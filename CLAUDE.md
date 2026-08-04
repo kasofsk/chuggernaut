@@ -181,6 +181,12 @@ the absence of a workflow file.
   **The operator applies. No job and no gate ever runs `terraform apply`** —
   `infra/README.md` is the runbook, including the trap that an invalid uploaded JWK set
   surfaces as `Error connecting to the given credential's issuer` and blames the issuer.
+- **A commit here is a publication.** The GitHub mirror `kasofsk/chuggernaut` is **public**
+  (verified 2026-08-04) and `deploy/prod` force-pushes `main` to it every five minutes, so
+  anything that merges is on the public internet minutes later with no review step in
+  between. That makes the `infra/` ignore rules a disclosure boundary rather than tidiness,
+  and a new terraform root adds its own **before** its first `git add` — `infra/README.md`
+  names what is excluded and why.
 - **`gcp-proof` is the only job type that may declare `workload_identities:`.** Half A of
   design #313 is being *proven*, not adopted: `.chug/jobs/gcp-proof.yaml` climbs a
   five-rung ladder against chuggernaut's own project, and its stage-0 `no-identity`

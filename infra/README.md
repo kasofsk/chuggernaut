@@ -16,6 +16,78 @@ provider is a **separate resource** that this one cannot grow into by accident.
 
 ---
 
+## The mirror is public: the `.gitignore` here is a disclosure boundary
+
+**Everything that reaches `main` in this repo is on the public internet within
+about five minutes.** The GitHub mirror `kasofsk/chuggernaut` is **public** —
+re-verified 2026-08-04, and re-runnable:
+
+```sh
+gh repo view kasofsk/chuggernaut --json visibility,isPrivate
+# {"isPrivate":false,"visibility":"PUBLIC"}
+
+# or, with no `gh` and no credential of any kind — which is itself the answer:
+git ls-remote https://github.com/kasofsk/chuggernaut | head -1
+```
+
+The launchd agent installed by
+[`deploy/prod/chug-mirror-install.sh`](../deploy/prod/chug-mirror-install.sh)
+runs `git push mirror main:main --force-with-lease` every `INTERVAL` seconds,
+default **300** ([`deploy/prod/README.md`](../deploy/prod/README.md) §3). It
+pushes **only `main`**, so a job branch is not itself mirrored — but a job whose
+evaluation passes merges to `main` with no human in the loop, so the gap between
+an agent's `git commit` and publication is that merge plus one tick of the
+timer. Nothing reviews the diff for *disclosure* in between. The tree elsewhere
+calls the mirror **read-only** and warns that direct pushes are overwritten;
+that is a correctness warning about losing your work, and it is not this one.
+
+**So the ignore rules covering `infra/` are not tidiness — they are the only
+thing standing between a value and publication.** There is no secret scan in
+[`.chug/tasks/ci.sh`](../.chug/tasks/ci.sh) or
+[`.githooks/pre-commit`](../.githooks/pre-commit): the gates are fmt, clippy,
+tests, the module registry, duplication, the comment lint and doc lint, and not
+one of them reads a file looking for a credential.
+
+(Whether the mirror *should* be public is the operator's call and is not decided
+here. This section records what is true today.)
+
+### What [`.gitignore`](../.gitignore) excludes, and why each one is there
+
+| Pattern | Why |
+| --- | --- |
+| `infra/**/terraform.tfvars`, `infra/**/terraform.tfvars.json`, `infra/**/*.auto.tfvars`, `infra/**/*.auto.tfvars.json` | Variable files — where `billing_account` and every other value this repo cannot know is written (§1). Four spellings because those are the four names terraform loads automatically |
+| `infra/**/.tokens/` | An earlier orphaned experiment kept **live plaintext secrets** under this name; it stays ignored so it cannot come back by habit |
+| `infra/**/*.tfstate`, `infra/**/*.tfstate.*` | State holds every value in plaintext, sensitive or not. This root's state is remote (§1), but a `terraform init` run before the backend is configured writes a local one |
+| `infra/**/tfplan` | A saved plan carries the same values as state, plus the pending diff |
+| `infra/**/.terraform/` | Provider plugins and the resolved backend configuration |
+| `infra/**/.terraform.lock.hcl` | **Not a secret.** Ignored because a lock file generated on someone else's platform would fail your `init` (§1) |
+| `infra/**/jwks.json` | **Not a secret either** — a JWK set is public data ([#313 A4](../docs/design/313-workload-identity-image-builds.md)). Ignored because it is fetched from the running platform, never authored (§2 step (c)) |
+
+The last two rows matter as much as the first five: treating every ignored file
+as a secret is how the list stops being read, and the list is the boundary.
+
+### A new root adds its own exclusions before its first `git add`
+
+Every pattern above names a **filename**, and a second root inherits protection
+only for the names it happens to reuse. A root applied with
+`-var-file=prod.tfvars`, or one that fetches a credential to some name other
+than `jwks.json`, matches nothing here and is tracked the moment someone types
+`git add infra/`.
+
+So the exclusion goes in **before** the file exists, and the check is one
+command:
+
+```sh
+git check-ignore -v infra/<root>/<file>   # silent + exit 1 means it is NOT ignored
+```
+
+There is no gate that would catch it afterwards, and there is no clean undo: a
+later commit deleting the file leaves it in history, and even rewriting `main`
+and force-pushing leaves the blob fetchable from GitHub by its SHA. **A value
+that has been pushed is rotated, not reverted.**
+
+---
+
 ## `gcp-proof` — proving the boundary against ourselves first
 
 Half A is unexercised. The first consumer of a workload-identity path should not

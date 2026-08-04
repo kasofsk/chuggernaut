@@ -1195,3 +1195,52 @@ Slices 1 and 2 are independent; 3 depends on nothing; 4 depends on 1.
   update` time rather than silently.
 - **Nothing here is exercised by this platform's CI** until a node has nix
   (§2.3). That is a known, accepted gap, not an oversight.
+
+## Correction — 2026-08-04, job #423 (the mirror's visibility is measured: it is public)
+
+**The third unverifiable fact in the preamble is now verified, and §2.2's
+conditional resolves in favour of what §2.2 already recommends.** Appended
+rather than edited into the prose above, per
+[#415](415-knowledge-architecture.md) D2; the preamble's third bullet and §11's
+*"The mirror's visibility is assumed, not verified"* stay as written, and are
+answered here.
+
+**Measured 2026-08-04 from a work container, two ways.** `gh` is not installed
+in the agent image, so the first is the REST call `gh repo view` makes:
+
+```sh
+curl -s https://api.github.com/repos/kasofsk/chuggernaut   # "private": false, "visibility": "public"
+gh repo view kasofsk/chuggernaut --json visibility,isPrivate
+# {"isPrivate":false,"visibility":"PUBLIC"}
+```
+
+The second is the property §2.2 actually depends on, rather than a field that
+implies it — an **anonymous, credential-free** read succeeds:
+
+```sh
+git ls-remote https://github.com/kasofsk/chuggernaut | head -1
+# 47d70dfadbf9c8995875d5bac1745d450d2defed	HEAD
+```
+
+That `HEAD` was this branch's base commit at the time of measurement, so the
+mirror was current, not a stale public snapshot of an old tree.
+
+What this changes, and nothing more:
+
+- **§2.2's recommendation stands as written**, with its load-bearing assumption
+  now a measurement. `inputs.chuggernaut.url = "github:kasofsk/chuggernaut"`
+  needs no credential in a host repo's closure, which was the whole reason it
+  beat the tailnet ssh front.
+- **The fallback is not taken.** The ssh front with an `issue_node_credential`
+  key installed for root stays what §2.2 says it is — the answer if the mirror
+  *becomes* private, pre-decided so nobody re-litigates it — and the GitHub read
+  deploy key stays third and worst.
+- **Nothing else in §2.2 moves.** The five-minute lag and "the mirror is the only
+  transport" are properties of the mirroring agent, not of its visibility, and
+  both open questions in §11 that name them are untouched.
+
+**Note that the answer cuts the other way too, and that half is not this
+document's subject.** A publicly readable mirror force-pushed every five minutes
+means every merge to `main` is a publication; the disclosure boundary that
+follows is recorded in [`infra/README.md`](../../infra/README.md), which is
+where a job adding a file — rather than a host consuming the flake — needs it.
