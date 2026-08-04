@@ -57,7 +57,7 @@ the exact string that was applied — compare it before suspecting anything else
 ### The state bucket — and where it must not live
 
 `gcp-proof/mod.tf` has a `backend "gcs"` block pointing at bucket
-`chug-tfstate-kasofsk`, prefix `gcp-proof`. A root cannot create the bucket that
+`chuggernaut-tfstate`, prefix `gcp-proof`. A root cannot create the bucket that
 holds its own state, so it is created **by hand, once, out of band**, and stays
 unmanaged by terraform for good.
 
@@ -86,10 +86,10 @@ own repo, not here.)
 ### Creating it
 
 ```sh
-gcloud storage buckets create gs://chug-tfstate-kasofsk \
+gcloud storage buckets create gs://chuggernaut-tfstate \
   --project=terraform-backend-456523 --location=US \
   --uniform-bucket-level-access --public-access-prevention
-gcloud storage buckets update gs://chug-tfstate-kasofsk --versioning
+gcloud storage buckets update gs://chuggernaut-tfstate --versioning
 ```
 
 Then bound the version history — this repo keeps the **10 most recent noncurrent
@@ -100,7 +100,7 @@ cat > lifecycle.json <<'JSON'
 {"rule": [{"action": {"type": "Delete"},
            "condition": {"numNewerVersions": 10, "isLive": false}}]}
 JSON
-gcloud storage buckets update gs://chug-tfstate-kasofsk --lifecycle-file=lifecycle.json
+gcloud storage buckets update gs://chuggernaut-tfstate --lifecycle-file=lifecycle.json
 ```
 
 These are `gcloud storage` spellings (the `gsutil` equivalents differ), written

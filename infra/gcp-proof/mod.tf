@@ -36,7 +36,7 @@ terraform {
   # root cannot create the bucket holding its own state. `terraform init
   # -backend-config=bucket=...` overrides it. See infra/README.md §1.
   backend "gcs" {
-    bucket = "chug-tfstate-kasofsk"
+    bucket = "chuggernaut-tfstate"
     prefix = "gcp-proof"
   }
 }
