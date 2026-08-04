@@ -19,7 +19,20 @@ deploy/prod/rclone.conf
 deploy/prod/*.local
 .deployed-sha
 
-# infra/ — orphaned terraform experiment with LIVE plaintext secrets
-# (terraform.tfvars, .tokens/*). Never commit.
-infra/
+# infra/ — terraform roots ARE versioned (config travels with the project repo).
+# What is ignored is the secret and derived half only: an earlier orphaned
+# experiment kept LIVE plaintext secrets in terraform.tfvars and .tokens/, and a
+# blanket `infra/` ignore silently swallowed every `git add` of a real root.
+infra/**/terraform.tfvars
+infra/**/terraform.tfvars.json
+infra/**/*.auto.tfvars
+infra/**/*.auto.tfvars.json
+infra/**/.tokens/
+infra/**/.terraform/
+infra/**/.terraform.lock.hcl
+infra/**/*.tfstate
+infra/**/*.tfstate.*
+infra/**/tfplan
+# The JWK set is fetched from the running platform, not authored — see infra/README.md.
+infra/**/jwks.json
 .claude/worktrees/

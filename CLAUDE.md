@@ -85,7 +85,7 @@ the absence of a workflow file.
   `.chug/tasks/check-duplication.sh` — copy-paste
   detection via a pinned `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1;
   ~30ms for the whole repo, so it is unconditional) — `.chug/tasks/check-comments.sh`,
-  the comment lint, and since #385 **the repo's 18 `*.test.sh` shell suites**.
+  the comment lint, and since #385 **the repo's 19 `*.test.sh` shell suites**.
   Any clone fails the gate.
 - **The shell suites are the tests of the gates themselves, and CI runs them all.**
   Discovery is `git ls-files '*.test.sh'` — add a suite and it is picked up, with
@@ -159,4 +159,18 @@ the absence of a workflow file.
   their branch coverage near-total.
 - Factories and job-type config are **project-owned and repo-versioned** — v2 is a
   per-consumer forge, not a shared control plane. Config travels with the project repo.
+- **`infra/` holds terraform roots, and they are versioned.** Config travels with the
+  project repo, so `infra/gcp-proof/` (chuggernaut's own GCP project and workload-identity
+  pool) is tracked; `.gitignore` excludes only the secret and derived half —
+  `terraform.tfvars`, `.tokens/`, `.terraform/`, state, and the fetched `jwks.json`. It
+  used to exclude **`infra/` entirely**, which silently swallowed every `git add` of a real
+  root; if a `git add infra/...` appears to do nothing, that is the shape of the bug.
+  **The operator applies. No job and no gate ever runs `terraform apply`** —
+  `infra/README.md` is the runbook, including the trap that an invalid uploaded JWK set
+  surfaces as `Error connecting to the given credential's issuer` and blames the issuer.
+- **`gcp-proof` is the only job type that may declare `workload_identities:`.** Half A of
+  design #313 is being *proven*, not adopted: `.chug/jobs/gcp-proof.yaml` climbs a
+  five-rung ladder against chuggernaut's own project, and its stage-0 `no-identity`
+  evaluator asserts rung 5b by declaring **no** identity — that absence is the assertion,
+  so don't add one there or anywhere else.
 - Don't run destructive commands (deploys, restarts, data resets) without asking first.
