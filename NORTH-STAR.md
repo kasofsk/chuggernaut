@@ -56,7 +56,7 @@ dispatcher/
 
 Why this is the right target for *this* project specifically:
 
-- **The correctness core becomes total-coverage-cheap.** `dispatcher::state`
+- **The correctness core becomes total-coverage-cheap.** `chuggernaut_domain::state`
   and release validation are flagged as the correctness core, but today most
   of the actual decision logic (the ~2,900-line `eval.rs`) can only be tested
   through NATS+Docker harnesses. Pure deciders test at tier 1.

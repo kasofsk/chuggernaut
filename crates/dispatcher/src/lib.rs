@@ -28,6 +28,7 @@ pub mod forge_ingest;
 pub mod handlers;
 pub mod interpret;
 pub mod invariants;
+pub mod knowledge;
 pub mod launch_queue;
 pub mod platform_ops;
 pub mod project_config;

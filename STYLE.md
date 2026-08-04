@@ -201,7 +201,7 @@ verify it in seconds and must name it when rejecting.
    v2 never had (#394).
 
 6. **New behavior lands with a regression test at the lowest tier that can
-   express it** (`testing.md`); the correctness core (`dispatcher::state`,
+   express it** (`testing.md`); the correctness core (`chuggernaut_domain::state`,
    release validation) stays at near-total branch coverage. *Why:* the lower
    the tier, the more often the test actually runs.
 

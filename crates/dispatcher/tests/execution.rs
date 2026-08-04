@@ -74,7 +74,7 @@ work:
   type: agent
   prompt: prompts/impl.md
 work_retries: 1
-knowledge: [rust]
+knowledge: [rust, HOUSE.md]
 "#;
 
 const CMD_WORK: &str = r#"
@@ -210,6 +210,7 @@ async fn rig_full(
         ("prompts/eval.md", "review it"),
         ("tags/rust.md", "# rust\nrust conventions here"),
         ("tags/style.md", "# style\nhouse style here"),
+        ("HOUSE.md", "# house\nthe page that defines it"),
     ] {
         clone.commit_file(path, content.as_bytes(), path).await;
     }
@@ -3294,15 +3295,20 @@ async fn job_level_evaluators_run_alongside_type_evaluators() {
 }
 
 /// §4.4 upfront knowledge injection: the union of the type's `knowledge:`
-/// defaults and the job's tags rides the work agent's system prompt, read
-/// from tags/{tag}.md at base_ref. Unknown tags are skipped.
+/// defaults and the job's tags rides the work agent's system prompt — a bare
+/// name from tags/{tag}.md, an entry naming a markdown file from that page
+/// verbatim. An entry with no file is skipped and the launch still lands.
 #[tokio::test]
 async fn knowledge_tags_inject_into_work_system_prompt() {
     let Some(rig) = rig().await else { return };
 
     commit_work(&rig);
     let mut create = req("flaky");
-    create.knowledge_tags = vec!["style".into(), "no-such-tag".into()];
+    create.knowledge_tags = vec![
+        "style".into(),
+        "no-such-tag".into(),
+        "docs/no-such-page.md".into(),
+    ];
     let job = rig.handle.create_job(create).await.unwrap();
     assert_invariants_of(&rig.invariants);
     rig.handle.release_job("acme", "api", job.id).await.unwrap();
@@ -3318,8 +3324,12 @@ async fn knowledge_tags_inject_into_work_system_prompt() {
     );
     assert!(system.contains("house style here"), "job tag: {system}");
     assert!(
-        !system.contains("no-such-tag"),
-        "missing tags are skipped: {system}"
+        system.contains("### HOUSE.md\n# house\nthe page that defines it"),
+        "a declared page rides as itself, named by path: {system}"
+    );
+    assert!(
+        !system.contains("no-such-tag") && !system.contains("no-such-page"),
+        "entries with no file are skipped: {system}"
     );
     assert_invariants_of(&rig.invariants);
 }

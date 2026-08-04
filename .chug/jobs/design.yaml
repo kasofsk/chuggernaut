@@ -16,8 +16,13 @@ name: design
 display_name: Design
 description: Produce an architecture/plan document under docs/design/; agent-reviewed, doc-lint gated.
 image: chuggernaut/agent-rust:prod
+# Injected into every work container's system prompt (spec §4.4): the pages
+# that define this repo's blessed practices, delivered as themselves. Payload,
+# not a pointer, and not a distillation — a second copy of a rule is what
+# drifts (design #415 D4).
 knowledge:
-  - north-star-blessed-practices
+  - STYLE.md
+  - NORTH-STAR.md
 work:
   type: agent
   prompt: .chug/prompts/work/design.md

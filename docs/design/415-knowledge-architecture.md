@@ -726,3 +726,93 @@ that prompted this); `STYLE.md` Tier 1 (`check-comments.sh`,
 [#362](362-binary-artifacts.md) (the head-and-slice-table shape to model, and
 the `outputs` bucket S0 turns on); [#313](313-workload-identity-image-builds.md)
 A2 (the two-age-keys distinction S0 restores); `spec.md` §4.3, §5.1, §10.2.
+
+## Correction — 2026-08-04, job #416 (D8 reversed; M1 and M5 restated)
+
+**D8 was half an answer, and the half it gave was the wrong one.** It conflated
+two independent questions: what a knowledge tag *is*, and how attached knowledge
+is *delivered*. Turning delivery into a pointer aimed at the same distilled tag
+file would have left the second definition — and M5 — exactly where they were,
+plus a file read. Job #416 splits them and decides both:
+
+- **What the tag is.** `.chug/tags/north-star-blessed-practices.md` is deleted.
+  `knowledge:` now names a repo page by path, so `.chug/jobs/{code,design,docs,web}.yaml`
+  declare `STYLE.md` and `NORTH-STAR.md` — the documents that define the rules,
+  not a restatement of them. This is D4 applied to the most deliberate violation
+  of it in the tree, and it is the part D8 was right that M5 needed.
+- **How it is delivered: payload, not a pointer** — the reverse of D8. Once the
+  paraphrase is gone the pointer buys nothing and costs a guarantee. Its bytes
+  are not saved, only deferred and made conditional: an agent that obeys the
+  pointer reads the same 25,974 bytes into an uncached mid-conversation turn,
+  and an agent that does not obey it works without the rules. Payload puts them
+  in the cached system prefix, where they are certainly present.
+
+**The measured price of the reversal**, which #87 asserted away and D8 inherited:
+the composed `## Project Knowledge` block goes from **3,948 to 26,030 bytes**
+(+22,082, ~5.5k tokens) per work container, on the four job types that are
+essentially every agent job this repo runs. That is the cost of delivering the
+definition instead of a summary of it, paid once per prompt prefix against a job
+that spends hundreds of thousands of tokens.
+
+The tag mechanism itself survives — `.chug/tags/{tag}.md`, `req.tags.list` and
+the UI listing are untouched, and a bare `knowledge:` entry still resolves there.
+This repo simply has no tag left to list.
+
+**M1 is now 4, not 7**, and two of the three that went are the substance rather
+than the arithmetic. Deleting the tag file took one. The other two are the
+payload itself: under A1 the thing that replaces the tag *is* `STYLE.md` and
+`NORTH-STAR.md` delivered verbatim, so the stale `dispatcher::state` in
+`STYLE.md`'s Tier 2 rule 6 and in `NORTH-STAR.md`'s correctness-core bullet
+would have reached every `code`/`design`/`docs`/`web` agent from two files
+instead of one — M1's "a stale directive is acted on", now amplified by
+delivery. Both read `chuggernaut_domain::state`, which exists. The *bare*
+`state.rs` mentions in those two files resolve to `crates/domain/src/state.rs`
+and are left alone; `CLAUDE.md`, `testing.md`, `.chug/prompts/work/design.md`
+and [#169](169-handoff-continuity.md) are the remaining four and stay with the
+truth-pass slice that owns them (this document is a fifth grep hit only because
+it quotes the string). **M5 is no longer reproducible**: the file one
+side of the `comm -12` reads
+is gone, which is the intended outcome rather than a drift in the measurement.
+**S8 is done** and did not wait on S3 — a page path is only as good as the page
+it names, but `STYLE.md` and `NORTH-STAR.md` are two names in four config files,
+so the move updates them the same way it updates its other ~730 references.
+
+### The skew window this opens, and why it is deliberately not gated
+
+`knowledge:` is not a new field. The four configs parse identically on both
+sides of the skew boundary; what moved is the *resolution rule* for their
+values, and that ships in the dispatcher binary while the configs are read live
+from the default branch (spec §14). So between this merge and the `deploy` job
+that ships the same SHA, the running N-1 dispatcher reads every entry as a tag
+name — appending `.md` to `STYLE.md` — finds nothing, and skips it; with both
+entries skipped
+the four job types launch with **no `## Project Knowledge` block at all**. The
+whole block, not part of it, and silently: the skip logs at `debug!` on that
+binary. The window is operator-paced, not automatic — it closes when a `deploy`
+job ships, and `deploy` declares no `knowledge:`, so nothing here can delay its
+own remedy.
+
+That window is knowingly accepted rather than declared with a
+`CONFIG_SCHEMA_EPOCH` bump and `min_dispatcher:`, on §14.1's own test:
+
+- **The N-1 behaviour is graceful degradation, not a dropped constraint.** The
+  three gated features are gated because the job runs *wrong* — `inputs:`
+  unparameterized, `runtime:` against the image's toolchain,
+  `workload_identities:` rejecting the whole config and parking the type. Here
+  the job runs as declared with a smaller system prompt, and every Tier 1 rule
+  the block carries is machine-enforced regardless by `.githooks/pre-commit` and
+  `.chug/tasks/ci.sh`.
+- **What survives the window is the pointer.** `CLAUDE.md` reaches the agent
+  from the checkout whatever the dispatcher's version, and it names `STYLE.md`
+  and `NORTH-STAR.md` as where the rules live. Inside the window, delivery
+  degrades to exactly the pointer form D8 preferred — which is the honest reason
+  the degradation is tolerable, and not a coincidence.
+- **Declaring it costs more than it buys.** `min_dispatcher` above the deployed
+  epoch parks every `code`, `design`, `docs` and `web` job pre-Work under
+  `config_schema_skew` (§14.2) until an operator retries each one: a hard stop
+  on essentially every agent job the repo runs, in exchange for a fuller prompt.
+  Trading a graceful degradation for a platform stall inverts what §14 is for.
+
+Recorded rather than left implicit, because §14 exists so that merging config
+can never *silently* become deploying config, and this is a change whose N-1
+behaviour is silent by construction.

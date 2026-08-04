@@ -1697,11 +1697,11 @@ impl Core {
         Ok(())
     }
 
-    /// §4.4 upfront knowledge injection, repo-versioned form: the union of
-    /// the type's `knowledge:` defaults and the job's tags, each resolved to
-    /// `tags/{tag}.md` at `base_ref` and concatenated into the work agent's
-    /// system prompt. Tags without a file are skipped — the tag may predate
-    /// its write-up. None when nothing resolves.
+    /// §4.4 upfront knowledge injection, the I/O half: read every entry of the
+    /// union `crate::knowledge` composes — a repo page verbatim, a bare tag
+    /// through the config root — at `base_ref`, into the work agent's system
+    /// prompt. An entry with no file is warned about and skipped, never a
+    /// failed launch.
     pub(crate) async fn knowledge_block(
         &self,
         owner: &str,
@@ -1710,41 +1710,32 @@ impl Core {
         job_type: &JobType,
         job: &types::Job,
     ) -> Result<Option<String>> {
-        let mut tags: Vec<&str> = job_type
-            .knowledge
-            .iter()
-            .chain(job.knowledge_tags.iter())
-            .map(String::as_str)
-            .collect();
-        tags.dedup_by(|a, b| a == b);
-        let mut seen = std::collections::HashSet::new();
-        let mut block = String::new();
-        for tag in tags {
-            if !seen.insert(tag) {
-                continue;
-            }
-            match crate::project_config::read_file(
-                &self.repos,
-                owner,
-                project,
-                base_ref,
-                &format!("tags/{tag}.md"),
-            )
-            .await?
-            {
-                Some(file) => {
-                    block.push_str(&format!("\n### {tag}\n{}\n", file.content));
+        let mut sections: Vec<(&str, String)> = Vec::new();
+        for entry in crate::knowledge::entries(&job_type.knowledge, &job.knowledge_tags) {
+            let content = match crate::knowledge::source(entry) {
+                crate::knowledge::Source::Page(path) => {
+                    self.repos
+                        .read_file_at(owner, project, base_ref, &path)
+                        .await?
                 }
-                None => tracing::debug!(
-                    "knowledge tag '{tag}' has no {} at {base_ref}",
-                    types::config_path(&format!("tags/{tag}.md"))
+                crate::knowledge::Source::Tag(relative) => crate::project_config::read_file(
+                    &self.repos,
+                    owner,
+                    project,
+                    base_ref,
+                    &relative,
+                )
+                .await?
+                .map(|file| file.content),
+            };
+            match content {
+                Some(content) => sections.push((entry, content)),
+                None => tracing::warn!(
+                    "{owner}/{project}: knowledge entry '{entry}' has no file at {base_ref}; skipped"
                 ),
             }
         }
-        if block.is_empty() {
-            return Ok(None);
-        }
-        Ok(Some(format!("## Project Knowledge\n{block}")))
+        Ok(crate::knowledge::block(&sections))
     }
 
     /// Platform agent credentials (§8.2): every secret under the reserved

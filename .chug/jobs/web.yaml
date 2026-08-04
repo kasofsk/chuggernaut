@@ -10,10 +10,13 @@ name: web
 display_name: Web UI
 description: Front-end-only change in web/; agent-reviewed, cheap CI, published instantly via web-publish.
 image: chuggernaut/agent-rust:prod   # node 22 + claude CLI ride along in the rust agent image
-# Injected into every work container's system prompt (spec §4.4): the
-# distilled STYLE.md / NORTH-STAR.md rules that keep agent output consistent.
+# Injected into every work container's system prompt (spec §4.4): the pages
+# that define this repo's blessed practices, delivered as themselves. Payload,
+# not a pointer, and not a distillation — a second copy of a rule is what
+# drifts (design #415 D4).
 knowledge:
-  - north-star-blessed-practices
+  - STYLE.md
+  - NORTH-STAR.md
 work:
   type: agent
   prompt: .chug/prompts/work/web.md

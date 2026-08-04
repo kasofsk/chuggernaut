@@ -149,9 +149,9 @@ defaulting to the Feature type. Title/description placeholders removed.
 enumerate the stems; the create form shows them as toggleable chips (plus
 free-text extras with datalist suggestions). Demo repo seeded with
 backend/frontend/style tags. §4.4 upfront injection is now
-**wired**: union of type `knowledge:` + job tags → `.chug/tags/{tag}.md` at
-`base_ref` → `## Project Knowledge` system-prompt block, work agents only
-(missing files skipped; under test). chuggernaut-ko/global buckets stay
+**wired**: union of type `knowledge:` + job tags → a repo page by path, else
+`.chug/tags/{tag}.md`, at `base_ref` → `## Project Knowledge` system-prompt
+block, work agents only (missing files skipped; under test). chuggernaut-ko/global buckets stay
 deferred for cross-project knowledge. A **Tags tab** in the UI browses each
 tag's markdown. Session 8: job artifacts (transcripts +
 logs captured, encrypted, served; channel posts through the dispatcher;

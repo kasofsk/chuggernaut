@@ -305,7 +305,7 @@ stale.
 - **fn launch_work_container** — §1.1 per-job override for Work-phase tasks (else type default). Drives the agent run timeout and the §7.4 credential TTLs so creds outlive a longer override.
 - **fn launch_work_container** — #168: a work retry (attempt > 1) leads with the predecessor's partial output. `resume` means the branch already carries the predecessor's pushed commits, so the block points the agent at both the log tail and those commits.
 - **fn launch_work_container** — §12.4 model resolution for the Work agent: per-job override → job type → project default (folded into work.model by `with_defaults`) → platform default.
-- **fn launch_work_container** — §4.4 upfront injection: tagged knowledge (tags/{tag}.md at base_ref) rides the system prompt, work agents only.
+- **fn launch_work_container** — §4.4 upfront injection: declared knowledge (a repo page by path, else tags/{tag}.md at base_ref) rides the system prompt, work agents only.
 - **fn launch_work_container** — Harvest before reporting the exit: once the task completes the job may advance, and the artifacts are the only record of how it got here.
 - **fn launch_work_container** — The placement window opens where the decision to launch does, not at the launch (design #293 §2): everything from here to `place_container` is the decision, and none of it may consult the operator's intent.
 - **fn launch_work_container** — Logs are the only record of what a command task printed — TaskResult::Command.output has never carried it.
