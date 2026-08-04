@@ -7,7 +7,7 @@ mutate cloud state when it is wrong.
 
 | Root | What it owns |
 | --- | --- |
-| [`gcp-proof/`](./gcp-proof) | Chuggernaut's own GCP project, its workload identity pool and OIDC provider, and the two-service-account/two-bucket fixture that the `gcp-proof` job type climbs (design #313 half A, slice S6) |
+| [`gcp-proof/`](./gcp-proof) | A workload identity pool and OIDC provider **inside the existing, shared `daekon-ai` project**, and the two-service-account/two-bucket fixture that the `gcp-proof` job type climbs (design #313 half A, slice S6) |
 
 There are no beacon resources here and there never will be: beacon's
 `infra/gcp-workload-id/` is operator-owned and lives in beacon's own repo. This
@@ -109,6 +109,45 @@ empty, the negative rung would be refused with a *not found* and would have
 proved nothing about the binding. The ladder treats a not-found refusal as a
 failure for exactly that reason.
 
+### The project is shared, and this root no longer owns it
+
+This root originally created its own `chug-wif-proof` project with
+`deletion_policy = "DELETE"`. It cannot: the billing account
+`01C6FD-E6129C-3CE232` is at its Cloud billing project quota, so attaching a new
+project fails at the first resource with `Error 400: Precondition check failed`.
+The operator's decision (2026-08-04) was to use the **existing `daekon-ai`**
+project rather than raise the quota or detach something. `mod.tf` therefore reads
+the project with `data "google_project" "proof"` — the id is validated at plan
+time and `.number` is still available for the principalSet member, which needs
+the project **number**, never the id.
+
+**This is a real loss against #313's design intent.** The point of a throwaway
+project was that proving the boundary could not damage anything: teardown was one
+command with no collateral, and a mistake was bounded by the project itself.
+`daekon-ai` is **not disposable** and has other tenants — beacon's `gcp-org` root
+creates it and the `claude-readonly` service account in it, and neither is managed
+here. What follows from that:
+
+- **`terraform destroy` removes only what this root manages** — the pool, the
+  provider, the two service accounts, the two buckets and their objects, and the
+  IAM bindings this root created. Everything else in `daekon-ai` survives, and
+  must.
+- **The API enablements are deliberately left behind.**
+  `google_project_service.apis` sets `disable_on_destroy = false`. That was
+  hygiene when the project was ours; it is now load-bearing. A destroy that
+  disabled `storage.googleapis.com` project-wide would break bystanders that never
+  asked this root for anything.
+- **A future root in this repo must not assume it can create or delete
+  project-scoped things freely in `daekon-ai`.** Name resources so a collision with
+  another tenant is impossible, prefer additive IAM members over policy
+  replacement (`google_project_iam_member`, never `google_project_iam_policy`),
+  and never take a `deletion_policy`/`force_destroy` on anything shared.
+
+`terraform.tfvars` is not needed at all now — there is no value this repo cannot
+know. `project_id` and `bucket_prefix` are still overridable; bucket names are
+globally unique, so a collision means overriding `bucket_prefix` and nothing else
+changes.
+
 ### The `%2F` is load-bearing
 
 The IAM member is:
@@ -140,14 +179,14 @@ hold terraform state and nothing else, and that no root in this repo manages.
 it manages.** A second root added here inherits the rule — give it a new
 `prefix` in the same bucket, not a bucket of its own.
 
-> **Never create it inside `chug-wif-proof`.** This root creates its project with
-> `deletion_policy = "DELETE"` and both proof buckets with `force_destroy = true`
-> (§7): everything it owns is disposable on purpose. A state bucket in that
-> project would be deleted by the very `terraform destroy` that reads it —
-> mid-run the state disappears, and what survives is whatever GCP had not
-> deleted yet, with no record left of what it was. Nothing warns you at
-> `init` time, because a `backend "gcs"` block names a bucket and a bucket name
-> says nothing about the project it sits in.
+> **Never create it inside `daekon-ai`.** This root writes both proof buckets with
+> `force_destroy = true` (§7), and a state bucket sitting beside them is one
+> mistaken `bucket_prefix` or one stray `terraform state rm` away from being the
+> thing that gets emptied. Nothing warns you at `init` time, because a
+> `backend "gcs"` block names a bucket and a bucket name says nothing about the
+> project it sits in. The rule held when this root owned a disposable project and
+> holds harder now that it does not: state lives outside everything the root
+> writing it manages, and outside the blast radius of that root's mistakes.
 
 That split is the standard bootstrap, not a local quirk. Beacon does the same
 with one hand-created `beacon-tfstate`: six roots (`gcp-org`, `gcp-app/prod`,
@@ -198,9 +237,9 @@ hygiene, not cost.
 holds sensitive values in plaintext. This particular state honestly does not
 hold much: the uploaded JWK set is public data
 ([#313 A4](../docs/design/313-workload-identity-image-builds.md)), and the rest is
-service-account emails, bucket names, the project number and the billing account
-id. Set both flags anyway — the habit must not be re-decided per state file, and
-the next root to share this bucket may hold more.
+service-account emails, bucket names and the project number. Set both flags
+anyway — the habit must not be re-decided per state file, and the next root to
+share this bucket may hold more.
 
 A different bucket name is fine — `terraform init -backend-config=bucket=<name>`.
 
@@ -211,17 +250,13 @@ backend addresses a bucket by its **globally unique name** and accepts no
 `project` argument. Naming `terraform-backend-456523` here *is* the fix. Don't
 go looking for a field in `backend "gcs"` to put it in.
 
-**Org and billing.** The org id (`496204159091`) is defaulted;
-`billing_account` is the one variable with no default, because it is the one
-value this repo cannot know. Put it in `gcp-proof/terraform.tfvars`, which is
-gitignored:
-
-```hcl
-billing_account = "XXXXXX-XXXXXX-XXXXXX"
-```
-
-`project_id` and `bucket_prefix` are globally unique across GCP; a collision
-means overriding them, and nothing else changes.
+**No org, no billing, no tfvars.** This root creates no project, so it needs
+neither an org id nor a billing account and there is nothing an operator must
+supply. Every variable has a working default and `gcp-proof/terraform.tfvars` —
+still gitignored — can stay absent. What you do need is **access to the existing
+`daekon-ai` project**: the `data "google_project"` read fails at plan time
+otherwise, which is the intended way to learn you are pointed at the wrong
+credential.
 
 **`.terraform.lock.hcl` is gitignored here** rather than committed. Your first
 `terraform init` writes one for your own platform; a lock file generated on
@@ -273,9 +308,14 @@ releasing a `gcp-proof` job parks it.
 ```sh
 cd infra/gcp-proof
 terraform init                 # add -backend-config=bucket=<name> if you renamed it
-terraform plan                 # read it; this creates a project and a billing attachment
+terraform plan                 # read it; every Create lands INSIDE the shared daekon-ai
 terraform apply
 ```
+
+Read the plan with the shared project in mind: nothing should show a project
+being created, and nothing outside this root's own resources should show a
+change. A `data.google_project.proof` read that errors means the credential
+cannot see `daekon-ai`, not that the id is wrong.
 
 `terraform plan` is **not runnable from a job container** — it needs credentials
 the platform deliberately does not hold — and the acceptance bar for a change to
@@ -369,9 +409,22 @@ cd infra/gcp-proof && terraform destroy
 chuggernaut admin cloud-identity delete --project kasofsk/chuggernaut --name gcp-proof
 ```
 
-The buckets are `force_destroy = true` and the project is `deletion_policy =
-"DELETE"`, so the root is disposable by construction — do not relax either; the
-disposability is the point, and §1 is what keeps the disposal from reaching the
-state. The state bucket sits in `terraform-backend-456523`, is managed by no
-terraform, and survives this untouched; delete it by hand only when you are done
-with every root that uses it.
+**A destroy is now partial, on purpose.** It removes the pool, the provider, the
+two service accounts, the two buckets (`force_destroy = true`, so their canaries
+go with them) and the IAM bindings this root created. It does **not** remove the
+`daekon-ai` project — nothing here manages it — and it does **not** disable the
+three APIs, because `disable_on_destroy = false` and other tenants of that
+project use them. Re-enabling by hand afterwards is not something you should have
+to do; leaving them is the cheaper mistake.
+
+So teardown no longer returns the account to a clean slate the way a disposable
+project did. Check what you expect to be gone actually is:
+
+```sh
+gcloud iam service-accounts list --project=daekon-ai
+gcloud storage ls --project=daekon-ai
+```
+
+The state bucket sits in `terraform-backend-456523`, is managed by no terraform,
+and survives this untouched; delete it by hand only when you are done with every
+root that uses it.

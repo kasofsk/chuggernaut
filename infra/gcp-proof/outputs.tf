@@ -3,13 +3,13 @@
 # infra/README.md §4.
 
 output "project_id" {
-  description = "The proof project."
-  value       = google_project.proof.project_id
+  description = "The shared project this root adopted; it is read, never created."
+  value       = data.google_project.proof.project_id
 }
 
 output "project_number" {
   description = "The project NUMBER — resource names and the principalSet use this, never the id."
-  value       = google_project.proof.number
+  value       = data.google_project.proof.number
 }
 
 output "audience" {

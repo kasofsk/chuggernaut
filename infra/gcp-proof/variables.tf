@@ -1,22 +1,12 @@
-# Only `billing_account` has no default: everything else is fixed by a decision
-# recorded in design #313 or by this platform's own identity, and a default that
-# an operator has to override is a default that was wrong.
-
-variable "billing_account" {
-  description = "Billing account to attach the proof project to. No default — the one value this root cannot know."
-  type        = string
-}
-
-variable "org_id" {
-  description = "The kasofsk.xyz organization."
-  type        = string
-  default     = "496204159091"
-}
+# Every variable has a default: each is fixed by a decision recorded in design
+# #313 or by this platform's own identity, and a default that an operator has to
+# override is a default that was wrong. Nothing here names a billing account or
+# an organization: this root creates no project, so it attaches no billing.
 
 variable "project_id" {
-  description = "Project id for the proof project. Globally unique across GCP, so a collision means overriding this."
+  description = "The EXISTING project this root adopts. It is shared with other tenants, so nothing here creates or deletes it."
   type        = string
-  default     = "chug-wif-proof"
+  default     = "daekon-ai"
 }
 
 variable "region" {

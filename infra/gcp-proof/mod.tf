@@ -42,8 +42,8 @@ terraform {
 }
 
 # Deliberately no `project` on the provider: every resource names the project
-# this root creates, so there is no chicken-and-egg between provider config and
-# the project it would point at.
+# explicitly, so nothing here can land in whatever project a stray
+# `GOOGLE_PROJECT` or gcloud default happens to name.
 provider "google" {
   region = var.region
 }
@@ -60,7 +60,7 @@ locals {
   # no grant, and an error that names the issuer rather than the member.
   principal_set = join("", [
     "principalSet://iam.googleapis.com/projects/",
-    google_project.proof.number,
+    data.google_project.proof.number,
     "/locations/global/workloadIdentityPools/",
     google_iam_workload_identity_pool.chug.workload_identity_pool_id,
     "/attribute.workload/",
@@ -75,18 +75,18 @@ locals {
   }
 }
 
-resource "google_project" "proof" {
-  name            = var.project_id
-  project_id      = var.project_id
-  org_id          = var.org_id
-  billing_account = var.billing_account
-
-  # A proof project is disposable by construction; teardown is in the runbook.
-  deletion_policy = "DELETE"
+# The project is ADOPTED, not created: `daekon-ai` already exists and holds
+# other tenants, so nothing here creates or deletes a project and there is no
+# billing attachment to make. Reading it as data validates the id at plan time
+# and yields `.number`, which the principalSet member needs — the id in that
+# string grants nothing while failing like an ordinary 403.
+data "google_project" "proof" {
+  project_id = var.project_id
 }
 
 # `sts` and `iamcredentials` are the exchange path itself; `storage` is what
-# rungs 4 and 5 read. Left enabled on destroy so a re-apply does not thrash them.
+# rungs 4 and 5 read. Left enabled on destroy — load-bearing in a SHARED project:
+# disabling `storage` here would break bystanders this root does not manage.
 resource "google_project_service" "apis" {
   for_each = toset([
     "iamcredentials.googleapis.com",
@@ -94,13 +94,13 @@ resource "google_project_service" "apis" {
     "storage.googleapis.com",
   ])
 
-  project            = google_project.proof.project_id
+  project            = data.google_project.proof.project_id
   service            = each.value
   disable_on_destroy = false
 }
 
 resource "google_iam_workload_identity_pool" "chug" {
-  project                   = google_project.proof.project_id
+  project                   = data.google_project.proof.project_id
   workload_identity_pool_id = var.pool_id
   display_name              = "Chuggernaut"
   description               = "Workload identities federated from the Chuggernaut platform (design #313)."
@@ -109,7 +109,7 @@ resource "google_iam_workload_identity_pool" "chug" {
 }
 
 resource "google_iam_workload_identity_pool_provider" "chug" {
-  project                            = google_project.proof.project_id
+  project                            = data.google_project.proof.project_id
   workload_identity_pool_id          = google_iam_workload_identity_pool.chug.workload_identity_pool_id
   workload_identity_pool_provider_id = var.provider_id
   display_name                       = "Chuggernaut OIDC"
@@ -144,7 +144,7 @@ resource "google_iam_workload_identity_pool_provider" "chug" {
 }
 
 resource "google_service_account" "granted" {
-  project      = google_project.proof.project_id
+  project      = data.google_project.proof.project_id
   account_id   = "gcp-proof-granted"
   display_name = "gcp-proof: the impersonatable SA"
   description  = "Reachable from the proof's principalSet; reads the `granted` bucket only."
@@ -155,7 +155,7 @@ resource "google_service_account" "granted" {
 # become it — because no workloadIdentityUser binding names it. That is a
 # sharper negative than an orphan bucket nobody can read.
 resource "google_service_account" "unreachable" {
-  project      = google_project.proof.project_id
+  project      = data.google_project.proof.project_id
   account_id   = "gcp-proof-unreachable"
   display_name = "gcp-proof: the DELIBERATELY unreachable SA"
   description  = "No workloadIdentityUser binding. Reads the `denied` bucket; the platform must never reach it."
@@ -171,7 +171,7 @@ resource "google_service_account_iam_member" "granted_impersonation" {
 resource "google_storage_bucket" "proof" {
   for_each = local.bucket_readers
 
-  project  = google_project.proof.project_id
+  project  = data.google_project.proof.project_id
   name     = "${var.bucket_prefix}-${each.key}"
   location = var.location
 
