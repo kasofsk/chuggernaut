@@ -82,6 +82,11 @@ export type ProjectRole = "viewer" | "member" | "admin";
  * What kind of value an [`Input`] accepts (spec §1.1, design #311 Decision 2).
  */
 export type InputKind = "string" | "enum";
+/**
+ * Which backend serves a job type's tasks (design #309 §3). Only
+ * [`RuntimeMode::Container`] is implemented; see [`JobType::validate`].
+ */
+export type RuntimeMode = "container" | "host";
 export type WorkType = "agent" | "command" | "human";
 /**
  * Wrap-up mode after eval-pass (design-lifecycle.md).
@@ -1266,6 +1271,12 @@ export interface JobType {
   placement: Placement | null;
   resources: Resources | null;
   rework_budget: number | null;
+  /**
+   * Where this job type's tasks run and against which toolchain (spec §1.1,
+   * design #309 §3, #373 Decision 2). Absent means `mode: container` with no
+   * declared environment — every job type that predates the block.
+   */
+  runtime?: Runtime | null;
   vars: string[];
   work: WorkSpec;
   work_retries: number | null;
@@ -1294,6 +1305,21 @@ export interface Resources {
    */
   memory: string | null;
   task_timeout: string | null;
+}
+/**
+ * Where a job type's tasks run and against which toolchain (spec §1.1, design
+ * #309 §3 option A, #373 Decision 2). A nested block, so a typo'd `mdoe: host`
+ * is a hard parse error rather than a job that silently runs somewhere else.
+ */
+export interface Runtime {
+  /**
+   * An opaque environment reference the node resolves — `nix:<flake-ref>#<attr>`
+   * in either mode, `xcode:<version>` in host mode only (design #309 §9,
+   * #373 Decision 2). Optional in container mode, where it layers a toolchain
+   * over the `image`'s userland.
+   */
+  env?: string | null;
+  mode: RuntimeMode;
 }
 export interface WorkSpec {
   /**

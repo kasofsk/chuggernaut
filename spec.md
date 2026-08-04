@@ -103,6 +103,10 @@ display_name: string           # optional; human-facing name for the library and
 description: string            # optional; one-line summary shown alongside the display name in the type picker
 image: string                  # required for agent/command work; disallowed at top level for human work (container evaluators must declare their own image; see eval.image)
 
+runtime:                       # optional; where this type's tasks run and against which toolchain. Absent = mode: container with no declared environment, which is every job type that predates the block
+  mode: container | host       # optional; default container. `host` PARSES AND IS REFUSED by validate() — the mode is designed but unbuilt (design #309 P0/P1), so the refusal is a "not supported by this dispatcher" field-rule error, never a launch that queues for a node that cannot exist
+  env: string                  # optional in container mode, where it layers a project-supplied toolchain over the image's userland (design #373); an opaque environment reference the node resolves — `nix:<flake-ref>#<attr>` in either mode, `xcode:<version>` in host mode only (Xcode cannot be containerized, §322 design). A declared env requires min_dispatcher >= the runtime epoch (§14.2)
+
 work:                          # required
   type: agent | command | human  # required
 
@@ -214,6 +218,16 @@ inputs:                        # optional; the values a job of this type accepts
 | `stage` | optional | optional | optional |
 
 ² Falls back to the job's top-level `image`. Required per-evaluator when the job declares no top-level image (`work.type: human`).
+
+**Field rules for `runtime`** (design #309 §3, #373 Decision 2 — the whole table
+is declared, only the container row is implemented):
+
+| Rule | Detail |
+|---|---|
+| `mode: container` (and an absent `runtime`) | `image` required for agent/command work exactly as before — a container always needs a root filesystem, so `container + env + no image` is not coherent. `env` optional |
+| `mode: host` | **Refused** by `validate()` as not supported by this dispatcher: the mode is designed (top-level `image` disallowed, `env` required) and unbuilt, and the refusal stands in for design #309 P0 until it lands. The host row's own field rules — and the narrowing of the evaluator-image requirement they need — arrive with it |
+| Scheme | `nix:<flake-ref>#<attr>` is legal in either mode. `xcode:<version>` requires `mode: host`, so it is a field rule rather than a launch failure — Xcode cannot be containerized. A declared `env` must be non-empty |
+| Skew | Any `runtime:` beyond a bare `mode: container` — a declared `env`, or any non-container `mode` — requires `min_dispatcher >=` the epoch the block landed in (§14.2). The gate is structural, not left to authorship: an N−1 dispatcher tolerates the whole unknown `runtime:` field, keeps the still-present `image`, and would run the job containerized against the image's toolchain rather than as declared — a silently dropped constraint. The declaration is the only signal that crosses the skew boundary, because an N−1 dispatcher never runs the new field rules at all. A container-mode `runtime:` with no `env` is ungated: it drops nothing |
 
 **Field rules for `inputs`** (all enforced at parse, so release validation and
 `chuggernaut validate` reject them offline):
@@ -2472,13 +2486,17 @@ author: a non-empty `inputs:` (§1.1) is a field rule error unless
 `min_dispatcher` is at least the epoch inputs landed in — on a job type, the
 epoch job inputs landed in; on a **schedule file**, the later epoch a schedule's
 `inputs:` landed in, because a dispatcher that understands the first still drops
-the second. The rule exists because `min_dispatcher` is the one field an N-1
-dispatcher **does** parse — it cannot see `inputs:` at all, so without the
-declaration it would accept the config and run the job unparameterized. Each
-feature freezes its own constant at the epoch it shipped
-(`types::version::INPUTS_SCHEMA_EPOCH`, `SCHEDULE_INPUTS_SCHEMA_EPOCH`), so a
-later bump for an unrelated feature never retroactively raises what an existing
-config must declare.
+the second. A `runtime:` block beyond a bare `mode: container` (§1.1) is gated
+the same way and for the same reason: the block is invisible to an N-1
+dispatcher, which keeps the still-present `image` and runs the job containerized
+against the image's toolchain instead of as declared. The rule exists because `min_dispatcher` is the one field an
+N-1 dispatcher **does** parse — it cannot see `inputs:` or `runtime:` at all, so
+without the declaration it would accept the config and run the job
+unparameterized. Each feature freezes its own constant at the epoch it shipped
+(`types::version::INPUTS_SCHEMA_EPOCH`, `SCHEDULE_INPUTS_SCHEMA_EPOCH`,
+`RUNTIME_SCHEMA_EPOCH`), so a later bump for an unrelated feature never
+retroactively raises what an existing config must declare — and those constants,
+not `CONFIG_SCHEMA_EPOCH`, are where a reader finds which epoch bought what.
 
 ### 14.3 Merge-time gate
 

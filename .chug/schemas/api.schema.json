@@ -1438,6 +1438,17 @@
           "format": "uint32",
           "minimum": 0
         },
+        "runtime": {
+          "description": "Where this job type's tasks run and against which toolchain (spec §1.1,\ndesign #309 §3, #373 Decision 2). Absent means `mode: container` with no\ndeclared environment — every job type that predates the block.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Runtime"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "vars": {
           "type": "array",
           "default": [],
@@ -1918,6 +1929,43 @@
           "description": "The merge gate failed on a **compile/build** stage only (spec §3.3\ngate-fix fast path, job #154): an already-approved branch that no longer\ncompiles after rebasing onto moved main. A narrowly-scoped fix task that\nreturns straight to the merge gate — no re-review, no eval-phase CI.",
           "type": "string",
           "const": "GateCompileFix"
+        }
+      ]
+    },
+    "Runtime": {
+      "description": "Where a job type's tasks run and against which toolchain (spec §1.1, design\n#309 §3 option A, #373 Decision 2). A nested block, so a typo'd `mdoe: host`\nis a hard parse error rather than a job that silently runs somewhere else.",
+      "type": "object",
+      "properties": {
+        "env": {
+          "description": "An opaque environment reference the node resolves — `nix:<flake-ref>#<attr>`\nin either mode, `xcode:<version>` in host mode only (design #309 §9,\n#373 Decision 2). Optional in container mode, where it layers a toolchain\nover the `image`'s userland.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "description": "`container` (default) or `host`. Host mode parses but is refused by\n[`JobType::validate`] until design #309 P0/P1 land.",
+          "$ref": "#/$defs/RuntimeMode",
+          "default": "container"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ]
+    },
+    "RuntimeMode": {
+      "description": "Which backend serves a job type's tasks (design #309 §3). Only\n[`RuntimeMode::Container`] is implemented; see [`JobType::validate`].",
+      "oneOf": [
+        {
+          "description": "Today's behavior: the task runs in a container built from `image`.",
+          "type": "string",
+          "const": "container"
+        },
+        {
+          "description": "The task runs as a process on a host-capable node (design #309). Not\nimplemented — declaring it is a validation refusal, not a launch.",
+          "type": "string",
+          "const": "host"
         }
       ]
     },

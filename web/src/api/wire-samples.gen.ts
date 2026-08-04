@@ -103,7 +103,7 @@ export const wireSamples = {
     placement_policy: "busyness",
     repo_url_base: "ssh://git@chug.example",
     repos_root: "/var/lib/chuggernaut/repos",
-    schema_epoch: 3,
+    schema_epoch: 4,
     secrets_encryption: true,
     triage_image: "chuggernaut/agent-claude:latest",
   } satisfies DispatcherConfigSnapshot,
@@ -288,6 +288,7 @@ export const wireSamples = {
     inputs: [],
     job_deadline: "6h",
     knowledge: ["rust"],
+    min_dispatcher: 4,
     name: "code",
     placement: null,
     resources: {
@@ -296,6 +297,10 @@ export const wireSamples = {
       task_timeout: "45m",
     },
     rework_budget: 3,
+    runtime: {
+      env: "nix:.#chug-ci",
+      mode: "container",
+    },
     vars: ["BRANCH"],
     work: {
       model: null,

@@ -341,6 +341,10 @@ name: code
 display_name: Code
 description: Implement a ticket.
 image: chuggernaut/agent-rust:latest
+runtime:
+  mode: container
+  env: nix:.#chug-ci
+min_dispatcher: 4
 work:
   type: agent
   prompt: .chug/prompts/work-code.md

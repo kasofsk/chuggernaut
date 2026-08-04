@@ -158,10 +158,12 @@ Resulting field rules:
 filesystem, and `container + env + no image` is not coherent. So **every
 existing job type parses identically**, and this costs **no epoch bump beyond
 the one [#309](309-host-native-execution.md) slice 4 already spends** — it makes
-that bump buy three modes instead of two. `CONFIG_SCHEMA_EPOCH` is 2 today
-(`crates/types/src/version.rs`); `image` is `Required` for `WorkType::Agent` and
-`WorkType::Command` in `JobType::validate` (`crates/types/src/job_type.rs`), and
-neither rule moves.
+that bump buy three modes instead of two. `CONFIG_SCHEMA_EPOCH` was 2 when this
+was written and is **4** today (`crates/types/src/version.rs`): #376 spent 2 → 3
+on schedule `inputs:`, and job #401 spent 3 → 4 landing this table, so the bump
+this paragraph anticipated has been spent and `RUNTIME_SCHEMA_EPOCH` is 4.
+`image` is `Required` for `WorkType::Agent` and `WorkType::Command` in
+`JobType::validate` (`crates/types/src/job_type.rs`), and neither rule moves.
 
 Four rules fall out:
 
@@ -181,11 +183,18 @@ Four rules fall out:
    docker socket: "a node-side allow-list entry, never a job-type field the
    platform honors on request." A job type asks for an *environment*; it never
    asks for a *privilege*.
-4. **N−1 fails safe for free.** An N−1 dispatcher does not know `runtime` at
-   all, and `deny_unknown_fields` on the nested block parks the config Stalled
-   per §14.2 — one park, detected and explained, rather than retries burned per
-   job. That is the property #309 §3 chose the nested block for, and it covers
-   this addition at no extra cost.
+4. **N−1 fails safe for neither row; both need the skew gate.**
+   `deny_unknown_fields` on the nested block cannot fire on an N−1 dispatcher,
+   which never descends into `runtime:` at all — see
+   [C7](#c7-rule-4s-n1-fail-safe-holds-for-neither-row).
+   Such a dispatcher keeps the still-present `image` and gains a tolerated
+   unknown top-level field, so a container-mode toolchain is silently dropped
+   and a host-mode job silently runs containerized. **Any `runtime:` beyond a
+   bare `mode: container` therefore requires `min_dispatcher >=` the runtime
+   epoch**, a `validate()` rule in the shape #376 used for schedule `inputs:`,
+   so §14.3's merge-time gate fails the config's own CI against a dispatcher on
+   the old epoch. The declaration is the gate because it is the one field the
+   old side parses; a field ban is not, since the old side never runs it.
 
 Honest residual: nix closures carry their own glibc — which is why a nix wrapper
 ran on Debian — so the env is largely self-contained and image/env skew is
@@ -717,6 +726,46 @@ ahead of the commit that needs it — i.e. the first time
 [What would refute this](#what-would-refute-this)'s first bullet actually
 happens. Until then a 45s bound plus a warming job is the cheaper answer, and it
 costs the platform nothing new.
+
+### C7. Rule 4's N−1 fail-safe holds for neither row
+
+[Decision 2](#decision-2--schema-container--image--env-one-cell) rule 4 claimed
+the addition "fails safe for free": an N−1 dispatcher "does not know `runtime` at
+all, and `deny_unknown_fields` on the nested block parks the config Stalled".
+**The two halves contradict each other**, and job #401 measured which one is
+true. `JobType` deliberately drops `deny_unknown_fields` and captures unknown
+top-level keys into `JobType::unknown` (`crates/types/src/job_type.rs`, and its
+own type doc says why), so a dispatcher that does not know `runtime` never
+descends into the block and its nested `deny_unknown_fields` never runs.
+
+What actually happens, per row:
+
+- **`mode: container` + `env`** — `image` is still present and the config is
+  otherwise valid, so `runtime:` is merely a tolerated unknown top-level field.
+  The dispatcher warns and runs the job **without its toolchain**: a job type
+  meaning "build with Flutter 3.41.2" silently means "build with whatever the
+  image has".
+- **`mode: host`** — fail-safe *only once the host row's own field rules exist*.
+  Rule 4's reasoning was that `image` is absent and the N−1 dispatcher hits the
+  existing `Required { field: "image" }` rule; but the `image` ban is P0/P1 debt
+  that #401 did not land, so a host declaration keeping `image:` is just as
+  invisible as the container row — and worse, since it means "run natively" and
+  silently runs containerized. Even with the ban, a new rule the N−1 dispatcher
+  never executes cannot make it park.
+
+Both are the failure class job #376 settled for schedule `inputs:` and
+[#309](309-host-native-execution.md) §5b calls a correctness bug — a silently
+dropped constraint, not a failed job. The fix is the one #309 §3 already argues
+for `min_dispatcher` ("leaving it to authorship guarantees somebody forgets"): a
+`validate()` rule requiring `min_dispatcher >= RUNTIME_SCHEMA_EPOCH` for **any
+`runtime:` beyond a bare `mode: container`**, so §14.3's merge-time gate fails
+the config's own CI against a deployed dispatcher on the old epoch. The declared
+`min_dispatcher` is the only signal that crosses the skew boundary, which is why
+it and not a field ban is the gate. Shipped in #401 with the block.
+
+The `deny_unknown_fields` half of rule 4 is not worthless — it is what makes
+`mdoe: host` a hard parse error on an **N** dispatcher, which is what #309 §3's
+option-A table actually claimed. It is simply not the N−1 property.
 
 ## What this makes wrong elsewhere
 

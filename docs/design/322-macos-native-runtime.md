@@ -1063,8 +1063,11 @@ Per STYLE.md's contract-first rule, each slice names the contract it changes:
   terms of a writable overlay layer; the contract survives, the rationale needs a
   second sentence.
 - **[#309](./309-host-native-execution.md) itself** is stale on two points now
-  fixed here: the epoch is 2 (so the bump is 2 → 3), and `runtime.env`'s
-  nix-only scheme does not cover the category that motivated the design.
+  fixed here: the epoch claim (it read 2 when this was written; job #401 landed
+  the `runtime:` block at 4, so there is no bump left to spend), and
+  `runtime.env`'s nix-only scheme does not cover the category that motivated the
+  design — §3's `xcode:<version>` is a `validate()` rule in the tree today,
+  requiring `mode: host`.
 
 ## Risks and open questions
 

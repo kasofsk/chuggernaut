@@ -276,15 +276,23 @@ not safe is a config where `image` is **absent**: an N−1 dispatcher rejects it
 outright and, per §14.2, parks every job of that type. That is the 2026-07-22
 shape §14 exists to prevent.
 
-So: **bump `CONFIG_SCHEMA_EPOCH` 1 → 2 in `crates/types/src/version.rs`, in the
-same commit as the parser change, and gate every host-mode job type with
-`min_dispatcher: 2`** (§14.1, §14.3 — `.chug/tasks/ci.sh`'s config-skew gate then
-fails the config's own CI against a deployed dispatcher on epoch 1).
+So: **bump `CONFIG_SCHEMA_EPOCH` in `crates/types/src/version.rs`, in the same
+commit as the parser change, and gate every host-mode job type with
+`min_dispatcher:` at that epoch** (§14.1, §14.3 — `.chug/tasks/ci.sh`'s
+config-skew gate then fails the config's own CI against a deployed dispatcher on
+the older epoch). Job #401 spent that bump: 3 → **4**, not 1 → 2, since #376 had
+moved the epoch twice by then, with `RUNTIME_SCHEMA_EPOCH` frozen at 4.
 
 `min_dispatcher` is author-declared, so leaving it to authorship guarantees
 somebody forgets. `validate()` should therefore gain a rule: **`runtime.mode:
-host` requires `min_dispatcher >= 2`**, reported as an ordinary
-`FieldRuleError::Required`. One line, and it makes the gate structural.
+host` requires `min_dispatcher >= RUNTIME_SCHEMA_EPOCH`**, reported as an
+ordinary `FieldRuleError::Required`. One line, and it makes the gate
+structural. Job #401 shipped it wider — any `runtime:` beyond a bare
+`mode: container` — because
+[#373](373-project-toolchains.md) C7 measured that the container row leaks the
+same way and that the `image` ban this section leans on cannot help: an N−1
+dispatcher never runs the new field rules at all, so the declared
+`min_dispatcher` is the only signal that crosses the boundary.
 
 ### Syntax options
 
@@ -986,11 +994,24 @@ What can be prototyped on one node with nothing migrated:
 | Phase | Work | Needs | Notes |
 | --- | --- | --- | --- |
 | **P0** | Backend polymorphism ([1](#1-backend-polymorphism)) + a `HostBackend` ([2](#2-the-traits-container-assumptions)), on one node with `WORKER_MODES=container,host`, routed by `placement.node`, `slots: 1` | nothing else | **No schema change, no epoch bump, no capability wire, no placement change.** The job type still declares `image:` and that node simply ignores it. This is deliberately a lie and must never leave the prototype node — but it answers the only question that matters: *which of the ten methods is actually hard* |
-| **P1** | The `runtime:` selector, `CONFIG_SCHEMA_EPOCH` 1→2, `min_dispatcher: 2`, the validate rule ([3](#3-the-host-mode-selector)) | P0 | Still pinned; `image` stops lying |
+| **P1** | The `runtime:` selector, the `CONFIG_SCHEMA_EPOCH` bump, the `min_dispatcher` requirement, the validate rule ([3](#3-the-host-mode-selector)) | P0 | Still pinned; `image` stops lying. **Half-landed ahead of P0** — see the note below |
 | **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` ([4](#4-capability-advertisement), [5a](#5a-capability-aware-placement)) | P1, **and #293 job 3** | Unpins host work |
 | **P3** | Per-task users ([8](#8-secrets-on-a-shared-host)); `resources_enforced` ([7](#7-resource-limits)); transient scopes ([6](#6-drain)) | P2 | The isolation and bounding story; the scope work is Linux-only |
 | **P4** | Device leases ([5b](#5b-exclusive-resources-device-leases)) | P2 | Only when the host node must run a second, non-device-bound task concurrently |
 | **P5** | Declared caches + GC roots + warm set ([9](#9-environment-and-state)) | P1 | Independent of P2–P4 |
+
+**P1's schema half landed before P0, deliberately (job #401).**
+[#373](373-project-toolchains.md) Decision 2 needed the same block for
+container-mode toolchains, so the whole designed table now exists in
+`crates/types/src/job_type.rs` — `runtime.mode` (`container` default | `host`)
+and `runtime.env` — at `CONFIG_SCHEMA_EPOCH` **4**, not 2 (#376 spent 2 → 3
+first), with `RUNTIME_SCHEMA_EPOCH` frozen at 4 and required of any `runtime:`
+beyond a bare `mode: container`. **Only the container row validates**: `mode: host` parses and is
+refused by `validate()` as unsupported-because-unbuilt, naming P0. So the epoch
+is spent once, nothing unservable is expressible, and what P0/P1 still owe is
+the backend, the placement, and the host row's own field rules — the top-level
+`image` ban, the required `env`, and the evaluator-image narrowing — plus
+deleting one refusal. No epoch is left to spend.
 
 P0 is the one to start. #308's ordering already says phase 2 should be a
 prototype rather than a design carried to completion, and this document's own
@@ -1009,7 +1030,7 @@ of too many unbuilt things.
 | 1 | `code` — `ContainerBackend` gains `managed_running_total` (provided); daemon holds `Arc<dyn ContainerBackend>`; `WORKER_MODES` parsing | `ContainerBackend` trait surface; worker config | — |
 | 2 | `code` — `HostBackend`: task dir, process group, the ten methods, the `/workspace` rebase rule | new backend implementation; `ContainerId` shape (`{node}/{task_id}`, unchanged) | 1 |
 | 3 | `docs` — spec §3.1 amendment: the host node kind, the selector, capability advertisement, the mode filter in placement; fix the stale trait listing (correction 3) | spec §3.1, §1.1 field-rules matrix | 2 |
-| 4 | `code` — `runtime:` block, field rules, the per-level mode precedence rule and the narrowing of the evaluator `image` requirement, `CONFIG_SCHEMA_EPOCH` 1→2, the `min_dispatcher` requirement | job-type schema epoch (§14.1); `Evaluator`/`wrap_up` image resolution | 3 |
+| 4 | `code` — `runtime:` block, field rules, the per-level mode precedence rule and the narrowing of the evaluator `image` requirement, the `CONFIG_SCHEMA_EPOCH` bump (#401 spent 3→4), the `min_dispatcher` requirement | job-type schema epoch (§14.1); `Evaluator`/`wrap_up` image resolution | 3 |
 | 5 | `code` — `NodeCapabilities` on `PingOk` + `WorkerAnnounce`; ingest inside `probe_worker` | two wire records (additive, no `WORKER_RPC_VERSION` bump) | 4, **#293 job 3** |
 | 6 | `code` — `choose_placement` capability predicate + the two distinct `NoCapacity` messages; the fleet-wide "no node advertises" warning | `choose_placement` postcondition; §3.1 placement | 5 |
 | 7 | `code` — `placement.leases` (+ the "leases require a pin" rule), the actor lease table, release in `on_task_exited` **and** on the revoke path, §3.6 rebuild | `Placement` schema (nested, breaking); `on_task_exited` postcondition; `revoke_job` postcondition; §3.6 reconciliation | 6 |

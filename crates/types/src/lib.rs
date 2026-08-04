@@ -46,7 +46,7 @@ pub use job::{
 };
 pub use job_type::{
     ConfigWarning, Evaluator, EvaluatorType, Input, InputKind, JobType, Placement, ProjectDefaults,
-    ReviewSpec, WorkSpec, WorkType, WrapUpMode, WrapUpSpec,
+    ReviewSpec, Runtime, RuntimeMode, WorkSpec, WorkType, WrapUpMode, WrapUpSpec,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
 pub use platform::{
@@ -69,7 +69,7 @@ pub use task::{
 };
 pub use user::{Identity, IdentityKind, ProjectRole, User};
 pub use version::{
-    CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, INPUTS_SCHEMA_EPOCH,
+    CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, INPUTS_SCHEMA_EPOCH, RUNTIME_SCHEMA_EPOCH,
     SCHEDULE_INPUTS_SCHEMA_EPOCH, WORKER_RPC_VERSION,
 };
 pub use worker::{

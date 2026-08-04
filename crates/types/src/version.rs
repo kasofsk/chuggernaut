@@ -52,7 +52,7 @@
 /// Epoch 2 is job `inputs:` (#311, [`INPUTS_SCHEMA_EPOCH`]): a top-level field
 /// an N-1 dispatcher *would* tolerate, which is exactly why it needs the bump —
 /// tolerating it means a job runs with no value where the type declares one.
-pub const CONFIG_SCHEMA_EPOCH: u32 = 3;
+pub const CONFIG_SCHEMA_EPOCH: u32 = 4;
 
 /// The epoch at which job `inputs:` landed (#311, spec §1.1). A job type
 /// declaring a non-empty `inputs:` must declare `min_dispatcher` at least this
@@ -74,6 +74,13 @@ pub const INPUTS_SCHEMA_EPOCH: u32 = 2;
 /// Above [`INPUTS_SCHEMA_EPOCH`] rather than a reuse of it — a dispatcher at
 /// epoch 2 understands a job type's `inputs:` and still drops a schedule's.
 pub const SCHEDULE_INPUTS_SCHEMA_EPOCH: u32 = 3;
+
+/// The epoch at which the `runtime:` block landed (#309 §3, #373 Decision 2,
+/// spec §1.1). Any `runtime:` beyond a bare `mode: container` must declare
+/// `min_dispatcher` at least this high ([`crate::JobType::validate`]), because
+/// an N-1 dispatcher tolerates the whole unknown block, keeps the still-present
+/// `image`, and would run the job containerized against the image's toolchain.
+pub const RUNTIME_SCHEMA_EPOCH: u32 = 4;
 
 /// The worker-node RPC protocol version ([`crate::worker`] ops, spec §3.1).
 /// The daemon logs-and-fallbacks on an unknown op rather than crashing, so an
@@ -106,6 +113,7 @@ mod tests {
         let feature_epochs: Vec<(&str, u32)> = vec![
             ("inputs", INPUTS_SCHEMA_EPOCH),
             ("schedule-inputs", SCHEDULE_INPUTS_SCHEMA_EPOCH),
+            ("runtime", RUNTIME_SCHEMA_EPOCH),
         ];
         for (name, epoch) in feature_epochs {
             assert!(

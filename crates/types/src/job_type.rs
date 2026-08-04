@@ -38,6 +38,11 @@ pub struct JobType {
     pub description: Option<String>,
     /// Required for agent/command work; disallowed at top level for human work.
     pub image: Option<String>,
+    /// Where this job type's tasks run and against which toolchain (spec §1.1,
+    /// design #309 §3, #373 Decision 2). Absent means `mode: container` with no
+    /// declared environment — every job type that predates the block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<Runtime>,
     pub work: WorkSpec,
     /// The third step of the job (work → evaluation → wrap-up): what happens
     /// after eval-pass (design-lifecycle.md).
@@ -316,6 +321,44 @@ impl Placement {
     }
 }
 
+/// The scheme prefix of an Xcode environment reference (design #322 §3, #373
+/// Decision 2 rule 1). Legal only under [`RuntimeMode::Host`] — Xcode cannot be
+/// containerized.
+const XCODE_ENV_PREFIX: &str = "xcode:";
+
+/// Where a job type's tasks run and against which toolchain (spec §1.1, design
+/// #309 §3 option A, #373 Decision 2). A nested block, so a typo'd `mdoe: host`
+/// is a hard parse error rather than a job that silently runs somewhere else.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct Runtime {
+    /// `container` (default) or `host`. Host mode parses but is refused by
+    /// [`JobType::validate`] until design #309 P0/P1 land.
+    #[serde(default)]
+    pub mode: RuntimeMode,
+    /// An opaque environment reference the node resolves — `nix:<flake-ref>#<attr>`
+    /// in either mode, `xcode:<version>` in host mode only (design #309 §9,
+    /// #373 Decision 2). Optional in container mode, where it layers a toolchain
+    /// over the `image`'s userland.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+}
+
+/// Which backend serves a job type's tasks (design #309 §3). Only
+/// [`RuntimeMode::Container`] is implemented; see [`JobType::validate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum RuntimeMode {
+    /// Today's behavior: the task runs in a container built from `image`.
+    #[default]
+    Container,
+    /// The task runs as a process on a host-capable node (design #309). Not
+    /// implemented — declaring it is a validation refusal, not a launch.
+    Host,
+}
+
 /// One declared job input (spec §1.1, design #311 Decision 2): a name, a kind,
 /// and the narrowing that makes a supplied value safe to hand to a script.
 ///
@@ -426,6 +469,14 @@ pub enum FieldRuleError {
     },
     #[error("field '{field}' is invalid for {context}: {reason}")]
     Invalid {
+        field: &'static str,
+        context: String,
+        reason: String,
+    },
+    /// A declaration this schema accepts and this dispatcher cannot serve —
+    /// refused because the feature is unbuilt, not because the config is wrong.
+    #[error("field '{field}' is not supported by this dispatcher for {context}: {reason}")]
+    Unsupported {
         field: &'static str,
         context: String,
         reason: String,
@@ -689,7 +740,63 @@ impl JobType {
             });
         }
 
+        errs.extend(self.validate_runtime());
         errs.extend(self.validate_inputs());
+        errs
+    }
+
+    /// The `runtime:` block's field rules (spec §1.1, design #309 §3, #373
+    /// Decision 2). Only the container row is implemented, and a job type with
+    /// no `runtime:` produces no errors from here.
+    fn validate_runtime(&self) -> Vec<FieldRuleError> {
+        let mut errs = Vec::new();
+        let Some(runtime) = self.runtime.as_ref() else {
+            return errs;
+        };
+        let ctx = format!("job type '{}'", self.name);
+        if runtime.mode == RuntimeMode::Host {
+            errs.push(FieldRuleError::Unsupported {
+                field: "runtime.mode",
+                context: ctx.clone(),
+                reason: "mode 'host' is not implemented yet: design #309 P0 (the HostBackend \
+                         prototype) and P1 (host placement) have not landed, so no node can \
+                         serve it — the declaration itself is well-formed"
+                    .into(),
+            });
+        }
+        if let Some(env) = runtime.env.as_deref() {
+            if env.is_empty() {
+                errs.push(FieldRuleError::Invalid {
+                    field: "runtime.env",
+                    context: ctx.clone(),
+                    reason: "an environment reference must not be empty".into(),
+                });
+            }
+            if env.starts_with(XCODE_ENV_PREFIX) && runtime.mode != RuntimeMode::Host {
+                errs.push(FieldRuleError::Invalid {
+                    field: "runtime.env",
+                    context: ctx,
+                    reason: format!(
+                        "'{XCODE_ENV_PREFIX}' environments require runtime.mode: host — Xcode \
+                         cannot be containerized (design #322 §3, #373 Decision 2 rule 1)"
+                    ),
+                });
+            }
+        }
+        let drops_silently_on_an_older_dispatcher =
+            runtime.env.is_some() || runtime.mode != RuntimeMode::Container;
+        if drops_silently_on_an_older_dispatcher
+            && self.min_dispatcher.unwrap_or(0) < crate::version::RUNTIME_SCHEMA_EPOCH
+        {
+            errs.push(FieldRuleError::Required {
+                field: "min_dispatcher",
+                context: format!(
+                    "a job type declaring 'runtime.env' or a non-container 'runtime.mode' \
+                     (needs min_dispatcher >= {})",
+                    crate::version::RUNTIME_SCHEMA_EPOCH
+                ),
+            });
+        }
         errs
     }
 
@@ -1836,6 +1943,253 @@ min_dispatcher: 5
                 }
             )),
             "{too_long:?}"
+        );
+    }
+
+    /// An agent job type carrying `block` as its `runtime:` section, with the
+    /// `min_dispatcher` a declared `runtime:` requires already set — so each
+    /// test below asserts about its own rule and nothing else.
+    fn jt_with_runtime(block: &str) -> JobType {
+        JobType::parse(&format!(
+            "name: mobile\nimage: img:latest\nmin_dispatcher: {}\n\
+             work:\n  type: agent\n  prompt: p.md\nruntime:\n{block}",
+            crate::version::RUNTIME_SCHEMA_EPOCH
+        ))
+        .expect("runtime block should parse")
+    }
+
+    #[test]
+    fn runtime_absent_leaves_every_existing_job_type_untouched() {
+        let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
+        assert_eq!(jt.runtime, None);
+        assert_eq!(jt.validate(), vec![]);
+        assert!(jt.config_warnings().is_empty());
+        assert!(
+            !serde_yaml::to_string(&jt).unwrap().contains("runtime"),
+            "an undeclared runtime must not appear on the wire"
+        );
+        let defaults =
+            ProjectDefaults::parse(include_str!("../../../.chug/jobs/_defaults.yaml")).unwrap();
+        for yaml in [
+            include_str!("../../../.chug/jobs/android-proof.yaml"),
+            include_str!("../../../.chug/jobs/code.yaml"),
+            include_str!("../../../.chug/jobs/coverage.yaml"),
+            include_str!("../../../.chug/jobs/deploy.yaml"),
+            include_str!("../../../.chug/jobs/design.yaml"),
+            include_str!("../../../.chug/jobs/docs.yaml"),
+            include_str!("../../../.chug/jobs/manual.yaml"),
+            include_str!("../../../.chug/jobs/rollback.yaml"),
+            include_str!("../../../.chug/jobs/web-publish.yaml"),
+            include_str!("../../../.chug/jobs/web.yaml"),
+        ] {
+            let jt = JobType::parse(yaml).unwrap();
+            assert_eq!(jt.runtime, None, "{}: declares runtime", jt.name);
+            assert!(
+                jt.min_dispatcher.unwrap_or(0) < crate::version::RUNTIME_SCHEMA_EPOCH,
+                "{}: declares the new epoch, which no config may until the dispatcher \
+                 carrying it is deployed (spec §14.3)",
+                jt.name
+            );
+            assert_eq!(
+                jt.with_defaults(&defaults).unwrap().validate(),
+                vec![],
+                "{}: field rules",
+                jt.name
+            );
+        }
+    }
+
+    #[test]
+    fn container_mode_parses_with_and_without_an_env() {
+        let bare = jt_with_runtime("  mode: container\n");
+        assert_eq!(
+            bare.runtime,
+            Some(Runtime {
+                mode: RuntimeMode::Container,
+                env: None,
+            })
+        );
+        assert_eq!(bare.validate(), vec![]);
+
+        let layered = jt_with_runtime("  mode: container\n  env: \"nix:.#chug-mobile\"\n");
+        assert_eq!(
+            layered.runtime.as_ref().unwrap().env.as_deref(),
+            Some("nix:.#chug-mobile")
+        );
+        assert_eq!(layered.validate(), vec![]);
+
+        let defaulted = jt_with_runtime("  env: \"nix:.#chug-ci\"\n");
+        assert_eq!(
+            defaulted.runtime.as_ref().unwrap().mode,
+            RuntimeMode::Container
+        );
+        assert_eq!(defaulted.validate(), vec![]);
+    }
+
+    #[test]
+    fn container_mode_still_requires_an_image() {
+        let yaml = format!(
+            "name: mobile\nmin_dispatcher: {}\nwork:\n  type: agent\n  prompt: p.md\n\
+             runtime:\n  mode: container\n  env: \"nix:.#chug-mobile\"\n",
+            crate::version::RUNTIME_SCHEMA_EPOCH
+        );
+        let errs = JobType::parse(&yaml).unwrap().validate();
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, FieldRuleError::Required { field: "image", .. })),
+            "container + env + no image is not coherent: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn host_mode_is_refused_as_unbuilt_not_as_invalid() {
+        let jt = jt_with_runtime("  mode: host\n  env: \"nix:.#chug-mobile\"\n");
+        assert_eq!(jt.runtime.as_ref().unwrap().mode, RuntimeMode::Host);
+        let errs = jt.validate();
+        let refusal = errs
+            .iter()
+            .find(|e| matches!(e, FieldRuleError::Unsupported { .. }))
+            .unwrap_or_else(|| panic!("host mode must be refused: {errs:?}"));
+        assert!(matches!(
+            refusal,
+            FieldRuleError::Unsupported {
+                field: "runtime.mode",
+                ..
+            }
+        ));
+        let rendered = refusal.to_string();
+        assert!(rendered.contains("not implemented"), "{rendered}");
+        assert!(rendered.contains("#309 P0"), "{rendered}");
+        assert!(
+            !errs.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "runtime.mode",
+                    ..
+                }
+            )),
+            "an unbuilt mode is not an invalid declaration: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn runtime_env_requires_the_min_dispatcher_declaration() {
+        let yaml = |line: &str| {
+            format!(
+                "name: mobile\nimage: img:latest\n{line}work:\n  type: agent\n  prompt: p.md\n\
+                 runtime:\n  env: \"nix:.#chug-mobile\"\n"
+            )
+        };
+        let expected = expected_runtime_epoch_error();
+        assert_eq!(
+            JobType::parse(&yaml("")).unwrap().validate(),
+            vec![expected.clone()]
+        );
+        let stale = format!(
+            "min_dispatcher: {}\n",
+            crate::version::RUNTIME_SCHEMA_EPOCH - 1
+        );
+        assert_eq!(
+            JobType::parse(&yaml(&stale)).unwrap().validate(),
+            vec![expected]
+        );
+        let newer = format!(
+            "min_dispatcher: {}\n",
+            crate::version::RUNTIME_SCHEMA_EPOCH + 1
+        );
+        assert_eq!(JobType::parse(&yaml(&newer)).unwrap().validate(), vec![]);
+        assert_eq!(
+            JobType::parse(
+                "name: mobile\nimage: img:latest\nwork:\n  type: agent\n  prompt: p.md\n\
+                 runtime:\n  mode: container\n"
+            )
+            .unwrap()
+            .validate(),
+            vec![],
+            "a container-mode runtime with no env drops no constraint an N-1 dispatcher can see"
+        );
+    }
+
+    /// The `min_dispatcher` refusal every `runtime:` declaration an N-1
+    /// dispatcher would silently drop must produce.
+    fn expected_runtime_epoch_error() -> FieldRuleError {
+        FieldRuleError::Required {
+            field: "min_dispatcher",
+            context: format!(
+                "a job type declaring 'runtime.env' or a non-container 'runtime.mode' \
+                 (needs min_dispatcher >= {})",
+                crate::version::RUNTIME_SCHEMA_EPOCH
+            ),
+        }
+    }
+
+    #[test]
+    fn host_mode_requires_the_min_dispatcher_declaration_too() {
+        let errs = JobType::parse(
+            "name: mobile\nimage: img:latest\nwork:\n  type: agent\n  prompt: p.md\n\
+             runtime:\n  mode: host\n",
+        )
+        .unwrap()
+        .validate();
+        assert!(
+            errs.contains(&expected_runtime_epoch_error()),
+            "a host declaration keeping 'image' is invisible to an N-1 dispatcher unless it \
+             declares the epoch: {errs:?}"
+        );
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, FieldRuleError::Unsupported { .. })),
+            "{errs:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_field_inside_runtime_is_a_hard_error() {
+        let yaml = "name: mobile\nimage: img:latest\nwork:\n  type: agent\n  prompt: p.md\n\
+                    runtime:\n  mdoe: host\n";
+        let err = JobType::parse(yaml).expect_err("unknown runtime field must fail parsing");
+        assert!(err.to_string().contains("mdoe"), "{err}");
+    }
+
+    #[test]
+    fn xcode_environments_require_host_mode() {
+        let containerized = jt_with_runtime("  mode: container\n  env: \"xcode:16.2\"\n");
+        let errs = containerized.validate();
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "runtime.env",
+                    ..
+                }
+            )),
+            "{errs:?}"
+        );
+        let hosted = jt_with_runtime("  mode: host\n  env: \"xcode:16.2\"\n");
+        assert!(
+            !hosted.validate().iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "runtime.env",
+                    ..
+                }
+            )),
+            "the scheme rule must not fire under host mode, which is refused on its own"
+        );
+    }
+
+    #[test]
+    fn empty_runtime_env_is_invalid() {
+        let errs = jt_with_runtime("  env: \"\"\n").validate();
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "runtime.env",
+                    ..
+                }
+            )),
+            "{errs:?}"
         );
     }
 
