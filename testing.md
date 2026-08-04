@@ -33,8 +33,9 @@ production bucket names that cannot be namespaced, or a server configuration of
 their own. Since job 408 it is a private `nats-server -js` **process** per
 caller when the binary is on `PATH` (an OS-chosen port via `-p -1`, a fresh temp
 store dir, both reclaimed on drop), and a private container otherwise;
-`CHUG_TEST_NATS_LOCAL=0` forces the container. So the five private-server files
-now run on a Docker-less evaluator too — but `announce_tier2` still subtracts
+`CHUG_TEST_NATS_LOCAL=0` forces the container. So the private-server files —
+the five job 408 measured, plus `dispatcher/tests/workload_identity.rs` (#313
+S4) — now run on a Docker-less evaluator too — but `announce_tier2` still subtracts
 them from the tally whenever the gate's own NATS came from a URL rather than a
 daemon, which since 408 **understates** what ran. What the gate announces is the
 *result* of its start attempt and never a separate probe — the two drifting

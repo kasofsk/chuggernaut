@@ -29,6 +29,7 @@ uuid.workspace = true
 [dev-dependencies]
 test-utils.workspace = true
 futures.workspace = true
+jsonwebtoken.workspace = true
 nkeys.workspace = true
 serde_yaml.workspace = true
 

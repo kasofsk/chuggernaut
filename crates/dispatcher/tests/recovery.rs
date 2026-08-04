@@ -286,6 +286,7 @@ async fn restart_recovers_orphaned_running_work_task() {
             queued_at: None,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -445,6 +446,7 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
         queued_at: None,
         session_id: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),
@@ -472,6 +474,7 @@ async fn restart_rebuilds_re_review_context_from_persisted_records() {
                 prompt: "prompts/eval.md".into(),
             },
             reviewed_tip: Some(tip1.clone()),
+            workload_identities: vec![],
             result: Some(TaskResult::Agent {
                 pass: false,
                 abort: false,
@@ -643,6 +646,7 @@ async fn restart_infra_loss_relaunches_work_without_burning_budget() {
             queued_at: None,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -787,6 +791,7 @@ async fn restart_repeated_infra_loss_escalates_with_infra_loss() {
         queued_at: None,
         session_id: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),
@@ -938,6 +943,7 @@ async fn restart_real_nonzero_exit_still_burns_budget() {
             queued_at: None,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -1076,6 +1082,7 @@ async fn restart_requeues_queued_pending_work_task() {
             queued_at: None,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: None,
             created_at: Utc::now(),
             started_at: None,
@@ -1142,6 +1149,51 @@ async fn seed_queued_command_work(
     base_ref: &str,
     queued_at: chrono::DateTime<Utc>,
 ) {
+    seed_queued_command_work_job(store, seq, base_ref, queued_at).await;
+    store
+        .tasks()
+        .await
+        .unwrap()
+        .put(&Task {
+            id: 1,
+            job_seq: seq,
+            project: "acme/api".into(),
+            phase: TaskPhase::Work,
+            cycle: 1,
+            kind: TaskKind::Command {
+                run: "./build.sh".into(),
+            },
+            state: TaskState::Pending,
+            attempt: 1,
+            evaluator: None,
+            label: None,
+            stage: 0,
+            performed_by: None,
+            container_id: None,
+            rework_reason: None,
+            infra_loss: false,
+            pending_reason: Some(types::PendingReason::QueuedForCapacity),
+            queued_at: Some(queued_at),
+            session_id: None,
+            reviewed_tip: None,
+            workload_identities: vec![],
+            result: None,
+            created_at: queued_at,
+            started_at: None,
+            completed_at: None,
+        })
+        .await
+        .unwrap();
+}
+
+/// The Work-state job record [`seed_queued_command_work`]'s parked task belongs
+/// to.
+async fn seed_queued_command_work_job(
+    store: &NatsStore,
+    seq: u64,
+    base_ref: &str,
+    queued_at: chrono::DateTime<Utc>,
+) {
     store
         .jobs()
         .await
@@ -1174,39 +1226,6 @@ async fn seed_queued_command_work(
             inputs: Default::default(),
             groups: vec![],
             task_time_ms: None,
-        })
-        .await
-        .unwrap();
-    store
-        .tasks()
-        .await
-        .unwrap()
-        .put(&Task {
-            id: 1,
-            job_seq: seq,
-            project: "acme/api".into(),
-            phase: TaskPhase::Work,
-            cycle: 1,
-            kind: TaskKind::Command {
-                run: "./build.sh".into(),
-            },
-            state: TaskState::Pending,
-            attempt: 1,
-            evaluator: None,
-            label: None,
-            stage: 0,
-            performed_by: None,
-            container_id: None,
-            rework_reason: None,
-            infra_loss: false,
-            pending_reason: Some(types::PendingReason::QueuedForCapacity),
-            queued_at: Some(queued_at),
-            session_id: None,
-            reviewed_tip: None,
-            result: None,
-            created_at: queued_at,
-            started_at: None,
-            completed_at: None,
         })
         .await
         .unwrap();
@@ -1442,6 +1461,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
             infra_loss: false,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: Some(types::TaskResult::Command {
                 pass: true,
                 exit_code: 0,
@@ -1479,6 +1499,7 @@ async fn restart_requeues_queued_pending_agent_eval() {
             infra_loss: false,
             session_id: Some("sess-eval-1".into()),
             reviewed_tip: None,
+            workload_identities: vec![],
             result: None,
             created_at: Utc::now(),
             started_at: None,
@@ -1653,6 +1674,7 @@ async fn startup_sweep_removes_only_terminal_and_orphan_containers() {
         queued_at: None,
         session_id: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),
@@ -1839,6 +1861,7 @@ fn work_task(id: u64, state: TaskState, container_id: Option<&str>) -> Task {
         queued_at: None,
         session_id: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),
@@ -2103,6 +2126,7 @@ async fn restart_lands_job_orphaned_in_wrapup() {
             queued_at: None,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: Some(types::TaskResult::Work {
                 summary: None,
                 structured: None,
@@ -2247,6 +2271,7 @@ wrap_up:
             queued_at: None,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: Some(types::TaskResult::Work {
                 summary: None,
                 structured: None,
@@ -2283,6 +2308,7 @@ wrap_up:
             queued_at: None,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -2600,6 +2626,7 @@ async fn restart_preserves_the_submitted_summary_for_the_squash_commit() {
             queued_at: None,
             session_id: Some("da08d5f3-844e-430e-8363-39b4882f437b".into()),
             reviewed_tip: None,
+            workload_identities: vec![],
             result: Some(types::TaskResult::Work {
                 summary: Some("added f() with tests".into()),
                 structured: None,
@@ -2903,6 +2930,7 @@ async fn restart_reattach_harvests_command_work_deploy_report() {
             queued_at: None,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -3084,6 +3112,7 @@ fn crash_state_task(cid: &str, started_at: chrono::DateTime<Utc>) -> Task {
         queued_at: None,
         session_id: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: Utc::now(),
         started_at: Some(started_at),

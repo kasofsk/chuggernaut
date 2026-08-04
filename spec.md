@@ -1889,6 +1889,7 @@ All events are published exclusively by the dispatcher to `job.events.{owner}.{p
 | `schedule-skipped` | An occurrence came due while a prior run of the same schedule was non-terminal; published on the **blocking** job; includes `schedule` and `occurrence_at`. At most one per occurrence — not one per scan tick |
 | `task-created` | New task written to KV; includes `kind` (`Command`\|`Agent`\|`Human`), `phase` (`Work`\|`Evaluation`\|`MergeGate`), `cycle`, `attempt` |
 | `task-started` | Task transitioned to Running |
+| `task-launched` | A task's container was **placed** — published once per placement by the site that confirmed it (an initial launch, an agent run reporting its container id, or a queue drain, §3.5), never before the backend accepted it; includes `task_id`, `phase`, and `workload_identities` (one `{ identity, audience, sub, workload, jti, expires_at }` per minted token, §8.3). The last is **optional and omitted** when the container declared none, so such a task's events are unchanged |
 | `task-completed` | Task reached Done; includes `pass` and `structured` where applicable; includes `token_usage` for agent tasks when reported |
 | `task-failed` | Task reached Failed |
 | `step-started` | Harness reported a step beginning (see §4.5); includes `task_id`, `step`, `kind` (`author`\|`inline-review`), `iteration` |
@@ -2082,6 +2083,8 @@ principal: job:{owner}/{project}:{seq}
 pull: any ref in {owner}/{project}    read-only, no push
 ```
 
+**Workload tokens — any container declaring `workload_identities:`** (§8.3): a third short-lived credential, minted per (container, declared identity) rather than per job, valid for `min(task_timeout, the identity's token_ttl_secs, 3600s)` and delivered as injected files rather than env values (§8.3). A container that declares none is minted none.
+
 The NATS operator signing key is mounted into the dispatcher at runtime (k8s Secret in k8s deployments, bind-mounted file in Docker deployments).
 
 ---
@@ -2164,7 +2167,13 @@ Records are **operator data, managed by the admin CLI only** (`chuggernaut admin
 
 That grant injects every secret in the `global/agents` scope into *every* agent container on the platform, and `admin secret copy --to global/agents` is a one-line operation. Keeping the two mechanisms disjoint — separate declaration, separate bucket, no conversion between them and no `copy` verb — makes that command incapable of expressing the mistake. The residual is named rather than hidden: nothing stops an operator storing a raw service-account key in `global/agents` as an ordinary secret, and nothing mechanical can; what this guarantees is that the *supported* mechanism has no path there.
 
-Minting, injection and audit of the token itself are design #313 half A slices S4–S6 and are not yet built: today the declaration is parsed, gated and validated, and no container's environment or file set changes.
+**Delivery.** At each container launch the dispatcher mints one token per declared identity — never a shared one, never a job-scoped one, and nothing inherited — and injects it as two files under `/chuggernaut/cloud/{identity}/`: `token` (the JWT, mode `0600`) and `adc.json` (the external-account credential config naming the audience, the impersonated service account and the token file, mode `0644` — it carries no secret). `GOOGLE_APPLICATION_CREDENTIALS` names the `adc.json` path **only when exactly one identity is granted**; with two or more it is not set at all and the script names the path it wants, because a silent "first one wins" would make which credential a build used depend on map ordering. A container declaring none receives no file under `/chuggernaut/cloud/` and no such env var.
+
+The token's lifetime is `min(resolved task_timeout, the identity's token_ttl_secs, 3600s)` — §7.4's rule for the two credentials that already exist, capped. There is no refresh channel: a running container has no subject on which to ask (§7.4), so the cap is the answer.
+
+**Audit: the token is never recorded; its identity is** (§10.2, §10.3). At mint time the task record (`tasks.*` KV) carries `{ identity, audience, sub, workload, jti, expires_at }` per minted token; the task's `task-launched` event (§6.3) carries the same rows, published only once its container is placed — so a launch the fleet defers records the mint that happened without announcing a delivery that did not, and its relaunch mints afresh. `jti` is the join key: Google's audit log records the exchange and the impersonated service account, this record says which job, type, container and task minted the token that was exchanged. It makes a replay **attributable after the fact** — it prevents nothing.
+
+Registering the provider with the uploaded JWK set, its attribute condition and the IAM binding is an operator action (design #313 S6), so no chuggernaut token is accepted by a real STS until that lands.
 
 ---
 

@@ -100,10 +100,38 @@ pub struct Task {
     /// None for work/escalation/triage tasks and pre-#155 records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewed_tip: Option<String>,
+    /// The workload tokens minted for this container at launch, recorded as
+    /// their identity and never their value (spec §8.3, §10.2/§10.3, design
+    /// #313 A6). Empty — and omitted from the record — for every container that
+    /// declared no `workload_identities:`, so those tasks serialize exactly as
+    /// they did before the feature existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workload_identities: Vec<WorkloadIdentityGrant>,
     pub result: Option<TaskResult>,
     pub created_at: DateTime<Utc>,
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// What one minted workload token is recorded as, in place of the token
+/// itself (spec §10.3, design #313 A6). `jti` is the join key: Google's audit
+/// log records the exchange, this record says which job, type, container and
+/// task minted the token that was exchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub struct WorkloadIdentityGrant {
+    /// The `workload_identities:` name that was honored (spec §8.3).
+    pub identity: String,
+    /// The provider audience the token is valid at, and only there.
+    pub audience: String,
+    /// The policy identity presented — the token's `sub`.
+    pub sub: String,
+    /// The composite policy key a cloud-side binding matches on.
+    pub workload: String,
+    /// The token's `jti`: what makes a replay attributable after the fact.
+    pub jti: String,
+    /// When the token stops being accepted.
+    pub expires_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -38,6 +38,7 @@ pub mod run;
 pub mod scan;
 pub mod schedules;
 pub mod trace;
+pub mod workload;
 
 pub use chuggernaut_domain::decide::escalation;
 pub use chuggernaut_domain::{decide, effects, graph, inputs, queue, state};

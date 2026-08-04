@@ -589,6 +589,7 @@ impl Core {
             pending_reason: None,
             queued_at: None,
             reviewed_tip,
+            workload_identities: vec![],
             result: None,
             created_at: Utc::now(),
             started_at: (!pending_human).then(Utc::now),
@@ -613,7 +614,7 @@ impl Core {
             EvaluatorType::Command => {
                 let placement = self.placement_guard();
                 let run = evaluator.run.clone().unwrap_or_default();
-                let config = self
+                let mut config = self
                     .command_launch_config(
                         owner,
                         project,
@@ -630,6 +631,22 @@ impl Core {
                         eval_timeout,
                     )
                     .await?;
+                let audit = self
+                    .workload_delivery(&crate::workload::WorkloadLaunch {
+                        owner,
+                        project,
+                        seq,
+                        task_id,
+                        job_type: &job_type,
+                        container: auth::workload::WorkloadContainer::Evaluator {
+                            name: evaluator.name.clone(),
+                        },
+                        declared: &evaluator.workload_identities,
+                        creds_ttl: eval_timeout,
+                    })
+                    .await?
+                    .apply(&mut config);
+                self.record_workload_identities(&mut task, audit).await?;
                 match self
                     .place_container(DecidedLaunch { config, placement })
                     .await
@@ -637,6 +654,8 @@ impl Core {
                     Ok(id) => {
                         task.container_id = Some(id.clone());
                         self.task_put(&task).await?;
+                        self.publish_task_launched(owner, project, seq, &task)
+                            .await?;
                         self.spawn_eval_monitor(owner, project, seq, task_id, id);
                     }
                     Err(container::BackendError::NoCapacity(reason)) => {
@@ -881,6 +900,23 @@ impl Core {
             )
             .await?,
         );
+        let audit = self
+            .workload_delivery(&crate::workload::WorkloadLaunch {
+                owner,
+                project,
+                seq,
+                task_id,
+                job_type: &job_type,
+                container: auth::workload::WorkloadContainer::Evaluator {
+                    name: evaluator.name.clone(),
+                },
+                declared: &evaluator.workload_identities,
+                creds_ttl: eval_timeout,
+            })
+            .await?
+            .merge_into(&mut env, &mut files);
+        self.record_workload_identities_for(owner, project, seq, task_id, audit)
+            .await?;
         let config = AgentRunConfig {
             image: eval_image(&job_type, evaluator),
             prompt,
@@ -1797,6 +1833,7 @@ impl Core {
             pending_reason: None,
             queued_at: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: None,
             created_at: Utc::now(),
             started_at: Some(Utc::now()),
@@ -1817,7 +1854,7 @@ impl Core {
             .clone()
             .or_else(|| job_type.image.clone())
             .unwrap_or_default();
-        let config = self
+        let mut config = self
             .command_launch_config(
                 owner,
                 project,
@@ -1831,6 +1868,20 @@ impl Core {
                 timeout,
             )
             .await?;
+        let audit = self
+            .workload_delivery(&crate::workload::WorkloadLaunch {
+                owner,
+                project,
+                seq,
+                task_id,
+                job_type: &job_type,
+                container: auth::workload::WorkloadContainer::WrapUp,
+                declared: &job_type.wrap_up.workload_identities,
+                creds_ttl: timeout,
+            })
+            .await?
+            .apply(&mut config);
+        self.record_workload_identities(&mut task, audit).await?;
         self.place_or_defer_launch(
             owner,
             project,
@@ -2097,6 +2148,7 @@ mod tests {
             infra_loss: false,
             session_id: None,
             reviewed_tip: None,
+            workload_identities: vec![],
             result: result.or(Some(TaskResult::Agent {
                 pass,
                 abort: false,

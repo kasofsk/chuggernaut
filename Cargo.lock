@@ -1030,6 +1030,7 @@ dependencies = [
  "chuggernaut-platform-ops",
  "container",
  "futures",
+ "jsonwebtoken",
  "nkeys",
  "petgraph",
  "reqwest",

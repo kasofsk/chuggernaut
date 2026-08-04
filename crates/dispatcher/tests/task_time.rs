@@ -124,6 +124,7 @@ fn task(
         queued_at: None,
         session_id: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: base(),
         started_at: started_min.map(at),

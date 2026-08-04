@@ -1700,6 +1700,7 @@ async fn task_output_endpoint() {
         queued_at: None,
         session_id: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: chrono::Utc::now(),
         started_at: Some(chrono::Utc::now()),

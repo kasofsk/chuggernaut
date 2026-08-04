@@ -166,6 +166,7 @@ pub fn escalation_task(
         pending_reason: None,
         queued_at: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: now,
         started_at: None,

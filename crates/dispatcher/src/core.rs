@@ -879,6 +879,16 @@ impl CoreHandle {
     }
 }
 
+/// The issuer half of the workload-token mint (spec §12.1, design #313 A2):
+/// the keypair `chuggernaut init` wrote and the identifier every token's `iss`
+/// carries.
+#[derive(Debug, Clone)]
+pub struct OidcIssuer {
+    pub private_pem: String,
+    pub public_pem: String,
+    pub issuer: String,
+}
+
 #[derive(Default)]
 pub struct CoreConfig {
     /// Base for `REPO_URL` env injection: `{repo_url_base}/{owner}/{project}.git`.
@@ -918,6 +928,11 @@ pub struct CoreConfig {
     /// (§7.4). Certs are injected only when `repo_url_base` is `ssh://` —
     /// `file://` dev repos need none.
     pub ssh_ca: Option<std::path::PathBuf>,
+    /// The OIDC issuer keypair and identifier (`oidc_private.pem` /
+    /// `oidc_public.pem`, §12.1, design #313 A2) for minting workload tokens
+    /// (§8.3). None → a job type declaring `workload_identities:` fails its
+    /// launch rather than running without the credential it declared.
+    pub oidc_issuer: Option<OidcIssuer>,
     /// Binary path baked into new repos' pre-receive hooks (§5.2) — the path
     /// the binary has on the SSH host. None → this process's own executable.
     /// Used by the core for `req.projects.link`; `spawn_api_handlers` takes
@@ -958,6 +973,10 @@ pub struct Core {
     pub(crate) channel_binary: Option<Vec<u8>>,
     /// Decrypting secret store; None runs raw-injection dev mode.
     pub(crate) secrets: Option<store::secrets::AgeSecretStore>,
+    /// Signs one workload token per (container, declared identity) at launch
+    /// (§8.3, design #313 A3). None on a platform with no issuer keypair, where
+    /// a declared identity fails its launch instead.
+    pub(crate) workload_signer: Option<auth::workload::WorkloadTokenSigner>,
     /// Transcript/log blob store; None disables capture (see `harvest`).
     pub(crate) artifacts: Option<Arc<store::ArtifactStore>>,
     /// Per-project landing pipeline (spec §3.3 Merge Gate: the FIFO queue +
@@ -1128,6 +1147,17 @@ impl Core {
         )
         .await
         .map_err(|e| CoreError::Config(e.to_string()))?;
+        let workload_signer = match &config.oidc_issuer {
+            Some(keys) => Some(
+                auth::workload::WorkloadTokenSigner::new(
+                    keys.private_pem.as_bytes(),
+                    &keys.public_pem,
+                    keys.issuer.clone(),
+                )
+                .map_err(|e| CoreError::Config(format!("oidc issuer keypair: {e}")))?,
+            ),
+            None => None,
+        };
 
         let mut core = Self {
             store,
@@ -1141,6 +1171,7 @@ impl Core {
             config,
             channel_binary,
             secrets,
+            workload_signer,
             artifacts,
             graphs: HashMap::new(),
             queue: ReadyQueue::default(),
@@ -1687,7 +1718,28 @@ impl Core {
         }
         task.container_id = Some(container_id);
         self.task_put(&task).await?;
-        Ok(())
+        self.publish_task_launched(owner, project, seq, &task).await
+    }
+
+    /// Announce that a task's container was placed (§6.3), carrying the
+    /// identities it minted in place of the tokens themselves (§10.3, #313 A6).
+    /// Every launch path calls this from the site that confirmed the placement,
+    /// exactly once, so no event claims a delivery that never happened.
+    pub(crate) async fn publish_task_launched(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task: &types::Task,
+    ) -> Result<()> {
+        self.publish(
+            owner,
+            project,
+            seq,
+            "task-launched",
+            crate::workload::task_launched_payload(task),
+        )
+        .await
     }
 
     /// Build a [`agent::LaunchReporter`] wired back into the core: it spawns a

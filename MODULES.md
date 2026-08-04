@@ -90,6 +90,7 @@ one surface.
 | `handlers/tasks` | The `req.tasks.*` family: the human inbox, a job's task log, operator resolutions, and the live container tail served off the core actor. | §6.1, §4.2 |
 | `handlers/jobtypes` | `req.jobtypes.{list,get}`: the job-type library at default-branch HEAD; a broken type still lists, with its errors. | §1.1, §6.1 |
 | `handlers/repo` | `req.vcs.{file,tree,diff}` and `req.tags.list`: repo-backed reads, each pinned to one resolved ref; the diff serves one cursor page per reply. | §6.1, §5.2 |
+| `workload` | Workload-token minting and delivery at container launch: the `cloud-identities.*` read, one token per (container, declared identity) through `auth::workload`'s pure mint, two injected files plus the single-identity `GOOGLE_APPLICATION_CREDENTIALS` rule, and the identity — never the token — recorded on the task record at mint time and announced on the `task-launched` its placement publishes. | §7.4, §8.3, §10.3 |
 | `config` | Dispatcher configuration; `AGENT_PROVIDER_DEFAULT` required, refuses to start without it. | §12.4 |
 | `platform_ops` | Adapter for the platform-ops context crate: turns the single writer's fields into the narrow views it takes (`JobLookup`, `FleetView`, the borrowed `ConfigSnapshot`); gathers, never decides. | §3.1, §3.6 |
 

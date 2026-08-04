@@ -182,6 +182,8 @@ impl Core {
             Ok(id) => {
                 task.container_id = Some(id.clone());
                 self.task_put(task).await?;
+                self.publish_task_launched(owner, project, seq, task)
+                    .await?;
                 self.spawn_logs_monitor(owner, project, seq, task_id, id);
             }
             Err(BackendError::NoCapacity(reason)) => {
@@ -327,16 +329,6 @@ impl Core {
             task.started_at = Some(Utc::now());
             task.pending_reason = None;
             self.task_put(&task).await?;
-            self.publish(
-                owner,
-                project,
-                seq,
-                "task-launched",
-                serde_json::json!({
-                    "task_id": task.id, "phase": format!("{:?}", task.phase),
-                }),
-            )
-            .await?;
             self.spawn_eval_agent(
                 owner,
                 project,
@@ -409,11 +401,27 @@ impl Core {
             }
         };
 
-        let config = self
+        let mut config = self
             .command_launch_config(
                 owner, project, seq, &branch, &job_type, &secrets, image, run, role, timeout,
             )
             .await?;
+        let mut task = task;
+        if let Some((container, declared)) = crate::workload::declared_for_task(&job_type, &task) {
+            task.workload_identities = self
+                .workload_delivery(&crate::workload::WorkloadLaunch {
+                    owner,
+                    project,
+                    seq,
+                    task_id,
+                    job_type: &job_type,
+                    container,
+                    declared: &declared,
+                    creds_ttl: timeout,
+                })
+                .await?
+                .apply(&mut config);
+        }
         self.launch_resumed(
             owner,
             project,
@@ -445,16 +453,8 @@ impl Core {
                 task.pending_reason = None;
                 task.queued_at = None;
                 self.task_put(&task).await?;
-                self.publish(
-                    owner,
-                    project,
-                    seq,
-                    "task-launched",
-                    serde_json::json!({
-                        "task_id": task.id, "phase": format!("{:?}", task.phase),
-                    }),
-                )
-                .await?;
+                self.publish_task_launched(owner, project, seq, &task)
+                    .await?;
                 match monitor {
                     MonitorKind::Logs => self.spawn_logs_monitor(owner, project, seq, task.id, id),
                     MonitorKind::Eval => self.spawn_eval_monitor(owner, project, seq, task.id, id),

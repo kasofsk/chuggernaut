@@ -149,6 +149,7 @@ fn sample_task() -> types::Task {
         infra_loss: false,
         session_id: Some("6f1c".into()),
         reviewed_tip: Some("deadbeef".into()),
+        workload_identities: vec![],
         result: Some(types::TaskResult::Work {
             summary: Some("wired the generator".into()),
             structured: Some(serde_json::json!({ "files_changed": ["web/src/api.ts"] })),

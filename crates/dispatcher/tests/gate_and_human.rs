@@ -1430,6 +1430,7 @@ async fn list_pending_hides_terminal_job_zombie() {
         queued_at: None,
         session_id: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: job.created_at,
         started_at: None,

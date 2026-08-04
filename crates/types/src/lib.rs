@@ -67,7 +67,8 @@ pub use schedule::{SCHEDULES_DIR, SCHEDULES_MAX, Schedule};
 pub use step::{StepKind, StepRecord, StepStatus};
 pub use task::{
     EscalationAction, EvalResult, PendingReason, Performer, ReworkReason, Task, TaskKind,
-    TaskPhase, TaskResolution, TaskResult, TaskState, TokenUsage, task_time_ms,
+    TaskPhase, TaskResolution, TaskResult, TaskState, TokenUsage, WorkloadIdentityGrant,
+    task_time_ms,
 };
 pub use user::{Identity, IdentityKind, ProjectRole, User};
 pub use version::{

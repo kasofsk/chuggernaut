@@ -1630,10 +1630,50 @@ export interface Task {
   stage: number;
   started_at: string | null;
   state: TaskState;
+  /**
+   * The workload tokens minted for this container at launch, recorded as
+   * their identity and never their value (spec §8.3, §10.2/§10.3, design
+   * #313 A6). Empty — and omitted from the record — for every container that
+   * declared no `workload_identities:`, so those tasks serialize exactly as
+   * they did before the feature existed.
+   */
+  workload_identities?: WorkloadIdentityGrant[];
 }
 export interface TokenUsage {
   cache_read_tokens: number | null;
   cache_write_tokens: number | null;
   input_tokens: number;
   output_tokens: number;
+}
+/**
+ * What one minted workload token is recorded as, in place of the token
+ * itself (spec §10.3, design #313 A6). `jti` is the join key: Google's audit
+ * log records the exchange, this record says which job, type, container and
+ * task minted the token that was exchanged.
+ */
+export interface WorkloadIdentityGrant {
+  /**
+   * The provider audience the token is valid at, and only there.
+   */
+  audience: string;
+  /**
+   * When the token stops being accepted.
+   */
+  expires_at: string;
+  /**
+   * The `workload_identities:` name that was honored (spec §8.3).
+   */
+  identity: string;
+  /**
+   * The token's `jti`: what makes a replay attributable after the fact.
+   */
+  jti: string;
+  /**
+   * The policy identity presented — the token's `sub`.
+   */
+  sub: string;
+  /**
+   * The composite policy key a cloud-side binding matches on.
+   */
+  workload: string;
 }

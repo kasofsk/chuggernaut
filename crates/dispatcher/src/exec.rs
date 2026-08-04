@@ -376,6 +376,18 @@ impl Core {
         })?;
         let (task_id, cycle, session_id) = (task.id, task.cycle, task.session_id.clone());
 
+        let workload = self
+            .workload_delivery(&crate::workload::WorkloadLaunch {
+                owner,
+                project,
+                seq,
+                task_id,
+                job_type: &job_type,
+                container: auth::workload::WorkloadContainer::Work,
+                declared: &job_type.work.workload_identities,
+                creds_ttl: work_timeout,
+            })
+            .await?;
         match job_type.work.r#type {
             WorkType::Agent => {
                 let mut env = self
@@ -428,6 +440,8 @@ impl Core {
                     )
                     .await?,
                 );
+                let audit = workload.merge_into(&mut env, &mut files);
+                self.record_workload_identities(&mut task, audit).await?;
                 let config = AgentRunConfig {
                     image: job_type.image.clone().unwrap_or_default(),
                     prompt,
@@ -493,7 +507,7 @@ impl Core {
             WorkType::Command => {
                 let placement = self.placement_guard();
                 let run = job_type.work.run.clone().unwrap_or_default();
-                let config = self
+                let mut config = self
                     .command_launch_config(
                         owner,
                         project,
@@ -507,6 +521,8 @@ impl Core {
                         work_timeout,
                     )
                     .await?;
+                let audit = workload.apply(&mut config);
+                self.record_workload_identities(&mut task, audit).await?;
                 self.place_or_defer_launch(
                     owner,
                     project,

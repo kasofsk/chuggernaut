@@ -179,10 +179,31 @@ impl DispatcherConfig {
         self.key_file_read("dispatcher.creds").await
     }
 
+    /// Read the OIDC issuer keypair `chuggernaut init` wrote (§12.1, design
+    /// #313 A2), with the identifier every minted token's `iss` carries. Either
+    /// half missing → None: a platform that predates the key mints nothing, and
+    /// a job type declaring `workload_identities:` fails its launch loudly.
+    async fn oidc_issuer(&self) -> Result<Option<crate::core::OidcIssuer>> {
+        let (Some(private_pem), Some(public_pem)) = (
+            self.key_file_read("oidc_private.pem").await?,
+            self.key_file_read("oidc_public.pem").await?,
+        ) else {
+            return Ok(None);
+        };
+        let issuer = auth::oidc::issuer_from_env()
+            .map_err(|e| CoreError::Config(format!("oidc issuer: {e}")))?;
+        Ok(Some(crate::core::OidcIssuer {
+            private_pem,
+            public_pem,
+            issuer,
+        }))
+    }
+
     pub async fn core_config(&self) -> Result<CoreConfig> {
         let ssh_ca = self.keys_dir.join("ssh_ca");
         Ok(CoreConfig {
             ssh_ca: ssh_ca.is_file().then_some(ssh_ca),
+            oidc_issuer: self.oidc_issuer().await?,
             repo_url_base: self.repo_url_base.clone(),
             nats_url: self
                 .nats_url_container

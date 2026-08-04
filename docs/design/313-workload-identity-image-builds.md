@@ -1,7 +1,8 @@
 # Design #313 — Workload identity (OIDC issuer) and image build/push
 
-Status: IMPLEMENTED IN PART — half A's slices S1 (job #410), S2 (job #411) and
-S5 (job #412) shipped; S3, S4 and S6 are open and half B is still a design.
+Status: IMPLEMENTED IN PART — half A's slices S1 (job #410), S2 (job #411),
+S5 (job #412), S3 (job #413) and S4 (job #414) shipped; S3d (the deploy) and S6
+(the operator's provider registration) are open and half B is still a design.
 
 **Amended 2026-08-04 (job #409), against the tree at `f1e3b41`.** The operator
 has taken half A's four open decisions. They are recorded in
@@ -20,10 +21,11 @@ jobs, and this amendment exists so they can cite the document safely.
 
 The status token is `IMPLEMENTED IN PART` from S2 onward, per
 [`docs/design-docs.md`](../../docs/design-docs.md)'s vocabulary — some slices
-merged, and the qualifier says which. Nothing a job container sees has changed
-yet: S1 generates a keypair, S2 is a library nothing calls, and S5 serves two
-documents on a loopback bind, so the first slice with an operator-visible
-effect is S4.
+merged, and the qualifier says which. S1 generates a keypair, S2 is the pure
+mint, S5 serves two documents on a loopback bind, and S3 parses and gates the
+declaration; the first slice a job container sees is **S4, which has since
+shipped** — a declared identity now produces a usable credential inside its own
+container, valid at a provider nobody has registered yet (S6).
 
 Written against the tree at `d7ebfae`. Every claim about current behavior below
 was read out of [spec.md](../../spec.md) and the source in this repo; where the
@@ -1250,7 +1252,7 @@ Slice labels below are `S{n}` deliberately — the `A`/`B` labels above name
 | **S2** | Token minting + claim assembly as a **pure function**, unit-tested; no I/O. **Shipped** as [`crates/auth/src/workload.rs`](../../crates/auth/src/workload.rs) — see [Where S2 landed](#where-s2-landed) | S1 |
 | **S3** | `workload_identities:` on `work`/`eval[]`/`wrap_up`; field rules; **epoch bump `4 → 5` + frozen `WORKLOAD_IDENTITY_SCHEMA_EPOCH = 5`** + the `min_dispatcher` rule in one commit; `cloud-identities.*` KV + admin CLI + release-validation check. **Shipped** — see [Where S3 landed](#where-s3-landed) | S2 |
 | **S3d** | ***Deploy:* a dispatcher carrying epoch 5 reaches prod.** Not a code slice and not optional — see the ordering note below | S3 |
-| **S4** | Injection at launch (two `InjectedFile`s + `GOOGLE_APPLICATION_CREDENTIALS`), audit fields, the empty-declaration assert | S3 |
+| **S4** | Injection at launch (two `InjectedFile`s + `GOOGLE_APPLICATION_CREDENTIALS`), audit fields, the empty-declaration assert. **Shipped** as [`crates/dispatcher/src/workload.rs`](../../crates/dispatcher/src/workload.rs), wired into every declaration-resolving launch path (spec §8.3) | S3 |
 | **S5** | Discovery + JWKS routes on the api (unexposed). **Shipped** as [`crates/api/src/oidc.rs`](../../crates/api/src/oidc.rs) (spec §6.7); the bind is untouched | S1 |
 | **S6** | *Operator:* register the provider with the uploaded JWK set (`--issuer-uri https://chug.kasofsk.xyz`, [D1](#decisions-taken-2026-08-04)); attribute condition; one IAM binding to the impersonated SA ([D4](#decisions-taken-2026-08-04)); prove it in a work container. The terraform and the proof are **authored** — [`infra/gcp-proof/`](../../infra/gcp-proof) declares the pool, the provider, and a two-SA/two-bucket fixture whose second half is deliberately out of reach, and [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml) climbs a five-rung ladder over it against **`kasofsk/chuggernaut`**, not a consumer project. The `apply` is the operator's ([`infra/README.md`](../../infra/README.md)) | S4, **S3d** |
 | **S7** | *Operator:* a registry **confirmed** — plausibly already satisfied by beacon's Artifact Registry ([correction 2](#corrections-verified-against-the-tree)); what is left is confirming the repository, its GCP project, and IAM for a second writer | — (runs in parallel with S1–S6) |
@@ -1334,6 +1336,46 @@ nothing in the supported mechanism can express a cloud credential in
 `global/agents`. Nothing about container environments or file sets changed;
 that is S4, and **S3d** (a deployed dispatcher at epoch 5) gates any config
 declaring `min_dispatcher: 5`.
+
+### Where S4 landed
+
+`crates/dispatcher/src/workload.rs` — the I/O half only: the
+`cloud-identities.*` read, the TTL resolved against the container's own
+`task_timeout`, S2's `mint` per (container, declared identity), the two
+`InjectedFile`s, and the audit rows. The delivery *shape* — the two paths, the
+ADC document and the `GOOGLE_APPLICATION_CREDENTIALS` rule — went beside the
+mint in `auth::workload`, so it is pinned by tier-1 tests over zero, one and two
+identities rather than only by a launch.
+
+It is wired into every launch path that resolves a declaration: work agent and work
+command, the command and agent evaluator, wrap-up, and the capacity queue's
+resume — the last through `declared_for_task`, so a queued relaunch resolves the
+same declaration and mints afresh rather than reusing a token from before the
+wait. The forge-ingest triage launch is the one container path deliberately
+outside it — it launches no declaring block, so `declared_for_task` returns
+`None` for `TaskPhase::Triage | TaskPhase::Escalation` and the launch never
+reaches the injection site. A new launch path added the way triage was added
+would bypass the assert silently rather than trip it. Four things a later slice
+must not undo:
+
+- **The audit is the identity, never the token** (A6). `Task::workload_identities`
+  and the `task-launched` event carry `{ identity, audience, sub, workload, jti,
+  expires_at }`; both are omitted entirely for a container that declared none.
+  The tree publishes no `task-started` — the event A6 names — so the fields ride
+  `task-launched`, which is the event the dispatcher emits when a container is
+  placed.
+- **The record is the mint; the event is the delivery.** The rows land on the
+  task record as they are minted, but `task-launched` is published once, by the
+  site that confirmed the placement — so a deferred or failed launch announces
+  nothing, and its relaunch mints and announces a fresh `jti`.
+- **The empty declaration is asserted, not assumed**, at the injection site
+  (`WorkloadDelivery::merge_into`, which every launch that resolves a
+  declaration passes through — triage launches no declaring block): a launch
+  that granted nothing carries no file under `/chuggernaut/cloud/` and no
+  vendor env var, with a tier-2 test that pins it while a *sibling* container of
+  the same job holds a credential.
+- **`GOOGLE_APPLICATION_CREDENTIALS` is set for exactly one granted identity**
+  and for no other count.
 
 ## Contracts this changes
 

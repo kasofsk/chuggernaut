@@ -116,6 +116,7 @@ fn work_task(id: u64, job_seq: u64, state: TaskState, container_id: Option<&str>
         infra_loss: false,
         session_id: None,
         reviewed_tip: None,
+        workload_identities: vec![],
         result: None,
         created_at: Utc::now(),
         started_at: Some(Utc::now()),

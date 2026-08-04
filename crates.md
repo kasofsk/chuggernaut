@@ -78,8 +78,8 @@ The single NATS integration point, wrapping `async-nats`:
 - JWT (RS256) issue/verify, cookie construction (§7.1); `AuthProvider` trait for later swap-out
 - SSH CA: user cert signing (§7.3) and per-job cert issuance with `job:{owner}/{project}:{seq}` principals (§7.4)
 - Per-job NATS JWT minting with the §7.4 allow-lists
-- The OIDC issuer's identity (`oidc`): the `kid` — the RFC 7638 JWK thumbprint of `oidc_public.pem`, pure and stable across restarts (design #313 A2) — plus the RFC 7517 JWK set, the §6.7 discovery document, and `issuer_from_env`, the one resolver of `OIDC_ISSUER` — the api's routes read it today and #313 S4 will hand the same value to `workload`'s minter
-- Workload-token claim assembly and minting (`workload`): the #313 A1 claim set from a typed request, the A3 TTL rule (`min(task_timeout, cap)`, cap 3600) and one audience per token, RS256 with that `kid`. Pure — `now` and the `jti` are arguments — and the minted token has no `Debug`/`Serialize` route out (§10.2). Nothing calls it yet; #313 S3/S4 wire it
+- The OIDC issuer's identity (`oidc`): the `kid` — the RFC 7638 JWK thumbprint of `oidc_public.pem`, pure and stable across restarts (design #313 A2) — plus the RFC 7517 JWK set, the §6.7 discovery document, and `issuer_from_env`, the one resolver of `OIDC_ISSUER` — the api's routes read it today and the dispatcher hands the same value to `workload`'s minter
+- Workload-token claim assembly, minting and delivery shape (`workload`): the #313 A1 claim set from a typed request, the A3 TTL rule (`min(task_timeout, cap)`, cap 3600) and one audience per token, RS256 with that `kid`, plus the two container paths a granted identity occupies, its ADC document and the single-identity `GOOGLE_APPLICATION_CREDENTIALS` rule. Pure — `now` and the `jti` are arguments — and the minted token has no `Debug`/`Serialize` route out (§10.2). `dispatcher::workload` is the I/O around it: the record read, the mint at launch and the injected files (§8.3)
 - Permission rules table (§7.5) as a pure `authorize(identity, action)` function used by the API layer
 - The SSH server's ref-authorization hook (§5.2): a small `chuggernaut-ssh-authz` helper (exposed via the fat binary) invoked by sshd to enforce push/pull rules per principal
 
@@ -185,6 +185,10 @@ dispatcher/
   reconcile.rs   — restart reconciliation of mid-execution jobs, incl. the escalation
                    inbox heal (§3.6)
   channel.rs     — agent → operator channel posts: writes `channels` KV + job-events (§4.2)
+  workload.rs    — workload-token minting and delivery at container launch: the
+                   cloud-identities.* read, auth::workload's pure mint per (container,
+                   declared identity), the two injected files and the identity — never
+                   the token — on the task record and its event (§7.4, §8.3, §10.3)
   platform_ops.rs— the adapter for the platform-ops context, which is now its own crate
                    (C9): lends it `JobLookup`/`FleetView`/`ConfigSnapshot` off Core's
                    fields, decides nothing (§3.1, §3.6)

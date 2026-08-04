@@ -21,6 +21,7 @@ steps:
   - PublishEvent task-completed
   - PublishEvent job-evaluation-started
   - PublishEvent task-created
+  - PublishEvent task-launched
   - PublishEvent task-completed
   - PutTask Human(escalation)
   - PublishEvent job-escalated

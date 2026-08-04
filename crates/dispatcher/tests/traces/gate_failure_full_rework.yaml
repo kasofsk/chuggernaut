@@ -33,12 +33,14 @@ steps:
   - PublishEvent task-completed
   - PublishEvent job-evaluation-started
   - PublishEvent task-created
+  - PublishEvent task-launched
   - PublishEvent task-completed
   - PublishEvent job-wrapup-started
   - CreateSquashCandidate
   - PublishEvent job-merge-gate-started
   - LaunchGateStage
   - PublishEvent task-created
+  - PublishEvent task-launched
   - PublishEvent task-completed
   - DeleteBranch merge-gate/1
   - RebaseOntoWithConflict
@@ -48,6 +50,7 @@ steps:
   - PublishEvent task-completed
   - PublishEvent job-evaluation-started
   - PublishEvent task-created
+  - PublishEvent task-launched
   - PublishEvent task-completed
   - PublishEvent job-wrapup-started
   - SquashMerge

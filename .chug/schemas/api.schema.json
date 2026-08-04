@@ -2193,6 +2193,13 @@
         },
         "state": {
           "$ref": "#/$defs/TaskState"
+        },
+        "workload_identities": {
+          "description": "The workload tokens minted for this container at launch, recorded as\ntheir identity and never their value (spec §8.3, §10.2/§10.3, design\n#313 A6). Empty — and omitted from the record — for every container that\ndeclared no `workload_identities:`, so those tasks serialize exactly as\nthey did before the feature existed.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WorkloadIdentityGrant"
+          }
         }
       },
       "required": [
@@ -2759,6 +2766,45 @@
         "slots",
         "available",
         "version"
+      ]
+    },
+    "WorkloadIdentityGrant": {
+      "description": "What one minted workload token is recorded as, in place of the token\nitself (spec §10.3, design #313 A6). `jti` is the join key: Google's audit\nlog records the exchange, this record says which job, type, container and\ntask minted the token that was exchanged.",
+      "type": "object",
+      "properties": {
+        "audience": {
+          "description": "The provider audience the token is valid at, and only there.",
+          "type": "string"
+        },
+        "expires_at": {
+          "description": "When the token stops being accepted.",
+          "type": "string",
+          "format": "date-time"
+        },
+        "identity": {
+          "description": "The `workload_identities:` name that was honored (spec §8.3).",
+          "type": "string"
+        },
+        "jti": {
+          "description": "The token's `jti`: what makes a replay attributable after the fact.",
+          "type": "string"
+        },
+        "sub": {
+          "description": "The policy identity presented — the token's `sub`.",
+          "type": "string"
+        },
+        "workload": {
+          "description": "The composite policy key a cloud-side binding matches on.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "audience",
+        "sub",
+        "workload",
+        "jti",
+        "expires_at"
       ]
     },
     "WrapUpMode": {

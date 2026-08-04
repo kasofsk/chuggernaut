@@ -44,7 +44,7 @@ Private (`NatsTestServer::spawn` / `spawn_with_config` / `require_nats_config`):
 reads that URL, and since #408 is a **local `nats-server -js` process per caller** when
 the binary is on `PATH` — OS-chosen port, fresh temp store dir, both reclaimed on drop —
 falling back to a private container otherwise (`CHUG_TEST_NATS_LOCAL=0` forces the
-container). So the five private-server files run on a Docker-less evaluator; only the
+container). So the private-server files run on a Docker-less evaluator; only the
 files needing a Docker **backend** still self-skip there. The skip guards are the
 `require_nats!` / `require_nats_config!`
 macros and `test_utils::backend_suite::docker_available()`; there is no `e2e!`

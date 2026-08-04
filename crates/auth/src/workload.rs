@@ -5,7 +5,10 @@
 //!   `oidc_public.pem`, §12.1) and the instant the token is issued at.
 //! - **Emits:** a [`MintedWorkloadToken`]: the RS256 token a container presents
 //!   to a cloud STS, beside the [`WorkloadTokenAudit`] §10.3 records *in place
-//!   of* it. Refusals are [`WorkloadTokenError`], one variant per rule.
+//!   of* it. Refusals are [`WorkloadTokenError`], one variant per rule. Beside
+//!   the mint, the delivery shape one granted identity takes inside a container
+//!   (§4.2, design #313 A3): the two file paths, the [`AdcDocument`] the second
+//!   carries, and the [`GOOGLE_CREDENTIALS_ENV`] rule.
 //! - **Guarantees:** pure and synchronous — no I/O, no clock read (`now` is an
 //!   argument), no logging path, and no `Debug`/`Display`/`Serialize` route to
 //!   the token value (§10.2). Exactly one audience is representable, the
@@ -28,6 +31,7 @@ use chrono::{DateTime, Utc};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::Serialize;
 use thiserror::Error;
+use types::CloudIdentity;
 use types::inputs::{INPUT_VALUE_LEN_MAX, InputValueError, check_value_charset};
 
 /// The provider's cap on the mapped `google.subject`, verified in #313 A1.
@@ -390,6 +394,109 @@ impl WorkloadTokenSigner {
     }
 }
 
+/// The directory one granted identity's credential pair is delivered under
+/// (#313 A3). A subdirectory per identity, so two identities of one container
+/// never share a file.
+pub const CLOUD_CREDENTIAL_DIR: &str = "/chuggernaut/cloud";
+
+/// The env var naming the ADC config — a path, never a credential. It is
+/// vendor-named rather than `CHUG_`-prefixed on purpose: its whole value is
+/// that unmodified tooling finds it (#313 A3).
+pub const GOOGLE_CREDENTIALS_ENV: &str = "GOOGLE_APPLICATION_CREDENTIALS";
+
+/// The STS endpoint an external-account credential exchanges its subject token
+/// at.
+const STS_TOKEN_URL: &str = "https://sts.googleapis.com/v1/token";
+
+/// The subject-token type an OIDC workload token is presented as.
+const SUBJECT_TOKEN_TYPE: &str = "urn:ietf:params:oauth:token-type:jwt";
+
+const IMPERSONATION_URL_PREFIX: &str =
+    "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts";
+
+const IMPERSONATION_URL_SUFFIX: &str = ":generateAccessToken";
+
+/// The path the token itself is injected at, mode `0600` (#313 A3).
+#[must_use]
+pub fn token_file_path(identity: &str) -> String {
+    assert!(
+        identity_is_one_path_component(identity),
+        "a cloud identity name is one path component, checked at release (§2.2)"
+    );
+    format!("{CLOUD_CREDENTIAL_DIR}/{identity}/token")
+}
+
+/// The path the [`AdcDocument`] is injected at, mode `0644` — it names the
+/// token file rather than carrying a credential (#313 A3).
+#[must_use]
+pub fn adc_file_path(identity: &str) -> String {
+    assert!(
+        identity_is_one_path_component(identity),
+        "a cloud identity name is one path component, checked at release (§2.2)"
+    );
+    format!("{CLOUD_CREDENTIAL_DIR}/{identity}/adc.json")
+}
+
+/// The charset release validation already enforces on a declared name, re-checked
+/// here because it is what makes the name safe to join into a path.
+fn identity_is_one_path_component(identity: &str) -> bool {
+    !identity.is_empty()
+        && identity
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+/// Where an external-account credential reads its subject token from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdcCredentialSource {
+    pub file: String,
+}
+
+/// The external-account credential config delivered beside a token: the
+/// document every Google client library already reads (#313 A3). It names the
+/// audience, the impersonated service account and the token file, and carries
+/// no secret.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AdcDocument {
+    pub r#type: String,
+    pub audience: String,
+    pub subject_token_type: String,
+    pub token_url: String,
+    pub service_account_impersonation_url: String,
+    pub credential_source: AdcCredentialSource,
+}
+
+/// The ADC document one `cloud-identities.*` record produces, sourcing its
+/// subject token from the file delivered beside it.
+#[must_use]
+pub fn adc_document(identity: &str, record: &CloudIdentity) -> AdcDocument {
+    AdcDocument {
+        r#type: "external_account".to_string(),
+        audience: record.audience.clone(),
+        subject_token_type: SUBJECT_TOKEN_TYPE.to_string(),
+        token_url: STS_TOKEN_URL.to_string(),
+        service_account_impersonation_url: format!(
+            "{IMPERSONATION_URL_PREFIX}/{}{IMPERSONATION_URL_SUFFIX}",
+            record.service_account
+        ),
+        credential_source: AdcCredentialSource {
+            file: token_file_path(identity),
+        },
+    }
+}
+
+/// The [`GOOGLE_CREDENTIALS_ENV`] value for a container's granted identities:
+/// the one ADC path when exactly one is granted, and nothing at all otherwise
+/// (#313 A3). A silent "first one wins" would make which credential a build
+/// used depend on map ordering, so with two the script names the path it wants.
+#[must_use]
+pub fn google_credentials_env(granted: &[String]) -> Option<String> {
+    match granted {
+        [identity] => Some(adc_file_path(identity)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -709,6 +816,85 @@ mod tests {
         let audit = serde_json::to_string(minted.audit()).unwrap();
         assert!(!audit.contains(minted.token()));
         assert!(audit.contains("kasofsk/beacon:deploy:work"));
+    }
+
+    fn identity_record() -> CloudIdentity {
+        CloudIdentity {
+            audience: AUDIENCE.into(),
+            service_account: "deployer@beacon.iam.gserviceaccount.com".into(),
+            token_ttl_secs: None,
+        }
+    }
+
+    /// The ADC document's shape for a given record: the external-account flow
+    /// every Google client library reads, naming the audience, the impersonated
+    /// service account and the token file beside it — and no secret.
+    #[test]
+    fn the_adc_document_is_a_file_sourced_external_account_credential() {
+        let document = adc_document("gcp-artifact-writer", &identity_record());
+        let json = serde_json::to_value(&document).unwrap();
+        assert_eq!(json["type"], "external_account");
+        assert_eq!(json["audience"], AUDIENCE);
+        assert_eq!(json["subject_token_type"], SUBJECT_TOKEN_TYPE);
+        assert_eq!(json["token_url"], STS_TOKEN_URL);
+        assert_eq!(
+            json["service_account_impersonation_url"],
+            "https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/\
+             deployer@beacon.iam.gserviceaccount.com:generateAccessToken"
+        );
+        assert_eq!(
+            json["credential_source"]["file"],
+            "/chuggernaut/cloud/gcp-artifact-writer/token"
+        );
+        let mut keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "audience",
+                "credential_source",
+                "service_account_impersonation_url",
+                "subject_token_type",
+                "token_url",
+                "type",
+            ]
+        );
+    }
+
+    /// The two paths one identity occupies, each under its own directory, so a
+    /// second identity can never overwrite the first's token.
+    #[test]
+    fn each_identity_gets_its_own_directory() {
+        assert_eq!(token_file_path("a"), "/chuggernaut/cloud/a/token");
+        assert_eq!(adc_file_path("a"), "/chuggernaut/cloud/a/adc.json");
+        assert_ne!(token_file_path("a"), token_file_path("b"));
+        assert!(token_file_path("a").starts_with(CLOUD_CREDENTIAL_DIR));
+    }
+
+    /// The `GOOGLE_APPLICATION_CREDENTIALS` rule across zero, one and two
+    /// granted identities: set for exactly one, unset for none and unset for
+    /// many — never a silent "first one wins" (#313 A3).
+    #[test]
+    fn google_credentials_is_set_for_exactly_one_identity() {
+        assert_eq!(google_credentials_env(&[]), None);
+        assert_eq!(
+            google_credentials_env(&["gcp-artifact-writer".to_string()]),
+            Some("/chuggernaut/cloud/gcp-artifact-writer/adc.json".to_string())
+        );
+        assert_eq!(
+            google_credentials_env(&["gcp-artifact-writer".into(), "gcp-deployer".into()]),
+            None,
+            "two identities set no env var at all: the script names the path it wants"
+        );
+        assert_eq!(
+            google_credentials_env(&["a".into(), "b".into(), "c".into()]),
+            None
+        );
     }
 
     #[test]

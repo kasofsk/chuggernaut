@@ -30,12 +30,14 @@ steps:
   - PublishEvent task-completed
   - PublishEvent job-evaluation-started
   - PublishEvent task-created
+  - PublishEvent task-launched
   - PublishEvent task-completed
   - PublishEvent job-rework-started
   - PublishEvent task-created
   - PublishEvent task-completed
   - PublishEvent job-evaluation-started
   - PublishEvent task-created
+  - PublishEvent task-launched
   - PublishEvent task-completed
   - PublishEvent job-wrapup-started
   - SquashMerge
