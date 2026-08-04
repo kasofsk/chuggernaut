@@ -54,17 +54,90 @@ the exact string that was applied — compare it before suspecting anything else
 
 ## 1. Prerequisites the operator creates once
 
-**The state bucket.** `gcp-proof/mod.tf` has a `backend "gcs"` block pointing at
-`chug-tfstate-kasofsk`. A root cannot create the bucket that holds its own
-state, so create it out of band, once, in a project you already own:
+### The state bucket — and where it must not live
+
+`gcp-proof/mod.tf` has a `backend "gcs"` block pointing at bucket
+`chug-tfstate-kasofsk`, prefix `gcp-proof`. A root cannot create the bucket that
+holds its own state, so it is created **by hand, once, out of band**, and stays
+unmanaged by terraform for good.
+
+It lives in **`terraform-backend-456523`** — a long-lived project that exists to
+hold terraform state and nothing else, and that no root in this repo manages.
+
+**The rule, not just the value: state lives outside everything the root writing
+it manages.** A second root added here inherits the rule — give it a new
+`prefix` in the same bucket, not a bucket of its own.
+
+> **Never create it inside `chug-wif-proof`.** This root creates its project with
+> `deletion_policy = "DELETE"` and both proof buckets with `force_destroy = true`
+> (§7): everything it owns is disposable on purpose. A state bucket in that
+> project would be deleted by the very `terraform destroy` that reads it —
+> mid-run the state disappears, and what survives is whatever GCP had not
+> deleted yet, with no record left of what it was. Nothing warns you at
+> `init` time, because a `backend "gcs"` block names a bucket and a bucket name
+> says nothing about the project it sits in.
+
+That split is the standard bootstrap, not a local quirk. Beacon does the same
+with one hand-created `beacon-tfstate`: six roots (`gcp-org`, `gcp-app/prod`,
+`gcp-workload-id`, `gcp-firebase`, …) share it and differ only by `prefix`, and
+none of them manages it. (Beacon's roots are operator-owned and live in beacon's
+own repo, not here.)
+
+### Creating it
 
 ```sh
 gcloud storage buckets create gs://chug-tfstate-kasofsk \
-  --project <an-existing-project> --location US --uniform-bucket-level-access
+  --project=terraform-backend-456523 --location=US \
+  --uniform-bucket-level-access --public-access-prevention
 gcloud storage buckets update gs://chug-tfstate-kasofsk --versioning
 ```
 
-A different name is fine — `terraform init -backend-config=bucket=<name>`.
+Then bound the version history — this repo keeps the **10 most recent noncurrent
+versions**:
+
+```sh
+cat > lifecycle.json <<'JSON'
+{"rule": [{"action": {"type": "Delete"},
+           "condition": {"numNewerVersions": 10, "isLive": false}}]}
+JSON
+gcloud storage buckets update gs://chug-tfstate-kasofsk --lifecycle-file=lifecycle.json
+```
+
+These are `gcloud storage` spellings (the `gsutil` equivalents differ), written
+against Google's documented surface rather than a locally installed SDK — no
+container in this repo ships `gcloud`, so `gcloud storage buckets create --help`
+on the machine you run it from is the authority if a flag is rejected.
+
+**Why versioning.** The GCS backend takes a lock, but it keeps **no history**.
+An apply interrupted or truncated part-way can leave state that does not match
+reality, and `terraform state rm`, a wrong `import` and a mistaken `destroy` all
+have no undo of their own. Object versioning *is* that undo: the previous
+generation of the `default.tfstate` object under the `gcp-proof/` prefix is
+still there to restore.
+
+**Why a lifecycle rule, and why by count.** Versions otherwise accumulate
+without bound. A count (`numNewerVersions: 10`) bounds the history no matter how
+often this root is applied; a 90-day noncurrent expiry — the other reasonable
+choice — would instead leave a rarely-applied root with nothing to roll back to
+after a quiet quarter. State objects are kilobytes either way, so this is
+hygiene, not cost.
+
+**Why uniform access and public-access-prevention.** Terraform state routinely
+holds sensitive values in plaintext. This particular state honestly does not
+hold much: the uploaded JWK set is public data
+([#313 A4](../docs/design/313-workload-identity-image-builds.md)), and the rest is
+service-account emails, bucket names, the project number and the billing account
+id. Set both flags anyway — the habit must not be re-decided per state file, and
+the next root to share this bucket may hold more.
+
+A different bucket name is fine — `terraform init -backend-config=bucket=<name>`.
+
+### The project is a documentation fact, not a setting
+
+There is nowhere in the HCL to record it, and that is not an oversight: the GCS
+backend addresses a bucket by its **globally unique name** and accepts no
+`project` argument. Naming `terraform-backend-456523` here *is* the fix. Don't
+go looking for a field in `backend "gcs"` to put it in.
 
 **Org and billing.** The org id (`496204159091`) is defaulted;
 `billing_account` is the one variable with no default, because it is the one
@@ -222,5 +295,8 @@ chuggernaut admin cloud-identity delete --project kasofsk/chuggernaut --name gcp
 ```
 
 The buckets are `force_destroy = true` and the project is `deletion_policy =
-"DELETE"`, so the root is disposable by construction. The state bucket from §1
-is **not** managed here and survives; delete it by hand if you are done with it.
+"DELETE"`, so the root is disposable by construction — do not relax either; the
+disposability is the point, and §1 is what keeps the disposal from reaching the
+state. The state bucket sits in `terraform-backend-456523`, is managed by no
+terraform, and survives this untouched; delete it by hand only when you are done
+with every root that uses it.
