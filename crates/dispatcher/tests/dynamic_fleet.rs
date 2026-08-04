@@ -296,7 +296,10 @@ async fn announce_adds_capacity_and_drains_launch_queue() {
 
 /// Heartbeat loss stops NEW placements on a dynamically-announced node but never
 /// touches a container already running there: the running slot stays tracked in
-/// occupancy, and a fresh launch queues for other capacity instead.
+/// occupancy, and a fresh launch queues for other capacity instead. The timeout is
+/// `Duration::ZERO` so a lapse is decided by the scan rather than by elapsed wall
+/// clock — under the 1 ms it used to hold, an announce and the scan that follows it
+/// could land inside the threshold and leave this waiting out the 30 s scan tick.
 #[tokio::test]
 async fn heartbeat_loss_stops_placement_but_preserves_running() {
     let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
@@ -329,7 +332,7 @@ async fn heartbeat_loss_stops_placement_but_preserves_running() {
         server,
         &store,
         vec![],
-        Some(Duration::from_millis(1)),
+        Some(Duration::ZERO),
         backend.clone(),
     )
     .await;

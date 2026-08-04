@@ -23,11 +23,20 @@
 //! did (see the `require_nats!` macro). Setting the [`URL_ENV`] environment
 //! variable points tests at an already-running NATS instead (CI with a baked
 //! server, or a shared dev NATS); no container — and no Docker — is then needed.
+//!
+//! An *impossible* start is answered once, not once per caller: a client-init
+//! failure means no runtime exists to retry against, so the verdict is recorded
+//! process-wide (`RUNTIME_UNREACHABLE`) and every later caller skips instantly.
+//! Only a transient container failure is retried with backoff (#407).
 
+use std::sync::{Once, OnceLock};
 use std::time::Duration;
 use testcontainers::{
     ContainerAsync, GenericImage, ImageExt,
-    core::{IntoContainerPort, WaitFor},
+    core::{
+        IntoContainerPort, WaitFor,
+        error::{ClientError, TestcontainersError},
+    },
     runners::AsyncRunner,
 };
 use tokio::sync::OnceCell;
@@ -49,10 +58,19 @@ pub const URL_ENV: &str = "CHUG_TEST_NATS_URL";
 /// stale-container sweep only ever touches our own.
 const LEAK_LABEL: &str = "chug.test.nats";
 
-/// Best-effort reap of harness containers older than 30 minutes (see the
-/// comment at the sweep call site). Shells out to `docker` — the harness
-/// already requires Docker, and a subprocess keeps this synchronous-simple.
+/// Start attempts before a *transient* container failure is given up on
+/// (principle 3: every loop is bounded).
+const ATTEMPTS_MAX: u64 = 5;
+
+/// Best-effort reap of harness containers older than 30 minutes, run at most
+/// once per test process. Shells out to `docker` — the harness already requires
+/// Docker, and a subprocess keeps this synchronous-simple.
 fn sweep_stale_containers() {
+    static SWEPT: Once = Once::new();
+    SWEPT.call_once(sweep_stale_containers_now);
+}
+
+fn sweep_stale_containers_now() {
     let Ok(out) = std::process::Command::new("docker")
         .args([
             "ps",
@@ -106,6 +124,23 @@ pub struct NatsTestServer {
 /// resolves to `None` once and every caller skips.
 static SHARED: OnceCell<Option<NatsTestServer>> = OnceCell::const_new();
 
+/// Set the first time a start attempt proves no container runtime is reachable,
+/// so every later caller in the process skips without attempting again.
+static RUNTIME_UNREACHABLE: OnceLock<()> = OnceLock::new();
+
+/// A start failure that no retry can fix: the Docker client could not be built,
+/// configured, or pointed at a host. Anything else may be transient.
+fn is_runtime_unreachable(error: &TestcontainersError) -> bool {
+    matches!(
+        error,
+        TestcontainersError::Client(
+            ClientError::Init(_)
+                | ClientError::Configuration(_)
+                | ClientError::InvalidDockerHost(_)
+        )
+    )
+}
+
 impl NatsTestServer {
     /// The single per-process server (principle 2). The first caller in a test
     /// binary starts the container; later callers get the running instance.
@@ -158,6 +193,10 @@ impl NatsTestServer {
             );
         }
 
+        if RUNTIME_UNREACHABLE.get().is_some() {
+            return None;
+        }
+
         sweep_stale_containers();
         let build = || {
             let image = GenericImage::new(IMAGE_NAME, IMAGE_TAG)
@@ -177,9 +216,16 @@ impl NatsTestServer {
             attempt += 1;
             match build().start().await {
                 Ok(c) => break c,
-                Err(e) if attempt < 5 => {
+                Err(e) if is_runtime_unreachable(&e) => {
+                    if RUNTIME_UNREACHABLE.set(()).is_ok() {
+                        eprintln!(
+                            "skipping: no container runtime is reachable ({e}) — every later NATS test in this binary skips without retrying"
+                        );
+                    }
+                    return None;
+                }
+                Err(_) if attempt < ATTEMPTS_MAX => {
                     tokio::time::sleep(Duration::from_millis(500 * attempt)).await;
-                    let _ = e;
                 }
                 Err(e) => {
                     eprintln!(
@@ -267,4 +313,30 @@ macro_rules! require_nats_config {
             None => return,
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Duration, NatsTestServer, RUNTIME_UNREACHABLE};
+
+    /// A start that cannot succeed is answered once per process, not once per
+    /// caller — before #407 each of these paid the 5 s retry backoff.
+    #[tokio::test]
+    async fn an_unreachable_runtime_costs_one_attempt_for_the_whole_process() {
+        const SPAWNS: usize = 20;
+        const BUDGET: Duration = Duration::from_secs(2);
+        unsafe { std::env::set_var("DOCKER_HOST", "unix:///nonexistent/chug-test.sock") };
+
+        let started = std::time::Instant::now();
+        for _ in 0..SPAWNS {
+            assert!(NatsTestServer::spawn().await.is_none());
+        }
+
+        let elapsed = started.elapsed();
+        assert!(RUNTIME_UNREACHABLE.get().is_some(), "verdict not recorded");
+        assert!(
+            elapsed < BUDGET,
+            "{SPAWNS} impossible spawns took {elapsed:?}, over the {BUDGET:?} budget"
+        );
+    }
 }

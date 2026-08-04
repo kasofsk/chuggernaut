@@ -44,7 +44,14 @@ cargo test`). That URL buys the **shared-server** suites only: `NatsTestServer::
 private-server files still need Docker and self-skip without it. Prefer containers over
 host installs. The skip guards are the `require_nats!` / `require_nats_config!`
 macros and `test_utils::backend_suite::docker_available()`; there is no `e2e!`
-macro, and no tier-3 suite for one to guard (`testing.md`).
+macro, and no tier-3 suite for one to guard (`testing.md`). **A skip is free and
+must stay free**: since #407 an unreachable Docker daemon is a permanent,
+process-wide verdict answered instantly, not a 5s retry backoff per call — that
+was 55% of the suite's wall time. Measure on a **fresh** JetStream store dir
+with `RUST_MIN_STACK=16777216`, or the numbers lie (`testing.md`). And a tier-2
+binary that costs ~30s while still reporting `ok` is almost always a wait rescued
+by the core's 30s scan tick, not a slow broker — `test_utils::wait::DEFAULT_TIMEOUT`
+is **20s** so that now fails loudly instead of hiding (`testing.md`).
 
 ## CI — the evaluation gates ARE the CI
 

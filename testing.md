@@ -39,6 +39,61 @@ are tier-2 files that self-skip on a Docker-less host through
 `test_utils::backend_suite::docker_available()`. They are not a third tier; there
 is no third tier to run.
 
+### A skip costs nothing (job 407)
+
+A test that *cannot* run must not be allowed to cost time, because cargo counts a
+self-skip as a pass and the cost is therefore invisible. Until job 407 it was not
+free: `NatsTestServer::start` answered an unreachable Docker daemon with a
+five-attempt retry loop whose backoff sleeps total **5s**, paid once per
+`shared()` binary and once per `spawn()` **call** — so the five private-server
+files burnt 30.1s of a 54.2s whole-workspace run (55%) proving Docker was still
+absent. A client-init failure is now classified as permanent, recorded
+process-wide, and answered instantly for every later caller; only a *transient*
+container failure is still retried. Measured on one 12-core host against a local
+`nats-server`, fresh JetStream store, per-binary: **54.19s → 23.44s**, with
+`worker/tests/nats_backend.rs` 10.03s → 5ms and `auth/tests/nats_live.rs`,
+`chuggernaut-channel/tests/stdio.rs`, `cli/tests/init_admin.rs`,
+`dispatcher/tests/fleet_e2e.rs` each ~5.02s → 3–5ms. With no broker reachable at
+all — a work container, where every NATS binary took the retry path — the same
+run went **139.40s → 4.15s**. Every binary's pass count is unchanged.
+`crates/test-utils/src/nats.rs`'s own unit test pins the property by pointing
+`DOCKER_HOST` at a socket that cannot exist and asserting 20 spawns finish inside
+2s.
+
+Two measurement traps, both found the hard way here. **Reuse of a JetStream store
+across runs skews everything after it** — every test namespaces its own buckets
+and nothing deletes them, so a second run against the same `-sd` directory
+measured `execution.rs` at 7.38s and a third at 18.57s against 3.59s on a fresh
+one; start a clean server per measurement or the numbers are fiction. And
+**`RUST_MIN_STACK=16777216` is not optional**: without it a dozen dispatcher
+binaries abort with `has overflowed its stack` before asserting anything (`ci.sh`
+exports it whenever the tier runs), and an abort looks like a fast binary.
+
+`test_utils::wait::DEFAULT_TIMEOUT` is **20s**, sized from that run rather than
+from a guess: all 244 waits in a whole-workspace run finished under 0.94s (p50
+54ms, p99 552ms), and the worst wait seen with all 53 binaries forced to run at
+once on 12 cores — far past anything CI's sequential binaries produce — was
+4.31s. A wait that exceeds 20s is a hang, not a slow host, and should be read as
+one.
+
+### A wait that lands on a multiple of 30s is the scan tick, not a slow host
+
+`dispatcher::core`'s scan ticker fires every **30s**, so a test whose assertion
+one `trigger_scan` failed to satisfy is not lost — the next tick rescues it, and
+the only evidence is a binary that takes 30s instead of 0.3s while still
+reporting `ok`. That is what the 30.25s attributed to
+`dispatcher/tests/dynamic_fleet.rs` was:
+`heartbeat_loss_stops_placement_but_preserves_running` set a **1ms**
+`worker_heartbeat_timeout` and then raced it, because `announce_worker` and
+`trigger_scan` are two messages to one actor and the scan can read the heartbeat
+it just recorded less than a millisecond old. Measured here at 4 of 15 runs
+taking 31.1–31.4s against 2.5–3.5s, all 15 green under the old 60s ceiling; the
+fix is `Duration::ZERO`, which makes the lapse a property of the scan rather
+than of elapsed wall clock, and 40 runs then stayed under 4.2s with none failing.
+The general rule: **a threshold a test asks the dispatcher to cross must not be
+one the test has to out-run**, and a tier-2 wait quantised to 30s (or 60s, or
+90s) is a scan-tick rescue rather than a slow broker.
+
 If NATS is unavailable, `ci.sh` prints `tier-2 (NATS): SKIPPED` and, when the diff itself
 adds or edits a tier-2 test file, a loud `!!!` warning — such a change then needs
 a **manual verification note** in the work summary. To run the tier locally

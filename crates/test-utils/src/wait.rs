@@ -28,13 +28,13 @@ use std::time::Duration;
 use store::NatsStore;
 use types::{Job, JobState, Task};
 
-/// Default hard timeout for a wait before it panics, set above the nominal 30s
-/// so a stalled wait fails loud with a named message instead of hanging.
-/// The margin exists because `cargo test --workspace` runs many binaries —
-/// including the Docker-dependent real-container suites — against one shared
-/// NATS server per binary, and under that peak CPU contention a
-/// slow-but-progressing wait can take tens of seconds.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Default hard timeout for a wait before it panics, sized from the measured
+/// distribution of real waits rather than from a guess at contention (#407).
+/// All 244 waits in a whole-workspace run finished under 0.94s (p50 54ms, p99
+/// 552ms), and 4.31s was the worst seen with all 53 binaries forced to run at
+/// once on 12 cores — far past what CI's sequential binaries produce — so 20s
+/// is ~21x the realistic worst wait and a breach is a hang, not slowness.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Wait until job `seq` reaches `want`, returning the record (#206 principle 3).
 pub async fn job_state(
