@@ -80,13 +80,26 @@ the absence of a workflow file.
   neither and gates in seconds.
 - `.chug/tasks/ci.sh` also runs five pure-shell gates **before** those diff-aware
   stages, so a web-only or docs-only change is still gated: the `.chug/jobs/*.yaml`
-  version-skew check against the deployed dispatcher (spec §14), the
+  version-skew check (spec §14.3 — **advisory and early**, see below), the
   `MODULES.md` registry check (`.chug/tasks/check-modules.sh`),
   `.chug/tasks/check-duplication.sh` — copy-paste
   detection via a pinned `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1;
   ~30ms for the whole repo, so it is unconditional) — `.chug/tasks/check-comments.sh`,
   the comment lint, and since #385 **the repo's 19 `*.test.sh` shell suites**.
   Any clone fails the gate.
+- **Version skew is gated twice, and only the dispatcher's half is authoritative.**
+  The **dispatcher** refuses to merge a branch whose `.chug/jobs/*.yaml` or
+  `.chug/schedules/*.yaml` declares a `min_dispatcher` above the running
+  binary's `CONFIG_SCHEMA_EPOCH`, escalating with `merge_config_skew` naming the
+  file and both epochs (spec §3.3 step 0, §14.3). It performs the merge and
+  knows its own epoch, so it needs no API call, no credential and no env var,
+  and cannot degrade to a pass. `config_schema_gate()` in `.chug/tasks/ci.sh` is
+  the **advisory, early** signal: it asks `$CHUG_API_URL/api/v1/platform/config`
+  only when that variable is set — which no task container sets — and otherwise
+  compares against the checkout's own epoch, which catches a config declaring an
+  epoch newer than the code beside it and nothing about any deployed
+  dispatcher. A green CI skew gate is not evidence a dispatcher was consulted;
+  #421 is the job that fixed reading it that way.
 - **The shell suites are the tests of the gates themselves, and CI runs them all.**
   Discovery is `git ls-files '*.test.sh'` — add a suite and it is picked up, with
   no list to update and nothing to register; a glob matching nothing fails rather

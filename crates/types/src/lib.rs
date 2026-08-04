@@ -72,8 +72,9 @@ pub use task::{
 };
 pub use user::{Identity, IdentityKind, ProjectRole, User};
 pub use version::{
-    CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, INPUTS_SCHEMA_EPOCH, RUNTIME_SCHEMA_EPOCH,
-    SCHEDULE_INPUTS_SCHEMA_EPOCH, WORKER_RPC_VERSION, WORKLOAD_IDENTITY_SCHEMA_EPOCH,
+    CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, ConfigSkew, INPUTS_SCHEMA_EPOCH,
+    RUNTIME_SCHEMA_EPOCH, SCHEDULE_INPUTS_SCHEMA_EPOCH, WORKER_RPC_VERSION,
+    WORKLOAD_IDENTITY_SCHEMA_EPOCH, config_requires_dispatcher, declared_min_dispatcher,
 };
 pub use worker::{
     CapacityObservation, CapacitySource, CapacityTransport, ObservedCapacity, capacity_applies,

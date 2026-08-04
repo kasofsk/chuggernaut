@@ -399,6 +399,58 @@ async fn agent_work_commits_eval_passes_squash_merges_to_done() {
     assert_invariants_of(&rig.invariants);
 }
 
+/// §14.3: the dispatcher owns the skew gate because it performs the merge. A
+/// branch whose config declares an epoch above this binary's lands nothing, and
+/// the refusal names the file and both epochs — with no environment variable
+/// set and no platform API reachable from here.
+#[tokio::test]
+async fn config_ahead_of_this_binary_refuses_to_merge_and_names_both_epochs() {
+    let Some(rig) = rig().await else { return };
+    let needed = types::CONFIG_SCHEMA_EPOCH + 1;
+    let ahead = format!(
+        "name: future\nimage: img:latest\nmin_dispatcher: {needed}\n\
+         work:\n  type: command\n  run: ./go.sh\n"
+    );
+
+    let bare = rig.repo.bare_path();
+    rig.provider.on_run(move |cfg| async move {
+        let branch = cfg.env.get("JOB_BRANCH").unwrap().clone();
+        let clone = clone_branch_from(&bare, &branch).await;
+        clone
+            .commit_file(".chug/jobs/future.yaml", ahead.as_bytes(), "future type")
+            .await;
+        clone.push(&branch).await;
+    });
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    let rec = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+
+    let esc = rec.escalation.expect("the refusal records why");
+    assert_eq!(esc.reason, "merge_config_skew");
+    for needle in [
+        ".chug/jobs/future.yaml",
+        &needed.to_string(),
+        &types::CONFIG_SCHEMA_EPOCH.to_string(),
+    ] {
+        assert!(
+            esc.detail.contains(needle),
+            "'{needle}' missing from: {}",
+            esc.detail
+        );
+    }
+    assert_eq!(
+        rig.repo
+            .manager
+            .read_file_at("acme", "api", "main", ".chug/jobs/future.yaml")
+            .await
+            .unwrap(),
+        None,
+        "the skewed config must not have landed on the default branch"
+    );
+    assert_invariants_of(&rig.invariants);
+}
+
 #[tokio::test]
 async fn work_failure_retries_with_reset_then_escalates() {
     let Some(rig) = rig().await else { return };

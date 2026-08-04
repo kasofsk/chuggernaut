@@ -83,6 +83,7 @@ struct LandingViewData {
     cycle: u32,
     gate_fix_used: u32,
     gate_evaluators: Vec<Evaluator>,
+    config_skew: Option<types::ConfigSkew>,
     gate_commit: Option<String>,
     gate_old_head: Option<String>,
 }
@@ -1265,6 +1266,12 @@ impl Core {
             .map(|e| merge_gate::gate_evaluators(&e.job_type.eval))
             .unwrap_or_default();
         let gate_fix_used = self.active.get(&key).map(|e| e.gate_fix_used).unwrap_or(0);
+        let config_skew = match job.state {
+            JobState::WrapUp => {
+                crate::release::branch_config_skew(&self.repos, owner, project, &job.branch).await?
+            }
+            _ => None,
+        };
         let (gate_commit, gate_old_head) = match parked {
             Some((c, h)) => (Some(c.clone()), Some(h.clone())),
             None => (None, None),
@@ -1277,6 +1284,7 @@ impl Core {
             cycle,
             gate_fix_used,
             gate_evaluators,
+            config_skew,
             gate_commit,
             gate_old_head,
         })
@@ -1319,6 +1327,7 @@ impl Core {
                 cycle: view_data.cycle,
                 gate_fix_used: view_data.gate_fix_used,
                 gate_evaluators: view_data.gate_evaluators.clone(),
+                config_skew: view_data.config_skew.clone(),
                 gate_commit: view_data.gate_commit.clone(),
                 gate_old_head: view_data.gate_old_head.clone(),
             };

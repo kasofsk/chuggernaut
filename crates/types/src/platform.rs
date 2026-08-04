@@ -191,10 +191,11 @@ pub struct DispatcherConfigSnapshot {
     #[serde(default = "default_placement_policy")]
     pub placement_policy: String,
     /// The job-type config schema epoch this dispatcher understands
-    /// ([`crate::CONFIG_SCHEMA_EPOCH`], spec §14). Exposed so the merge-time CI
-    /// check can compare a config's `min_dispatcher` against the *deployed*
-    /// dispatcher and fail a config that would otherwise merge ahead of the
-    /// binary. Defaults to `1` (the epoch before this field existed) for older
+    /// ([`crate::CONFIG_SCHEMA_EPOCH`], spec §14), exposed so the advisory
+    /// CI-side skew gate can compare a config's `min_dispatcher` against a
+    /// deployed dispatcher when it can reach one — the dispatcher's own
+    /// merge-time refusal is the authority (§14.3).
+    /// Defaults to `1` (the epoch before this field existed) for older
     /// snapshots.
     #[serde(default = "default_schema_epoch")]
     pub schema_epoch: u32,

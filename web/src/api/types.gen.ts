@@ -486,10 +486,11 @@ export interface DispatcherConfigSnapshot {
   repos_root: string;
   /**
    * The job-type config schema epoch this dispatcher understands
-   * ([`crate::CONFIG_SCHEMA_EPOCH`], spec §14). Exposed so the merge-time CI
-   * check can compare a config's `min_dispatcher` against the *deployed*
-   * dispatcher and fail a config that would otherwise merge ahead of the
-   * binary. Defaults to `1` (the epoch before this field existed) for older
+   * ([`crate::CONFIG_SCHEMA_EPOCH`], spec §14), exposed so the advisory
+   * CI-side skew gate can compare a config's `min_dispatcher` against a
+   * deployed dispatcher when it can reach one — the dispatcher's own
+   * merge-time refusal is the authority (§14.3).
+   * Defaults to `1` (the epoch before this field existed) for older
    * snapshots.
    */
   schema_epoch: number;
@@ -1258,15 +1259,13 @@ export interface JobType {
   job_deadline: string | null;
   knowledge: string[];
   /**
-   * Minimum dispatcher schema epoch this config requires (spec §14). When
-   * set and greater than the running dispatcher's
-   * [`crate::version::CONFIG_SCHEMA_EPOCH`], the config is ahead of the
-   * binary: the dispatcher parks the job with a platform-level diagnostic
-   * ("config requires dispatcher >= X") instead of launching it, and the
-   * merge-time CI check fails the config's own build if it can reach a
-   * deployed dispatcher advertising an older epoch. Author it in the same
-   * commit that relies on a schema feature the previous generation lacks, so
-   * "merging config" can never silently become "deploying config".
+   * Minimum dispatcher schema epoch this config requires (spec §14): above
+   * [`crate::version::CONFIG_SCHEMA_EPOCH`] the config is ahead of the binary,
+   * so the dispatcher parks the job instead of launching it (§14.2) and
+   * refuses to merge a branch carrying it (§14.3).
+   * Author it in the same commit that relies on a schema feature the previous
+   * generation lacks, so "merging config" never silently becomes "deploying
+   * config".
    */
   min_dispatcher?: number | null;
   name: string;

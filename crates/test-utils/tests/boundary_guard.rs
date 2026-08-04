@@ -330,3 +330,44 @@ fn domain_crate_has_zero_await() {
          `.await` at: {offenders:?}"
     );
 }
+
+/// Spec §14.3: the merge-time skew gate reads the repo and the binary's own
+/// constant — never the platform API, a token, or an environment variable.
+/// The three files implementing it are swept for the means to try, so it cannot
+/// regain the fail-open the CI-side gate has (job #421).
+#[test]
+fn the_merge_time_skew_gate_consults_no_network() {
+    const IMPLEMENTATION: [&str; 3] = [
+        "crates/types/src/version.rs",
+        "crates/domain/src/decide/merge_gate.rs",
+        "crates/dispatcher/src/release.rs",
+    ];
+    const FORBIDDEN: [&str; 6] = [
+        "CHUG_API_URL",
+        "reqwest",
+        "std::env",
+        "env::var",
+        "http://",
+        "https://",
+    ];
+
+    let mut offenders = Vec::new();
+    for relative in IMPLEMENTATION {
+        let path = workspace_root().join(relative);
+        let src = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {relative}: {e} — did the skew gate move?"));
+        for (i, line) in src.lines().enumerate() {
+            for needle in FORBIDDEN {
+                if line.contains(needle) {
+                    offenders.push(format!("{relative}:{}: {needle}", i + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "the merge-time skew gate must compare the branch's config against this \
+         binary's CONFIG_SCHEMA_EPOCH with no network and no environment \
+         (spec §14.3), but found: {offenders:?}"
+    );
+}

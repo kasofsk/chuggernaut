@@ -136,6 +136,12 @@ pub struct LandingView<'a> {
     pub gate_fix_used: u32,
     /// The gate's evaluator set (filtered by [`gate_evaluators`]).
     pub gate_evaluators: Vec<Evaluator>,
+    /// A config file on the landing branch declaring a `min_dispatcher` above
+    /// this binary's epoch (spec §14.2/§14.3), pre-read by the shim. `Some`
+    /// refuses the landing: the dispatcher performs the merge and knows its own
+    /// epoch, so this half of the skew gate needs no API call and cannot
+    /// degrade to a pass.
+    pub config_skew: Option<types::ConfigSkew>,
     /// The parked candidate's commit + the HEAD it was built against — the
     /// promote CAS pair (pre-read from the gate round's parked state; `None`
     /// before a gate opens).
@@ -262,6 +268,10 @@ pub fn decide(
         LandingEvent::Start => {
             if job.state != JobState::WrapUp {
                 return (state, vec![], vec![], LandingStep::Completed);
+            }
+            if let Some(skew) = &view.config_skew {
+                let effects = vec![escalate_config_skew(owner, project, seq, skew)];
+                return (state, vec![], effects, LandingStep::CompletedDropExec);
             }
             let base_ref = job
                 .base_ref
@@ -561,6 +571,31 @@ fn escalate_markers(owner: &str, project: &str, seq: u64, files: &[String]) -> E
     }
 }
 
+/// The merge-time half of the §14.3 skew gate: refuse a landing whose branch
+/// carries a config ahead of this binary, naming the file and both epochs.
+/// Harsh at the last step, and strictly better than merging a config that parks
+/// every future job of its type (§14.2).
+fn escalate_config_skew(owner: &str, project: &str, seq: u64, skew: &types::ConfigSkew) -> Effect {
+    Effect::Escalate {
+        owner: owner.to_string(),
+        project: project.to_string(),
+        seq,
+        reason: MERGE_CONFIG_SKEW_REASON.to_string(),
+        detail: format!(
+            "Job {seq}: '{}' on job/{seq} declares min_dispatcher: {} but this dispatcher is at \
+             config schema epoch {} — merging it would park every job of that type (spec §14.2). \
+             Deploy the newer dispatcher first and retry, or land the config behind a version gate.",
+            skew.path, skew.needed, skew.running
+        ),
+        failing_task: None,
+    }
+}
+
+/// The escalation reason a §14.3 merge-time skew refusal carries — named so the
+/// producer and every consumer (the operator UI, the golden traces) read the
+/// same string.
+pub const MERGE_CONFIG_SKEW_REASON: &str = "merge_config_skew";
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -606,6 +641,7 @@ mod tests {
             cycle: 1,
             gate_fix_used: 0,
             gate_evaluators: vec![cmd_eval("ci", 0)],
+            config_skew: None,
             gate_commit: Some("cand1".into()),
             gate_old_head: Some("head1".into()),
         }
@@ -717,6 +753,32 @@ mod tests {
             matches!(&e[0], Effect::CreateSquashCandidate { .. }),
             "gate-fix cycle must re-gate even on an unmoved HEAD"
         );
+    }
+
+    /// §14.3: a branch carrying a config ahead of this binary lands nothing,
+    /// and the escalation names the file and both epochs.
+    #[test]
+    fn start_refuses_a_branch_whose_config_is_ahead_of_this_binary() {
+        let j = job(JobState::WrapUp);
+        let mut v = view(&j, "base0");
+        v.config_skew = Some(types::ConfigSkew {
+            path: ".chug/jobs/gcp-proof.yaml".into(),
+            needed: 6,
+            running: 5,
+        });
+        let (state, t, e, step) = decide(MergeGateState::default(), &v, LandingEvent::Start);
+
+        assert!(t.is_empty(), "no transition: the operator owns it now");
+        assert_eq!(e.len(), 1);
+        let Effect::Escalate { reason, detail, .. } = &e[0] else {
+            panic!("expected an escalation, got {:?}", e[0]);
+        };
+        assert_eq!(reason, MERGE_CONFIG_SKEW_REASON);
+        for needle in [".chug/jobs/gcp-proof.yaml", "6", "5"] {
+            assert!(detail.contains(needle), "'{needle}' missing from {detail}");
+        }
+        assert_eq!(step, LandingStep::CompletedDropExec);
+        assert!(state.is_empty(), "nothing gating, nothing queued");
     }
 
     #[test]

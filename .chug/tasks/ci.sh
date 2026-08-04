@@ -437,21 +437,29 @@ run_full_ci() {
 	return "$test_status"
 }
 
-# --- config/binary version-skew gate (spec §14, job #110) --------------------
+# --- config/binary version-skew gate (spec §14.3, job #110) ------------------
+# ADVISORY AND EARLY. This is the fast half of a two-part gate, and it is NOT
+# the authority: since #421 the DISPATCHER refuses to merge a branch declaring a
+# `min_dispatcher` above its own CONFIG_SCHEMA_EPOCH (spec §3.3 step 0), which
+# it can do without an API call, a credential or an env var, and therefore
+# cannot degrade to a pass. What this gate buys is feedback minutes earlier, and
+# one error the dispatcher's half cannot see: a config declaring an epoch newer
+# than the code it ships BESIDE.
+#
 # Job-type config is read LIVE from the default branch, so a config that needs a
 # newer dispatcher than the one deployed would otherwise merge and then escalate
 # every job of the type at launch (the 2026-07-22 wrap_up incident). This gate
 # fails a config's OWN CI when it declares `min_dispatcher` greater than the
-# DEPLOYED dispatcher's schema epoch — "deploy first or gate it" — before it can
-# merge. Pure shell so a config-only change (which skips the Rust build below)
-# is still gated in seconds.
+# comparison epoch — "deploy first or gate it". Pure shell so a config-only
+# change (which skips the Rust build below) is still gated in seconds.
 #
-# The deployed epoch is read from the running dispatcher's config snapshot
-# (`GET $CHUG_API_URL/api/v1/platform/config` → .dispatcher.schema_epoch). When
-# that is not reachable (no CHUG_API_URL / no token / offline CI) the gate falls
-# back to comparing against this checkout's own epoch — still catching a config
-# that requires an epoch newer than the code it ships beside. It never blocks on
-# an unreachable API.
+# The comparison epoch is the running dispatcher's, read from its config
+# snapshot (`GET $CHUG_API_URL/api/v1/platform/config` → .dispatcher.schema_epoch)
+# — but ONLY when CHUG_API_URL is set, which no task container sets (see
+# `container_env` in crates/dispatcher/src/exec.rs). The fallback to this
+# checkout's own epoch is therefore the path that actually runs here; #417
+# merged `min_dispatcher: 5` against a prod dispatcher at 4 that way. It says
+# which branch it took, and it never blocks on an unreachable API.
 config_schema_gate() {
 	# The config files to gate: the changed ones when the diff is known, else
 	# every .chug/jobs/*.yaml and .chug/schedules/*.yaml as a safe superset. A
@@ -490,14 +498,16 @@ config_schema_gate() {
 			| head -n1)"
 	fi
 	if [ -n "$_deployed" ]; then
-		echo "ci: config-skew gate — deployed dispatcher schema epoch is $_deployed"
+		echo "ci: config-skew gate (advisory) — deployed dispatcher schema epoch is $_deployed"
 	else
 		# CONFIG_SCHEMA_EPOCH in crates/types/src/version.rs — the epoch this
 		# checkout ships. Grep it so the gate needs no compiled binary.
 		_deployed="$(sed -n 's/^pub const CONFIG_SCHEMA_EPOCH:[^=]*=[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
 			crates/types/src/version.rs 2>/dev/null | head -n1)"
 		_deployed="${_deployed:-1}"
-		echo "ci: config-skew gate — dispatcher not reachable; comparing against this checkout's epoch $_deployed"
+		echo "ci: config-skew gate (advisory) — no CHUG_API_URL, so no dispatcher was asked;"
+		echo "ci:   comparing against this checkout's epoch $_deployed. The dispatcher refuses"
+		echo "ci:   the merge itself if a config is ahead of the binary it runs (spec §14.3)."
 	fi
 
 	_gate_failed=0
@@ -510,7 +520,7 @@ config_schema_gate() {
 		if [ "$_need" -gt "$_deployed" ]; then
 			echo "!!! ci: $f declares min_dispatcher: $_need but the dispatcher is at epoch $_deployed"
 			echo "!!!     requires a coordinated deploy — deploy the newer dispatcher first,"
-			echo "!!!     or land this config behind a version gate. (spec §14)"
+			echo "!!!     or land this config behind a version gate. (spec §14.3)"
 			_gate_failed=1
 		fi
 	done

@@ -253,6 +253,59 @@ fn static_errors_cloud_identities(
         .collect()
 }
 
+/// The config directories a landing is scanned for version skew (§14.3): a
+/// schedule file carries `min_dispatcher` with the same meaning a job type
+/// does, and merging either one ahead of the binary breaks the same way.
+const SKEW_SCAN_DIRS: [&str; 2] = ["jobs", types::SCHEDULES_DIR];
+
+/// Config files one skew scan reads, per directory (STYLE.md Tier 2 #3).
+const SKEW_SCAN_FILES_MAX: usize = 256;
+
+/// The first config file at `reference` declaring a `min_dispatcher` above this
+/// binary's [`types::CONFIG_SCHEMA_EPOCH`] (spec §14.2), scanned in path order
+/// so the same branch always names the same file.
+///
+/// Reads the repo and nothing else — no API call, no credential, no
+/// environment: the dispatcher performs the merge and already knows its own
+/// epoch, which is what makes this half of the gate unable to degrade to a pass
+/// (§14.3).
+pub async fn branch_config_skew(
+    repo: &RepoManager,
+    owner: &str,
+    project: &str,
+    reference: &str,
+) -> vcs::Result<Option<types::ConfigSkew>> {
+    let tree = repo.tree(owner, project, reference).await?;
+    for dir in SKEW_SCAN_DIRS {
+        let mut entries = crate::project_config::entries(&tree, dir, ".yaml");
+        if entries.len() > SKEW_SCAN_FILES_MAX {
+            let refused = entries.split_off(SKEW_SCAN_FILES_MAX).len();
+            tracing::error!(
+                "{owner}/{project}@{reference} carries more than {SKEW_SCAN_FILES_MAX} \
+                 '{dir}' config files; {refused} go unscanned for version skew"
+            );
+        }
+        for entry in entries {
+            let Some(content) = repo
+                .read_file_at(owner, project, reference, &entry.path)
+                .await?
+            else {
+                continue;
+            };
+            if let Some(needed) =
+                types::config_requires_dispatcher(&content, types::CONFIG_SCHEMA_EPOCH)
+            {
+                return Ok(Some(types::ConfigSkew {
+                    path: entry.path,
+                    needed,
+                    running: types::CONFIG_SCHEMA_EPOCH,
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
 /// [`project_config::read_file`] in the validation-error vocabulary: the config
 /// root resolution lives there, the diagnostic wrapping here.
 async fn read_config(

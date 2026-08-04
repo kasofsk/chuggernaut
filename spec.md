@@ -834,6 +834,7 @@ The authoritative definition of all valid job state transitions. No transition e
 | `WrapUp` | `Work` | Squash-merge conflict (any cycle; rework budget NOT consumed) | — | Update `base_ref` to current default HEAD; cycle++; build conflict context (see §4.3); rebase `job/{seq}` onto the new `base_ref`, committing the 3-way-merged tree as a WIP commit (conflict markers in the conflicting hunks only; agent resolves in place); publish `job-rework-started` (reason: `merge_conflict`) |
 | `WrapUp` | `Work` | Merge-gate task fails (any cycle; rework budget NOT consumed) | — | Update `base_ref` to current default HEAD; cycle++; inject gate output as findings plus conflict-style context (see §3.3); rebase `job/{seq}` onto the new `base_ref`, committing the 3-way-merged tree as a WIP commit (agent resolves any markers in place); publish `job-rework-started` (reason: `merge_gate_failure`) |
 | `WrapUp` | `Done` | All required evaluators passed; merge gate passed or skipped (see §3.3); squash-merge clean or no-op; `wrap_up.run` absent or its command exited 0 | — | Squash-merge `job/{seq}` to default branch (no-op if no commits); delete branch `job/{seq}`; publish `job-done` |
+| `WrapUp` | `Escalated` | A `.chug/jobs/*.yaml` or `.chug/schedules/*.yaml` on `job/{seq}` declares `min_dispatcher` above the running binary's `CONFIG_SCHEMA_EPOCH` (§3.3 step 0, §14.3) | — | Create Human escalation task, reason `merge_config_skew`, detail naming the file and both epochs; land nothing; the merge queue advances; publish `job-escalated` |
 | `WrapUp` | `Escalated` | Unexpected hard wrap-up failure — git plumbing / repo IO, not a conflict (design-lifecycle.md) — OR the `wrap_up.run` command exited non-zero (§3.2; the merge already landed and is NOT undone) | — | Create Human escalation task; the merge queue advances past the job rather than wedging; publish `job-escalated` |
 | `Escalated` | `Work` | Operator resolves escalation with `action: Retry` and **Work** is what failed (`work_retries_exhausted`) | — | Create new work task (same cycle, attempt++, branch as-is); publish `job-escalation-resolved` |
 | `Escalated` | `Evaluation` | Operator resolves escalation with `action: Retry` and **Evaluation** is what failed (`eval_infra_failure`/`eval_abort`/`rework_budget_exhausted`), OR with `action: Resolve` | — | Re-enter Evaluation (fresh eval fan-out on Retry — no new work task); publish `job-escalation-resolved` |
@@ -1185,6 +1186,7 @@ Because evaluation entry rebases the branch onto current HEAD and advances `base
 
 Applied after the eval reduce passes, before squash-merge — the job is in the **`WrapUp`** state throughout (§2.1); a pass lands (WrapUp→Done), a gate failure reworks (WrapUp→Work):
 
+0. **Version-skew refusal** — before anything is built, read the landing branch's `.chug/jobs/*.yaml` and `.chug/schedules/*.yaml` and refuse the landing if any declares `min_dispatcher` above the running binary's `CONFIG_SCHEMA_EPOCH` (§14.3): escalate with reason `merge_config_skew`, naming the file and both epochs, drop the exec slice, land nothing, and let the queue move on. Failing a job that did everything right at its last step is harsh; merging a config the running dispatcher cannot read would instead park **every** future job of that type (§14.2, the 2026-07-22 incident). The scan reads the repo and the binary's own constant — no API call, no credential, no environment variable — so unlike the CI-side gate it cannot degrade to a pass.
 1. **Skip fast-path** — if the default branch HEAD still equals `base_ref`, or `job/{seq}` has no commits beyond `base_ref`, the evaluators already ran against exactly what will land. Skip the gate; squash-merge directly. Solo jobs — and jobs whose race was already resolved by the pre-eval rebase — pay nothing.
 2. **Candidate construction** — if HEAD moved: build the candidate squash commit (the job branch's changes squashed onto current default HEAD) via `git merge-tree --write-tree` + `git commit-tree`, and point a temp ref `merge-gate/{seq}` at it. If the merge conflicts, this is the existing squash-merge-conflict path (§3.2 step 12) — the gate never runs.
 3. **Gate tasks** — create one `MergeGate` task (attempt=1, current cycle) per **required command evaluator** (job type's own plus project defaults). Each runs exactly like a command eval container (§3.3 `command` semantics: bootstrap clone, exit code is the verdict, `eval-result.json` extraction, no retries) except `JOB_BRANCH=merge-gate/{seq}`. Agent and human evaluators do not re-run — their verdict is about the change; command evaluators verify the integration. The gate runs the required command evaluators **staged** — grouped ascending by `stage`, one stage at a time, stopping at the first stage that fails (job #154) — so a failure's *class* falls out of which stage failed (see the gate-fix fast path below). A single-stage gate is the flat fan-out.
@@ -2571,16 +2573,31 @@ not `CONFIG_SCHEMA_EPOCH`, are where a reader finds which epoch bought what.
 
 ### 14.3 Merge-time gate
 
-The dispatcher publishes its `CONFIG_SCHEMA_EPOCH` in the config snapshot
-(`GET /api/v1/platform/config` → `dispatcher.schema_epoch`). `.chug/tasks/ci.sh`'s
-config-skew gate — and `chuggernaut validate --deployed-epoch <N>` — compare a
-config's declared `min_dispatcher` against the **deployed** dispatcher's epoch
-and **fail the config's own CI** ("requires dispatcher >= X; deploy first or gate
-it") before it can merge. The gate is pure shell so a config-only change stays
-fast, is best-effort about reaching the API (falling back to the checkout's own
-epoch), and never blocks on an unreachable dispatcher. This is the first line of
-defense; the runtime park (§14.2) is the fallback if a skewed config reaches a
-launch anyway.
+Two checks compare a config's declared `min_dispatcher` against a dispatcher
+epoch before it can land, and they are not interchangeable:
+
+- **Authoritative — the dispatcher refuses the merge.** The dispatcher performs
+  every merge and knows its own `CONFIG_SCHEMA_EPOCH`, so at the head of the
+  merge gate (§3.3) it reads the landing branch's `.chug/jobs/*.yaml` and
+  `.chug/schedules/*.yaml` and refuses a landing that declares an epoch above
+  it, escalating with reason `merge_config_skew` and a detail naming the file
+  and both epochs. It needs no API call, no credential and no environment
+  variable, which is what makes it unable to degrade to a pass. The read is
+  tolerant of the file's *other* contents by construction: a config ahead of
+  the binary is exactly the file a strict parse rejects, so only
+  `min_dispatcher` is read.
+- **Advisory and early — CI.** `.chug/tasks/ci.sh`'s config-skew gate, and
+  `chuggernaut validate --deployed-epoch <N>`, run the same comparison as a fast
+  signal on the job's own branch, best-effort about reaching
+  `GET /api/v1/platform/config` → `dispatcher.schema_epoch` and falling back to
+  the checkout's own epoch. That fallback catches a real and different error — a
+  config declaring an epoch newer than the code it ships beside — but it means a
+  green CI gate is not evidence that any deployed dispatcher was consulted.
+  Never treat it as the guarantee.
+
+The runtime park (§14.2) remains the fallback if a skewed config reaches a
+launch anyway — from an operator's manual push, or from a dispatcher that
+downgraded below a config already on the default branch.
 
 ---
 

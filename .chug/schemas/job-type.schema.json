@@ -62,7 +62,7 @@
       }
     },
     "min_dispatcher": {
-      "description": "Minimum dispatcher schema epoch this config requires (spec §14). When\nset and greater than the running dispatcher's\n[`crate::version::CONFIG_SCHEMA_EPOCH`], the config is ahead of the\nbinary: the dispatcher parks the job with a platform-level diagnostic\n(\"config requires dispatcher >= X\") instead of launching it, and the\nmerge-time CI check fails the config's own build if it can reach a\ndeployed dispatcher advertising an older epoch. Author it in the same\ncommit that relies on a schema feature the previous generation lacks, so\n\"merging config\" can never silently become \"deploying config\".",
+      "description": "Minimum dispatcher schema epoch this config requires (spec §14): above\n[`crate::version::CONFIG_SCHEMA_EPOCH`] the config is ahead of the binary,\nso the dispatcher parks the job instead of launching it (§14.2) and\nrefuses to merge a branch carrying it (§14.3).\nAuthor it in the same commit that relies on a schema feature the previous\ngeneration lacks, so \"merging config\" never silently becomes \"deploying\nconfig\".",
       "type": [
         "integer",
         "null"

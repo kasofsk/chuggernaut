@@ -81,15 +81,13 @@ pub struct JobType {
     /// which is why the skew gate is structural rather than left to authorship.
     #[serde(default)]
     pub inputs: Vec<Input>,
-    /// Minimum dispatcher schema epoch this config requires (spec §14). When
-    /// set and greater than the running dispatcher's
-    /// [`crate::version::CONFIG_SCHEMA_EPOCH`], the config is ahead of the
-    /// binary: the dispatcher parks the job with a platform-level diagnostic
-    /// ("config requires dispatcher >= X") instead of launching it, and the
-    /// merge-time CI check fails the config's own build if it can reach a
-    /// deployed dispatcher advertising an older epoch. Author it in the same
-    /// commit that relies on a schema feature the previous generation lacks, so
-    /// "merging config" can never silently become "deploying config".
+    /// Minimum dispatcher schema epoch this config requires (spec §14): above
+    /// [`crate::version::CONFIG_SCHEMA_EPOCH`] the config is ahead of the binary,
+    /// so the dispatcher parks the job instead of launching it (§14.2) and
+    /// refuses to merge a branch carrying it (§14.3).
+    /// Author it in the same commit that relies on a schema feature the previous
+    /// generation lacks, so "merging config" never silently becomes "deploying
+    /// config".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_dispatcher: Option<u32>,
     /// Unknown top-level fields, captured rather than rejected (see the type
@@ -1045,7 +1043,7 @@ impl JobType {
     /// (usually [`crate::version::CONFIG_SCHEMA_EPOCH`]), the epoch it needs.
     /// `Some(needed)` means the config is ahead of the binary: the dispatcher
     /// must park the job with a diagnostic naming the needed version rather than
-    /// launch it, and the merge-time CI check must fail the config's build.
+    /// launch it, and must refuse to merge a branch carrying it (§14.3).
     pub fn requires_dispatcher(&self, dispatcher_epoch: u32) -> Option<u32> {
         self.min_dispatcher.filter(|&need| need > dispatcher_epoch)
     }

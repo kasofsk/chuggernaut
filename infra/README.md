@@ -180,10 +180,13 @@ something true.
 non-empty `workload_identities:` requires it (spec §1.1). Two different gates
 read that number, and they fire at different moments:
 
-- **At merge**, `.chug/tasks/ci.sh`'s config-skew gate compares it against the
-  *deployed* dispatcher — but only when `CHUG_API_URL` is set, which it is not
-  inside an evaluator container. There it falls back to the checkout's own
-  `CONFIG_SCHEMA_EPOCH` (5), so the file merges.
+- **At merge**, the dispatcher refuses to land a branch declaring an epoch above
+  the one it runs, escalating with `merge_config_skew` (spec §14.3). It knows
+  its own epoch, so this is the check that holds. `.chug/tasks/ci.sh`'s
+  config-skew gate is the advisory, earlier signal: it asks the *deployed*
+  dispatcher only when `CHUG_API_URL` is set, which it is not inside an
+  evaluator container, and otherwise compares against the checkout's own
+  `CONFIG_SCHEMA_EPOCH` (5).
 - **At release**, the running dispatcher enforces it for real (spec §14.2): a
   `gcp-proof` job released against a pre-epoch-5 dispatcher parks `Stalled` with
   `config_schema_skew` and launches nothing.
