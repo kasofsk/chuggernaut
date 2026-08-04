@@ -1,6 +1,27 @@
 # Design #313 — Workload identity (OIDC issuer) and image build/push
 
-Status: PROPOSED.
+Status: PROPOSED — half A's four decisions taken 2026-08-04; half B still open.
+
+**Amended 2026-08-04 (job #409), against the tree at `f1e3b41`.** The operator
+has taken half A's four open decisions. They are recorded in
+[Decisions taken](#decisions-taken-2026-08-04) and marked in the sections that
+argue them, with every rejected option and its reasoning left standing — the
+rejections are why the decisions are defensible, and
+[A4](#a4-the-public-reachability-problem-the-crux)'s rejected options now carry
+an explicit trigger for revisiting them. Three factual claims were
+corrected, and the epoch bump is re-derived from
+[`crates/types/src/version.rs`](../../crates/types/src/version.rs): **4 → 5**,
+not the `1 → 2` [A5](#skew-this-field-costs-an-epoch-bump) inherited from its
+siblings. Half B is untouched beyond
+[correction 2](#corrections-verified-against-the-tree)'s scope note and the
+consequence it has for slice S7. **No code changed** — slices S1–S5 are separate
+jobs, and this amendment exists so they can cite the document safely.
+
+The status token stays `PROPOSED` because nothing has shipped.
+[`docs/design-docs.md`](../../docs/design-docs.md) reserves `IMPLEMENTED IN
+PART` for a document with slices *merged*, and its vocabulary has no term for
+"decided, not yet built"; rather than invent one, the qualifier carries it.
+Whichever slice lands first moves this to `IMPLEMENTED IN PART`.
 
 Written against the tree at `d7ebfae`. Every claim about current behavior below
 was read out of [spec.md](../../spec.md) and the source in this repo; where the
@@ -15,14 +36,21 @@ Doc 4 of 4 — and the last — extracting implementable specs from
 [design #308](./308-gha-port.md). Its category D (image build and push) and its
 taken decision "Chuggernaut becomes an OIDC issuer" are the motivation.
 
-**The three sibling docs are PROPOSED and not implemented.**
-[#309 host-native execution](./309-host-native-execution.md),
+**Three of the four sibling docs have since shipped** — this paragraph said the
+opposite when the document was first written, and the amendment corrects it.
 [#310 scheduled jobs](./310-scheduled-jobs.md),
 [#311 job inputs](./311-job-inputs.md) and
-[#293 worker capacity](./293-worker-capacity.md) describe no field, epoch or
-mechanism that exists in the tree today. Nothing below assumes any of them has
-landed; where a dependency is real it is named in
-[Sequencing](#sequencing-and-what-ships-first).
+[#293 worker capacity](./293-worker-capacity.md) all read `Status:
+IMPLEMENTED`; `inputs:` is a real field on `JobType`
+([`crates/types/src/job_type.rs`](../../crates/types/src/job_type.rs)) with
+[`.chug/jobs/rollback.yaml`](../../.chug/jobs/rollback.yaml) as its shipped
+first consumer at `min_dispatcher: 2`.
+[#309 host-native execution](./309-host-native-execution.md) is the only sibling
+still `PROPOSED`, and even its `runtime:` epoch is already frozen in the tree as
+`RUNTIME_SCHEMA_EPOCH = 4`. So the live dependency below is on **#309 alone** —
+named where it is real in [Sequencing](#sequencing-and-what-ships-first) (slice
+S11) and in [B1](#b1-the-build-mechanism)'s `NodeCapabilities` note. Everything
+this document needs from #310, #311 and #293 is a mechanism available today.
 
 Related: [spec.md](../../spec.md) §1.1 (job types, per-container secret
 scoping, the config root), §2.2 (release validation's three passes), §3.1
@@ -91,6 +119,27 @@ the source. Each moves an argument.
    this repo — it is an infrastructure decision nobody has taken. That matters
    for [B2](#b2-registry-auth-falls-out-of-half-a): "registry auth falls out of
    half A" is true, and there is still no registry for it to fall out into.
+
+   **Scope note, added 2026-08-04.** The sentence "this repo has no container
+   registry at all" is true of **chuggernaut** and misleading as a statement
+   about the **port**, which is what half B is for. Per the operator's
+   2026-08-04 beacon inspection — `~/beacon` is not checked out in this
+   workspace, so this is relied on **secondhand** and marked as such, the same
+   way [#361](./361-per-run-placement.md) and
+   [#362](./362-binary-artifacts.md) mark theirs — beacon carries **six
+   composite actions** under `.github/actions/`
+   (`build-push-{bot,web,worker}` and `deploy-{bot,web,worker}`) that
+   authenticate to GCP and push to **Artifact Registry**. So the target has a
+   registry; this repo is the side that does not.
+
+   The sequencing consequence: **S7 ("operator: a registry chosen and
+   provisioned") is *plausibly* already satisfied** by that Artifact Registry.
+   Plausibly, not "is" — nobody has checked here whether the existing repository
+   is the one a chuggernaut build job should push to, whether it is in the same
+   GCP project as the workload identity pool, or whether its IAM is authored for
+   a second writer. S7 stays on the slice table as an operator item; what
+   changes is that its likely content is "confirm and grant", not "choose and
+   provision".
 
 3. **Image building is already a worker-daemon operation, not a container
    capability.** §3.1's "worker self-refresh" is a `refresh { sha, tag }` op on
@@ -186,6 +235,31 @@ follows from it.
 
 # Half A — workload identity
 
+## Decisions taken, 2026-08-04
+
+Half A opened four questions and recommended an answer to each. The operator
+took all four, as recommended, on 2026-08-04. They are recorded here so a slice
+can cite one line rather than re-read a section, and marked again at the section
+that argues them.
+
+**The rejected options stay in this document, unedited.** They are not history
+to be pruned: each is the reasoning that makes its decision defensible, and
+[D1's trigger](#what-would-change-d1) is a live condition a future reader is
+expected to check rather than re-argue.
+
+| # | Decision | Argued in | Rejected, and why it stays |
+| --- | --- | --- | --- |
+| **D1** | **An uploaded JWK set and no public endpoint.** Register the provider with `--jwk-json-path` and `--issuer-uri https://chug.kasofsk.xyz` — a stable identifier we control, not a URL anyone fetches. No Funnel, no tunnel, no relay, **no inbound path to `gumbo-mini-0`** | [A4](#a4-the-public-reachability-problem-the-crux) | Tailscale Funnel, a path-scoped Cloudflare Tunnel, and an R2 static relay stay priced as the answer *if* a second cloud reopens the requirement — see [What would change D1](#what-would-change-d1) |
+| **D2** | **`workload_identities: [name]`, a named reference.** Each name resolves against a project-scoped `cloud-identities.{owner}.{project}.{name}` record | [A5](#named-reference-or-inline-cloud-configuration) | Option A (inline `audience`/`service_account` in the job-type file) is rejected: it has nothing to validate against, so a typo fails inside a container rather than at release. A5's "do not ship both readings" stands |
+| **D3** | **The issuer emits `workload` as a claim**, computed dispatcher-side, not assembled cloud-side in CEL | [A1](#sub-versus-custom-claims) | The CEL mapping is editable cloud-side; the claim is not. The recorded cost is accepted as stated: adding a component to the composite later is a token change **and** a re-tag of every existing IAM binding |
+| **D4** | **The exchanged token impersonates a service account**, mirroring beacon's current posture. `service_account` is therefore **populated** in the `cloud-identities` record, not optional-in-practice | [A5](#a5-per-container-scoping), [B2](#b2-registry-auth-falls-out-of-half-a) | Direct `principalSet`-to-resource binding — no SA in the middle — is rejected *for now*: beacon's existing bindings grant to a service account, so the direct form would mean re-authoring them rather than adding a second provider beside them. It is the cheaper posture once no GHA-era binding is left |
+
+D4 is the one decision this document did not previously frame as a question, so
+state its consequence plainly: `service_account` moves from "optional field in a
+record whose schema is undecided" to a field every record populates, and
+[A6](#a6-audit)'s audit row set is unchanged — the impersonated SA is visible in
+Google's audit log, joined to ours by `jti`.
+
 ## A1. What a workload token identifies
 
 The claim set **is** the security boundary: an attribute condition on the cloud
@@ -237,7 +311,8 @@ Custom claims, and why each earns its place:
 | `phase` | `Work`, `Evaluation`, `WrapUp` | Diagnostic; redundant with `container` and cheap |
 | `jti` | a UUIDv4 | Replay attribution ([A6](#a6-audit)) |
 
-`workload` is computed **by the issuer**, not by a cloud-side attribute mapping.
+**Taken 2026-08-04 ([D3](#decisions-taken-2026-08-04)).** `workload` is computed
+**by the issuer**, not by a cloud-side attribute mapping.
 The alternative — map `attribute.workload = assertion.project + ':' +
 assertion.job_type + ':' + assertion.container` in CEL — works, and it puts the
 definition of the policy key
@@ -486,9 +561,17 @@ identity pool providers accept an **uploaded JWK set** instead of fetching one:
 - `--issuer-uri` remains **required** in both cases. It is an identifier that
   must equal the token's `iss` — not necessarily a URL anyone fetches.
 
-> **Recommendation: register the provider with an uploaded JWK set and an
-> `issuer-uri` that is a stable identifier we control (`https://chug.kasofsk.xyz`).
-> Ship no public endpoint.**
+> **Decided 2026-08-04 ([D1](#decisions-taken-2026-08-04)): register the
+> provider with an uploaded JWK set and `--issuer-uri
+> https://chug.kasofsk.xyz` — a stable identifier we control, not a URL anyone
+> fetches. Ship no public endpoint.**
+
+The issuer URI is fixed to that string by the decision, and slice S6's terraform
+must use it verbatim: it is the token's `iss`, so changing it later invalidates
+every registered provider at once. It is the hostname
+[`deploy/prod/README.md`](../../deploy/prod/README.md) §5b already names for the
+Cloudflare Tunnel — deliberately the same name, so the identifier stays right
+whether or not that tunnel is ever pointed at a JWKS path.
 
 This is the whole crux dissolved: no Funnel, no tunnel, no relay, no inbound path
 to `gumbo-mini-0`. The costs are real and small, and both are **operator**
@@ -547,6 +630,39 @@ must publish before it signs, and that ordering wants a check (a startup assert
 that the fetched JWKS contains the live `kid`, warned about loudly rather than
 fatally). Also `iss` then names a bucket domain rather than the platform, which
 is honest but reads oddly in an audit log.
+
+### What would change D1
+
+Stated as triggers, so a future reader can check them rather than re-argue the
+section. The three options above are priced precisely so that hitting a trigger
+is a *choice among them*, not a redesign.
+
+- **A second federation endpoint enters the picture** — AWS, Azure, or a
+  registry with its own OIDC. This is the live one: the third bullet above says
+  uploaded JWKs were verified for **GCP only and must not be assumed**, and
+  nothing since has widened that. If the new endpoint insists on fetching a JWKS,
+  D1 does not cover it and the choice is the Cloudflare Tunnel (best if a public
+  endpoint is genuinely required) or the R2 relay (best if availability of cloud
+  auth must not depend on the platform being up). Do not re-argue Funnel:
+  [`deploy/prod/README.md`](../../deploy/prod/README.md) §5a rules it out for
+  this host on its own grounds.
+- **Google withdraws or deprecates `--jwk-json-path`.** The one capability this
+  decision leans hardest on. [Verification of the provider
+  claims](#verification-of-the-provider-claims) already says to re-read the
+  provider docs before the terraform is written; that re-read is the check.
+- **The number of consumer providers stops being small.** Rotation is a
+  per-provider `providers update-oidc`, so its cost is linear in providers. At
+  one or two that is a terraform apply; at a dozen it is a fleet operation, and a
+  fetchable JWKS starts paying for itself.
+- **An emergency key revocation is needed and the cloud-console round trip is
+  too slow.** D1 accepts that revocation is an operator action rather than a
+  service restart. If that latency is ever exercised in anger, it is evidence,
+  not an argument — record it.
+
+Nothing about the *code* changes under any of these: the discovery and JWKS
+routes ship regardless (next section) and the `issuer-uri` string is the same
+either way. Hitting a trigger is an infrastructure decision, which is exactly
+why D1 was affordable to take.
 
 ### What ships as code regardless
 
@@ -623,12 +739,23 @@ against (a typo'd audience fails at exchange time inside the container), and
 re-pointing a project at a different cloud project becomes a commit in every job
 type.
 
-**Option B (recommended) — a named reference to a project-scoped record**, admin-
+**Option B (taken 2026-08-04, [D2](#decisions-taken-2026-08-04)) — a named
+reference to a project-scoped record**, admin-
 managed exactly as secrets are (CLI-only; there is no HTTP route for secrets in
 `crates/api/src/lib.rs`, and `crates/cli/src/admin.rs` owns `SecretCmd`). Store
 at `cloud-identities.{owner}.{project}.{name}` holding `{ audience,
-service_account?, token_ttl_secs? }` — **not** secret data, so it can live
+service_account, token_ttl_secs? }` — **not** secret data, so it can live
 beside vars rather than under age.
+
+`service_account` lost its `?` with [D4](#decisions-taken-2026-08-04): the
+exchanged token impersonates a service account, mirroring what beacon's existing
+bindings already grant to, so every record populates the field rather than
+leaving it optional-in-practice. The alternative D4 rejects — binding the
+`principalSet` directly to the resource, with no SA in the middle — would make
+the field genuinely optional and is the cheaper posture eventually; it is
+rejected *now* because adopting it means re-authoring beacon's bindings instead
+of adding a second provider beside them, which is a larger blast radius than
+this work is buying.
 
 The readable-from-the-file property survives: `workload_identities:
 [gcp-artifact-writer]` is a static name in a reviewed file, exactly as
@@ -647,7 +774,10 @@ Option A cannot:
   GCP project, or re-pointing at a staging provider is an `admin` command, not a
   job that has to pass CI to change a string.
 
-Both are defensible; do not ship both readings.
+Both are defensible; do not ship both readings. **Option B is the one taken**,
+and Option A stays above as the reasoning that makes the choice checkable — its
+"readable from the job-type file" property is real, and the paragraph before
+this one is why it survives the named reference.
 
 ### The `global/agents` hazard, stated as a rule
 
@@ -689,17 +819,46 @@ mean a job that runs without the credential it declared, hitting an
 authentication error deep inside a build — but it forces the same
 discipline #309 and #311 both land on:
 
-> Bump `CONFIG_SCHEMA_EPOCH` (currently `1`, `crates/types/src/version.rs`) in
-> the **same commit** as the parser change, and add a `validate()` rule that a
-> non-empty `workload_identities` requires `min_dispatcher >=` the new epoch,
-> reported as an ordinary `FieldRuleError::Required`.
+> Bump `CONFIG_SCHEMA_EPOCH` in the **same commit** as the parser change, and add
+> a `validate()` rule that a non-empty `workload_identities` requires
+> `min_dispatcher >=` the new epoch, reported as an ordinary
+> `FieldRuleError::Required`.
 
-Do not hard-code the number here. [#309
-§3](./309-host-native-execution.md#3-the-host-mode-selector) and [#311
-Skew](./311-job-inputs.md#skew-what-a-new-field-costs) both propose `1 → 2`;
-whichever of the three lands last re-derives it, and §14.3's gate reads the
-*deployed* epoch live, so a stale declaration fails CI rather than shipping. If
-two of them ship in one deploy generation, one bump covers both.
+**The number, re-derived 2026-08-04 against
+[`crates/types/src/version.rs`](../../crates/types/src/version.rs):**
+
+> **The bump is `4 → 5`**, with a frozen `WORKLOAD_IDENTITY_SCHEMA_EPOCH = 5`
+> beside the three constants already there.
+
+This paragraph previously said "currently `1`" and cited #309 §3 and #311 as
+both proposing `1 → 2`. All three claims are stale. #309 §3 has since been
+corrected (it names `3 → 4` after job #401) and so has #311's opening (it names
+`4`), but **#311's own Skew section still reads `CONFIG_SCHEMA_EPOCH = 1` and
+its phasing table still carries `1 → 2` cells** — so a slice author who reads
+that section rather than this one will inherit the same stale number.
+Correcting #311 is a separate docs job; the tree is the authority, and it holds
+`CONFIG_SCHEMA_EPOCH = 4`, with
+`INPUTS_SCHEMA_EPOCH = 2` (#311 slice A), `SCHEDULE_INPUTS_SCHEMA_EPOCH = 3`
+(#311 slice C, job #376) and `RUNTIME_SCHEMA_EPOCH = 4` (#309 §3 / #373,
+job #401) frozen behind it. A5's own instruction was that whichever of the three
+docs lands last re-derives the number; this is that re-derivation, and the rule
+it followed is the one this section always stated — **read the constant, do not
+copy a number out of a brief or a sibling doc.**
+
+The frozen per-feature constant is not optional decoration. §14.2 says
+explicitly that those constants, "not `CONFIG_SCHEMA_EPOCH`, are where a reader
+finds which epoch bought what", and each is frozen so a later bump for an
+unrelated feature never retroactively raises what an existing config must
+declare. `workload_identities` gets `WORKLOAD_IDENTITY_SCHEMA_EPOCH` for exactly
+that reason, and `JobType::validate` compares against it rather than against
+`CONFIG_SCHEMA_EPOCH` — the precedent the other three exist to set.
+
+Two things this does **not** change. §14.3's gate reads the *deployed* epoch
+live, so a declaration that is stale by the time a slice lands fails that
+slice's own CI rather than shipping — the re-derivation above is a convenience
+for the author, never the enforcement. And if another epoch-spending change
+ships in the same deploy generation, one bump still covers both; slice S3 should
+re-read the constant at implementation time exactly as this paragraph just did.
 
 ## A6. Audit
 
@@ -872,10 +1031,16 @@ Two properties worth stating because they are not obvious:
 
 **And the registry still has to exist.** Per [correction
 2](#corrections-verified-against-the-tree), this repo has none and the spec's
-Infrastructure Summary leaves the row open. Choosing one (Artifact Registry, to
-match where the WIF work already points) and provisioning it is **operator work
-with no code in it**. Half B cannot ship without it, and no amount of this
-design substitutes for that decision.
+Infrastructure Summary leaves the row open. It is **operator work with no code
+in it**, and half B cannot ship without it.
+
+What changed on 2026-08-04 is the likely size of that work, not its nature:
+beacon already pushes to **Artifact Registry** from six composite actions
+(secondhand, per correction 2), which is the same registry "to match where the
+WIF work already points" was pointing at anyway. So the operator item is
+probably "confirm the repository and grant a second writer" rather than "choose
+and provision" — but it has not been confirmed here, and half B stays blocked on
+it either way.
 
 ## B3. Build cache
 
@@ -967,8 +1132,9 @@ that asserts the alias now points at the digest it was given.
 gate that alone decides whether the external effect was good, with `wrap_up:
 type: none`.
 
-**Rollback and promote are the same job type**, and it needs
-[#311](./311-job-inputs.md):
+**Rollback and promote are the same job type**, built on
+[#311](./311-job-inputs.md)'s `inputs:` — shipped, not pending, and already
+carrying [`.chug/jobs/rollback.yaml`](../../.chug/jobs/rollback.yaml):
 
 ```yaml
 inputs:
@@ -1007,8 +1173,9 @@ The brief asks for this split plainly, so here it is in one place.
 | Docker API proxy + node allow-list + builder pin ([B1](#b1-the-build-mechanism)) | **Node configuration** (worker-side; no dispatcher code) |
 | Registering the second WIF provider, uploading the JWK set, the attribute condition and IAM bindings | **Operator / terraform** |
 | Rotating the issuer key (re-upload per provider) | **Operator / terraform** |
-| **Exposing** the discovery/JWKS endpoints publicly | **Infrastructure — and not required** under [A4](#a4-the-public-reachability-problem-the-crux)'s recommendation |
-| Choosing and provisioning a container registry ([B2](#b2-registry-auth-falls-out-of-half-a)) | **Operator** — and half B is blocked on it |
+| **Deploying** a dispatcher at epoch 5 before any config declares `min_dispatcher: 5` (§14.3, slice S3d) | **Operator** — ordering, not a choice |
+| **Exposing** the discovery/JWKS endpoints publicly | **Infrastructure — and not required** under [D1](#decisions-taken-2026-08-04) |
+| Confirming the container registry ([B2](#b2-registry-auth-falls-out-of-half-a)) | **Operator** — half B is blocked on it, and it is *plausibly* already satisfied ([correction 2](#corrections-verified-against-the-tree)) |
 
 ## Sequencing, and what ships first
 
@@ -1018,9 +1185,43 @@ without half A.**
 Half A alone unblocks #308 category C for anything cloud-touching — a deploy
 that calls a GCP API, a terraform plan job, a job that reads a bucket — none of
 which involve an image build. It also retires the "no OIDC issuer" row from the
-[#308](./308-gha-port.md) gap table (rank 6) and, per
+[#308](./308-gha-port.md) gap table (rank 6) **once it ships**, and, per
 [A4](#a4-the-public-reachability-problem-the-crux), does so without the infra
-prerequisite that gap assumed.
+prerequisite that gap assumed. Ranks 6 and 11 stay open until then; this
+document takes decisions, it does not close gaps.
+
+### Not every category-C deploy needs half A (beacon, secondhand)
+
+Same 2026-08-04 operator inspection, same caveat: `~/beacon` is not in this
+workspace, so nothing here re-derives it.
+
+Of [#308 §C](./308-gha-port.md#c-deploys-16-workflows)'s sixteen deploys, **four
+need nothing from this document**: creator and homepage, dev and prod. They
+deploy to **Cloudflare** and authenticate with a plain `CF_API_TOKEN` through
+`wrangler` — an ordinary long-lived API token, which is exactly what
+[A5](#a5-per-container-scoping)'s `secrets:` mechanism already carries, scoped to
+the work container. Those four are **portable on today's mechanisms**, ahead of
+S1, and #308 §C's own "secret blast radius" win applies to them without any of
+half A: beacon sets `CF_API_TOKEN` as a workflow-level `env`, and
+`.chug/jobs/deploy.yaml`'s per-container scoping is strictly narrower.
+
+The remaining twelve reach GCP and do need half A.
+
+> **The measurement trap, recorded because this repo keeps paying for it:** those
+> twelve authenticate **inside the composite actions**, not in the workflow files.
+> A grep of `.github/workflows/` alone finds the `wrangler` calls and misses the
+> `google-github-actions/auth` step, so it **understates** the dependency —
+> half A looks optional when it is load-bearing for three quarters of the
+> category. Any survey of what a port needs must read `.github/actions/` too.
+
+Two residual uncertainties, named rather than smoothed over. #308 §C's own
+enumeration ("deploy/rollback × {web, worker, bot} × {dev, prod}, plus creator,
+homepage, and nats") does not add to sixteen however it is read, so the
+4-versus-12 split rests on the inspection rather than on arithmetic anyone can
+redo here. And the `nats` deploy's authentication was not reported; it is
+counted with the GCP twelve because that is the conservative reading — being
+wrong that way costs a redundant identity declaration, being wrong the other way
+costs a deploy that fails at authentication.
 
 Half B without half A means a standing registry credential on the builder node
 or in the secret store — the regression half A exists to prevent. So the order
@@ -1033,15 +1234,36 @@ Slice labels below are `S{n}` deliberately — the `A`/`B` labels above name
 | --- | --- | --- |
 | **S1** | Issuer keypair in `crates/cli/src/keygen.rs`; mounts; `kid` from the public-key thumbprint | — |
 | **S2** | Token minting + claim assembly as a **pure function** in `crates/domain` or `crates/auth`, unit-tested; no I/O | S1 |
-| **S3** | `workload_identities:` on `work`/`eval[]`/`wrap_up`; field rules; epoch bump + `min_dispatcher` rule in one commit; `cloud-identities.*` KV + admin CLI + release-validation check | S2 |
+| **S3** | `workload_identities:` on `work`/`eval[]`/`wrap_up`; field rules; **epoch bump `4 → 5` + frozen `WORKLOAD_IDENTITY_SCHEMA_EPOCH = 5`** + the `min_dispatcher` rule in one commit; `cloud-identities.*` KV + admin CLI + release-validation check | S2 |
+| **S3d** | ***Deploy:* a dispatcher carrying epoch 5 reaches prod.** Not a code slice and not optional — see the ordering note below | S3 |
 | **S4** | Injection at launch (two `InjectedFile`s + `GOOGLE_APPLICATION_CREDENTIALS`), audit fields, the empty-declaration assert | S3 |
 | **S5** | Discovery + JWKS routes on the api (unexposed) | S1 |
-| **S6** | *Operator:* register the provider with the uploaded JWK set; attribute condition; one IAM binding; prove it with a trivial `gcloud` command in a work container | S4 |
-| **S7** | *Operator:* a registry chosen and provisioned | — (runs in parallel with S1–S6) |
+| **S6** | *Operator:* register the provider with the uploaded JWK set (`--issuer-uri https://chug.kasofsk.xyz`, [D1](#decisions-taken-2026-08-04)); attribute condition; one IAM binding to the impersonated SA ([D4](#decisions-taken-2026-08-04)); prove it with a trivial `gcloud` command in a work container | S4, **S3d** |
+| **S7** | *Operator:* a registry **confirmed** — plausibly already satisfied by beacon's Artifact Registry ([correction 2](#corrections-verified-against-the-tree)); what is left is confirming the repository, its GCP project, and IAM for a second writer | — (runs in parallel with S1–S6) |
 | **S8** | *Node config:* proxy + allow-list + `placement.node` pin on one builder node | [Decision 0](#decision-0-the-308-vs-309-contradiction-resolved) only |
 | **S9** | A real `build-image` job type: SHA tag, digest recorded, digest-resolves evaluator | S6, S7, S8 |
-| **S10** | A `promote` / `rollback` job type keyed on a digest input | S9, [#311](./311-job-inputs.md) slice A |
+| **S10** | A `promote` / `rollback` job type keyed on a digest input — [#311](./311-job-inputs.md) slice A shipped, so S9 is the only live dependency | S9 |
 | **S11** | Fold `builder` into #309's `NodeCapabilities` so placement filters instead of failing at the build command | [#309](./309-host-native-execution.md) P2 |
+
+**The ordering S3d exists to make unmissable.** S3 spends an epoch, so per
+`spec.md` §14.3 the merge-time gate compares a config's declared
+`min_dispatcher` against the **deployed** dispatcher's epoch and fails the
+config's own CI with "requires dispatcher >= X; deploy first or gate it". So:
+
+1. **S3 itself merges safely.** Nothing in `.chug/jobs/` declares
+   `min_dispatcher: 5` — the highest today is `2`
+   (`.chug/jobs/rollback.yaml`) — so the bump commit trips no gate.
+2. **No config declaring `min_dispatcher: 5` can merge until a dispatcher
+   carrying epoch 5 is deployed.** That includes S6's proving job type and S9's
+   `build-image`, both of which declare `workload_identities` and therefore must
+   declare the epoch.
+
+This is the same shape as the two prior bumps: job #376 spent `2 → 3` and
+job #401 spent `3 → 4`, whose commit message records the identical constraint ("a deploy carrying it is the prerequisite for any config
+later declaring `min_dispatcher: 4`"). §14.3's gate is the first line of defense
+and §14.2's runtime park is the fallback — a config that reaches a launch ahead
+of the binary parks every job of its type with `config_schema_skew` rather than
+running it without the credential it declared.
 
 S2 being a pure function matters more than it looks: it is the piece a reviewer
 must be able to read as a whole, and per STYLE.md Tier 2 #1 and
@@ -1059,9 +1281,11 @@ Per CLAUDE.md's contract-first rule for dispatcher work.
 | Contract | Change |
 | --- | --- |
 | `JobType` | New `workload_identities: Vec<String>` on `work`, each `eval[]` and `wrap_up`; nested blocks keep `deny_unknown_fields`, so this is a **breaking** config change |
-| `JobType::validate` | Existence-shape rules for the new field; a non-empty declaration requires `min_dispatcher >=` the new epoch |
-| Epoch | `CONFIG_SCHEMA_EPOCH` +1 in the same commit as the parser change (§14.1); number re-derived against whichever of #309/#311/#313 lands last |
+| `JobType::validate` | Existence-shape rules for the new field; a non-empty declaration requires `min_dispatcher >= WORKLOAD_IDENTITY_SCHEMA_EPOCH` |
+| Epoch | `CONFIG_SCHEMA_EPOCH` **4 → 5** in the same commit as the parser change (§14.1), plus a frozen `WORKLOAD_IDENTITY_SCHEMA_EPOCH = 5` beside `INPUTS_`/`SCHEDULE_INPUTS_`/`RUNTIME_SCHEMA_EPOCH` (§14.2). Re-derived 2026-08-04; slice S3 re-reads the constant at implementation time |
+| Deploy ordering | A dispatcher at epoch 5 must be **deployed** before any config declaring `min_dispatcher: 5` can merge (§14.3). Slice **S3d** |
 | Release validation | A declared identity must have a `cloud-identities.{owner}.{project}.{name}` record — same shape and message as the existing missing-secret error |
+| `cloud-identities` record | `{ audience, service_account, token_ttl_secs? }`; `service_account` is populated, not optional ([D4](#decisions-taken-2026-08-04)) |
 | Invariant | Workload identities are **never** secrets and never ride the `global/agents` grant. Structural: disjoint KV namespaces and no `secret copy` path |
 | Invariant | Nothing is inherited — a container receives exactly the identities its own block declares. Asserted at the injection site (no file written for an empty declaration) |
 | Invariant | Exactly one audience per minted token; no multi-audience token is representable |
@@ -1139,15 +1363,19 @@ reopen [A4](#a4-the-public-reachability-problem-the-crux) entirely.
 - **Which cloud beyond GCP.** The claim set is generic OIDC and the endpoints
   are standard. Only GCP's uploaded-JWKS capability was verified here; whether
   AWS's or Azure's federation can be handed a key set rather than fetching one
-  was **not** checked, so do not plan on it either way. If a second cloud
-  requires a fetchable issuer, that reopens
-  [A4](#a4-the-public-reachability-problem-the-crux) and should pick from the
-  three exposure options there rather than re-argue them.
+  was **not** checked, so do not plan on it either way. [D1](#decisions-taken-2026-08-04)
+  is taken on that scope, and a second cloud is the first trigger under
+  [What would change D1](#what-would-change-d1) — pick from the three exposure
+  options priced there rather than re-arguing them.
 - **The `cloud-identities` record's full schema.** Only that it is
-  project-scoped, admin-managed, non-secret, and existence-checked at release.
-- **Which epoch number lands** — only that this field requires one, and how it
-  sequences with [#309](./309-host-native-execution.md) and
-  [#311](./311-job-inputs.md).
+  project-scoped, admin-managed, non-secret, existence-checked at release, and —
+  since [D4](#decisions-taken-2026-08-04) — populates `service_account`.
+- ~~**Which epoch number lands.**~~ **Decided:** `4 → 5`, with
+  `WORKLOAD_IDENTITY_SCHEMA_EPOCH = 5` frozen beside the other three, re-derived
+  2026-08-04 from `crates/types/src/version.rs`
+  ([A5 Skew](#skew-this-field-costs-an-epoch-bump)). What is still not decided is
+  whether another epoch-spending change shares the deploy generation, in which
+  case one bump covers both and S3 re-reads the constant.
 - **The docker API proxy's exact allow-list.** Deny-by-default with `POST
   /build` and push/tag permitted is the shape; the verb-by-verb list is node
   configuration to be reviewed as security-relevant, not prose to be fixed here.
