@@ -1,7 +1,7 @@
 //! §12.1 keypair generation. Idempotent: each key is skipped if its private
 //! file already exists; a missing public file is re-derived from the private.
 //!
-//! JWT/VAPID keys shell out to `openssl` and the SSH CA to `ssh-keygen` — the
+//! JWT/OIDC/VAPID keys shell out to `openssl` and the SSH CA to `ssh-keygen` — the
 //! same standard tooling the deployment host needs anyway (sshd, TLS); only
 //! the age key is generated in-process (the dispatcher consumes it directly).
 
@@ -27,38 +27,8 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
         skipped: vec![],
     };
 
-    ensure(&mut report, dir, "jwt_private.pem", |path| async move {
-        run(
-            "openssl",
-            &[
-                "genpkey",
-                "-algorithm",
-                "RSA",
-                "-pkeyopt",
-                "rsa_keygen_bits:2048",
-                "-out",
-                path.to_str().unwrap(),
-            ],
-        )
-        .await
-    })
-    .await?;
-    ensure(&mut report, dir, "jwt_public.pem", |path| async move {
-        let private = path.with_file_name("jwt_private.pem");
-        run(
-            "openssl",
-            &[
-                "pkey",
-                "-in",
-                private.to_str().unwrap(),
-                "-pubout",
-                "-out",
-                path.to_str().unwrap(),
-            ],
-        )
-        .await
-    })
-    .await?;
+    ensure_rsa_keypair(&mut report, dir, "jwt").await?;
+    ensure_rsa_keypair(&mut report, dir, "oidc").await?;
 
     let ssh_ca_fresh = !dir.join("ssh_ca").exists();
     ensure(&mut report, dir, "ssh_ca", |path| async move {
@@ -167,6 +137,7 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
 
     for private in [
         "jwt_private.pem",
+        "oidc_private.pem",
         "ssh_ca",
         "age_private.key",
         "vapid_private.pem",
@@ -176,6 +147,51 @@ pub async fn ensure_all(dir: &Path) -> Result<KeygenReport> {
 
     ensure_nats_artifacts(dir, &mut report).await?;
     Ok(report)
+}
+
+/// An RS256 keypair as `{stem}_private.pem` / `{stem}_public.pem`, each half
+/// generated only when its own file is absent.
+async fn ensure_rsa_keypair(report: &mut KeygenReport, dir: &Path, stem: &str) -> Result<()> {
+    let private_name = format!("{stem}_private.pem");
+    let public_name = format!("{stem}_public.pem");
+    ensure(report, dir, &private_name, |path| async move {
+        run(
+            "openssl",
+            &[
+                "genpkey",
+                "-algorithm",
+                "RSA",
+                "-pkeyopt",
+                "rsa_keygen_bits:2048",
+                "-out",
+                path_str(&path)?,
+            ],
+        )
+        .await
+    })
+    .await?;
+    let private_of_public = private_name.clone();
+    ensure(report, dir, &public_name, |path| async move {
+        let private = path.with_file_name(private_of_public);
+        run(
+            "openssl",
+            &[
+                "pkey",
+                "-in",
+                path_str(&private)?,
+                "-pubout",
+                "-out",
+                path_str(&path)?,
+            ],
+        )
+        .await
+    })
+    .await
+}
+
+fn path_str(path: &Path) -> Result<&str> {
+    path.to_str()
+        .with_context(|| format!("non-UTF-8 path {}", path.display()))
 }
 
 /// Artifacts derived from the NATS seeds, re-created when missing:

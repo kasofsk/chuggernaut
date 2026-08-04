@@ -414,6 +414,15 @@ rather than minting a random one, so the same key always yields the same `kid`
 and a re-run of `init` on existing files is genuinely idempotent, as §12.1
 requires.
 
+**Fixed by slice S1: that thumbprint is the RFC 7638 JWK thumbprint**
+(SHA-256 over the canonical `{"e","kty","n"}` JSON, base64url without padding),
+not a digest of the raw SubjectPublicKeyInfo — `auth::oidc::kid_from_public_pem`,
+pinned to RFC 7638 §3.1's published example as a known-answer test. Both forms
+are stable; only this one is reproducible by a JWKS consumer holding the
+published JWK, which is the party that must agree with us about the id. S5's
+JWKS route and S2's token header both take the `kid` from that function rather
+than recomputing it.
+
 **The rejected option, honestly:** reusing `jwt_private.pem` is one fewer key to
 generate, mount, back up (`deploy/prod/backup-r2.sh`) and lose. For a
 single-tenant platform issuing tokens to one cloud, the confusion risk is small

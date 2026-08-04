@@ -2,6 +2,7 @@
 
 pub mod jwt;
 pub mod nats;
+pub mod oidc;
 pub mod ssh;
 
 use async_trait::async_trait;

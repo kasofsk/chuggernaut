@@ -38,6 +38,8 @@ async fn init_bootstraps_and_is_idempotent() {
     for name in [
         "jwt_private.pem",
         "jwt_public.pem",
+        "oidc_private.pem",
+        "oidc_public.pem",
         "ssh_ca",
         "ssh_ca.pub",
         "age_private.key",

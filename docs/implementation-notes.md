@@ -69,6 +69,9 @@ stale.
 - **fn common_container** — Knowledge keys nest b64 segments (`global.{s}.{p}`, `{owner}.{s}.{p}`, `{owner}.{project}.{s}.{p}`): `{owner}.>` covers the §7.4 owner and project grants in one pattern.
 - **fn common_container** — channel_check: ephemeral pull consumer on the inbox stream. Unnamed ephemeral creation targets `CONSUMER.CREATE.{stream}` exactly (no trailing tokens, which `.>` would require), named/filtered creation appends `.{name}.{filter}`.
 
+### `crates/auth/src/oidc.rs`
+- **fn kid_from_public_pem** — The RFC 7638 JWK thumbprint rather than a digest of the raw SubjectPublicKeyInfo: both are stable functions of the key, but only the thumbprint is reproducible by a JWKS consumer holding the published JWK, and that consumer is the party that has to agree with us about the id. The DER walk is hand-rolled because the only members a JWK needs are `n` and `e` out of a fixed SPKI shape, and nothing in the tree parses them — a DER/ASN.1 dependency would be a large supply-chain edge for ~25 lines.
+
 ### `crates/auth/src/ssh.rs`
 - **fn authorize_ref_push** — A platform admin (§7.3) pushes to any job branch in any project, but the default branch stays dispatcher-only for everyone.
 
@@ -114,6 +117,8 @@ stale.
 ### `crates/cli/src/keygen.rs`
 - **fn ensure_all** — SSH CA (§7.4) — ssh-keygen writes both halves in one shot, so report the .pub as generated too rather than "skipped".
 - **fn ensure_all** — Artifacts (transcripts, container logs) — a *separate* age keypair from the secrets one above. §10.2 keeps the secrets identity dispatcher-only, but the API must decrypt artifacts to serve them, and proxying blobs through the dispatcher would reintroduce the NATS max_payload cap that the object store exists to avoid. Different key, different trust boundary: this one guards artifacts at rest, not from the API.
+- **fn ensure_all** — The OIDC issuer keypair (design #313 A2) is a *separate* RS256 pair from the §7.1 session one. A session JWT and a workload token differ only by their claim set, so one signing key would turn any validator bug that ignores `aud`/`kind` into a cross-domain forgery — and a cloud STS has no reason to reject `kind: user`. Separate keys make that unrepresentable rather than merely unimplemented.
+- **fn ensure_all** — Adding a key needs no `deploy/` or backup edit. Every consumer is handed `KEYS_DIR` whole — the prod/dev compose files bind-mount the directory, `run-api.sh` and `run-dispatcher.sh` export it, and `deploy/backup.sh` copies it with `cp -Rp` — which is why `age_artifacts.key` appears in neither tree either. The split between "dispatcher-only" and "also the api" is enforced by which process *reads* which file, not by the mount.
 - **fn ensure_all** — NATS decentralized auth (§7.4): operator + system + platform account nkey seeds, generated in-process (nkeys is already in the tree via the NATS client). Derived server/dispatcher artifacts: ensure_nats_artifacts.
 
 ### `crates/cli/src/schema.rs`

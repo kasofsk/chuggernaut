@@ -77,6 +77,7 @@ The single NATS integration point, wrapping `async-nats`:
 - JWT (RS256) issue/verify, cookie construction (§7.1); `AuthProvider` trait for later swap-out
 - SSH CA: user cert signing (§7.3) and per-job cert issuance with `job:{owner}/{project}:{seq}` principals (§7.4)
 - Per-job NATS JWT minting with the §7.4 allow-lists
+- The OIDC issuer's `kid` (`oidc`): the RFC 7638 JWK thumbprint of `oidc_public.pem`, pure and stable across restarts (design #313 A2)
 - Permission rules table (§7.5) as a pure `authorize(identity, action)` function used by the API layer
 - The SSH server's ref-authorization hook (§5.2): a small `chuggernaut-ssh-authz` helper (exposed via the fat binary) invoked by sshd to enforce push/pull rules per principal
 

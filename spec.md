@@ -2254,6 +2254,7 @@ The SSE event stream (see §6.4) is the data backbone for the UI — the client 
 
 1. **Keypair generation** (skip if files already exist at the configured paths):
    - JWT RS256 keypair — `jwt_private.pem`, `jwt_public.pem`
+   - OIDC issuer RS256 keypair — `oidc_private.pem`, `oidc_public.pem` (workload tokens; separate from the session key so a session JWT and a workload token can never be confused)
    - SSH CA keypair — `ssh_ca`, `ssh_ca.pub`
    - age encryption keypair — `age_private.key`, `age_public.key`
    - VAPID keypair — `vapid_private.pem`, `vapid_public.pem`
@@ -2540,7 +2541,7 @@ launch anyway.
 | Version control | git CLI + bare repos on disk | — |
 | API | axum | — |
 
-Platform init generates: JWT RS256 keypair, SSH CA keypair, age keypair, VAPID keypair. All private keys are mounted into services at runtime via the deployment's secret mechanism (k8s Secrets in k8s deployments, bind-mounted files in Docker deployments) — never stored in NATS KV. The JWT public key is also mounted into the API layer for token verification; all other private keys are dispatcher-only. See §12.1 for the full bootstrap procedure.
+Platform init generates: JWT RS256 keypair, OIDC issuer RS256 keypair, SSH CA keypair, age keypair, VAPID keypair. All private keys are mounted into services at runtime via the deployment's secret mechanism (k8s Secrets in k8s deployments, bind-mounted files in Docker deployments) — never stored in NATS KV. The JWT public key is also mounted into the API layer for token verification, and the OIDC issuer public key for JWKS publication; all other private keys are dispatcher-only. See §12.1 for the full bootstrap procedure.
 
 ---
 
