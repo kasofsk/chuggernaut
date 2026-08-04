@@ -618,9 +618,12 @@ comments_gate() {
 #
 # UNCONDITIONAL, like the four gates above: a nix-only or docs-only diff runs no
 # other stage at all, and these suites are exactly what such a diff can break.
-# Measured 2026-08-02 on the agent-rust container: 17 suites, 36.8s total, of
-# which deploy/prod/update-refresh.test.sh alone is 27.1s (stub polling sleeps;
-# deterministic across consecutive runs, 19/19 each).
+# Measured 2026-08-04 on the agent-rust container: 18 suites, 45s total, 18/18
+# green on each of two consecutive runs. deploy/prod/update-refresh.test.sh alone
+# is 27s (stub polling sleeps) and .chug/tasks/android-proof.test.sh 9-10s; the
+# other 16 are 3s or under, so the 120s budget keeps ~75s of headroom.
+# Re-measure and re-date this line whenever a suite is added — #395 added the
+# 18th and this line still claimed the 17 that preceded it.
 #
 # BOTH BOUNDS ARE ENFORCED WHERE THEY ARE ANNOUNCED. The per-suite cap needs a
 # working `timeout`, so that is PROBED before the header prints rather than

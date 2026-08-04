@@ -28,13 +28,12 @@ use std::time::Duration;
 use store::NatsStore;
 use types::{Job, JobState, Task};
 
-/// Default hard timeout for a wait before it panics. A wait normally resolves
-/// in well under a second; the ceiling exists to fail loud (with a named
-/// message) instead of hanging. It is set above the nominal 30s because a whole
-/// `cargo test --workspace` runs many binaries — including tier-3 real-container
-/// suites — against one shared NATS server per binary, and under that peak CPU
-/// contention a tier-2 job can take tens of seconds. 60s keeps the hard-timeout
-/// guarantee with margin so a slow-but-progressing wait is not failed spuriously.
+/// Default hard timeout for a wait before it panics, set above the nominal 30s
+/// so a stalled wait fails loud with a named message instead of hanging.
+/// The margin exists because `cargo test --workspace` runs many binaries —
+/// including the Docker-dependent real-container suites — against one shared
+/// NATS server per binary, and under that peak CPU contention a
+/// slow-but-progressing wait can take tens of seconds.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Wait until job `seq` reaches `want`, returning the record (#206 principle 3).

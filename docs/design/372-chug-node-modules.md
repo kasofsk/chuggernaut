@@ -173,6 +173,26 @@ the clock table, and "Drain already has a hook. `schedulable` in
 Recorded so the next reader chasing the brief's pointer does not conclude the
 citation was invented.
 
+**C6 — there is no `e2e!` guard in `crates/test-utils`; §2's N1 cites a macro
+that does not exist.** Added by job #405, which re-verified the reference and
+recorded it here rather than editing §2's body. N1 proposes a third `ci.sh`
+stage "mirroring the `e2e!` guard's shape (`crates/test-utils`)". That crate
+exports two skip macros — `require_nats!` and `require_nats_config!` in
+[`crates/test-utils/src/nats.rs`](../../crates/test-utils/src/nats.rs) — plus the
+`backend_suite::docker_available()` predicate, and nothing named `e2e`;
+`git log -S 'macro_rules! e2e' --all -- crates/` returns no commit, so the macro
+was never defined in this tree. `testing.md` and `CLAUDE.md` both now say so
+outright ("there is no `e2e!` macro"), and that is why this is a Correction
+rather than a dated record: dating protects a claim that *was* true when written,
+and this one never was. The *name* does still survive in one place —
+`crates/dispatcher/tests/fleet_e2e.rs`'s module header cites an "`e2e!`/
+`require_nats!`" guard pair — left untouched here because `crates/dispatcher` is
+job #403's scope, and recorded as a follow-up for whoever next opens that file.
+N1's argument survives the substitution intact — those two macros are
+exactly the "skip loudly when the dependency is absent" shape N1 wants — so read
+N1 with `require_nats!` in place of `e2e!`; its cost and its
+inert-until-a-node-provisions-nix conclusion are unchanged.
+
 ---
 
 ## 1. The problem, restated from the tree
