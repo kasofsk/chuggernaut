@@ -75,6 +75,13 @@ stale.
 ### `crates/auth/src/ssh.rs`
 - **fn authorize_ref_push** — A platform admin (§7.3) pushes to any job branch in any project, but the default branch stays dispatcher-only for everyone.
 
+### `crates/auth/src/workload.rs`
+- **mod workload** — In `auth` rather than `chuggernaut-domain` (design #313 S2 left the choice open): a mint is a credential construction, not a lifecycle decision. It needs the issuer key and `jsonwebtoken`, and the pure core resolves neither by construction (`boundary_guard`'s `domain_subtree_is_sync` forbids the `auth` edge outright), so putting it there would mean either widening that crate's dependency floor or splitting the claim set from the token it exists to produce. The decision it sits beside — *which* identities a container is granted — is the part that stays on the decider side, in #313 S3/S4. It is also where the `kid` lives (`oidc`, next door) and where §7.4's other two per-task credentials are already minted (`nats`, `ssh`).
+- **struct WorkloadTokenRequest** — Typed fields are the injection defense, not a validation rule bolted on after: with no free-text field on the request there is nothing for a CEL expression to be injected through, which is #311 Decision 5's argument applied to a claim. The charset floor (`types::inputs::check_value_charset`) is a second, cheaper line — reused rather than re-stated so the two cannot drift.
+- **fn check_component** — `:` and `/` are refused in `owner`, `project`, `job_type` and an evaluator name because both composites join on them; without the rule a project literally named `x:type:deploy` could make one `sub` read as another. The audience and the issuer are exempt: they are full resource names and URLs, and neither is a component of a composite.
+- **const PROVIDER_TTL_SECS_MAX** — A configured cap above the provider's 24h `exp − iat` ceiling is refused rather than clamped: clamping would hide a job type asking for something the provider will not honor, and the resolved TTL is already `min(task_timeout, cap)` so a large *timeout* clamps quietly and correctly. That asymmetry is deliberate — a timeout is the job's, the cap is the operator's.
+- **struct MintedWorkloadToken** — The hand-written `Debug` and the absence of `Display`/`Serialize` on the token are §10.2 made structural: `{minted:?}` in a future log line cannot leak the credential, and the audit row (`identity`/`audience`/`sub`/`workload`/`jti`/`expires_at`) is a separate value precisely so the recording path never holds the token at all.
+
 ### `crates/chuggernaut-harness/src/main.rs`
 - **fn main** — Still unimplemented (`main` bails); spec §4.5 describes the loop it owes:
   1. Load `HarnessConfig` from `/chuggernaut/harness.json`.

@@ -4,6 +4,7 @@ pub mod jwt;
 pub mod nats;
 pub mod oidc;
 pub mod ssh;
+pub mod workload;
 
 use async_trait::async_trait;
 use thiserror::Error;

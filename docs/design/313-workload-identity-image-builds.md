@@ -1,6 +1,7 @@
 # Design #313 — Workload identity (OIDC issuer) and image build/push
 
-Status: PROPOSED — half A's four decisions taken 2026-08-04; half B still open.
+Status: IMPLEMENTED IN PART — half A's slices S1 (job #410) and S2 (job #411)
+shipped; S3–S6 are open and half B is still a design.
 
 **Amended 2026-08-04 (job #409), against the tree at `f1e3b41`.** The operator
 has taken half A's four open decisions. They are recorded in
@@ -17,11 +18,11 @@ siblings. Half B is untouched beyond
 consequence it has for slice S7. **No code changed** — slices S1–S5 are separate
 jobs, and this amendment exists so they can cite the document safely.
 
-The status token stays `PROPOSED` because nothing has shipped.
-[`docs/design-docs.md`](../../docs/design-docs.md) reserves `IMPLEMENTED IN
-PART` for a document with slices *merged*, and its vocabulary has no term for
-"decided, not yet built"; rather than invent one, the qualifier carries it.
-Whichever slice lands first moves this to `IMPLEMENTED IN PART`.
+The status token is `IMPLEMENTED IN PART` from S2 onward, per
+[`docs/design-docs.md`](../../docs/design-docs.md)'s vocabulary — some slices
+merged, and the qualifier says which. Nothing a job container sees has changed
+yet: S1 generates a keypair and S2 is a library nothing calls, so the first
+slice with an operator-visible effect is S4.
 
 Written against the tree at `d7ebfae`. Every claim about current behavior below
 was read out of [spec.md](../../spec.md) and the source in this repo; where the
@@ -1242,7 +1243,7 @@ Slice labels below are `S{n}` deliberately — the `A`/`B` labels above name
 | Slice | Content | Depends on |
 | --- | --- | --- |
 | **S1** | Issuer keypair in `crates/cli/src/keygen.rs`; mounts; `kid` from the public-key thumbprint | — |
-| **S2** | Token minting + claim assembly as a **pure function** in `crates/domain` or `crates/auth`, unit-tested; no I/O | S1 |
+| **S2** | Token minting + claim assembly as a **pure function**, unit-tested; no I/O. **Shipped** as [`crates/auth/src/workload.rs`](../../crates/auth/src/workload.rs) — see [Where S2 landed](#where-s2-landed) | S1 |
 | **S3** | `workload_identities:` on `work`/`eval[]`/`wrap_up`; field rules; **epoch bump `4 → 5` + frozen `WORKLOAD_IDENTITY_SCHEMA_EPOCH = 5`** + the `min_dispatcher` rule in one commit; `cloud-identities.*` KV + admin CLI + release-validation check | S2 |
 | **S3d** | ***Deploy:* a dispatcher carrying epoch 5 reaches prod.** Not a code slice and not optional — see the ordering note below | S3 |
 | **S4** | Injection at launch (two `InjectedFile`s + `GOOGLE_APPLICATION_CREDENTIALS`), audit fields, the empty-declaration assert | S3 |
@@ -1282,6 +1283,32 @@ side. Test placement per [testing.md](../../testing.md): claim assembly, the TTL
 cap, the `sub` length bound and the field rules are pure → **tier 1**; the
 launch round trip (declared identity → two files present with the right modes,
 undeclared → no files) is **tier 2**.
+
+### Where S2 landed
+
+`crates/auth/src/workload.rs`, not `crates/domain`. A mint is a credential
+construction rather than a lifecycle decision: it needs the issuer key and
+`jsonwebtoken`, and the pure core resolves neither by construction — the
+boundary guard forbids a `domain → auth` edge outright — so the alternative was
+either widening that crate's dependency floor or splitting the claim set from
+the token it exists to produce. §7.4's other two per-task credentials are minted
+in the same crate, and the `kid` comes from `auth::oidc` next door. The decision
+this sits beside — *which* identities a container is granted — is the part that
+stays on the decider side, in S3 and S4.
+
+What S4 calls, and what it must not undo:
+
+- `WorkloadTokenSigner::new(private_pem, public_pem, issuer)` then
+  `mint(&request, now)` → a `MintedWorkloadToken`: `token()` (the credential,
+  with no `Debug`/`Display`/`Serialize` route out) and `audit()` (the A6 row
+  minus `identity`, which names the declaration and is the caller's).
+- `WorkloadTokenRequest` carries only typed identity fields; `audience` is one
+  `String`, so a multi-audience token is unrepresentable. `task_timeout_secs`
+  and `token_ttl_secs_max` feed the A3 rule, with `TOKEN_TTL_SECS_MAX_DEFAULT =
+  3600` and a cap above `PROVIDER_TTL_SECS_MAX` refused rather than clamped.
+- `SUBJECT_BYTES_MAX = 127` is a named error, never a truncation, and every
+  claim component clears `types::inputs::check_value_charset` plus a ban on the
+  `:` and `/` the composites join on.
 
 ## Contracts this changes
 
