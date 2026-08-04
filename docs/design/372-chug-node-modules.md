@@ -1106,7 +1106,22 @@ inaccurate per C3 and should say what actually happens.
    must not be `chuggernaut.managed`.
 3. **`docs`** — the `worker-capacity.md` drain-before-rebuild section (§6), the
    §3.1 cache-ownership correction (§9), and the host-repo adoption runbook
-   including `--override-input` for testing against a job branch.
+   including `--override-input` for testing against a job branch. **Shipped.**
+   The §3.1 correction landed separately in jobs #379/#380 — the sentence now
+   reads "provisioned with the node and owned by neither the daemon nor any
+   container", which is C3's finding. The other two shipped in job #404, written
+   from the 2026-08-03 adoption on both prod nodes rather than from this
+   document: [`docs/runbooks/worker-capacity.md`](../runbooks/worker-capacity.md)
+   §4.1 (drain, and why the switch that *enables* A4's `live-restore` is the one
+   that costs), and
+   [`docs/runbooks/chug-node-adoption.md`](../runbooks/chug-node-adoption.md)
+   (the flake input, the `chug.node` block, A1b's coupled removal of a host's own
+   `label!=` filter, `--override-input`, and verification). Two facts the
+   adoption produced that this document did not predict are recorded there: a
+   host repo carrying a hand-rolled filter fails A1b at `nixos-rebuild build`
+   until its copy is deleted, and **a failed `darwin-rebuild switch` can leave
+   `/nix/var/nix/profiles/system` and `/run/current-system` disagreeing** — which
+   is how `gumbo-air-0` ran a month on an unapplied configuration, silently.
 4. **Adoption, in the host repo** — outside this platform's job graph. It is the
    first real gate on the modules (N3), and it is where the ~90-line comment
    block gets deleted.

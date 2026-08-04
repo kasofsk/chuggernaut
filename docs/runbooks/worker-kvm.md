@@ -308,6 +308,10 @@ a leak of disk, never of a job.
   roots and the reaper) — the argument behind §7 above.
 - [`spec.md`](../../spec.md) §3.1 — worker nodes, node-local properties.
 - [`worker-capacity.md`](./worker-capacity.md) — the other node knob, and the
-  same "recreate the daemon to change a boot value" shape.
+  same "recreate the daemon to change a boot value" shape. §4.1 is the drain a
+  toolchain-bumping `nixos-rebuild` needs, for §7's reason.
+- [the `chug-node` adoption runbook](./chug-node-adoption.md) — the host repo's
+  side: the modules that declare a node's docker, prune and cache conditions.
+  It owns none of the settings on this page.
 - `deploy/prod/build-worker.sh`, `deploy/prod/worker-refresh.sh`,
   `deploy/prod/env.example` — where these settings are threaded through.

@@ -136,6 +136,92 @@ that clock: queued jobs escalate with `no_free_slots_timeout` after the window. 
 maintenance mode that pauses the queue clock is a named follow-up, not something
 this behaviour already has.
 
+### 4.1 Drain before `nixos-rebuild switch` / `darwin-rebuild switch`
+
+Capacity is a scheduling knob, but the case that actually forces a drain is
+**rebuilding the node's system closure while it is running tasks**. Do this, in
+order:
+
+```sh
+TOKEN=$(cat ~/.config/chuggernaut/token)
+API=https://<api-host>
+
+# 1. drain — note the current number first, you have to put it back
+curl -fsS "$API/api/v1/platform/fleet" -H "Authorization: Bearer $TOKEN" \
+  | jq '.nodes[] | {name, slots, slots_desired, occupied}'
+curl -fsS -X PUT "$API/api/v1/platform/fleet/nuc/capacity" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"slots": 0}'
+
+# 2. wait for the node to go quiet — `occupied` is the number that matters,
+#    not `slots`. Running containers are never killed to honour a cap (§4).
+until [ "$(curl -fsS "$API/api/v1/platform/fleet" -H "Authorization: Bearer $TOKEN" \
+  | jq '.nodes[] | select(.name=="nuc") | .occupied')" = "0" ]; do sleep 10; done
+
+# 3. rebuild, on the node
+ssh worksalot@gumbo-nuc-0 \
+  sudo nixos-rebuild switch --flake /etc/nixos#gumbo-nuc-0 --impure
+
+# 4. restore the slot count
+curl -fsS -X PUT "$API/api/v1/platform/fleet/nuc/capacity" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"slots": 2}'
+```
+
+The Cluster page's stepper does steps 1 and 4 just as well, and the node card
+shows `occupied` for step 2. Either surface is fine; the ordering is the part
+that matters.
+
+Performed twice on `gumbo-nuc-0` on 2026-08-03, uneventfully both times —
+*because* it was followed.
+
+**Why the first rebuild is the expensive one.** The `chug-node` module sets
+`virtualisation.docker.daemon.settings.live-restore = true`
+([`nix/chug-node/nixos.nix`](../../nix/chug-node/nixos.nix), design
+[#372](../design/372-chug-node-modules.md) §5 A4), which keeps containers alive
+across a dockerd restart. But **live-restore only protects a restart that
+happens while it is already active.** Toggling it changes `daemon.settings`,
+which changes the store path the docker unit's `--config-file=` names, which
+restarts dockerd — *without* live-restore, because the running daemon predates
+it. So the switch that adopts the setting kills every in-flight job container,
+and it is exactly the switch an operator is least expecting to. Drain that one.
+
+The same is true of any rebuild that changes the docker package or its settings,
+of a **reboot** (live-restore does not survive one), and of a rebuild that
+bumps a node toolchain — the new system profile stops rooting the old closure,
+so the next `nix-gc` can collect a store path a running task is still using
+(#372 §5 A5, and [`worker-kvm.md`](./worker-kvm.md) §7 for the roots that
+narrow this).
+
+**Telling a hot-safe rebuild from one that needs the drain.** Most rebuilds
+touch nothing docker-shaped and are safe to run at full capacity. Ask the
+rebuild itself rather than guessing:
+
+```sh
+# on the node — builds, then prints the units it WOULD stop/restart, and
+# activates nothing. Look for docker.service in that list.
+sudo nixos-rebuild dry-activate --flake /etc/nixos#gumbo-nuc-0 --impure
+```
+
+The 2026-08-03 rebuild that added a toolchain symlink named only
+`systemd-tmpfiles-resetup.service`, so it ran hot with no drain. `nixos-rebuild
+build` followed by `nvd diff /run/current-system ./result` (or `--diff` where
+your host repo wires it up) answers the coarser "did anything I care about
+move" question.
+
+**When in doubt, drain.** It costs a minute of the node's capacity, and the
+fleet keeps placing on every other node meanwhile.
+
+Two things the drain does *not* buy you, both from §4 above: queued launches
+keep burning the 30-minute queue clock (only a concern if this is the last node
+with capacity), and a job already running on the node keeps running — the drain
+waits for it, it does not stop it. If you need the node down *now*, the honest
+move is to accept the loss and let the jobs retry.
+
+Adopting the module in the first place — flake input, the `chug.node` block,
+and the one edit that fails the build if you skip it — is
+[the `chug-node` adoption runbook](./chug-node-adoption.md).
+
 ---
 
 ## 5. Bootstrapping a new node
@@ -293,5 +379,9 @@ boot, so nothing else has to be undone.
   transports, what was rejected, and the incident behind it.
 - [`deploy/prod/README.md`](../../deploy/prod/README.md) §6 — worker nodes:
   provisioning, self-refresh, image caching.
+- [the `chug-node` adoption runbook](./chug-node-adoption.md) — putting the
+  NixOS/nix-darwin modules in a host repo, and why §4.1's drain is one-time
+  expensive.
+- [`worker-kvm.md`](./worker-kvm.md) — the other node knob, and §7's GC roots.
 - [ad-hoc deploy runbook](./adhoc-deploy.md) — when the normal deploy path
   cannot run.
