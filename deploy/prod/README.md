@@ -515,6 +515,47 @@ sessions.
 The **git SSH front (`:2222`) stays off the public tunnel.** Push project code via
 the project's linked GitHub origin, or reach `:2222` over LAN/Tailscale.
 
+### 5c. OIDC issuer documents — served, deliberately unexposed
+
+The api serves two more unauthenticated routes (spec §6.7), over the public half
+of the OIDC issuer keypair `chuggernaut init` generates:
+
+```sh
+curl -s localhost:8080/.well-known/openid-configuration   # issuer + jwks_uri
+curl -s localhost:8080/.well-known/jwks.json              # one RS256 key, RFC 7517
+```
+
+They are public, integrity-only documents — no project data, no private key. They
+are **not reachable from outside**, and that is the design (#313 D1): the GCP
+workload-identity provider is registered with an **uploaded** JWK set
+(`--jwk-json-path`) and `--issuer-uri https://chug.kasofsk.xyz`, an identifier
+nobody fetches. Serving them is code; **exposing them is an operator action, and
+one nobody has to take.** Do not point `tailscale funnel` at them (§5a rules
+Funnel out for this host); if a second cloud ever insists on fetching a JWKS,
+design #313 A4 prices the three options — a path-scoped `cloudflared` ingress
+and an R2 static relay are the two live ones.
+
+Two operational consequences of the uploaded set:
+
+- **Key rotation is a terraform apply**, per consumer provider
+  (`providers update-oidc --jwk-json-path`), not a service restart. The 8-key
+  allowance makes overlapping rotation cheap: publish both, wait out the longest
+  token TTL (≤1h), retire the old.
+- **The upload is not validated when the provider is created.** A malformed or
+  stale set surfaces later as `Error connecting to the given credential's
+  issuer` — which names the issuer and is therefore actively misleading. Compare
+  the `kid` in `/.well-known/jwks.json` against what the provider holds before
+  believing the issuer is at fault.
+
+The issuer string comes from `OIDC_ISSUER` (default `https://chug.kasofsk.xyz`).
+Only the api reads it today; #313 S2's minter
+(`auth::workload::WorkloadTokenSigner`) already takes the issuer as an argument
+and S4 will hand it this same resolver's value, so every workload token's `iss`
+comes from here too. `chuggernaut.env` is sourced by both `run-api.sh` and
+`run-dispatcher.sh` (`set -a`), so one line there covers both. It must equal the
+minted token's `iss`, and the api refuses to start on a value that is not an
+absolute `https` identifier without a trailing slash.
+
 ---
 
 ## 6. Worker nodes (gumbo-nuc-0)

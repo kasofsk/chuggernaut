@@ -5,6 +5,7 @@
 //! No orchestration logic. Never depends on the `dispatcher` crate.
 
 pub mod ingest;
+pub mod oidc;
 pub mod push;
 pub mod routes;
 pub mod run;
@@ -25,12 +26,16 @@ pub struct ApiState {
     /// secrets one, which stays dispatcher-only (§10.2). None → the platform
     /// has no artifacts key and capture is off, so the routes 404.
     pub artifacts: Option<store::ArtifactStore>,
+    /// The §6.7 issuer documents, over the mounted `oidc_public.pem` (§12.1).
+    /// None → no issuer key is mounted, so the `.well-known` routes 404.
+    pub oidc: Option<oidc::IssuerDocuments>,
 }
 
 pub type SharedState = Arc<ApiState>;
 
-/// Build the axum router: auth + the §6.2 project surface implemented so far,
-/// with the SPA (when `ui_dist` is given) served as the fallback.
+/// Build the axum router: auth + the §6.2 project surface implemented so far
+/// plus §6.7's unauthenticated issuer documents, with the SPA (when `ui_dist`
+/// is given) served as the fallback.
 #[allow(
     clippy::too_many_lines,
     reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
@@ -212,6 +217,7 @@ pub fn router(state: SharedState, ui_dist: Option<PathBuf>) -> axum::Router {
             "/api/v1/projects/{owner}/{project}/jobs/{seq}/events",
             get(sse::job_events),
         )
+        .merge(oidc::public_routes())
         .with_state(state);
 
     if let Some(dist) = ui_dist {

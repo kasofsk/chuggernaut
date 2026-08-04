@@ -165,6 +165,7 @@ async fn config_endpoints() {
         verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
         session_ttl: chrono::Duration::hours(1),
         artifacts: None,
+        oidc: None,
     });
     let router = api::router(state, None);
 
@@ -263,6 +264,7 @@ async fn platform_fleet_endpoint() {
         verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
         session_ttl: chrono::Duration::hours(1),
         artifacts: None,
+        oidc: None,
     });
     let router = api::router(state, None);
     let token = |admin: bool| {

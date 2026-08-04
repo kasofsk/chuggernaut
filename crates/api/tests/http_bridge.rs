@@ -214,6 +214,7 @@ async fn http_bridge_end_to_end() {
         verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
         session_ttl: chrono::Duration::hours(1),
         artifacts: Some(artifacts),
+        oidc: None,
     });
     let router = api::router(state, None);
 
@@ -850,6 +851,7 @@ async fn job_attachments_over_http() {
         verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
         session_ttl: chrono::Duration::hours(1),
         artifacts: Some(artifacts),
+        oidc: None,
     });
     let router = api::router(state, None);
 
@@ -974,6 +976,7 @@ async fn health_endpoint() {
             verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
             session_ttl: chrono::Duration::hours(1),
             artifacts: None,
+            oidc: None,
         })
     };
 
@@ -1038,6 +1041,116 @@ async fn health_endpoint() {
         body["version"].as_str().is_some(),
         "version missing: {body}"
     );
+}
+
+/// One `.well-known` document as an unauthenticated caller receives it: no
+/// cookie, no bearer.
+async fn get_public_document(
+    router: &axum::Router,
+    path: &str,
+) -> (StatusCode, String, serde_json::Value) {
+    let req = Request::builder()
+        .method("GET")
+        .uri(path)
+        .body(Body::empty())
+        .unwrap();
+    let res = router.clone().oneshot(req).await.unwrap();
+    let status = res.status();
+    let ctype = res
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    let body = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap()
+    };
+    (status, ctype, body)
+}
+
+/// The §6.7 pair as an unauthenticated caller sees it: a discovery document
+/// naming the configured issuer and its JWK set, and one RS256 signing key
+/// carrying the `kid` S1 derives for that same public key.
+async fn get_public_document_pair(router: &axum::Router, issuer: &str, issuer_pem: &str) {
+    let (status, ctype, document) = get_public_document(router, auth::oidc::DISCOVERY_PATH).await;
+    assert_eq!(status, StatusCode::OK, "{document}");
+    assert!(ctype.starts_with("application/json"), "ctype: {ctype}");
+    assert_eq!(document["issuer"], issuer, "{document}");
+    assert_eq!(
+        document["jwks_uri"],
+        format!("{issuer}{}", auth::oidc::JWKS_PATH),
+        "{document}"
+    );
+
+    let (status, ctype, jwks) = get_public_document(router, auth::oidc::JWKS_PATH).await;
+    assert_eq!(status, StatusCode::OK, "{jwks}");
+    assert!(ctype.starts_with("application/json"), "ctype: {ctype}");
+    assert_eq!(jwks["keys"].as_array().unwrap().len(), 1, "{jwks}");
+    assert_eq!(jwks["keys"][0]["kty"], "RSA", "{jwks}");
+    assert_eq!(jwks["keys"][0]["alg"], "RS256", "{jwks}");
+    assert_eq!(jwks["keys"][0]["use"], "sig", "{jwks}");
+    assert_eq!(
+        jwks["keys"][0]["kid"].as_str().unwrap(),
+        auth::oidc::kid_from_public_pem(issuer_pem).unwrap(),
+        "the published kid is S1's derivation for the same key"
+    );
+}
+
+/// §6.7 issuer documents: both `.well-known` routes answer a credential-free
+/// `GET` over the mounted issuer key — through `api::oidc::public_routes`,
+/// which serves them on its own — while the authenticated surface in the same
+/// router stays closed to that same caller.
+#[tokio::test]
+async fn well_known_issuer_documents_are_public() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let keys_dir = tempfile::tempdir().unwrap();
+    let (private, public) = gen_jwt_keys(keys_dir.path());
+    let issuer_pem = String::from_utf8(public.clone()).unwrap();
+    let issuer = "https://issuer.test";
+    let mk_state = |issuer: Option<&str>| -> SharedState {
+        Arc::new(ApiState {
+            store: store.clone(),
+            signer: auth::jwt::JwtSigner::from_pem(&private).unwrap(),
+            verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
+            session_ttl: chrono::Duration::hours(1),
+            artifacts: None,
+            oidc: issuer.map(|iss| api::oidc::IssuerDocuments::new(iss, &issuer_pem).unwrap()),
+        })
+    };
+
+    let router = api::router(mk_state(Some(issuer)), None);
+    get_public_document_pair(&router, issuer, &issuer_pem).await;
+
+    let (status, _, body) = get_public_document(&router, "/auth/me").await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+
+    let exempt: axum::Router = axum::Router::new()
+        .merge(api::oidc::public_routes())
+        .with_state(mk_state(Some(issuer)));
+    get_public_document_pair(&exempt, issuer, &issuer_pem).await;
+
+    let other = "https://other.test";
+    let rebranded = api::router(mk_state(Some(other)), None);
+    get_public_document_pair(&rebranded, other, &issuer_pem).await;
+    assert_ne!(issuer, auth::oidc::ISSUER_DEFAULT);
+
+    let unmounted = api::router(mk_state(None), None);
+    for path in [auth::oidc::DISCOVERY_PATH, auth::oidc::JWKS_PATH] {
+        let (status, _, body) = get_public_document(&unmounted, path).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{path}: {body}");
+    }
 }
 
 /// One fleet roster entry. `endpoint` is what separates the two transports: a
@@ -1120,6 +1233,7 @@ fn platform_router(store: &NatsStore, keys: &(Vec<u8>, Vec<u8>)) -> axum::Router
         verifier: auth::jwt::JwtVerifier::from_pem(&keys.1).unwrap(),
         session_ttl: chrono::Duration::hours(1),
         artifacts: None,
+        oidc: None,
     });
     api::router(state, None)
 }
@@ -1419,6 +1533,7 @@ async fn ssh_cert_minting() {
         verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
         session_ttl: chrono::Duration::hours(1),
         artifacts: None,
+        oidc: None,
     });
     let router = api::router(state, None);
 
@@ -1558,6 +1673,7 @@ async fn task_output_endpoint() {
         verifier: auth::jwt::JwtVerifier::from_pem(&public).unwrap(),
         session_ttl: chrono::Duration::hours(1),
         artifacts: Some(artifacts),
+        oidc: None,
     });
     let router = api::router(state, None);
 

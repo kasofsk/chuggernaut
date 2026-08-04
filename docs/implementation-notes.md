@@ -42,6 +42,11 @@ stale.
 - **fn router** — Vite content-hashes everything under /assets, so a given URL's bytes never change — cache it forever and skip even the revalidation RTT. Everything else (index.html, sw.js, the manifest, icons) keeps the default no-cache behavior: those URLs are stable across builds, so a long TTL would pin operators to a stale shell.
 - **fn router** — Compress every response the client will take it on. The default predicate already skips SSE (`text/event-stream`), gRPC, images, and sub-32-byte bodies, so the live event stream still flushes per frame. Applied last so it wraps the static fallback too — the UI bundle is the single largest transfer the operator makes.
 
+### `crates/api/src/oidc.rs`
+- **fn public_routes** — A separate router function rather than two more rows in `router`'s chain: the api authenticates per handler (the `Auth` extractor), so a route with no extractor is unauthenticated *by omission*, and these two are unauthenticated *on purpose*. Building them here is what makes the exemption reviewable — and testable, since a test can drive that router alone.
+- **fn discovery_documents** — 404, not an empty key set, when no `oidc_public.pem` is mounted: an empty JWKS is a valid document that says "this issuer signs nothing", which a consumer would cache. A platform initialized before the issuer keypair (§12.1) reads as absent rather than as an issuer with no keys.
+- **fn new** — Both documents are built once at startup, so a malformed key or issuer fails the process rather than every request, and a request costs no DER walk.
+
 ### `crates/api/src/routes.rs`
 - **fn from_request_parts** — `Authorization: Bearer <jwt>` first (machine callers — CLI-minted tokens, §7.1), then the browser session cookie. Same JWT either way.
 - **fn health** — Only a genuine {"dispatcher":"ok",..} reply is healthy; anything else (e.g. the actor's 503 envelope) maps to 503, never 200.
@@ -58,6 +63,7 @@ stale.
 
 ### `crates/api/src/run.rs`
 - **fn run** — The artifacts identity — not `age_private.key`, which stays dispatcher-only (§10.2). Missing → the platform captures no artifacts, and the routes report that rather than failing startup.
+- **fn run** — The issuer public key is optional the same way, but `OIDC_ISSUER` is validated unconditionally in `from_env`: a malformed issuer is a config error whether or not a key is mounted today, and the §6.7 documents are worth nothing if the string in them is not the one a provider was registered with.
 
 ### `crates/api/src/sse.rs`
 - **fn project_events** — A fresh connect gets live events only. The project feed spans every job the project has ever run, so replaying it costs the operator a multi- megabyte download before the first live frame — and nothing needs it: the page's initial state comes from the jobs list (which now carries each live job's latest channel post), and this stream's job is to keep that state current. A reconnect still resumes exactly where it left off.
@@ -71,6 +77,7 @@ stale.
 
 ### `crates/auth/src/oidc.rs`
 - **fn kid_from_public_pem** — The RFC 7638 JWK thumbprint rather than a digest of the raw SubjectPublicKeyInfo: both are stable functions of the key, but only the thumbprint is reproducible by a JWKS consumer holding the published JWK, and that consumer is the party that has to agree with us about the id. The DER walk is hand-rolled because the only members a JWK needs are `n` and `e` out of a fixed SPKI shape, and nothing in the tree parses them — a DER/ASN.1 dependency would be a large supply-chain edge for ~25 lines.
+- **fn resolve_issuer** — Configuration rather than a constant, and one resolver rather than one per process: the issuer is the single value the api's discovery document and the dispatcher's minted `iss` must agree on byte-for-byte, and a disagreement is invisible here and fatal at a cloud STS. The validation is strict (absolute `https`, no trailing slash) because every way of being loose about it fails there instead, under an error message that names the issuer whatever the real fault was.
 
 ### `crates/auth/src/ssh.rs`
 - **fn authorize_ref_push** — A platform admin (§7.3) pushes to any job branch in any project, but the default branch stays dispatcher-only for everyone.

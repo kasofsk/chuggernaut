@@ -77,7 +77,7 @@ The single NATS integration point, wrapping `async-nats`:
 - JWT (RS256) issue/verify, cookie construction (§7.1); `AuthProvider` trait for later swap-out
 - SSH CA: user cert signing (§7.3) and per-job cert issuance with `job:{owner}/{project}:{seq}` principals (§7.4)
 - Per-job NATS JWT minting with the §7.4 allow-lists
-- The OIDC issuer's `kid` (`oidc`): the RFC 7638 JWK thumbprint of `oidc_public.pem`, pure and stable across restarts (design #313 A2)
+- The OIDC issuer's identity (`oidc`): the `kid` — the RFC 7638 JWK thumbprint of `oidc_public.pem`, pure and stable across restarts (design #313 A2) — plus the RFC 7517 JWK set, the §6.7 discovery document, and `issuer_from_env`, the one resolver of `OIDC_ISSUER` — the api's routes read it today and #313 S4 will hand the same value to `workload`'s minter
 - Workload-token claim assembly and minting (`workload`): the #313 A1 claim set from a typed request, the A3 TTL rule (`min(task_timeout, cap)`, cap 3600) and one audience per token, RS256 with that `kid`. Pure — `now` and the `jti` are arguments — and the minted token has no `Debug`/`Serialize` route out (§10.2). Nothing calls it yet; #313 S3/S4 wire it
 - Permission rules table (§7.5) as a pure `authorize(identity, action)` function used by the API layer
 - The SSH server's ref-authorization hook (§5.2): a small `chuggernaut-ssh-authz` helper (exposed via the fat binary) invoked by sshd to enforce push/pull rules per principal
@@ -214,6 +214,7 @@ handling of its own — it names the families and hands each one its ports.
 - Secret encryption on write (age public key only)
 - Ingest endpoint (§13.2): Bearer-token auth against hashed tokens, envelope wrapping, publish to the `ingest` stream
 - Web Push: subscription CRUD, the `task-created`→push background consumer (§11)
+- The §6.7 issuer documents (`oidc`): the two `.well-known` routes, built apart from the authenticated surface so the exemption is explicit, and served from documents built once at startup
 - Serves the PWA's static assets from the same origin (§10.4)
 
 ### `webhooks`, `cli`

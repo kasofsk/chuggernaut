@@ -1959,6 +1959,22 @@ A liveness probe that proves the **dispatcher**, not just the api process. The a
 
 ---
 
+### 6.7 OIDC issuer documents
+
+```
+GET /.well-known/openid-configuration → 200 { "issuer", "jwks_uri", "response_types_supported", "subject_types_supported", "id_token_signing_alg_values_supported" }
+GET /.well-known/jwks.json            → 200 { "keys": [ { "kty": "RSA", "alg": "RS256", "use": "sig", "kid", "n", "e" } ] }
+                                      → 404 on a platform with no oidc_public.pem mounted (§12.1)
+```
+
+The workload-identity issuer's two public documents (design #313 A4), served over the public half of the §12.1 OIDC issuer keypair. The JWK set is RFC 7517 and holds exactly one key; its `kid` is the RFC 7638 thumbprint `auth::oidc::kid_from_public_pem` derives, the same value a minted workload token carries in its header — one derivation, called from both, because a `kid` that disagrees with the published set fails at a cloud STS wearing an error that names the issuer.
+
+**Issuer.** The `issuer` member and every minted token's `iss` come from one setting, `OIDC_ISSUER` (default `https://chug.kasofsk.xyz`), resolved by `auth::oidc::issuer_from_env` in the api and the dispatcher alike. It must be an absolute `https` identifier with no trailing slash — a cloud STS compares it byte-for-byte — and a process that reads a malformed one refuses to start. `jwks_uri` is always the issuer plus `/.well-known/jwks.json`, so the two documents cannot name different keys.
+
+**Unauthenticated by design, and unexposed.** Both are exempt from §7.1 auth: they are public, integrity-only documents that carry no project data and no private key material. The exemption is narrow and deliberate — they are the only routes built by `api::oidc::public_routes`, apart from the authenticated surface. **Serving them is not exposing them.** The api binds loopback and nothing routes these paths to the public internet; a provider is registered with an uploaded JWK set instead (#313 D1). Making them reachable is an infrastructure decision (#313 A4 prices three options), not a code change.
+
+---
+
 ## Part 7: Identity and Access
 
 ### 7.1 Authentication

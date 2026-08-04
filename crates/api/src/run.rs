@@ -5,7 +5,10 @@
 //! `/data/keys`; needs `jwt_private.pem`/`jwt_public.pem` from init, uses
 //! `dispatcher.creds` when present), `BIND_ADDR` (default `0.0.0.0:8080`),
 //! `UI_DIST` (optional; serve the built PWA from this directory),
-//! `SESSION_TTL` (default `24h`, spec §7.1).
+//! `SESSION_TTL` (default `24h`, spec §7.1), `OIDC_ISSUER` (default
+//! `https://chug.kasofsk.xyz`, spec §6.7) — resolved by
+//! `auth::oidc::issuer_from_env`, the resolver #313 S4 will hand S2's minter so
+//! a token's `iss` and the served issuer cannot disagree.
 
 use crate::{ApiState, SharedState};
 use auth::jwt::{JwtSigner, JwtVerifier};
@@ -23,6 +26,9 @@ pub struct ApiConfig {
     pub bind_addr: std::net::SocketAddr,
     pub ui_dist: Option<PathBuf>,
     pub session_ttl: chrono::Duration,
+    /// The §6.7 issuer identifier, from `auth::oidc::issuer_from_env` — the
+    /// resolver #313 S4 will hand S2's minter, so `iss` and the served issuer agree.
+    pub oidc_issuer: String,
 }
 
 impl ApiConfig {
@@ -44,6 +50,7 @@ impl ApiConfig {
                 .map_err(|e| anyhow::anyhow!("BIND_ADDR {bind_addr:?}: {e}"))?,
             ui_dist: env_opt("UI_DIST").map(Into::into),
             session_ttl,
+            oidc_issuer: auth::oidc::issuer_from_env()?,
         })
     }
 }
@@ -74,12 +81,27 @@ pub async fn run(config: ApiConfig) -> anyhow::Result<()> {
         }
     };
 
+    let oidc = match tokio::fs::read_to_string(config.keys_dir.join("oidc_public.pem")).await {
+        Ok(pem) => Some(crate::oidc::IssuerDocuments::new(
+            &config.oidc_issuer,
+            &pem,
+        )?),
+        Err(_) => {
+            tracing::warn!("no oidc_public.pem: the §6.7 issuer documents will 404");
+            None
+        }
+    };
+    if let Some(documents) = &oidc {
+        tracing::info!(issuer = %config.oidc_issuer, kid = %documents.kid(), "oidc issuer");
+    }
+
     let state: SharedState = Arc::new(ApiState {
         store,
         signer: JwtSigner::from_pem(&private)?,
         verifier: JwtVerifier::from_pem(&public)?,
         session_ttl: config.session_ttl,
         artifacts,
+        oidc,
     });
     if let Some(dist) = &config.ui_dist
         && !dist.join("index.html").exists()

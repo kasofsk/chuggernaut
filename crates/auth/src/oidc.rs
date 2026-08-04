@@ -1,16 +1,20 @@
-//! The OIDC issuer's key identity (design #313 A2, spec §12.1).
+//! The OIDC issuer's identity: its key, its identifier, and the two documents
+//! it publishes (design #313 A2/A4, spec §6.7, §12.1).
 //!
-//! Accepts the issuer's RSA public key (`oidc_public.pem`) as SPKI PEM; emits
-//! its `kid` — the RFC 7638 JWK thumbprint that a minted workload token and a
-//! published JWK both carry. Guarantees: pure, no I/O, and a function of the
-//! key bytes alone, so the same key yields the same `kid` on every host and
-//! after every restart and a JWKS consumer can recompute the id from the
-//! published JWK. The thumbprint form is chosen over a digest of the raw
-//! SubjectPublicKeyInfo because it is the one every JWKS consumer already
-//! knows how to reproduce.
+//! Accepts the issuer's RSA public key (`oidc_public.pem`) as SPKI PEM and the
+//! `OIDC_ISSUER` setting; emits the `kid` — the RFC 7638 JWK thumbprint that a
+//! minted workload token and a published JWK both carry — plus the RFC 7517
+//! JWK set and the discovery document served at §6.7's `.well-known` paths.
+//! Guarantees: every derivation is pure and a function of the key bytes alone,
+//! so the same key yields the same `kid` on every host and after every restart
+//! and a JWKS consumer can recompute the id from the published JWK; the only
+//! environment read is [`issuer_from_env`]. The thumbprint form is chosen over
+//! a digest of the raw SubjectPublicKeyInfo because it is the one every JWKS
+//! consumer already knows how to reproduce.
 
 use crate::AuthError;
 use base64::Engine;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const B64URL: base64::engine::general_purpose::GeneralPurpose =
@@ -21,6 +25,114 @@ const DER_BIT_STRING: u8 = 0x03;
 const DER_SEQUENCE: u8 = 0x30;
 
 const DER_LENGTH_BYTES_MAX: usize = 4;
+
+const ISSUER_LEN_MAX: usize = 256;
+
+/// The environment variable naming the issuer, read by every process that
+/// mints or publishes over the issuer key.
+pub const ISSUER_ENV: &str = "OIDC_ISSUER";
+
+/// The platform's issuer identifier when `OIDC_ISSUER` is unset (design #313
+/// D1) — an identifier a provider is registered with, not a URL anyone fetches.
+pub const ISSUER_DEFAULT: &str = "https://chug.kasofsk.xyz";
+
+/// The §6.7 path of the discovery document, relative to the issuer.
+pub const DISCOVERY_PATH: &str = "/.well-known/openid-configuration";
+
+/// The §6.7 path of the JWK set, relative to the issuer.
+pub const JWKS_PATH: &str = "/.well-known/jwks.json";
+
+/// The issuer identifier from `OIDC_ISSUER`, else [`ISSUER_DEFAULT`]. This is
+/// the one place the setting is read, so a token's `iss` and the published
+/// document cannot disagree.
+pub fn issuer_from_env() -> Result<String, AuthError> {
+    resolve_issuer(std::env::var(ISSUER_ENV).ok())
+}
+
+/// The issuer for a configured value, validated: it is compared byte-for-byte
+/// with a token's `iss` at a cloud STS, so a sloppy one fails there and not here.
+fn resolve_issuer(configured: Option<String>) -> Result<String, AuthError> {
+    let issuer = configured
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| ISSUER_DEFAULT.to_string());
+    let bad = |why: &str| {
+        Err(AuthError::Internal(format!(
+            "{ISSUER_ENV} {issuer:?}: {why}"
+        )))
+    };
+    if !issuer.starts_with("https://") {
+        return bad("must be an absolute https identifier");
+    }
+    if issuer.ends_with('/') {
+        return bad("must not end in a slash");
+    }
+    if issuer.len() > ISSUER_LEN_MAX {
+        return bad(&format!("longer than the {ISSUER_LEN_MAX}-byte bound"));
+    }
+    Ok(issuer)
+}
+
+/// One RFC 7517 JWK: the issuer's public key as a JWKS consumer receives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Jwk {
+    pub kty: String,
+    pub alg: String,
+    #[serde(rename = "use")]
+    pub key_use: String,
+    pub kid: String,
+    pub n: String,
+    pub e: String,
+}
+
+/// An RFC 7517 JWK set — the document uploaded to a provider or served at
+/// [`JWKS_PATH`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JwkSet {
+    pub keys: Vec<Jwk>,
+}
+
+/// The OIDC discovery document served at [`DISCOVERY_PATH`], naming the issuer
+/// and where its keys live.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiscoveryDocument {
+    pub issuer: String,
+    pub jwks_uri: String,
+    pub response_types_supported: Vec<String>,
+    pub subject_types_supported: Vec<String>,
+    pub id_token_signing_alg_values_supported: Vec<String>,
+}
+
+/// The single-key JWK set for an SPKI PEM RSA public key, carrying the `kid`
+/// [`kid_from_public_pem`] derives for that same key.
+pub fn jwk_set_from_public_pem(public_pem: &str) -> Result<JwkSet, AuthError> {
+    let (modulus, exponent) = rsa_public_parts(public_pem)?;
+    let key = Jwk {
+        kty: "RSA".into(),
+        alg: "RS256".into(),
+        key_use: "sig".into(),
+        kid: kid_from_public_pem(public_pem)?,
+        n: B64URL.encode(&modulus),
+        e: B64URL.encode(&exponent),
+    };
+    assert!(!key.n.is_empty() && !key.e.is_empty(), "a JWK has n and e");
+    Ok(JwkSet { keys: vec![key] })
+}
+
+/// The discovery document for a validated issuer; its `jwks_uri` is that
+/// issuer's [`JWKS_PATH`], so the two documents cannot name different keys.
+pub fn discovery_document(issuer: &str) -> DiscoveryDocument {
+    assert!(
+        issuer.starts_with("https://") && !issuer.ends_with('/'),
+        "issuer is validated before a document names it"
+    );
+    DiscoveryDocument {
+        issuer: issuer.to_string(),
+        jwks_uri: format!("{issuer}{JWKS_PATH}"),
+        response_types_supported: vec!["id_token".into()],
+        subject_types_supported: vec!["public".into()],
+        id_token_signing_alg_values_supported: vec!["RS256".into()],
+    }
+}
 
 /// The `kid` (RFC 7517 §4.5) of an RSA public key in SPKI PEM form: its
 /// RFC 7638 JWK thumbprint, base64url-encoded without padding.
@@ -143,6 +255,56 @@ mod tests {
             kid_from_public_pem(&RFC_7638_EXAMPLE.replace('\n', "\r\n")).unwrap()
         );
         assert_ne!(kid, kid_from_public_pem(OTHER_KEY).unwrap());
+    }
+
+    #[test]
+    fn jwk_set_is_one_rs256_signing_key_under_s1s_kid() {
+        let set = jwk_set_from_public_pem(RFC_7638_EXAMPLE).unwrap();
+        assert_eq!(set.keys.len(), 1);
+        let key = &set.keys[0];
+        assert_eq!(key.kty, "RSA");
+        assert_eq!(key.alg, "RS256");
+        assert_eq!(key.key_use, "sig");
+        assert_eq!(key.e, "AQAB");
+        assert_eq!(key.kid, kid_from_public_pem(RFC_7638_EXAMPLE).unwrap());
+        assert_eq!(B64URL.decode(&key.n).unwrap().len(), 256);
+        assert_ne!(
+            key.kid,
+            jwk_set_from_public_pem(OTHER_KEY).unwrap().keys[0].kid
+        );
+    }
+
+    #[test]
+    fn jwk_set_serializes_under_rfc_7517_member_names() {
+        let set = jwk_set_from_public_pem(RFC_7638_EXAMPLE).unwrap();
+        let json = serde_json::to_value(&set).unwrap();
+        assert_eq!(json["keys"][0]["use"], "sig");
+        assert_eq!(json["keys"][0]["kty"], "RSA");
+        assert!(json["keys"][0].get("key_use").is_none());
+    }
+
+    #[test]
+    fn discovery_names_the_issuer_and_its_jwks_path() {
+        let document = discovery_document("https://issuer.example");
+        assert_eq!(document.issuer, "https://issuer.example");
+        assert_eq!(
+            document.jwks_uri,
+            format!("https://issuer.example{JWKS_PATH}")
+        );
+        assert_eq!(document.id_token_signing_alg_values_supported, ["RS256"]);
+    }
+
+    #[test]
+    fn issuer_is_configured_and_validated() {
+        assert_eq!(resolve_issuer(None).unwrap(), ISSUER_DEFAULT);
+        assert_eq!(resolve_issuer(Some(String::new())).unwrap(), ISSUER_DEFAULT);
+        assert_eq!(
+            resolve_issuer(Some("https://other.example".into())).unwrap(),
+            "https://other.example"
+        );
+        assert!(resolve_issuer(Some("http://insecure.example".into())).is_err());
+        assert!(resolve_issuer(Some("https://issuer.example/".into())).is_err());
+        assert!(resolve_issuer(Some(format!("https://{}", "x".repeat(300)))).is_err());
     }
 
     #[test]
