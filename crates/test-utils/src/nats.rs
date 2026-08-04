@@ -1,5 +1,5 @@
-//! NATS server for tier-2 tests (testing.md), managed by the
-//! [`testcontainers`] crate (#206).
+//! NATS server for tier-2 tests (testing.md), backed by a local `nats-server`
+//! process or the [`testcontainers`] crate (#206, #408).
 //!
 //! ## One instance per test process (principle 2)
 //!
@@ -13,22 +13,37 @@
 //! tier-2 suite share one server.
 //!
 //! [`NatsTestServer::spawn`] is the per-test-isolation escape hatch: a private
-//! container just for the caller (torn down on drop), for tests that genuinely
-//! need their own server.
+//! server just for the caller (torn down on drop), for tests that genuinely
+//! need their own instance.
+//!
+//! ## How a private server is obtained (#408)
+//!
+//! A private server is a `nats-server -js` **process** when the binary is on
+//! `PATH` — an OS-chosen port (`-p -1`) and a fresh store directory per caller,
+//! killed and removed on drop — and a container otherwise. The process path is
+//! what makes the five private-server files run in a job container, which has a
+//! baked `nats-server` and no Docker socket ([#309](docs/design/309-host-native-execution.md) §10).
+//! It is deliberately *not* used for [`NatsTestServer::shared`]: that handle
+//! lives in a `static` that is never dropped, so a child process there would
+//! outlive the test binary with no reaper to collect it. [`LOCAL_ENV`]`=0` forces
+//! the container path.
 //!
 //! ## Skip semantics
 //!
-//! When Docker is unavailable the container cannot start, so `spawn`/`shared`
-//! return `None` and callers skip — exactly as the previous hand-rolled harness
-//! did (see the `require_nats!` macro). Setting the [`URL_ENV`] environment
-//! variable points tests at an already-running NATS instead (CI with a baked
+//! When neither a local binary nor Docker can serve, `spawn`/`shared` return
+//! `None` and callers skip — exactly as the previous hand-rolled harness did
+//! (see the `require_nats!` macro). Setting the [`URL_ENV`] environment variable
+//! points *shared* tests at an already-running NATS instead (CI with a baked
 //! server, or a shared dev NATS); no container — and no Docker — is then needed.
 //!
 //! An *impossible* start is answered once, not once per caller: a client-init
 //! failure means no runtime exists to retry against, so the verdict is recorded
-//! process-wide (`RUNTIME_UNREACHABLE`) and every later caller skips instantly.
+//! process-wide (`RUNTIME_UNREACHABLE`), and a missing local binary is recorded
+//! the same way (`LOCAL_UNAVAILABLE`), so every later caller skips instantly.
 //! Only a transient container failure is retried with backoff (#407).
 
+use std::path::Path;
+use std::process::Child;
 use std::sync::{Once, OnceLock};
 use std::time::Duration;
 use testcontainers::{
@@ -53,6 +68,23 @@ const READY_LOG: &str = "Server is ready";
 /// (e.g. `docker run -d -p 4222:4222 nats:2.10-alpine -js`) so a whole-workspace
 /// run stands up a single server instead of one container per binary.
 pub const URL_ENV: &str = "CHUG_TEST_NATS_URL";
+
+/// Env override: set to `0` to force a private server onto the container path
+/// even when a local `nats-server` is on `PATH`. The `#[cfg(test)]` regression
+/// test for #407's fast skip uses it to reach the container retry loop.
+pub const LOCAL_ENV: &str = "CHUG_TEST_NATS_LOCAL";
+
+/// The binary a private server is started from when it is on `PATH` —
+/// `deploy/prod/Dockerfile.agent-rust` bakes it at `/usr/local/bin/nats-server`.
+const LOCAL_BINARY: &str = "nats-server";
+
+/// The server's own line announcing the port it was given by `-p -1`.
+const LOCAL_LISTEN_LOG: &str = "Listening for client connections on";
+
+/// Readiness polls before a local server is given up on (principle 3: every
+/// loop is bounded). 25 ms apart, so 5 s — a `nats-server` starts in well
+/// under one.
+const LOCAL_POLLS_MAX: u32 = 200;
 
 /// Docker label stamped on every harness-started NATS container, so the
 /// stale-container sweep only ever touches our own.
@@ -111,13 +143,32 @@ fn sweep_stale_containers_now() {
         .output();
 }
 
-/// A NATS server available to a tier-2 test: either a testcontainers-managed
-/// container (torn down on drop) or an externally-provided URL ([`URL_ENV`]).
+/// A NATS server available to a tier-2 test: a local `nats-server` process, a
+/// testcontainers-managed container (both torn down on drop), or an
+/// externally-provided URL ([`URL_ENV`]).
 pub struct NatsTestServer {
     url: String,
+    /// Owns the local process and its store dir so both are reclaimed on drop.
+    /// `None` unless this server came from [`LOCAL_BINARY`].
+    _local: Option<LocalServer>,
     /// Owns the container so it is stopped on drop. `None` when reusing an
     /// external URL, or for the process-shared instance held in a `static`.
     _container: Option<ContainerAsync<GenericImage>>,
+}
+
+/// A private `nats-server` process and the temp dir holding its JetStream store,
+/// its config and its log. Dropped in declaration order: the process is killed
+/// before the directory under it is removed.
+struct LocalServer {
+    child: Child,
+    _store: tempfile::TempDir,
+}
+
+impl Drop for LocalServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 /// Process-wide shared server (principle 2). `Option` so a Docker-less run
@@ -127,6 +178,11 @@ static SHARED: OnceCell<Option<NatsTestServer>> = OnceCell::const_new();
 /// Set the first time a start attempt proves no container runtime is reachable,
 /// so every later caller in the process skips without attempting again.
 static RUNTIME_UNREACHABLE: OnceLock<()> = OnceLock::new();
+
+/// Set the first time an exec proves there is no [`LOCAL_BINARY`] on `PATH`, so
+/// every later private spawn goes straight to the container path (#407's
+/// "an impossible start is answered once", one level down).
+static LOCAL_UNAVAILABLE: OnceLock<()> = OnceLock::new();
 
 /// A start failure that no retry can fix: the Docker client could not be built,
 /// configured, or pointed at a host. Anything else may be transient.
@@ -163,36 +219,102 @@ impl NatsTestServer {
 
     /// Spawn a private server with an extra config body — the operator/resolver
     /// stanza used by the §7.4 auth tests. The harness owns JetStream (a
-    /// `store_dir` is prepended), so the body must NOT set `jetstream {}`; the
-    /// listen port is the image default (4222), mapped to an ephemeral host
-    /// port by testcontainers.
+    /// `store_dir` is prepended) and the listen port, so the body must NOT set
+    /// `jetstream {}` or `port`.
     pub async fn spawn_with_config(config: &str) -> Option<Self> {
         Self::start(Some(config), false).await
     }
 
-    #[allow(
-        clippy::too_many_lines,
-        reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
-    )]
     async fn start(config: Option<&str>, shared: bool) -> Option<Self> {
         if shared
             && config.is_none()
-            && let Ok(url) = std::env::var(URL_ENV)
-            && !url.is_empty()
+            && let Some(server) = Self::start_external().await
         {
-            if let Some(hostport) = url.strip_prefix("nats://")
-                && tokio::net::TcpStream::connect(hostport).await.is_ok()
-            {
-                return Some(Self {
-                    url,
-                    _container: None,
-                });
-            }
-            eprintln!(
-                "test-utils: {URL_ENV}={url} is UNREACHABLE — falling back to a per-process container"
-            );
+            return Some(server);
         }
+        if !shared && let Some(server) = Self::start_local(config).await {
+            return Some(server);
+        }
+        Self::start_container(config).await
+    }
 
+    /// Reuse the already-running NATS named by [`URL_ENV`], when it answers.
+    async fn start_external() -> Option<Self> {
+        let url = std::env::var(URL_ENV).ok().filter(|u| !u.is_empty())?;
+        if let Some(hostport) = url.strip_prefix("nats://")
+            && tokio::net::TcpStream::connect(hostport).await.is_ok()
+        {
+            return Some(Self {
+                url,
+                _local: None,
+                _container: None,
+            });
+        }
+        eprintln!(
+            "test-utils: {URL_ENV}={url} is UNREACHABLE — falling back to a per-process container"
+        );
+        None
+    }
+
+    /// Start a private `nats-server -js` process on an OS-chosen port with its
+    /// own store directory. `None` when the binary is absent or the server never
+    /// became ready, so the caller falls back to a container.
+    async fn start_local(config: Option<&str>) -> Option<Self> {
+        if LOCAL_UNAVAILABLE.get().is_some()
+            || std::env::var(LOCAL_ENV).is_ok_and(|opt_out| opt_out == "0")
+        {
+            return None;
+        }
+        let store = tempfile::Builder::new()
+            .prefix("chug-test-nats-")
+            .tempdir()
+            .ok()?;
+        let log_path = store.path().join("server.log");
+        let log = std::fs::File::create(&log_path).ok()?;
+        let mut command = std::process::Command::new(LOCAL_BINARY);
+        command.args(["-a", "127.0.0.1", "-p", "-1"]);
+        match config {
+            None => {
+                command.arg("-js").arg("-sd").arg(store.path());
+            }
+            Some(body) => {
+                let conf_path = store.path().join("nats.conf");
+                let store_dir = store.path().join("js");
+                let conf = full_config(&store_dir.to_string_lossy(), body);
+                std::fs::write(&conf_path, conf).ok()?;
+                command.arg("-c").arg(&conf_path);
+            }
+        }
+        command.stdout(log.try_clone().ok()?).stderr(log);
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound && LOCAL_UNAVAILABLE.set(()).is_ok() {
+                    eprintln!(
+                        "test-utils: no `{LOCAL_BINARY}` on PATH — private servers fall back to a container"
+                    );
+                }
+                return None;
+            }
+        };
+        let Some(port) = start_local_port(&log_path, &mut child).await else {
+            start_local_diagnose(&log_path);
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        };
+        Some(Self {
+            url: format!("nats://127.0.0.1:{port}"),
+            _local: Some(LocalServer {
+                child,
+                _store: store,
+            }),
+            _container: None,
+        })
+    }
+
+    async fn start_container(config: Option<&str>) -> Option<Self> {
         if RUNTIME_UNREACHABLE.get().is_some() {
             return None;
         }
@@ -206,7 +328,10 @@ impl NatsTestServer {
             match config {
                 None => image.with_cmd(["-js"]),
                 Some(body) => image
-                    .with_copy_to("/etc/nats-test/nats.conf", full_config(body).into_bytes())
+                    .with_copy_to(
+                        "/etc/nats-test/nats.conf",
+                        full_config("/tmp/js", body).into_bytes(),
+                    )
                     .with_cmd(["-c", "/etc/nats-test/nats.conf"]),
             }
         };
@@ -259,12 +384,53 @@ impl NatsTestServer {
 
         Some(Self {
             url,
+            _local: None,
             _container: Some(container),
         })
     }
 
     pub fn url(&self) -> &str {
         &self.url
+    }
+}
+
+/// Wait for a local server to log the port `-p -1` gave it, giving up early if
+/// the process died instead (bounded by [`LOCAL_POLLS_MAX`]).
+async fn start_local_port(log_path: &Path, child: &mut Child) -> Option<u16> {
+    for _ in 0..LOCAL_POLLS_MAX {
+        let log = std::fs::read_to_string(log_path).unwrap_or_default();
+        if log.contains(READY_LOG)
+            && let Some(port) = start_local_port_from_log(&log)
+        {
+            return Some(port);
+        }
+        if child.try_wait().ok().flatten().is_some() {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    None
+}
+
+fn start_local_port_from_log(log: &str) -> Option<u16> {
+    log.lines()
+        .find_map(|line| line.split_once(LOCAL_LISTEN_LOG))
+        .and_then(|(_, addr)| addr.trim().rsplit_once(':'))
+        .and_then(|(_, port)| port.trim().parse().ok())
+}
+
+/// Show the server's own words rather than a generic timeout, the way
+/// `.chug/tasks/ci.sh`'s `start_gate_nats_local` does.
+fn start_local_diagnose(log_path: &Path) {
+    eprintln!(
+        "test-utils: the local {LOCAL_BINARY} did not come up — falling back to a container. It said:"
+    );
+    for line in std::fs::read_to_string(log_path)
+        .unwrap_or_default()
+        .lines()
+        .take(20)
+    {
+        eprintln!("    {line}");
     }
 }
 
@@ -285,9 +451,9 @@ async fn await_accept(url: &str) -> bool {
 
 /// Wrap a caller-supplied config body (auth/resolver stanza only) with the
 /// harness-owned JetStream store so the body stays free of infra details. The
-/// store dir is inside the container's own filesystem.
-fn full_config(body: &str) -> String {
-    format!("jetstream {{ store_dir: \"/tmp/js\" }}\n{body}")
+/// store dir is the container's own filesystem or the local server's temp dir.
+fn full_config(store_dir: &str, body: &str) -> String {
+    format!("jetstream {{ store_dir: \"{store_dir}\" }}\n{body}")
 }
 
 /// Skip guard: binds a shared [`NatsTestServer`] or returns early (test
@@ -317,7 +483,19 @@ macro_rules! require_nats_config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Duration, NatsTestServer, RUNTIME_UNREACHABLE};
+    use super::{
+        Duration, LOCAL_ENV, NatsTestServer, RUNTIME_UNREACHABLE, start_local_port_from_log,
+    };
+
+    #[test]
+    fn a_local_servers_port_is_read_from_its_own_log() {
+        let log = "[1] [INF] Listening for client connections on 127.0.0.1:39461\n[1] [INF] Server is ready\n";
+        assert_eq!(start_local_port_from_log(log), Some(39461));
+        assert_eq!(
+            start_local_port_from_log("[1] [INF] Starting nats-server"),
+            None
+        );
+    }
 
     /// A start that cannot succeed is answered once per process, not once per
     /// caller — before #407 each of these paid the 5 s retry backoff.
@@ -325,6 +503,7 @@ mod tests {
     async fn an_unreachable_runtime_costs_one_attempt_for_the_whole_process() {
         const SPAWNS: usize = 20;
         const BUDGET: Duration = Duration::from_secs(2);
+        unsafe { std::env::set_var(LOCAL_ENV, "0") };
         unsafe { std::env::set_var("DOCKER_HOST", "unix:///nonexistent/chug-test.sock") };
 
         let started = std::time::Instant::now();

@@ -35,14 +35,18 @@ cargo test                     # whole workspace
 ```
 
 Integration tests need **NATS** (and some need **Docker**). The `test-utils` harness
-reaches a broker **two ways and only two** (`crates/test-utils/src/nats.rs`): the URL in
-`CHUG_TEST_NATS_URL`, else a `nats` image via testcontainers, which needs Docker — it
-never execs a local `nats-server` itself, so a bare binary on `PATH` buys nothing unless
-you start it and export the URL (`nats-server -js & CHUG_TEST_NATS_URL=nats://127.0.0.1:4222
-cargo test`). That URL buys the **shared-server** suites only: `NatsTestServer::spawn` /
-`spawn_with_config` (the `require_nats_config` guard) never read it, so the
-private-server files still need Docker and self-skip without it. Prefer containers over
-host installs. The skip guards are the `require_nats!` / `require_nats_config!`
+has a **shared** route and a **private** one (`crates/test-utils/src/nats.rs`), and they
+do not overlap. Shared (`require_nats!`): the URL in `CHUG_TEST_NATS_URL`, else a `nats`
+image via testcontainers, which needs Docker — it never execs a `nats-server` itself,
+because its handle lives in a never-dropped `static`, so start one yourself and export
+the URL (`nats-server -js & CHUG_TEST_NATS_URL=nats://127.0.0.1:4222 cargo test`).
+Private (`NatsTestServer::spawn` / `spawn_with_config` / `require_nats_config`): never
+reads that URL, and since #408 is a **local `nats-server -js` process per caller** when
+the binary is on `PATH` — OS-chosen port, fresh temp store dir, both reclaimed on drop —
+falling back to a private container otherwise (`CHUG_TEST_NATS_LOCAL=0` forces the
+container). So the five private-server files run on a Docker-less evaluator; only the
+files needing a Docker **backend** still self-skip there. The skip guards are the
+`require_nats!` / `require_nats_config!`
 macros and `test_utils::backend_suite::docker_available()`; there is no `e2e!`
 macro, and no tier-3 suite for one to guard (`testing.md`). **A skip is free and
 must stay free**: since #407 an unreachable Docker daemon is a permanent,
@@ -68,8 +72,9 @@ the absence of a workflow file.
   the gate can hand the harness a broker — a communal Docker NATS, or the image's
   baked `nats-server`, which since #382 is the default on a Docker-less host
   (`CHUG_CI_LOCAL_NATS=0` opts out) — and says which of the
-  two happened, naming the private-server files the URL-only path leaves dark;
-  otherwise it announces the skip. It is diff-aware, with two independent
+  two happened, naming the private-server files as dark on the URL-only path;
+  since #408 they serve themselves from the same baked binary, so that
+  subtraction now **understates** what ran. Otherwise it announces the skip. It is diff-aware, with two independent
   stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
   diff touching Rust paths runs the cargo gate, and a doc/config-only diff runs
   neither and gates in seconds.

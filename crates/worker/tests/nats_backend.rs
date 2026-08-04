@@ -1351,6 +1351,10 @@ async fn declared_mode_without_a_backend_refuses_to_start() {
 /// time.
 #[tokio::test]
 async fn declared_kvm_without_the_device_refuses_to_start() {
+    if !suite::docker_available() {
+        eprintln!("skipping: Docker daemon unavailable");
+        return;
+    }
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;
     };

@@ -12,32 +12,81 @@ marked here rather than described in the present tense.
 ## What CI actually runs
 
 The merge gate (`.chug/tasks/ci.sh`) runs tier 1, and tier 2 when it can. The
-`test-utils` harness reaches a server two ways and only two
-(`crates/test-utils/src/nats.rs`): the URL in `CHUG_TEST_NATS_URL` when a caller
-exports one, else a `nats` image started through testcontainers, which needs a
-Docker daemon. It never execs a `nats-server` binary. `ci.sh` provides the first
-— a communal Docker NATS for the whole gate when a daemon is usable, else the
-image's baked `nats-server` started by the gate itself. That second path is **on by
-default** since job 382 fixed the four dispatcher tier-2 tests that went red while
-the tier was dark (`CHUG_CI_LOCAL_NATS=0` opts back out), which is what makes the
-tier run on an evaluator container — those get no Docker socket. It buys the
-**shared-server** files only:
-`NatsTestServer::spawn`/`spawn_with_config` never consult the URL, so the
-private-server files self-skip on a Docker-less host and the gate names them
-rather than counting them. What the gate announces is the *result* of that
-attempt and never a separate probe — the two drifting apart is what job 375 found,
-and `.chug/tasks/ci.test.sh` pins both the claim and its size to the mechanism. It
-prints the tier state up front and a per-tier pass tally at the end (`tier-2
-(NATS): N passed across M file(s)`, flagged as an upper bound when the
-private-server tests self-skipped, since cargo counts a skip as a pass), so a
-green gate is never silently partial.
+`test-utils` harness reaches a server by a **shared** route and a **private**
+one, and the two do not overlap (`crates/test-utils/src/nats.rs`).
+
+The shared route (`NatsTestServer::shared`, the `require_nats!` guard) is the
+URL in `CHUG_TEST_NATS_URL` when a caller exports one, else a `nats` image
+started through testcontainers, which needs a Docker daemon; it never execs a
+`nats-server` binary, because the handle lives in a `static` that is never
+dropped and a child process there would outlive the binary unreaped. `ci.sh`
+provides the URL — a communal Docker NATS for the whole gate when a daemon is
+usable, else the image's baked `nats-server` started by the gate itself. That
+second path is **on by default** since job 382 fixed the four dispatcher tier-2
+tests that went red while the tier was dark (`CHUG_CI_LOCAL_NATS=0` opts back
+out), which is what makes the tier run on an evaluator container — those get no
+Docker socket.
+
+The private route (`NatsTestServer::spawn`/`spawn_with_config`, the
+`require_nats_config!` guard) never consults the URL — its callers need
+production bucket names that cannot be namespaced, or a server configuration of
+their own. Since job 408 it is a private `nats-server -js` **process** per
+caller when the binary is on `PATH` (an OS-chosen port via `-p -1`, a fresh temp
+store dir, both reclaimed on drop), and a private container otherwise;
+`CHUG_TEST_NATS_LOCAL=0` forces the container. So the five private-server files
+now run on a Docker-less evaluator too — but `announce_tier2` still subtracts
+them from the tally whenever the gate's own NATS came from a URL rather than a
+daemon, which since 408 **understates** what ran. What the gate announces is the
+*result* of its start attempt and never a separate probe — the two drifting
+apart is what job 375 found, and `.chug/tasks/ci.test.sh` pins both the claim and
+its size to the mechanism. It prints the tier state up front and a per-tier pass
+tally at the end (`tier-2 (NATS): N passed across M file(s)`, flagged as an upper
+bound when the private-server tests self-skipped, since cargo counts a skip as a
+pass), so a green gate is never silently partial.
 
 The tests that need a **real Docker daemon** —
 `crates/container/tests/docker_backend.rs`,
 `crates/worker/tests/nats_backend.rs`, `crates/dispatcher/tests/fleet_e2e.rs` —
 are tier-2 files that self-skip on a Docker-less host through
 `test_utils::backend_suite::docker_available()`. They are not a third tier; there
-is no third tier to run.
+is no third tier to run. A *private NATS server* is no longer one of those
+reasons; a Docker **backend** still is, and 13 of `nats_backend.rs`'s 20 tests
+skip on that guard on a Docker-less host even though all 20 now get a server.
+`declared_kvm_without_the_device_refuses_to_start` is one of the 13 and job 408
+added its guard: it asserts a pure *config* refusal, but `daemon::build_backend`
+constructs the Docker client before it validates the `WORKER_KVM` device path,
+so on a Docker-less host the refusal under test is masked by `Socket not found:
+/var/run/docker.sock`. Sequencing the local check first would make the assertion
+host-independent; that is `crates/worker`'s to decide, not the harness's.
+
+### What running the five private-server files costs (job 408)
+
+Before 408 they cost ~15ms **because they did nothing**; the honest comparison is
+against what running them buys. Measured per binary on one host with
+`RUST_MIN_STACK=16777216`, cargo's own `finished in`, before → after:
+
+| file | before | after | what runs now |
+| --- | --- | --- | --- |
+| `auth/tests/nats_live.rs` | 0.00s | **12.12s** | 1 test, operator-mode server |
+| `cli/tests/init_admin.rs` | 0.01s | 0.81s | 3 tests |
+| `dispatcher/tests/fleet_e2e.rs` | 0.00s | 0.17s | 2 tests |
+| `worker/tests/nats_backend.rs` | 0.00s | 0.12s | 20 spawns, 7 tests past the Docker guard |
+| `chuggernaut-channel/tests/stdio.rs` | 0.00s | 0.07s | 1 test |
+| `test-utils/tests/local_nats.rs` (new) | — | 0.10s | 2 tests, 3 servers |
+
+Cargo runs test binaries one at a time, so those deltas add: ~+13.3s on job 407's
+23.44s whole-workspace baseline, ~36.7s in total. That is arithmetic on the table
+above, not a sixth measurement.
+
+**Starting the server is not the cost.** A private `nats-server` is up and
+serving in ~34ms, so all ~26 of them across the five binaries are well under a
+second in total. `nats_live.rs` is 12.1s because it asserts **denials**, and a
+denial is only observable as a wait: four of its assertions wait 3s each for a
+request the server must never answer. That is inherent to what it proves. It was
+19.1s until 408 bounded the fifth one, which passed a 200ms *backoff* to
+`request_with_retry(attempts = 1)` — where the backoff is never reached — and so
+waited async-nats' 10s default request timeout instead (STYLE.md Tier-2 rule 3:
+every wait a timeout).
 
 ### A skip costs nothing (job 407)
 
@@ -98,8 +147,10 @@ If NATS is unavailable, `ci.sh` prints `tier-2 (NATS): SKIPPED` and, when the di
 adds or edits a tier-2 test file, a loud `!!!` warning — such a change then needs
 a **manual verification note** in the work summary. To run the tier locally
 without Docker, start the `nats-server` binary yourself and point the harness at
-it: `nats-server -js & CHUG_TEST_NATS_URL=nats://127.0.0.1:4222 cargo test` — the
-private-server suites above still skip, so that is not a whole-tier run.
+it: `nats-server -js & CHUG_TEST_NATS_URL=nats://127.0.0.1:4222 cargo test`. That
+URL serves the shared suites; the private-server suites serve themselves from the
+same binary on `PATH` (job 408), so with `nats-server` installed this *is* a
+whole-tier run except for the files that need a real Docker daemon.
 
 ## Tier 1: Unit
 
@@ -278,7 +329,7 @@ these suites cover.
 
 ## Conventions
 
-- `test-utils` owns: the NATS harness (`CHUG_TEST_NATS_URL`, else a testcontainers-run `nats` container), temp-repo builder, fake backend/provider, record-fixture builders (`fixture::job` — one blank `types::Job` a test edits into its case, not a project fixture), and the skip guards: the `require_nats!`/`require_nats_config!` macros for NATS and `backend_suite::docker_available()` for Docker. There is no `e2e!` macro
+- `test-utils` owns: the NATS harness (shared: `CHUG_TEST_NATS_URL`, else a testcontainers-run `nats` container; private: a local `nats-server -js` process per caller, else a private container), temp-repo builder, fake backend/provider, record-fixture builders (`fixture::job` — one blank `types::Job` a test edits into its case, not a project fixture), and the skip guards: the `require_nats!`/`require_nats_config!` macros for NATS and `backend_suite::docker_available()` for Docker. There is no `e2e!` macro
 - Every bug fix lands with a regression test at the lowest tier that can express it
 - Coverage is tracked per crate (v1 discipline carries over); `dispatcher::state` and `release` validation are held to ~100% branch coverage — they are the correctness core
 
@@ -297,11 +348,13 @@ thing you ask for, not a thing that runs on every push
 ([#308](docs/design/308-gha-port.md) §G).
 
 Two limits to read the number with. The run starts the image's `nats-server` and
-exports `CHUG_TEST_NATS_URL`, so tier-2 executes — but the tier-2 suites that
-need a *private* server, and the ones that need a Docker daemon, still self-skip,
-so every percentage is a lower bound and the script says so. (Its wording calls
-those Docker-needing suites "Tier-3"; they are the tier-2 files named above, and
-tier 3 is not built.) And `coverage.lcov` plus
+exports `CHUG_TEST_NATS_URL`, so tier-2 executes — and since job 408 the
+*private*-server suites are measured too, because they serve themselves from the
+same binary `start_nats` puts on `PATH`. What still self-skips is only what needs
+a Docker **backend**: 7 of `docker_backend.rs`'s 8 tests, 13 of
+`nats_backend.rs`'s 20, and 1 of `fleet_e2e.rs`'s 2, all at their
+`docker_available()` guard. So every percentage is still a lower bound, and the
+script says so. And `coverage.lcov` plus
 `coverage-html/` leave the container only through the run's output archive: the
 script tars them to `/workspace/chug-output.tar.gz`, which the dispatcher
 harvests into the task's `output.tar.gz` artifact

@@ -79,11 +79,12 @@ install_llvm_cov() {
 	rustup component add llvm-tools-preview
 }
 
-# Tier-2 (NATS) tests reach a server through test-utils' `NatsTestServer::shared`,
-# which honours CHUG_TEST_NATS_URL and otherwise needs a Docker daemon
-# (crates/test-utils/src/nats.rs). The agent-rust image bakes a `nats-server`
-# binary, so the cheapest way to make the tier execute for real is to run one
-# here and point the harness at it — no Docker socket required.
+# Tier-2 (NATS) tests reach a server two ways (crates/test-utils/src/nats.rs):
+# `NatsTestServer::shared` honours CHUG_TEST_NATS_URL and otherwise needs a Docker
+# daemon, and `NatsTestServer::spawn` gives one caller a private server — since
+# job #408 a local `nats-server -js` process, falling back to a container. The
+# agent-rust image bakes a `nats-server` binary, so running one here serves the
+# shared route by URL and the private route by PATH — no Docker socket required.
 start_nats() {
 	if [ -n "${CHUG_TEST_NATS_URL:-}" ]; then
 		echo "coverage: tier-2 (NATS) uses the provided CHUG_TEST_NATS_URL=$CHUG_TEST_NATS_URL"
@@ -130,8 +131,11 @@ start_nats
 
 # Say what was measured, so nobody reads a partial number as a total.
 echo "coverage: SCOPE — cargo llvm-cov --workspace --all-features, tier 1 + tier 2."
-echo "coverage:   Tier-3 (real Docker containers) tests self-skip, as do the tier-2"
-echo "coverage:   suites that need a PRIVATE server (NatsTestServer::spawn, i.e. Docker)."
+echo "coverage:   Since job #408 the PRIVATE-server suites (NatsTestServer::spawn) serve"
+echo "coverage:   themselves from a nats-server on PATH, so when one is there (see above)"
+echo "coverage:   they are measured too. What still self-skips is what needs a Docker"
+echo "coverage:   BACKEND: 7 of docker_backend.rs's 8 tests, 13 of nats_backend.rs's 20,"
+echo "coverage:   and 1 of fleet_e2e.rs's 2, all at their docker_available() guard."
 echo "coverage:   Doctests are not instrumented. Every percentage below is therefore a"
 echo "coverage:   LOWER BOUND on covered behavior, not a total."
 

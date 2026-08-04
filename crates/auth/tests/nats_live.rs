@@ -141,15 +141,20 @@ async fn scoped_creds_enforced_by_operator_mode_server() {
         "cross-project job read must not succeed: {denied:?}"
     );
 
-    let denied = work
-        .request_with_retry(
+    let denied = tokio::time::timeout(
+        Duration::from_secs(3),
+        work.request_with_retry(
             &subjects::eval_submit("acme", "api", 1, 7),
             b"{}",
             1,
             Duration::from_millis(200),
-        )
-        .await;
-    assert!(denied.is_err(), "eval submit must be denied for work creds");
+        ),
+    )
+    .await;
+    assert!(
+        !matches!(denied, Ok(Ok(_))),
+        "eval submit must be denied for work creds: {denied:?}"
+    );
 
     let denied = tokio::time::timeout(
         Duration::from_secs(3),
