@@ -144,6 +144,12 @@ pub struct WorkSpec {
     /// their own (§4.1). Disallowed for human work (no container).
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Cloud identities (design #313 A5) the work container may exchange a
+    /// workload token for, each naming a `cloud-identities.*` record. Scoped
+    /// here because that is the only container they reach; not inherited from
+    /// anywhere, never secrets, and disallowed for human work (no container).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workload_identities: Vec<String>,
 }
 
 pub const DEFAULT_REVIEW_ITERATIONS: u32 = 5;
@@ -208,6 +214,11 @@ pub struct WrapUpSpec {
     /// the only container they reach; not inherited from `work.secrets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+    /// Cloud identities (design #313 A5) the `run` container may exchange a
+    /// workload token for. The only container they reach; not inherited from
+    /// `work.workload_identities`, and disallowed without `run`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workload_identities: Vec<String>,
 }
 
 impl WrapUpSpec {
@@ -249,6 +260,16 @@ pub fn is_valid_task_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Whether a name is non-empty `[A-Za-z0-9_-]+` — the charset a NATS subject
+/// or KV key segment carries unencoded, shared by fleet node names and cloud
+/// identity names.
+fn is_ascii_dashed_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
 /// Wrap-up mode after eval-pass (design-lifecycle.md).
@@ -314,10 +335,7 @@ impl Placement {
     /// `[A-Za-z0-9_-]+`). Kept in sync with the fleet config's `is_subject_safe`
     /// without depending on it (`types` is pure data).
     fn node_is_well_formed(node: &str) -> bool {
-        !node.is_empty()
-            && node
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        is_ascii_dashed_name(node)
     }
 }
 
@@ -435,6 +453,12 @@ pub struct Evaluator {
     pub model: Option<String>,
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Cloud identities (design #313 A5) this evaluator's container may
+    /// exchange a workload token for. The only container they reach; not
+    /// inherited from `work.workload_identities`, and disallowed for a human
+    /// evaluator (no container).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workload_identities: Vec<String>,
     /// Default true; false = advisory.
     pub required: Option<bool>,
     /// Staged evaluation ordering (spec §3.3): evaluators run in ascending
@@ -575,6 +599,10 @@ impl JobType {
                     (self.resources.is_some(), "resources"),
                     (self.work_retries.is_some(), "work_retries"),
                     (!self.work.secrets.is_empty(), "work.secrets"),
+                    (
+                        !self.work.workload_identities.is_empty(),
+                        "work.workload_identities",
+                    ),
                     (self.work.run.is_some(), "work.run"),
                     (self.work.provider.is_some(), "work.provider"),
                     (self.work.model.is_some(), "work.model"),
@@ -640,6 +668,7 @@ impl JobType {
                         (e.provider.is_some(), "provider"),
                         (e.model.is_some(), "model"),
                         (!e.secrets.is_empty(), "secrets"),
+                        (!e.workload_identities.is_empty(), "workload_identities"),
                     ] {
                         if present {
                             errs.push(FieldRuleError::Disallowed {
@@ -720,6 +749,10 @@ impl JobType {
             for (present, field) in [
                 (wrap.image.is_some(), "wrap_up.image"),
                 (!wrap.secrets.is_empty(), "wrap_up.secrets"),
+                (
+                    !wrap.workload_identities.is_empty(),
+                    "wrap_up.workload_identities",
+                ),
             ] {
                 if present {
                     errs.push(FieldRuleError::Disallowed {
@@ -742,6 +775,62 @@ impl JobType {
 
         errs.extend(self.validate_runtime());
         errs.extend(self.validate_inputs());
+        errs.extend(self.validate_workload_identities());
+        errs
+    }
+
+    /// The `workload_identities:` declaration rules (spec §1.1, design #313
+    /// A5): each name is a `cloud-identities.*` record name, and any non-empty
+    /// declaration requires the skew gate. A job type declaring none produces
+    /// no errors from here, so it validates exactly as it did before the
+    /// feature existed.
+    fn validate_workload_identities(&self) -> Vec<FieldRuleError> {
+        let mut errs = Vec::new();
+        let job_ctx = format!("job type '{}'", self.name);
+        let mut declared: Vec<(&'static str, String, &[String])> = vec![
+            (
+                "work.workload_identities",
+                job_ctx.clone(),
+                &self.work.workload_identities,
+            ),
+            (
+                "wrap_up.workload_identities",
+                job_ctx,
+                &self.wrap_up.workload_identities,
+            ),
+        ];
+        for e in &self.eval {
+            declared.push((
+                "eval.workload_identities",
+                format!("evaluator '{}'", e.name),
+                &e.workload_identities,
+            ));
+        }
+        declared.retain(|(_, _, names)| !names.is_empty());
+        for (field, context, names) in &declared {
+            for name in *names {
+                if !is_ascii_dashed_name(name) {
+                    errs.push(FieldRuleError::Invalid {
+                        field,
+                        context: context.clone(),
+                        reason: format!(
+                            "{name:?} is not a valid cloud identity name ([A-Za-z0-9_-]+)"
+                        ),
+                    });
+                }
+            }
+        }
+        if !declared.is_empty()
+            && self.min_dispatcher.unwrap_or(0) < crate::version::WORKLOAD_IDENTITY_SCHEMA_EPOCH
+        {
+            errs.push(FieldRuleError::Required {
+                field: "min_dispatcher",
+                context: format!(
+                    "a job type declaring 'workload_identities:' (needs min_dispatcher >= {})",
+                    crate::version::WORKLOAD_IDENTITY_SCHEMA_EPOCH
+                ),
+            });
+        }
         errs
     }
 
@@ -1030,6 +1119,22 @@ impl ProjectDefaults {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// Every job type this repo ships, so a golden "the feature is off"
+    /// assertion is judged against all of `.chug/jobs/` rather than a subset
+    /// that can drift from it.
+    const REPO_JOB_TYPES: [&str; 10] = [
+        include_str!("../../../.chug/jobs/android-proof.yaml"),
+        include_str!("../../../.chug/jobs/code.yaml"),
+        include_str!("../../../.chug/jobs/coverage.yaml"),
+        include_str!("../../../.chug/jobs/deploy.yaml"),
+        include_str!("../../../.chug/jobs/design.yaml"),
+        include_str!("../../../.chug/jobs/docs.yaml"),
+        include_str!("../../../.chug/jobs/manual.yaml"),
+        include_str!("../../../.chug/jobs/rollback.yaml"),
+        include_str!("../../../.chug/jobs/web-publish.yaml"),
+        include_str!("../../../.chug/jobs/web.yaml"),
+    ];
 
     const SPEC_EXAMPLE: &str = r#"
 name: implement-endpoint
@@ -1977,18 +2082,7 @@ min_dispatcher: 5
         );
         let defaults =
             ProjectDefaults::parse(include_str!("../../../.chug/jobs/_defaults.yaml")).unwrap();
-        for yaml in [
-            include_str!("../../../.chug/jobs/android-proof.yaml"),
-            include_str!("../../../.chug/jobs/code.yaml"),
-            include_str!("../../../.chug/jobs/coverage.yaml"),
-            include_str!("../../../.chug/jobs/deploy.yaml"),
-            include_str!("../../../.chug/jobs/design.yaml"),
-            include_str!("../../../.chug/jobs/docs.yaml"),
-            include_str!("../../../.chug/jobs/manual.yaml"),
-            include_str!("../../../.chug/jobs/rollback.yaml"),
-            include_str!("../../../.chug/jobs/web-publish.yaml"),
-            include_str!("../../../.chug/jobs/web.yaml"),
-        ] {
+        for yaml in REPO_JOB_TYPES {
             let jt = JobType::parse(yaml).unwrap();
             assert_eq!(jt.runtime, None, "{}: declares runtime", jt.name);
             assert!(
@@ -2219,6 +2313,173 @@ rework_budget: 1
                 ..
             }
         )));
+    }
+
+    /// A command job type declaring `block` verbatim, with the `min_dispatcher`
+    /// a non-empty `workload_identities:` requires already declared — so each
+    /// test below asserts about its own rule and nothing else.
+    fn jt_with_identities(block: &str) -> JobType {
+        JobType::parse(&format!(
+            "name: build-image\nimage: img:latest\nmin_dispatcher: {}\n{block}",
+            crate::version::WORKLOAD_IDENTITY_SCHEMA_EPOCH
+        ))
+        .expect("workload_identities block should parse")
+    }
+
+    /// Design #313 A5: a container receives exactly the identities its own
+    /// block declares — `work`, each `eval[]` entry and `wrap_up` are scoped
+    /// separately and nothing is inherited from `work`.
+    #[test]
+    fn workload_identities_are_scoped_per_container_and_never_inherited() {
+        let jt = jt_with_identities(
+            "work:\n  type: command\n  run: ./build.sh\n  \
+             workload_identities: [gcp-artifact-writer]\n\
+             wrap_up:\n  run: ./publish.sh\n  workload_identities: [gcp-publisher]\n\
+             eval:\n  - name: digest\n    type: command\n    run: ./digest.sh\n    \
+             workload_identities: [gcp-reader]\n  \
+             - name: lint\n    type: command\n    run: ./lint.sh\n",
+        );
+        assert_eq!(jt.validate(), vec![]);
+        assert_eq!(jt.work.workload_identities, vec!["gcp-artifact-writer"]);
+        assert_eq!(jt.wrap_up.workload_identities, vec!["gcp-publisher"]);
+        assert_eq!(jt.eval[0].workload_identities, vec!["gcp-reader"]);
+        assert_eq!(jt.eval[1].workload_identities, Vec::<String>::new());
+    }
+
+    /// An unknown key inside a container block stays a hard parse error
+    /// (spec §14.2) — a typo'd declaration must never read as "no identity".
+    #[test]
+    fn a_misspelled_workload_identities_key_is_a_hard_error() {
+        for block in [
+            "work:\n  type: command\n  run: ./b.sh\n  workload_identity: [gcp]\n",
+            "work:\n  type: command\n  run: ./b.sh\n\
+             eval:\n  - name: d\n    type: command\n    run: ./d.sh\n    \
+             workload_identitys: [gcp]\n",
+            "work:\n  type: command\n  run: ./b.sh\n\
+             wrap_up:\n  run: ./p.sh\n  Workload_identities: [gcp]\n",
+        ] {
+            let err = JobType::parse(&format!("name: b\nimage: i:l\n{block}"))
+                .expect_err("an unknown key inside a nested block must fail parsing");
+            assert!(err.to_string().contains("unknown field"), "{err}");
+        }
+    }
+
+    /// The skew gate (spec §14.2): the nested blocks carry
+    /// `deny_unknown_fields`, so an N-1 dispatcher rejects the config outright
+    /// — the declared `min_dispatcher` is the only signal that crosses.
+    #[test]
+    fn non_empty_workload_identities_require_the_min_dispatcher_declaration() {
+        let expected = FieldRuleError::Required {
+            field: "min_dispatcher",
+            context: format!(
+                "a job type declaring 'workload_identities:' (needs min_dispatcher >= {})",
+                crate::version::WORKLOAD_IDENTITY_SCHEMA_EPOCH
+            ),
+        };
+        for block in [
+            "work:\n  type: command\n  run: ./b.sh\n  workload_identities: [gcp]\n",
+            "work:\n  type: command\n  run: ./b.sh\n\
+             eval:\n  - name: d\n    type: command\n    run: ./d.sh\n    \
+             workload_identities: [gcp]\n",
+            "work:\n  type: command\n  run: ./b.sh\n\
+             wrap_up:\n  run: ./p.sh\n  workload_identities: [gcp]\n",
+        ] {
+            let ungated = JobType::parse(&format!("name: b\nimage: i:l\n{block}")).unwrap();
+            assert!(ungated.validate().contains(&expected), "{block}");
+            let short = JobType::parse(&format!(
+                "name: b\nimage: i:l\nmin_dispatcher: {}\n{block}",
+                crate::version::WORKLOAD_IDENTITY_SCHEMA_EPOCH - 1
+            ))
+            .unwrap();
+            assert!(short.validate().contains(&expected), "{block}");
+            assert_eq!(jt_with_identities(block).validate(), vec![], "{block}");
+        }
+    }
+
+    /// A name is a `cloud-identities.*` key segment, so it is shape-checked at
+    /// parse rather than left to fail as a missing record.
+    #[test]
+    fn workload_identity_names_are_subject_safe_tokens() {
+        let jt = jt_with_identities(
+            "work:\n  type: command\n  run: ./b.sh\n  workload_identities: [\"gcp.writer\", \"\"]\n",
+        );
+        let errs = jt.validate();
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        assert!(errs.iter().all(|e| matches!(
+            e,
+            FieldRuleError::Invalid {
+                field: "work.workload_identities",
+                ..
+            }
+        )));
+    }
+
+    /// A container that does not exist cannot be handed a credential: human
+    /// work, a human evaluator and a wrap-up with no `run` all refuse the
+    /// declaration, exactly as they refuse `secrets:`.
+    #[test]
+    fn workload_identities_are_disallowed_where_no_container_runs() {
+        for (block, field) in [
+            (
+                "work:\n  type: human\n  prompt: p.md\n  workload_identities: [gcp]\n",
+                "work.workload_identities",
+            ),
+            (
+                "work:\n  type: command\n  run: ./b.sh\n\
+                 eval:\n  - name: sign\n    type: human\n    prompt: p.md\n    \
+                 workload_identities: [gcp]\n",
+                "workload_identities",
+            ),
+            (
+                "work:\n  type: command\n  run: ./b.sh\n\
+                 wrap_up:\n  workload_identities: [gcp]\n",
+                "wrap_up.workload_identities",
+            ),
+        ] {
+            let errs = jt_with_identities(block).validate();
+            assert!(
+                errs.iter().any(
+                    |e| matches!(e, FieldRuleError::Disallowed { field: f, .. } if *f == field)
+                ),
+                "{block}: {errs:?}"
+            );
+        }
+    }
+
+    /// The feature is **off** for every job type in this repo, not merely
+    /// unused: no declaration, nothing new on the wire, and no config declaring
+    /// the new epoch until a dispatcher carrying it is deployed (spec §14.3).
+    #[test]
+    fn workload_identities_absent_leaves_every_existing_job_type_untouched() {
+        let spec_example = JobType::parse(SPEC_EXAMPLE).unwrap();
+        assert!(
+            !serde_yaml::to_string(&spec_example)
+                .unwrap()
+                .contains("workload_identities"),
+            "an undeclared workload_identities must not appear on the wire"
+        );
+        let defaults =
+            ProjectDefaults::parse(include_str!("../../../.chug/jobs/_defaults.yaml")).unwrap();
+        for yaml in REPO_JOB_TYPES {
+            let jt = JobType::parse(yaml)
+                .unwrap()
+                .with_defaults(&defaults)
+                .unwrap();
+            assert_eq!(jt.validate(), vec![], "{}: field rules", jt.name);
+            assert!(jt.work.workload_identities.is_empty(), "{}", jt.name);
+            assert!(jt.wrap_up.workload_identities.is_empty(), "{}", jt.name);
+            assert!(
+                jt.eval.iter().all(|e| e.workload_identities.is_empty()),
+                "{}",
+                jt.name
+            );
+            assert!(
+                jt.min_dispatcher.unwrap_or(0) < crate::version::WORKLOAD_IDENTITY_SCHEMA_EPOCH,
+                "{}: declares the new epoch, which no config may until the dispatcher \
+                 carrying it is deployed (spec §14.3)",
+                jt.name
+            );
+        }
     }
 
     #[test]

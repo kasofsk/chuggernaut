@@ -3,6 +3,7 @@
 //! Pure data — no I/O, no async. Everything downstream depends on this crate.
 
 pub mod channel;
+pub mod cloud_identity;
 pub mod config_paths;
 pub mod cron;
 pub mod deploy;
@@ -28,6 +29,7 @@ pub mod worker;
 pub use channel::{
     AgentReply, ChannelEntry, ChannelOrigin, ChannelStatus, ChannelUpdate, OperatorMessage,
 };
+pub use cloud_identity::CloudIdentity;
 pub use config_paths::{CONFIG_DIR, config_entry_name, config_path, config_path_candidates};
 pub use cron::{CRON_FIELD_COUNT, CronExpr, CronParseError};
 pub use deploy::{DeployLeg, DeployReport, LegStatus};
@@ -70,7 +72,7 @@ pub use task::{
 pub use user::{Identity, IdentityKind, ProjectRole, User};
 pub use version::{
     CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, INPUTS_SCHEMA_EPOCH, RUNTIME_SCHEMA_EPOCH,
-    SCHEDULE_INPUTS_SCHEMA_EPOCH, WORKER_RPC_VERSION,
+    SCHEDULE_INPUTS_SCHEMA_EPOCH, WORKER_RPC_VERSION, WORKLOAD_IDENTITY_SCHEMA_EPOCH,
 };
 pub use worker::{
     CapacityObservation, CapacitySource, CapacityTransport, ObservedCapacity, capacity_applies,

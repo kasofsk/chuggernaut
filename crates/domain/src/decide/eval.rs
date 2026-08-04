@@ -1035,6 +1035,7 @@ mod tests {
             provider: None,
             model: None,
             secrets: vec![],
+            workload_identities: vec![],
             required,
             stage,
         }

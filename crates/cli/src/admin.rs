@@ -30,6 +30,8 @@ pub enum AdminCmd {
     Secret(SecretCmd),
     #[command(subcommand)]
     Var(VarCmd),
+    #[command(subcommand)]
+    CloudIdentity(CloudIdentityCmd),
     /// Mint NATS credentials for a `chuggernaut worker` node daemon
     /// (spec §3.1): allowed only its own `req.worker.{node}.>` subjects.
     /// Local-only — reads the account seed, no NATS connection.
@@ -185,6 +187,36 @@ pub enum VarCmd {
     },
 }
 
+/// §8.3 cloud identities — plaintext KV, the record a job type's
+/// `workload_identities: [name]` resolves to (design #313 A5). Not secrets:
+/// there is deliberately no `copy` verb and no path to the `global/agents`
+/// scope.
+#[derive(clap::Subcommand, Debug)]
+pub enum CloudIdentityCmd {
+    Set {
+        #[command(flatten)]
+        scoped: ScopedName,
+        /// The provider audience the minted token is valid at.
+        #[arg(long)]
+        audience: String,
+        /// The service account the exchanged token impersonates.
+        #[arg(long)]
+        service_account: String,
+        /// Optional per-identity cap on the minted token's lifetime.
+        #[arg(long)]
+        token_ttl_secs: Option<u64>,
+    },
+    /// Names and values — cloud coordinates are not sensitive.
+    List {
+        #[arg(long)]
+        project: String,
+    },
+    Delete {
+        #[command(flatten)]
+        scoped: ScopedName,
+    },
+}
+
 #[derive(clap::Subcommand, Debug)]
 pub enum UserCmd {
     Create {
@@ -313,6 +345,7 @@ pub async fn run(args: AdminArgs) -> Result<()> {
         AdminCmd::Project(cmd) => run_project(&store, cmd).await,
         AdminCmd::Secret(cmd) => run_secret(&store, &args.keys_dir, cmd).await,
         AdminCmd::Var(cmd) => run_var(&store, cmd).await,
+        AdminCmd::CloudIdentity(cmd) => run_cloud_identity(&store, cmd).await,
         AdminCmd::WorkerRefresh {
             node,
             sha,
@@ -778,6 +811,64 @@ async fn run_var(store: &NatsStore, cmd: VarCmd) -> Result<()> {
             vars.delete(&format!("{owner}.{project}.{}", scoped.name))
                 .await?;
             println!("deleted var {owner}/{project}.{}", scoped.name);
+        }
+    }
+    Ok(())
+}
+
+/// §8.3 cloud identity records (design #313 A5). Operator-managed exactly as
+/// secrets and vars are — CLI only, no HTTP route — and stored plaintext in
+/// their own bucket, never through the secret store.
+async fn run_cloud_identity(store: &NatsStore, cmd: CloudIdentityCmd) -> Result<()> {
+    let bucket = store.raw_bucket(store::buckets::CLOUD_IDENTITIES).await?;
+    match cmd {
+        CloudIdentityCmd::Set {
+            scoped,
+            audience,
+            service_account,
+            token_ttl_secs,
+        } => {
+            let (owner, project) = scoped.split()?;
+            keys::validate_subject_component(&scoped.name)?;
+            for (field, value) in [
+                ("--audience", &audience),
+                ("--service-account", &service_account),
+            ] {
+                if value.trim().is_empty() {
+                    bail!("{field} must not be empty");
+                }
+            }
+            let record = types::CloudIdentity {
+                audience,
+                service_account,
+                token_ttl_secs,
+            };
+            bucket
+                .put_json(&format!("{owner}.{project}.{}", scoped.name), &record)
+                .await?;
+            println!("set cloud identity {owner}/{project}.{}", scoped.name);
+        }
+        CloudIdentityCmd::List { project } => {
+            let Some((owner, project)) = project.split_once('/') else {
+                bail!("--project must be owner/project, got {project:?}");
+            };
+            let prefix = format!("{owner}.{project}.");
+            for key in bucket.keys_with_prefix(&prefix).await? {
+                let Some(name) = key.strip_prefix(&prefix) else {
+                    continue;
+                };
+                let Some(record) = bucket.get_json::<types::CloudIdentity>(&key).await? else {
+                    continue;
+                };
+                println!("{name}\t{}\t{}", record.audience, record.service_account);
+            }
+        }
+        CloudIdentityCmd::Delete { scoped } => {
+            let (owner, project) = scoped.split()?;
+            bucket
+                .delete(&format!("{owner}.{project}.{}", scoped.name))
+                .await?;
+            println!("deleted cloud identity {owner}/{project}.{}", scoped.name);
         }
     }
     Ok(())

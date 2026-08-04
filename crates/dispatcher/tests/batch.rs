@@ -171,6 +171,7 @@ fn cmd_eval(name: &str, run: &str) -> Evaluator {
         provider: None,
         model: None,
         secrets: vec![],
+        workload_identities: vec![],
         required: None,
         stage: 0,
     }

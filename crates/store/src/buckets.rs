@@ -12,6 +12,12 @@ pub const STEPS: &str = "steps";
 pub const CHANNELS: &str = "channels";
 pub const VARS: &str = "vars";
 pub const SECRETS: &str = "secrets";
+
+/// Cloud identity records (spec §8.3, design #313 A5): plaintext cloud
+/// coordinates a `workload_identities:` name resolves to. Deliberately its own
+/// bucket — a cloud identity is never a secret and never rides the
+/// `global/agents` grant.
+pub const CLOUD_IDENTITIES: &str = "cloud-identities";
 pub const USERS: &str = "users";
 pub const KNOWLEDGE: &str = "knowledge";
 pub const PLATFORM: &str = "platform";
@@ -28,6 +34,7 @@ pub const ALL_BUCKETS: &[&str] = &[
     CHANNELS,
     VARS,
     SECRETS,
+    CLOUD_IDENTITIES,
     USERS,
     KNOWLEDGE,
     PLATFORM,

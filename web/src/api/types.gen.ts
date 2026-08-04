@@ -628,6 +628,13 @@ export interface Evaluator {
    */
   stage: number;
   type: EvaluatorType;
+  /**
+   * Cloud identities (design #313 A5) this evaluator's container may
+   * exchange a workload token for. The only container they reach; not
+   * inherited from `work.workload_identities`, and disallowed for a human
+   * evaluator (no container).
+   */
+  workload_identities?: string[];
 }
 export interface FileQuery {
   path: string;
@@ -1349,6 +1356,13 @@ export interface WorkSpec {
    */
   secrets: string[];
   type: WorkType;
+  /**
+   * Cloud identities (design #313 A5) the work container may exchange a
+   * workload token for, each naming a `cloud-identities.*` record. Scoped
+   * here because that is the only container they reach; not inherited from
+   * anywhere, never secrets, and disallowed for human work (no container).
+   */
+  workload_identities?: string[];
 }
 /**
  * Inline review loop declaration (spec §1.1, §4.5). The reviewer runs inside
@@ -1407,6 +1421,12 @@ export interface WrapUpSpec {
    */
   secrets?: string[];
   type: WrapUpMode;
+  /**
+   * Cloud identities (design #313 A5) the `run` container may exchange a
+   * workload token for. The only container they reach; not inherited from
+   * `work.workload_identities`, and disallowed without `run`.
+   */
+  workload_identities?: string[];
 }
 export interface LoginBody {
   email: string;

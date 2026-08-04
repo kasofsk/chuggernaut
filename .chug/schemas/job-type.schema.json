@@ -208,6 +208,13 @@
         },
         "type": {
           "$ref": "#/$defs/EvaluatorType"
+        },
+        "workload_identities": {
+          "description": "Cloud identities (design #313 A5) this evaluator's container may\nexchange a workload token for. The only container they reach; not\ninherited from `work.workload_identities`, and disallowed for a human\nevaluator (no container).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false,
@@ -470,6 +477,13 @@
         },
         "type": {
           "$ref": "#/$defs/WorkType"
+        },
+        "workload_identities": {
+          "description": "Cloud identities (design #313 A5) the work container may exchange a\nworkload token for, each naming a `cloud-identities.*` record. Scoped\nhere because that is the only container they reach; not inherited from\nanywhere, never secrets, and disallowed for human work (no container).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false,
@@ -536,6 +550,13 @@
           "description": "`merge` (default) squash-merges the job branch through the merge\nqueue/gate; `none` goes straight to Done — for jobs whose effect is\nexternal (deploys, reports) and whose branch is scratch.",
           "$ref": "#/$defs/WrapUpMode",
           "default": "merge"
+        },
+        "workload_identities": {
+          "description": "Cloud identities (design #313 A5) the `run` container may exchange a\nworkload token for. The only container they reach; not inherited from\n`work.workload_identities`, and disallowed without `run`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false

@@ -86,6 +86,13 @@
         },
         "type": {
           "$ref": "#/$defs/EvaluatorType"
+        },
+        "workload_identities": {
+          "description": "Cloud identities (design #313 A5) this evaluator's container may\nexchange a workload token for. The only container they reach; not\ninherited from `work.workload_identities`, and disallowed for a human\nevaluator (no container).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "additionalProperties": false,

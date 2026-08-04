@@ -2888,9 +2888,16 @@ impl Core {
             .await?
             .keys_with_prefix(&prefix)
             .await?;
+        let cloud_identities = self
+            .store
+            .raw_bucket(store::buckets::CLOUD_IDENTITIES)
+            .await?
+            .keys_with_prefix(&prefix)
+            .await?;
         Ok(KvNames {
             secrets: name_set(secrets),
             vars: name_set(vars),
+            cloud_identities: name_set(cloud_identities),
         })
     }
 

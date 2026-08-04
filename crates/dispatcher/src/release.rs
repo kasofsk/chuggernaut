@@ -214,7 +214,43 @@ fn static_errors_kv(seq: Option<u64>, job_type: &JobType, kv: &KvNames) -> Vec<V
             ));
         }
     }
+    errs.extend(static_errors_cloud_identities(seq, job_type, kv));
     errs
+}
+
+/// The cloud-identity half of [`static_errors_kv`] (§2.2, design #313 A5):
+/// every name declared in a container's `workload_identities:` has a record in
+/// the `cloud-identities.*` bucket. This is what the named reference buys — a
+/// misdeclared identity fails here with a fixable per-name message instead of
+/// at token exchange inside the container.
+fn static_errors_cloud_identities(
+    seq: Option<u64>,
+    job_type: &JobType,
+    kv: &KvNames,
+) -> Vec<ValidationError> {
+    let declared = job_type
+        .work
+        .workload_identities
+        .iter()
+        .map(|name| ("work.workload_identities", name))
+        .chain(
+            job_type
+                .wrap_up
+                .workload_identities
+                .iter()
+                .map(|name| ("wrap_up.workload_identities", name)),
+        )
+        .chain(job_type.eval.iter().flat_map(|e: &Evaluator| {
+            e.workload_identities
+                .iter()
+                .map(|name| ("eval.workload_identities", name))
+        }));
+    declared
+        .filter(|(_, name)| !kv.cloud_identities.contains(*name))
+        .map(|(field, name)| {
+            ValidationError::new(seq, field, format!("cloud identity '{name}' is not set"))
+        })
+        .collect()
 }
 
 /// [`project_config::read_file`] in the validation-error vocabulary: the config
@@ -272,9 +308,14 @@ mod tests {
     }
 
     fn kv(secrets: &[&str], vars: &[&str]) -> KvNames {
+        kv_with_identities(secrets, vars, &[])
+    }
+
+    fn kv_with_identities(secrets: &[&str], vars: &[&str], identities: &[&str]) -> KvNames {
         KvNames {
             secrets: secrets.iter().map(|s| (*s).to_string()).collect(),
             vars: vars.iter().map(|v| (*v).to_string()).collect(),
+            cloud_identities: identities.iter().map(|i| (*i).to_string()).collect(),
         }
     }
 
@@ -309,5 +350,59 @@ mod tests {
             assert_eq!(errs[0].field, field);
             assert!(errs[0].message.contains("reserved"), "{errs:?}");
         }
+    }
+
+    /// The whole point of the named reference (design #313 A5): a declared
+    /// identity with no `cloud-identities.*` record fails at release, per
+    /// container and per name, instead of at token exchange inside the
+    /// container.
+    #[test]
+    fn declared_cloud_identities_must_exist_in_kv() {
+        let jt = JobType::parse(
+            "name: deploy\nimage: img:latest\nmin_dispatcher: 5\n\
+             work:\n  type: command\n  run: ./deploy.sh\n  \
+             workload_identities: [gcp-artifact-writer]\n\
+             wrap_up:\n  run: ./publish.sh\n  workload_identities: [gcp-publisher]\n\
+             eval:\n  - name: health\n    type: command\n    run: ./h.sh\n    \
+             workload_identities: [gcp-reader]\n",
+        )
+        .unwrap();
+        assert_eq!(jt.validate(), vec![]);
+        assert_eq!(
+            static_errors_kv(
+                Some(7),
+                &jt,
+                &kv_with_identities(
+                    &[],
+                    &[],
+                    &["gcp-artifact-writer", "gcp-publisher", "gcp-reader"]
+                )
+            ),
+            vec![]
+        );
+
+        let errs = static_errors_kv(Some(7), &jt, &kv_with_identities(&[], &[], &["gcp-reader"]));
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        assert_eq!(errs[0].field, "work.workload_identities");
+        assert_eq!(
+            errs[0].message,
+            "cloud identity 'gcp-artifact-writer' is not set"
+        );
+        assert_eq!(errs[1].field, "wrap_up.workload_identities");
+        assert_eq!(errs[1].message, "cloud identity 'gcp-publisher' is not set");
+    }
+
+    /// A cloud identity and a secret of the same name are different things in
+    /// different buckets: a set secret never satisfies a declared identity.
+    #[test]
+    fn a_secret_never_satisfies_a_declared_cloud_identity() {
+        let jt = JobType::parse(
+            "name: deploy\nimage: img:latest\nmin_dispatcher: 5\n\
+             work:\n  type: command\n  run: ./deploy.sh\n  workload_identities: [gcp]\n",
+        )
+        .unwrap();
+        let errs = static_errors_kv(Some(7), &jt, &kv_with_identities(&["gcp"], &["gcp"], &[]));
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert_eq!(errs[0].message, "cloud identity 'gcp' is not set");
     }
 }

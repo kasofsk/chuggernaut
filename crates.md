@@ -41,7 +41,7 @@ One fat binary plus three tiny ones:
 
 ### `types`
 
-Pure data: `Job`, `JobState`, `Task`, `TaskKind`/`TaskState`/`TaskResult`, `TaskResolution`, `EscalationAction`, `TokenUsage`, `User`, `Identity`, `ProjectRole`, `ChannelEntry`/`ChannelUpdate`/`AgentReply`, `EvalResult`, event payloads (§6.3), error envelope (§6.5), the job type YAML schema (`JobType`) with its field-rules validation (§1.1 tables), and the schedule YAML schema (`Schedule`) with the five-field UTC cron parser and matcher it validates against (`CronExpr`, §1.1). Serde derives throughout; the YAML field-rules matrices are enforced here so every consumer (dispatcher validation, CLI linting, tests) shares one implementation. No async, no I/O — everything depends on `types`, so it stays dependency-light.
+Pure data: `Job`, `JobState`, `Task`, `TaskKind`/`TaskState`/`TaskResult`, `TaskResolution`, `EscalationAction`, `TokenUsage`, `User`, `Identity`, `ProjectRole`, `ChannelEntry`/`ChannelUpdate`/`AgentReply`, `EvalResult`, event payloads (§6.3), error envelope (§6.5), the job type YAML schema (`JobType`) with its field-rules validation (§1.1 tables), the `CloudIdentity` record a `workload_identities:` name resolves to (§8.3), and the schedule YAML schema (`Schedule`) with the five-field UTC cron parser and matcher it validates against (`CronExpr`, §1.1). Serde derives throughout; the YAML field-rules matrices are enforced here so every consumer (dispatcher validation, CLI linting, tests) shares one implementation. No async, no I/O — everything depends on `types`, so it stays dependency-light.
 
 Behind the off-by-default `schema` feature the wire types also derive
 `JsonSchema`, which is what makes `types` the single source of the §6.2 HTTP
@@ -69,6 +69,7 @@ The single NATS integration point, wrapping `async-nats`:
 - **Key encoding** (§1.4): base64url helpers for emails and KO subject/predicate segments; name validation for vars/secrets
 - Typed accessors per bucket: `JobStore`, `TaskStore`, `UserStore`, `ChannelStore`, `PushStore`, `CounterStore`, `RdepsStore`
 - `VarStore` and `SecretStore` traits (§8) with the NATS impls; age encrypt/decrypt lives behind `SecretStore` (public-key-only construction for the API side, private-key construction for the dispatcher side)
+- The plaintext `cloud-identities` bucket (§8.3) — its own namespace, deliberately unreachable from `SecretStore`, so a cloud identity can never ride the `global/agents` grant; read through the raw bucket (admin CLI writes, release validation lists) until a consumer needs a typed accessor
 - Knowledge store (§9): O(1) get, prefix-scan list, three-scope merge with narrower-wins dedup
 - Stream helpers: event publish (`job.events.*`), `channel-inbox` append/replay-from-sequence, request-reply with bounded retry (§4.2 reliability)
 

@@ -55,11 +55,16 @@ impl ValidationError {
     }
 }
 
-/// Everything static validation needs besides the repo: which secret and var
-/// names exist in KV. The core fetches these once per validation pass.
+/// Everything static validation needs besides the repo: which secret, var and
+/// cloud-identity names exist in KV. The core fetches these once per validation
+/// pass.
 pub struct KvNames {
     pub secrets: HashSet<String>,
     pub vars: HashSet<String>,
+    /// Names in the `cloud-identities.*` bucket (design #313 A5). A separate
+    /// namespace from `secrets`, and deliberately never merged with it: a cloud
+    /// identity is not expressible as a secret.
+    pub cloud_identities: HashSet<String>,
 }
 
 /// Graph wiring rules (§2.2): dependencies exist, no self-edges, no cycles,
@@ -147,6 +152,7 @@ pub fn approval_evaluator(resolved: &[Evaluator]) -> Option<Evaluator> {
         provider: None,
         model: None,
         secrets: Vec::new(),
+        workload_identities: Vec::new(),
         required: Some(true),
         stage,
     })
@@ -256,6 +262,7 @@ resources:
                 provider: None,
                 model: None,
                 secrets: vec![],
+                workload_identities: vec![],
                 required: None,
                 stage: 0,
             }],
@@ -404,6 +411,7 @@ resources:
             provider: None,
             model: None,
             secrets: vec![],
+            workload_identities: vec![],
             required: None,
             stage: 7,
         }];

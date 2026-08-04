@@ -4,7 +4,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use cli::admin::{self, AdminArgs, AdminCmd, ProjectCmd, RoleCmd, UserCmd};
+use cli::admin::{
+    self, AdminArgs, AdminCmd, CloudIdentityCmd, ProjectCmd, RoleCmd, ScopedName, UserCmd,
+};
 use cli::init::{self, InitArgs};
 use store::NatsStore;
 use types::User;
@@ -299,4 +301,124 @@ async fn admin_user_role_commands() {
         .await
         .is_err()
     );
+}
+
+/// A `cloud-identities.*` record round-trips through the admin CLI (design
+/// #313 A5): set writes the operator's coordinates, delete removes them, and
+/// the record never touches the secrets bucket.
+#[tokio::test]
+async fn admin_cloud_identity_round_trip() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = NatsStore::connect(server.url()).await.unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let admin_args = |cmd| AdminArgs {
+        nats_url: server.url().to_string(),
+        keys_dir: dir.path().join("no-keys"),
+        cmd,
+    };
+    let scoped = || ScopedName {
+        project: "acme/api".into(),
+        name: "gcp-artifact-writer".into(),
+    };
+    admin::run(admin_args(AdminCmd::CloudIdentity(CloudIdentityCmd::Set {
+        scoped: scoped(),
+        audience: "//iam.googleapis.com/projects/1/providers/chuggernaut".into(),
+        service_account: "deployer@acme.iam.gserviceaccount.com".into(),
+        token_ttl_secs: Some(900),
+    })))
+    .await
+    .unwrap();
+
+    let bucket = store
+        .raw_bucket(store::buckets::CLOUD_IDENTITIES)
+        .await
+        .unwrap();
+    let key = "acme.api.gcp-artifact-writer";
+    assert_eq!(
+        bucket
+            .get_json::<types::CloudIdentity>(key)
+            .await
+            .unwrap()
+            .unwrap(),
+        types::CloudIdentity {
+            audience: "//iam.googleapis.com/projects/1/providers/chuggernaut".into(),
+            service_account: "deployer@acme.iam.gserviceaccount.com".into(),
+            token_ttl_secs: Some(900),
+        }
+    );
+    assert_eq!(
+        store
+            .raw_bucket(store::buckets::SECRETS)
+            .await
+            .unwrap()
+            .keys_with_prefix("acme.api.")
+            .await
+            .unwrap(),
+        Vec::<String>::new(),
+        "a cloud identity must never be written to the secrets bucket"
+    );
+
+    admin::run(admin_args(AdminCmd::CloudIdentity(
+        CloudIdentityCmd::List {
+            project: "acme/api".into(),
+        },
+    )))
+    .await
+    .unwrap();
+    admin::run(admin_args(AdminCmd::CloudIdentity(
+        CloudIdentityCmd::Delete { scoped: scoped() },
+    )))
+    .await
+    .unwrap();
+    assert_eq!(
+        bucket.get_json::<types::CloudIdentity>(key).await.unwrap(),
+        None
+    );
+}
+
+/// A name that is not a KV key segment, and a record missing the coordinates
+/// it exists to carry, are refused at write rather than stored to fail at
+/// release.
+#[tokio::test]
+async fn admin_cloud_identity_rejects_malformed_records() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    NatsStore::connect(server.url())
+        .await
+        .unwrap()
+        .ensure_topology()
+        .await
+        .unwrap();
+
+    for (project, name, audience, service_account) in [
+        ("acme/api", "bad.name", "aud", "sa@acme.example"),
+        ("acme/api", "ok-name", "  ", "sa@acme.example"),
+        ("acme/api", "ok-name", "aud", ""),
+        ("no-slash", "ok-name", "aud", "sa@acme.example"),
+    ] {
+        assert!(
+            admin::run(AdminArgs {
+                nats_url: server.url().to_string(),
+                keys_dir: dir.path().join("no-keys"),
+                cmd: AdminCmd::CloudIdentity(CloudIdentityCmd::Set {
+                    scoped: ScopedName {
+                        project: project.into(),
+                        name: name.into(),
+                    },
+                    audience: audience.into(),
+                    service_account: service_account.into(),
+                    token_ttl_secs: None,
+                }),
+            })
+            .await
+            .is_err(),
+            "expected {project}.{name} ({audience:?}, {service_account:?}) to be rejected"
+        );
+    }
 }

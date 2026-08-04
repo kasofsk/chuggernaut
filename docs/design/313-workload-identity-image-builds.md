@@ -1248,7 +1248,7 @@ Slice labels below are `S{n}` deliberately — the `A`/`B` labels above name
 | --- | --- | --- |
 | **S1** | Issuer keypair in `crates/cli/src/keygen.rs`; mounts; `kid` from the public-key thumbprint | — |
 | **S2** | Token minting + claim assembly as a **pure function**, unit-tested; no I/O. **Shipped** as [`crates/auth/src/workload.rs`](../../crates/auth/src/workload.rs) — see [Where S2 landed](#where-s2-landed) | S1 |
-| **S3** | `workload_identities:` on `work`/`eval[]`/`wrap_up`; field rules; **epoch bump `4 → 5` + frozen `WORKLOAD_IDENTITY_SCHEMA_EPOCH = 5`** + the `min_dispatcher` rule in one commit; `cloud-identities.*` KV + admin CLI + release-validation check | S2 |
+| **S3** | `workload_identities:` on `work`/`eval[]`/`wrap_up`; field rules; **epoch bump `4 → 5` + frozen `WORKLOAD_IDENTITY_SCHEMA_EPOCH = 5`** + the `min_dispatcher` rule in one commit; `cloud-identities.*` KV + admin CLI + release-validation check. **Shipped** — see [Where S3 landed](#where-s3-landed) | S2 |
 | **S3d** | ***Deploy:* a dispatcher carrying epoch 5 reaches prod.** Not a code slice and not optional — see the ordering note below | S3 |
 | **S4** | Injection at launch (two `InjectedFile`s + `GOOGLE_APPLICATION_CREDENTIALS`), audit fields, the empty-declaration assert | S3 |
 | **S5** | Discovery + JWKS routes on the api (unexposed). **Shipped** as [`crates/api/src/oidc.rs`](../../crates/api/src/oidc.rs) (spec §6.7); the bind is untouched | S1 |
@@ -1313,6 +1313,27 @@ What S4 calls, and what it must not undo:
 - `SUBJECT_BYTES_MAX = 127` is a named error, never a truncation, and every
   claim component clears `types::inputs::check_value_charset` plus a ban on the
   `:` and `/` the composites join on.
+
+### Where S3 landed
+
+Shipped as one commit, per the [skew section](#skew-this-field-costs-an-epoch-bump):
+`workload_identities:` on `WorkSpec`, `Evaluator` and `WrapUpSpec`
+(`crates/types/src/job_type.rs`), the epoch **4 → 5** with a frozen
+`WORKLOAD_IDENTITY_SCHEMA_EPOCH = 5` and the `min_dispatcher` field rule
+(`crates/types/src/version.rs`), the `cloud-identities` KV bucket with a
+`types::CloudIdentity` record and `chuggernaut admin cloud-identity
+set|list|delete`, and the per-name release check
+(`static_errors_cloud_identities`, `crates/dispatcher/src/release.rs`) reading a
+third `KvNames` set. The re-derived number held: the tree was at 4.
+
+Two things a later slice must not undo. The name shape (`[A-Za-z0-9_-]+`) is
+checked at parse because it is a KV key segment, and the identity path is
+deliberately **disjoint** from the secret path end to end — its own bucket, its
+own `KvNames` field, its own validation function, and no `copy` verb — so
+nothing in the supported mechanism can express a cloud credential in
+`global/agents`. Nothing about container environments or file sets changed;
+that is S4, and **S3d** (a deployed dispatcher at epoch 5) gates any config
+declaring `min_dispatcher: 5`.
 
 ## Contracts this changes
 

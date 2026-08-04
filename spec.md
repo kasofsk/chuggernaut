@@ -125,6 +125,7 @@ work:                          # required
 
   # type: agent or command
   secrets: [string]            # optional; injected into the work container only — scoped here because that is the only container top-level-declared secrets ever reached; evaluators declare their own. Disallowed for human work (no container).
+  workload_identities: [string] # optional; cloud identities (§8.3) the work container may exchange a workload token for, each naming a cloud-identities.{owner}.{project}.{name} record. Scoped like secrets: and inherited from nothing; never a secret, so it can never ride the reserved global/agents grant (§8.2). A non-empty list requires min_dispatcher >= the workload-identity epoch (§14.2). Disallowed for human work (no container)
 
   # type: human only
   prompt: string               # required; shown to operator in task inbox
@@ -143,6 +144,7 @@ wrap_up:                       # optional; the job's third step (work → evalua
   name: string                 # optional; human-facing label for the wrap-up task, validated like an evaluator name ([A-Za-z0-9._-]+). Unset → derived from the mode: a command wrap-up takes its script's basename (.chug/tasks/web-publish.sh → web-publish). Stamped onto the task record's `label` so the UI reads `Command · publish`, not a bare `Command`
   image: string                # optional; image for the run container; falls back to top-level image (required when run is set and the job type has no top-level image). Disallowed without run
   secrets: [string]            # optional; secrets injected into the run container; not inherited from work.secrets. Disallowed without run
+  workload_identities: [string] # optional; cloud identities (§8.3) the run container may exchange a workload token for; not inherited from work.workload_identities. Disallowed without run
 
 job_deadline: duration         # optional; wall-clock limit on entire job (all retries + rework); clock starts when job first enters Ready; applies to all work types
 
@@ -163,6 +165,7 @@ eval:                          # optional; omit or leave empty for auto-pass
     # type: command or agent
     image: string              # optional; falls back to top-level image; one of the two is required
     secrets: [string]          # evaluator-specific secrets; not inherited from top-level
+    workload_identities: [string] # evaluator-specific cloud identities (§8.3); not inherited from work.workload_identities. Disallowed for a human evaluator (no container)
 
     # type: agent only
     provider: claude | codex
@@ -214,6 +217,7 @@ inputs:                        # optional; the values a job of this type accepts
 | `provider` | disallowed | optional | disallowed |
 | `model` | disallowed | optional | disallowed |
 | `secrets` | optional | optional | disallowed |
+| `workload_identities` | optional | optional | disallowed |
 | `required` | optional | optional | optional |
 | `stage` | optional | optional | optional |
 
@@ -672,6 +676,7 @@ steps.{owner}.{project}.{job_seq}.{task_id}     inline review step log (see §1.
 channels.{owner}.{project}.jobs.{seq}           latest ChannelUpdate + latest AgentReply
 vars.{owner}.{project}.{name}                   plaintext variable values
 secrets.{owner}.{project}.{name}                age-encrypted secret values
+cloud-identities.{owner}.{project}.{name}       plaintext cloud identity records (see §8.3)
 users.{email}                                   user accounts
 knowledge.global                                global knowledge objects
 knowledge.{owner}                               team-level knowledge objects
@@ -688,7 +693,7 @@ ingest          subjects: ingest.{owner}.{project}.{source}
 
 Subject components are limited to values that cannot contain `.`. Values that may contain `.` — file paths, git refs, knowledge subjects and predicates — are passed in the request payload, not embedded in the subject.
 
-**Bucket model:** each top-level prefix above (`jobs`, `rdeps`, `counters`, `tasks`, `steps`, `channels`, `vars`, `secrets`, `users`, `knowledge`, `platform`, `push`, `ingest-tokens`) is one fixed NATS KV bucket created at platform init (see §12.1); the dotted remainder is the key within that bucket. No buckets are created dynamically.
+**Bucket model:** each top-level prefix above (`jobs`, `rdeps`, `counters`, `tasks`, `steps`, `channels`, `vars`, `secrets`, `cloud-identities`, `users`, `knowledge`, `platform`, `push`, `ingest-tokens`) is one fixed NATS KV bucket created at platform init (see §12.1); the dotted remainder is the key within that bucket. No buckets are created dynamically.
 
 **Key encoding:** key segments that may contain characters outside the NATS key alphabet are base64url-encoded: user emails (`users.{b64url(email)}`) and knowledge subjects/predicates (`knowledge` bucket keys: `global.{b64url(subject)}.{b64url(predicate)}`, `{owner}.{b64url(subject)}.{b64url(predicate)}`, `{owner}.{project}.{b64url(subject)}.{b64url(predicate)}`). The owner name `global` is reserved to keep scope prefixes unambiguous. Secret and var `{name}`s are validated to `[A-Za-z0-9_]+` at write time (they become env var names) and stored unencoded.
 
@@ -727,6 +732,7 @@ pub struct ChannelEntry {
 | `channels.*` | 7d | Agent progress/status; short-lived |
 | `vars.*` | none | Plaintext config; permanent |
 | `secrets.*` | none | age-encrypted; permanent |
+| `cloud-identities.*` | none | Plaintext cloud coordinates (§8.3); permanent |
 | `users.*` | none | User accounts; permanent |
 | `knowledge.*` | none | KO store; permanent |
 | `platform.*` | none | Platform config (VAPID public key etc.); permanent |
@@ -891,6 +897,7 @@ Static configuration (fail-fast check against current HEAD of default branch):
 - For each agent or human evaluator (including project defaults): the evaluator's `prompt` path exists
 - Every secret named in `secrets:` (`work.secrets` and per-evaluator) has an entry in the `secrets.*` KV bucket
 - Every var named in `vars:` has an entry in the `vars.*` KV bucket
+- Every cloud identity named in `workload_identities:` (`work`, `wrap_up` and per-evaluator) has an entry in the `cloud-identities.*` KV bucket, reported per name as `cloud identity '{name}' is not set` — a misdeclared identity fails here rather than at token exchange inside the container
 - No declared secret or var name uses the reserved `CHUG_` prefix (§5.3)
 - Every input the job supplies is declared by the type, every `required` input has a value, every `enum` value is in its `values` and every `string` value matches its `pattern` — reported per input as `field: "inputs.{name}"` (§1.1). A declared `default` satisfies the presence check; it is materialized at the Ready-transition, not here
 
@@ -2145,6 +2152,22 @@ Key rotation requires re-encrypting all values with the new public key — a one
 
 ---
 
+### 8.3 Cloud identities
+
+Cloud identity records live in NATS KV (`cloud-identities.{owner}.{project}.{name}`) as **plaintext**: they are cloud coordinates, not credentials. One record is `{ audience, service_account, token_ttl_secs? }` — the provider audience a minted workload token is valid at, the service account that token impersonates (design #313 D4), and an optional per-identity cap on its lifetime.
+
+A job type reaches one by name: `workload_identities: [gcp-artifact-writer]` on `work`, on an `eval[]` entry, or on `wrap_up` (§1.1). The declaration is scoped per container and inherited from nothing — a container receives exactly the identities its own block declares — and every declared name must have a record at release (§2.2), so a typo fails with a fixable message instead of at token exchange inside the container.
+
+Records are **operator data, managed by the admin CLI only** (`chuggernaut admin cloud-identity set|list|delete`) — there is no HTTP route, exactly as for secrets (§8.2). `list` returns names and values; nothing here is sensitive.
+
+> **A cloud identity is never expressible as a secret, and therefore can never ride the reserved `global/agents` grant (§8.2, §4.1).**
+
+That grant injects every secret in the `global/agents` scope into *every* agent container on the platform, and `admin secret copy --to global/agents` is a one-line operation. Keeping the two mechanisms disjoint — separate declaration, separate bucket, no conversion between them and no `copy` verb — makes that command incapable of expressing the mistake. The residual is named rather than hidden: nothing stops an operator storing a raw service-account key in `global/agents` as an ordinary secret, and nothing mechanical can; what this guarantees is that the *supported* mechanism has no path there.
+
+Minting, injection and audit of the token itself are design #313 half A slices S4–S6 and are not yet built: today the declaration is parsed, gated and validated, and no container's environment or file set changes.
+
+---
+
 ## Part 9: Knowledge
 
 ### 9.1 KO Model
@@ -2327,6 +2350,11 @@ chuggernaut admin user delete --email <email>
 # Project management
 chuggernaut admin project create --owner <owner> --name <project> [--default-branch <branch>]
 chuggernaut admin project list [--owner <owner>]
+
+# Cloud identities (see §8.3)
+chuggernaut admin cloud-identity set --project <owner/project> --name <name> --audience <aud> --service-account <sa> [--token-ttl-secs <n>]
+chuggernaut admin cloud-identity list --project <owner/project>
+chuggernaut admin cloud-identity delete --project <owner/project> --name <name>
 
 # Ingest tokens (see §13.2)
 chuggernaut admin ingest-token create --project <owner/project> --source <source>   # prints token once
@@ -2519,12 +2547,16 @@ epoch job inputs landed in; on a **schedule file**, the later epoch a schedule's
 the second. A `runtime:` block beyond a bare `mode: container` (§1.1) is gated
 the same way and for the same reason: the block is invisible to an N-1
 dispatcher, which keeps the still-present `image` and runs the job containerized
-against the image's toolchain instead of as declared. The rule exists because `min_dispatcher` is the one field an
+against the image's toolchain instead of as declared. A non-empty
+`workload_identities:` (§1.1, §8.3) is gated for the mirror-image reason: it sits
+*inside* a nested block, so an N-1 dispatcher does not tolerate it at all — it
+rejects the whole config and parks every job of the type, which is the correct
+failure and exactly why the declaration must be authored with the epoch. The rule exists because `min_dispatcher` is the one field an
 N-1 dispatcher **does** parse — it cannot see `inputs:` or `runtime:` at all, so
 without the declaration it would accept the config and run the job
 unparameterized. Each feature freezes its own constant at the epoch it shipped
 (`types::version::INPUTS_SCHEMA_EPOCH`, `SCHEDULE_INPUTS_SCHEMA_EPOCH`,
-`RUNTIME_SCHEMA_EPOCH`), so a later bump for an unrelated feature never
+`RUNTIME_SCHEMA_EPOCH`, `WORKLOAD_IDENTITY_SCHEMA_EPOCH`), so a later bump for an unrelated feature never
 retroactively raises what an existing config must declare — and those constants,
 not `CONFIG_SCHEMA_EPOCH`, are where a reader finds which epoch bought what.
 
