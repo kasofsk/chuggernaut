@@ -44,7 +44,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 
 | # | Slice | Contract changed | Depends on | State |
 | --- | --- | --- | --- | --- |
-| 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | Proposed |
+| 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | **Landed** (job #442), plus a two-name floor the slice line does not mention — see [the correction](#correction-2026-08-05--slice-1-as-landed) |
 | 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | Proposed |
 | 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | Proposed |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | Proposed |
@@ -77,7 +77,7 @@ slice 7 does not change that.
 | --- | --- | --- |
 | The daemon is a container: `docker run -d --restart=always --name chug-worker` with the host's docker socket and `keys` bind-mounted | `deploy/prod/build-worker.sh:524` | Shipped |
 | So it is docker-out-of-docker: task containers are **siblings on the host**, and container mode is correct | same, plus `spec.md` §3.1 | Shipped |
-| `HostBackend` spawns a task with `process_group(0)` and `.envs(&config.env)` — and **no `env_clear()`**, so the task inherits the daemon's whole environment | `crates/container/src/host.rs` (`spawn_task`) | Shipped |
+| `HostBackend` spawns a task with `process_group(0)` and `.envs(&config.env)` — and **no `env_clear()`**, so the task inherits the daemon's whole environment | `crates/container/src/host.rs` (`spawn_task`) | **Superseded** by slice 1 (job #442): the environment is composed, not inherited |
 | A host task's exit status is written by the task's own wrapper, not by the daemon, so the daemon need not be alive when a task exits | `crates/container/src/host.rs` (`supervised_cmd`); #309 correction finding 2 | Shipped |
 | The swap runs a **detached `docker:cli` sibling** that removes `chug-worker` and re-composes `docker run` from mounts and devices recovered by `docker inspect` of the live container | `deploy/prod/worker-refresh.sh` (`swap`) | Shipped |
 | `nix/chug-node/` prepares the host and deliberately declares **no** unit supervising the daemon | `nix/chug-node/options.nix` charter; #372 §8 | Shipped |
@@ -545,3 +545,66 @@ leaves one.
 - **#322 §6's self-refresh collision** is resolved for the general case here.
   Its phase-1 refusal is adopted as D4 rather than superseded, and its phase-2
   per-task `launchd` job stays the macOS fallback if slice 2's proof fails.
+
+---
+
+## Correction, 2026-08-05 — slice 1 as landed
+
+Appended by job #442, which implemented [slice 1](#slices). Nothing above is
+edited except that slice's State cell and the `env_clear()` row of
+[what is true today](#what-is-true-today); this section records the floor the
+slice line does not mention and what measuring the parity target found.
+
+### The floor is two names, carried from the daemon
+
+`spawn_task` clears the environment and then composes it in three layers: the
+floor, the dispatcher's launch env, the two exit-status paths. In that order, so
+a launch declaring a floor name wins — the same precedence a container's env has
+over its image's.
+
+| Variable | Why it is in the floor |
+| --- | --- |
+| `PATH` | The bootstrap clones with `git` and `ssh`, which #309 §9 calls machine facts on a host node: on a nix or a macOS node they sit on the daemon's `PATH` and in no fixed system directory. A daemon carrying none falls back to the value docker gives a container whose image declares none. |
+| `HOME` | Docker sets one for every container from the image's user, and `git`, `ssh`, `cargo` and the agent harness all key per-user state off it. A daemon carrying none leaves the task carrying none — there is no correct value to invent, and each tool's own passwd-entry fallback is the honest answer. |
+
+Nothing else. `TMPDIR`, `LANG` and `HOSTNAME` were weighed and refused: a
+container is given no `TMPDIR` or `LANG` by either the image or the runtime, so
+setting them here would be a *divergence* from the parity target rather than
+parity, and a host task's hostname is the node's whether or not a variable says
+so.
+
+**Measured rather than assumed**, on this repo's own Debian agent image: a
+process spawned with a cleared environment sees exactly one variable, the `PATH`
+the shell supplies from its own compiled-in default, and no `HOME`. So "nothing
+visibly broke without a floor" was true here and beside the point — what has to
+reach a host task is the *node's* `PATH`, and a shell's built-in default is the
+undocumented version of the hardcoding this slice removes.
+
+### The parity target, and the two differences that remain
+
+Docker composes a task's environment from three sources: the image's baked
+`ENV`, the runtime's own additions, and `config.env`. A host task has no image,
+so two differences are structural rather than oversights:
+
+- **The image's `ENV` has no host analogue.** `deploy/prod/Dockerfile.agent-rust`
+  bakes `CARGO_TARGET_DIR` and `IS_SANDBOX`, and its `rust:1.96-bookworm` base
+  bakes `CARGO_HOME`, `RUSTUP_HOME` and a `PATH` reaching cargo's bin directory.
+  A host task gets none of them, which is #309 §9's own answer — a host node's
+  toolchain is `runtime.env` (P1) or machine configuration, never a value this
+  backend invents. It does mean an agent job on a host node would run without
+  the sandbox marker its image sets; that is P1's to answer, and no node runs
+  host work today.
+- **`HOSTNAME` is a docker fact.** A container's is its id; a host task shares
+  the node's, and `hostname` answers without an environment variable.
+
+Everything else now has the same shape in both backends: the launch env last-wins
+over what the runtime supplies, and the backend's own variables come after it.
+The docker backend was read and **not** changed.
+
+### What this does not close
+
+`env_clear` narrows *what* is exposed, never *to whom*. #309 §8 —
+`/proc/<pid>/environ` readable by every process of the same uid — is untouched
+and stays exactly what [D8](#decisions) says it is. What changed is that the
+environment a reader finds there is the dispatcher's launch env and nothing
+else, rather than that plus everything the daemon was started with.

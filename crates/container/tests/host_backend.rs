@@ -242,6 +242,67 @@ async fn a_task_lost_to_a_restart_reads_as_exited_not_running() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// A task reads its own environment and sees the composed set, not the
+/// daemon's (design #440 slice 1). The shell adds `PWD` and friends of its own
+/// after `execve`, so those are allowed and everything else must have been
+/// declared.
+#[tokio::test]
+async fn a_task_sees_the_composed_environment_and_not_the_daemons() {
+    let root = temp_root("env");
+    let backend = backend(&root);
+    let dump = root.join("env.dump");
+
+    let composed = ["PATH", "HOME", "JOB_PROJECT", "JOB_ID", "CHUG_TASK_ID"];
+    let shell_added = ["PWD", "OLDPWD", "SHLVL", "_", "IFS"];
+    let daemon_only = std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .find(|k| !composed.contains(&k.as_str()) && !shell_added.contains(&k.as_str()))
+        .expect("the test process has an environment of its own to leak");
+
+    let id = backend
+        .launch(cfg(&format!("env > {}", dump.display())))
+        .await
+        .unwrap();
+    assert_eq!(settle(&backend, &id).await, 0);
+
+    let dumped = std::fs::read_to_string(&dump).unwrap();
+    let seen: HashMap<&str, &str> = dumped
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .collect();
+
+    assert_eq!(seen.get("JOB_PROJECT"), Some(&"acme/chug"));
+    assert_eq!(seen.get("JOB_ID"), Some(&"309"));
+    assert_eq!(seen.get("CHUG_TASK_ID"), Some(&"2"));
+    assert!(seen.contains_key("CHUG_HOST_EXIT"), "{dumped}");
+    assert!(seen.contains_key("CHUG_HOST_EXIT_TMP"), "{dumped}");
+    assert_eq!(
+        seen.get("PATH").copied(),
+        std::env::var("PATH").ok().as_deref(),
+        "PATH is the daemon's, so the clone finds the node's git"
+    );
+    assert_eq!(
+        seen.get("HOME").copied(),
+        std::env::var("HOME").ok().as_deref()
+    );
+    assert!(
+        !seen.contains_key(daemon_only.as_str()),
+        "{daemon_only} is the daemon's environment and must not reach the task: {dumped}"
+    );
+
+    let undeclared: Vec<&str> = seen
+        .keys()
+        .copied()
+        .filter(|k| {
+            !shell_added.contains(k) && !k.starts_with("CHUG_HOST_EXIT") && !composed.contains(k)
+        })
+        .collect();
+    assert!(undeclared.is_empty(), "undeclared: {undeclared:?}");
+
+    backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// The two constants a host node's whole path story rests on, asserted so a
 /// silent edit to either is a red test rather than a transcript harvest that
 /// finds nothing (#309 §2(a)).

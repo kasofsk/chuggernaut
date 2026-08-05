@@ -23,7 +23,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -62,6 +63,22 @@ const WORKSPACE_OWNER: &str = "workspace-owner";
 /// environment so no path is ever quoted into a shell command.
 const EXIT_TMP_VAR: &str = "CHUG_HOST_EXIT_TMP";
 const EXIT_VAR: &str = "CHUG_HOST_EXIT";
+
+/// The only two variables a host task takes from the daemon, and it takes them
+/// **by name** (design #440 D8). `PATH` because a host node's toolchain is
+/// machine configuration rather than an image's (#309 §9) and the clone needs
+/// `git` and `ssh`; `HOME` because docker gives every container one and the
+/// per-user state of `git`, `ssh` and the agent harness hangs off it.
+const INHERITED: [&str; 2] = [PATH_VAR, HOME_VAR];
+
+const PATH_VAR: &str = "PATH";
+const HOME_VAR: &str = "HOME";
+
+/// `PATH` for a daemon that carries none — the value docker gives a container
+/// whose image declares none. Without it the task falls back to whatever
+/// default the shell was compiled with, which is the undocumented version of
+/// the same hardcoding.
+const PATH_FALLBACK: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 /// How long a killed process group gets on SIGTERM before the escalation, the
 /// same shape `signal_refresh_build` uses for the refresh script's build.
@@ -332,6 +349,47 @@ fn supervised_cmd(cmd: &[String]) -> Result<Vec<String>, BackendError> {
     Ok(wrapped)
 }
 
+/// The floor's values as the daemon holds them, read **by name** so no other
+/// variable of the daemon's is ever copied, and with the non-panicking API so a
+/// non-UTF-8 value drops to the fallback instead of killing the launch.
+fn daemon_floor() -> HashMap<String, String> {
+    INHERITED
+        .iter()
+        .filter_map(|name| {
+            let value = std::env::var_os(name)?.into_string().ok()?;
+            Some(((*name).to_string(), value))
+        })
+        .collect()
+}
+
+/// Everything a host task's environment holds: the floor carried from the
+/// daemon by name, the dispatcher's launch env, and the two exit-status paths
+/// the wrapper writes through. Composed rather than inherited, so it is
+/// exhaustive — [`spawn_task`] clears the daemon's environment first.
+fn task_env(
+    daemon: &HashMap<String, String>,
+    launch: &HashMap<String, String>,
+    dir: &Path,
+) -> BTreeMap<String, OsString> {
+    let mut env = BTreeMap::new();
+    for name in INHERITED {
+        if let Some(value) = daemon.get(name) {
+            env.insert(name.to_string(), OsString::from(value));
+        }
+    }
+    env.entry(PATH_VAR.to_string())
+        .or_insert_with(|| OsString::from(PATH_FALLBACK));
+    for (name, value) in launch {
+        env.insert(name.clone(), OsString::from(value));
+    }
+    env.insert(
+        EXIT_TMP_VAR.to_string(),
+        dir.join(EXIT_CODE_TMP).into_os_string(),
+    );
+    env.insert(EXIT_VAR.to_string(), dir.join(EXIT_CODE).into_os_string());
+    env
+}
+
 fn read_meta(dir: &Path) -> Option<TaskMeta> {
     let raw = std::fs::read(dir.join(META_JSON)).ok()?;
     serde_json::from_slice(&raw).ok()
@@ -400,9 +458,8 @@ fn spawn_task(
     command
         .args(&wrapped[1..])
         .current_dir(dir)
-        .envs(&config.env)
-        .env(EXIT_TMP_VAR, dir.join(EXIT_CODE_TMP))
-        .env(EXIT_VAR, dir.join(EXIT_CODE))
+        .env_clear()
+        .envs(task_env(&daemon_floor(), &config.env, dir))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(errors))
@@ -829,6 +886,92 @@ mod tests {
         assert_eq!(out.code(), Some(7), "the wrapper preserves the exit status");
         assert_eq!(read_exit_code(&dir), Some(7));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn daemon_env() -> HashMap<String, String> {
+        HashMap::from([
+            ("PATH".to_string(), "/run/current-system/sw/bin".to_string()),
+            ("HOME".to_string(), "/var/root".to_string()),
+            ("NATS_CREDS".to_string(), "the daemon's own".to_string()),
+            (
+                "DOCKER_HOST".to_string(),
+                "unix:///var/run/docker.sock".to_string(),
+            ),
+            ("WORKER_NODE".to_string(), "gumbo-nuc-0".to_string()),
+        ])
+    }
+
+    /// The launch environment is **composed, not inherited** (design #440 slice
+    /// 1): a variable the daemon holds and the launch config does not — here a
+    /// reachable docker socket and the daemon's own NATS credential — never
+    /// reaches the task.
+    #[test]
+    fn a_host_task_inherits_nothing_the_dispatcher_did_not_declare() {
+        let dir = Path::new("/var/lib/chuggernaut/host-tasks/host-1-0");
+        let launch = HashMap::from([
+            ("JOB_ID".to_string(), "440".to_string()),
+            ("NATS_CREDS".to_string(), "the dispatcher's".to_string()),
+        ]);
+        let env = task_env(&daemon_env(), &launch, dir);
+
+        assert_eq!(
+            env.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec![
+                EXIT_VAR,
+                EXIT_TMP_VAR,
+                "HOME",
+                "JOB_ID",
+                "NATS_CREDS",
+                "PATH"
+            ],
+            "the launch env, the floor and the two exit paths — and nothing else"
+        );
+        for leaked in ["DOCKER_HOST", "WORKER_NODE"] {
+            assert!(
+                !env.contains_key(leaked),
+                "{leaked} is the daemon's, never the task's"
+            );
+        }
+        assert_eq!(
+            env["NATS_CREDS"], "the dispatcher's",
+            "a declared name takes the dispatcher's value, never the daemon's"
+        );
+        assert_eq!(env["JOB_ID"], "440");
+        assert_eq!(env["PATH"], "/run/current-system/sw/bin");
+        assert_eq!(env["HOME"], "/var/root");
+        assert_eq!(env[EXIT_TMP_VAR], dir.join(EXIT_CODE_TMP).into_os_string());
+        assert_eq!(env[EXIT_VAR], dir.join(EXIT_CODE).into_os_string());
+    }
+
+    /// The floor is exactly `PATH` and `HOME`, and `PATH` has a value even on a
+    /// daemon carrying none — a task left to the shell's compiled-in default is
+    /// the undocumented version of the hardcoding this replaces.
+    #[test]
+    fn the_floor_is_two_names_and_path_always_has_a_value() {
+        let dir = Path::new("/tmp/host-1-0");
+        assert_eq!(INHERITED, ["PATH", "HOME"]);
+
+        for name in daemon_floor().keys() {
+            assert!(
+                INHERITED.contains(&name.as_str()),
+                "{name} is not the floor, and nothing else is read from the daemon"
+            );
+        }
+
+        let bare = task_env(&HashMap::new(), &HashMap::new(), dir);
+        assert_eq!(bare["PATH"], PATH_FALLBACK);
+        assert!(
+            !bare.contains_key("HOME"),
+            "no daemon HOME means no invented one — the tools fall back to the passwd entry"
+        );
+        assert_eq!(bare.len(), 3, "PATH and the two exit paths: {bare:?}");
+
+        let declared = HashMap::from([("PATH".to_string(), "/nix/store/x/bin".to_string())]);
+        assert_eq!(
+            task_env(&daemon_env(), &declared, dir)["PATH"],
+            "/nix/store/x/bin",
+            "a declared PATH wins over the floor, as a container env wins over its image's"
+        );
     }
 
     /// `remove` detaches the task tree before deleting it, so the reaper still

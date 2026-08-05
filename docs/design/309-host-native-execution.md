@@ -1233,6 +1233,14 @@ scope, P3); secrets are readable from `/proc/<pid>/environ` by any process of
 the same uid (§8, P3); the host task inherits the daemon's environment,
 including a reachable docker socket on a mixed-mode node (§10).
 
+The third of those was **closed by job #442**, implementing
+[#440](./440-native-worker-daemon.md) slice 1: `spawn_task` clears the
+environment and composes one, so a host task carries the dispatcher's launch
+env, a `PATH`/`HOME` floor and the two exit-status paths, and nothing the daemon
+was started with. The other two stand — §8 in particular is untouched, since
+`env_clear` narrows *what* a `/proc/<pid>/environ` reader finds, never *who* may
+read it.
+
 ### Test placement, as landed
 
 Tier 1 (`crates/container/src/host.rs`, `crates/worker/src/{config,daemon}.rs`):
