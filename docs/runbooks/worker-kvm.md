@@ -70,7 +70,7 @@ to no launch.
 
 `chug-worker` is **itself a container**. The daemon's "does this node have the
 device" check therefore reads the *daemon container's* view of it
-(`crates/worker/src/daemon.rs`, `build_backend`), and a daemon that is given
+(`crates/worker/src/daemon.rs`, `local_backend`), and a daemon that is given
 `WORKER_KVM` without `--device /dev/kvm` **refuses to start**. It is then
 restarted into the same refusal by `--restart=always`, and the node leaves the
 fleet.

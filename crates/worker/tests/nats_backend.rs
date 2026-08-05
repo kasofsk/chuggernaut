@@ -61,6 +61,7 @@ async fn setup(
         docker_endpoint: local_docker_endpoint(),
         channel_binary: artifact_path,
         cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
@@ -578,6 +579,7 @@ fn spawn_daemon(
         docker_endpoint: local_docker_endpoint(),
         channel_binary: channel,
         cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
@@ -904,6 +906,7 @@ async fn refresh_reports_skip_without_git_credential() {
         docker_endpoint: local_docker_endpoint(),
         channel_binary: channel,
         cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
@@ -985,6 +988,7 @@ fn nix_rooted_config(dir: &std::path::Path, nats_url: &str) -> WorkerConfig {
         docker_endpoint: local_docker_endpoint(),
         channel_binary: dir.join("chuggernaut-channel"),
         cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: Some("/dev/null".into()),
         kvm_projects: vec!["acme/nix".into()],
         android_sdk_dir: dir.join("toolchain"),
@@ -1304,12 +1308,12 @@ async fn set_slots_adopts_re_announces_and_refuses_above_the_ceiling() {
     daemon.abort();
 }
 
-/// A node that declares a runtime this build has no backend for refuses to come
-/// up, naming the mode (design #322 W1). `build_backend` is the only place a
-/// `WORKER_MODES` entry becomes a backend, so a mode the node cannot serve must
-/// fail there rather than advertising capacity it would then reject launches on.
+/// A host node whose capacity is not 1 refuses to come up, naming the settings
+/// (design #309 P0). `local_backend` is the only place a `WORKER_MODES` entry
+/// becomes a backend, so the §2 option (iii) exclusion is enforced there rather
+/// than advertising slots two host tasks would collide on `/workspace` using.
 #[tokio::test]
-async fn declared_mode_without_a_backend_refuses_to_start() {
+async fn host_mode_without_one_slot_refuses_to_start() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
         return;
     };
@@ -1323,6 +1327,7 @@ async fn declared_mode_without_a_backend_refuses_to_start() {
         docker_endpoint: local_docker_endpoint(),
         channel_binary: "/nonexistent/chuggernaut-channel".into(),
         cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
@@ -1342,6 +1347,8 @@ async fn declared_mode_without_a_backend_refuses_to_start() {
     let err = worker::run(config).await.unwrap_err().to_string();
     assert!(err.contains("WORKER_MODES"), "unexpected: {err}");
     assert!(err.contains("host"), "must name the mode: {err}");
+    assert!(err.contains("WORKER_SLOTS=1"), "must name the fix: {err}");
+    assert!(err.contains("/workspace"), "must name what collides: {err}");
 }
 
 /// A node whose `WORKER_KVM` device is absent refuses to come up, naming the
@@ -1368,6 +1375,7 @@ async fn declared_kvm_without_the_device_refuses_to_start() {
         docker_endpoint: local_docker_endpoint(),
         channel_binary: "/nonexistent/chuggernaut-channel".into(),
         cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: Some("/dev/definitely-not-kvm".into()),
         kvm_projects: vec!["acme/beacon".into()],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),

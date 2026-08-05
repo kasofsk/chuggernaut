@@ -376,7 +376,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         None => NatsStore::connect(&config.nats_url).await?,
     };
 
-    let backend = build_backend(&config).await?;
+    let backend = local_backend(&config).await?;
     let cache_enabled = config.cache_dir.is_some();
     let kvm = kvm_grant(&config);
     let nix = nix_roots(&config)?;
@@ -477,17 +477,52 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     Ok(())
 }
 
-/// Build the backend for the runtimes the node declares (design #322 W1) — the
-/// one construction site, so the docker backend's inherent `with_cache_dir` /
-/// `ping_all` wiring happens here and nowhere else. A declared mode this build
-/// has no backend for is refused by name: a node never advertises a runtime it
-/// cannot serve.
-async fn build_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
-    if let Some(mode) = config.modes.iter().find(|m| **m != WorkerMode::Container) {
-        return Err(WorkerRunError::Config(format!(
-            "WORKER_MODES names {mode}, which this build has no backend for (design #322 W2)",
-            mode = mode.as_str()
-        )));
+/// Which local runtime serves this node's launches (design #309 P0). P0 has no
+/// per-request selector — routing is `placement.node` plus `WORKER_MODES` — so a
+/// node that names `host` at all serves **every** launch as a host process.
+fn backend_kind(modes: &[WorkerMode]) -> WorkerMode {
+    if modes.contains(&WorkerMode::Host) {
+        WorkerMode::Host
+    } else {
+        WorkerMode::Container
+    }
+}
+
+/// The `/workspace` collision #309 §2(a) names is dodged by option (iii) — one
+/// host task per node — so a host node's capacity is **enforced** here rather
+/// than left to an operator's `WORKER_SLOTS`. The ceiling too: `set_slots` could
+/// otherwise raise a 1-slot node back into the collision at runtime.
+fn enforce_host_capacity(slots: u32, slots_max: u32) -> Result<(), WorkerRunError> {
+    if slots == 1 && slots_max == 1 {
+        return Ok(());
+    }
+    Err(WorkerRunError::Config(format!(
+        "WORKER_MODES names host, which needs WORKER_SLOTS=1 and WORKER_SLOTS_MAX=1 (got {slots} \
+         and {slots_max}): #309 P0 takes §2 option (iii), one host task per node, because two \
+         concurrent host tasks cannot both own {}",
+        container::host::HOST_WORKSPACE
+    )))
+}
+
+/// Build the backend for the runtimes the node declares (design #322 W1, #309
+/// P0) — the one construction site, so the docker backend's inherent
+/// `with_cache_dir` / `ping_all` wiring happens here and nowhere else. A node
+/// never advertises a runtime it cannot serve, which is why the host branch
+/// refuses the capacity that runtime cannot honor.
+async fn local_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
+    if backend_kind(&config.modes) == WorkerMode::Host {
+        enforce_host_capacity(config.slots, config.slots_max)?;
+        tracing::warn!(
+            node = %config.node,
+            host_root = %config.host_root.display(),
+            workspace = %container::host::HOST_WORKSPACE,
+            "WORKER_MODES names host: this node runs every launch as a HOST PROCESS and ignores \
+             the declared image — #309 P0 calls that deliberately a lie that must never leave the \
+             prototype node"
+        );
+        let backend =
+            container::host::HostBackend::new(config.node.clone(), config.host_root.clone())?;
+        return Ok(Arc::new(backend));
     }
     let mut backend = DockerBackend::new(vec![DockerNodeConfig {
         name: config.node.clone(),
@@ -1711,6 +1746,47 @@ fn bounded_tail(text: &str, max_lines: usize, max_bytes: usize) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The golden assertion for #309 P0: a node that does not name `host` picks
+    /// the docker variant whatever else it declares, and no host rule can reach
+    /// it — a container-only daemon is what ships today, byte for byte.
+    #[test]
+    fn a_container_only_node_is_unchanged() {
+        assert_eq!(backend_kind(&[]), WorkerMode::Container);
+        assert_eq!(
+            backend_kind(&[WorkerMode::Container]),
+            WorkerMode::Container
+        );
+        assert_eq!(
+            crate::config::WorkerMode::Container,
+            backend_kind(&crate::config::default_modes()),
+            "the WORKER_MODES default and the backend choice cannot drift"
+        );
+    }
+
+    /// P0 has no per-request selector, so naming `host` at all makes the node a
+    /// host node — and one whose capacity is not exactly 1 refuses to boot,
+    /// which is #309 §2 option (iii) enforced rather than assumed.
+    #[test]
+    fn host_mode_is_one_slot_or_no_boot() {
+        for modes in [
+            vec![WorkerMode::Host],
+            vec![WorkerMode::Container, WorkerMode::Host],
+            vec![WorkerMode::Host, WorkerMode::Container],
+        ] {
+            assert_eq!(backend_kind(&modes), WorkerMode::Host, "{modes:?}");
+        }
+
+        assert!(enforce_host_capacity(1, 1).is_ok());
+        for (slots, max) in [(2, 2), (1, 4), (4, 1), (0, 1)] {
+            let err = enforce_host_capacity(slots, max).unwrap_err().to_string();
+            assert!(err.contains("WORKER_SLOTS=1"), "{slots}/{max}: {err}");
+            assert!(
+                err.contains(container::host::HOST_WORKSPACE),
+                "the refusal names what collides: {err}"
+            );
+        }
+    }
 
     /// The swap window refuses new launches (retryable NoCapacity), and each
     /// permit is released on drop so the drain can complete — the core of the

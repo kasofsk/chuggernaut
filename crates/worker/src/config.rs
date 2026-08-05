@@ -42,6 +42,11 @@ pub struct WorkerConfig {
     /// A node property, provisioned entirely worker-side: it never rides the
     /// wire or the dispatcher's launch config (spec §3.1).
     pub cache_dir: Option<PathBuf>,
+    /// Root of this node's host task directories (`WORKER_HOST_ROOT`, design
+    /// #309 P0), defaulting to [`container::host::HOST_ROOT_DEFAULT`]. Read only
+    /// when [`Self::modes`] names [`WorkerMode::Host`]; a container-only node
+    /// never touches it.
+    pub host_root: PathBuf,
     /// The KVM device this node passes through (`WORKER_KVM`); `None` (unset) ⇒
     /// no passthrough at all. A node property provisioned exactly as
     /// [`Self::cache_dir`] is — worker-side, never on the wire or the launch
@@ -197,6 +202,7 @@ impl WorkerConfig {
                     PathBuf::from("/usr/local/lib/chuggernaut/chuggernaut-channel")
                 }),
             cache_dir: parse_cache_dir(std::env::var("WORKER_CACHE_DIR").ok()),
+            host_root: parse_host_root(std::env::var("WORKER_HOST_ROOT").ok())?,
             kvm_device: parse_kvm_device(std::env::var("WORKER_KVM").ok())?,
             kvm_projects: parse_projects(
                 "WORKER_KVM_PROJECTS",
@@ -290,6 +296,17 @@ fn resolve_refresh_script(raw: Option<String>) -> Option<PathBuf> {
 /// behavior is unit-tested without mutating the process environment.
 fn parse_cache_dir(raw: Option<String>) -> Option<PathBuf> {
     raw.filter(|s| !s.is_empty()).map(PathBuf::from)
+}
+
+/// Parse `WORKER_HOST_ROOT` into the node's host task root (design #309 P0);
+/// absent or empty ⇒ [`container::host::HOST_ROOT_DEFAULT`]. Held to
+/// [`parse_stable_path`]'s rule: the root is worker-writable node state that
+/// outlives a task, never a store path.
+fn parse_host_root(raw: Option<String>) -> Result<PathBuf, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(PathBuf::from(container::host::HOST_ROOT_DEFAULT));
+    };
+    parse_stable_path("WORKER_HOST_ROOT", &raw)
 }
 
 /// The node's Android SDK path when `WORKER_ANDROID_SDK_DIR` is unset (design
@@ -530,13 +547,19 @@ fn parse_slots(raw: Option<String>) -> Result<u32, ConfigError> {
     }
 }
 
+/// The runtimes a node offers when `WORKER_MODES` is unset — containers and
+/// nothing else, which is today's behavior on every node in the fleet.
+pub fn default_modes() -> Vec<WorkerMode> {
+    vec![WorkerMode::Container]
+}
+
 /// Parse `WORKER_MODES` into the runtimes this node offers, in the order
 /// declared; absent or empty ⇒ `[WorkerMode::Container]`, today's behavior. An
 /// unknown name, a blank entry, or a repeat is a hard config error rather than a
 /// silently dropped mode — pure over its input for unit testing.
 fn parse_modes(raw: Option<String>) -> Result<Vec<WorkerMode>, ConfigError> {
     let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
-        return Ok(vec![WorkerMode::Container]);
+        return Ok(default_modes());
     };
     let mut modes = Vec::new();
     for entry in raw.split(',') {
@@ -984,6 +1007,30 @@ mod tests {
         assert!(parse_slots_max(Some("some".into()), 6).is_err());
         assert_eq!(parse_slots_max(None, SLOTS_DEFAULT).unwrap(), SLOTS_DEFAULT);
         assert!(node_cpu_count() >= 1);
+    }
+
+    /// `WORKER_HOST_ROOT` (design #309 P0): unset is the documented default, an
+    /// absolute path is taken as given, and the same no-store-hash rule holds —
+    /// the root is worker-writable state that outlives a task, so a collectable
+    /// store path would be exactly wrong.
+    #[test]
+    fn host_root_parses_default_and_rejects_a_store_hash() {
+        assert_eq!(
+            parse_host_root(None).unwrap(),
+            PathBuf::from(container::host::HOST_ROOT_DEFAULT)
+        );
+        assert_eq!(
+            parse_host_root(Some(" \t".into())).unwrap(),
+            PathBuf::from(container::host::HOST_ROOT_DEFAULT)
+        );
+        assert_eq!(
+            parse_host_root(Some(" /data/chug/host ".into())).unwrap(),
+            PathBuf::from("/data/chug/host")
+        );
+        let store = "/nix/store/3zr1pgwpc00zrj8qc8d631bdfw1z9c5y-host-tasks";
+        let err = parse_host_root(Some(store.into())).unwrap_err().to_string();
+        assert!(err.contains("WORKER_HOST_ROOT"), "{err}");
+        assert!(parse_host_root(Some("host-tasks".into())).is_err());
     }
 
     /// `WORKER_MODES` (design #322 W1): unset is container-only — today's

@@ -25,7 +25,7 @@ One fat binary plus three tiny ones:
 | `chuggernaut-platform-ops` | lib | §3.1, §3.2, §3.6, §12.2 | The platform-ops context (`crates/platform-ops`): fleet occupancy, config/deploy-drift snapshots, container harvest, project seed template — the platform's own observability and housekeeping, never a job transition |
 | `store` | lib | §1.4–1.5, §8, §9 | NATS KV/stream access; the only crate that talks to NATS |
 | `auth` | lib | §7 | JWT, SSH CA, per-job credentials, permission rules |
-| `container` | lib | §3.1 | `ContainerBackend` trait + Docker and k8s implementations |
+| `container` | lib | §3.1 | `ContainerBackend` trait + the Docker, host-process and (stub) k8s implementations |
 | `worker` | lib | §3.1 | Worker-node daemon (`chuggernaut worker`) + NATS-proxying `FleetBackend` for mixed fleets |
 | `agent` | lib | §4 | `AgentProvider` trait + Claude/Codex impls, prompt assembly, KO injection |
 | `vcs` | lib | §5 | Bare repo management, git CLI shell-out, diff/tree/blob/log |
@@ -88,6 +88,7 @@ The single NATS integration point, wrapping `async-nats`:
 `ContainerBackend` trait exactly as specced (§3.1), plus:
 
 - `DockerBackend` (v1 production default): a **fleet of one or more Docker daemons** — local socket single-node, TCP+mTLS/SSH-tunnel endpoints multi-node. Slot-capped least-loaded placement; `ContainerId` encodes the owning node (`{node}/{docker_id}`). The dispatcher is the scheduler, so nodes are dumb endpoints — no Swarm, no cluster state
+- `HostBackend` (design #309 P0, prototype, **off by default**): host processes on the node itself, reachable only from a node whose `WORKER_MODES` names `host`. A task is a process group rooted in a per-task directory under `WORKER_HOST_ROOT` — that directory is what makes `inspect`, the two listings and `remove` implementable. It ignores the declared `image`, cannot enforce `resources.cpu`/`memory`, and runs **one task per node** (`slots: 1`, refused at boot otherwise) because two concurrent host tasks cannot both own `/workspace`
 - `K8sBackend` (Jobs API: create Job, watch pod status, stream logs; scale-out beyond a small fleet, built when needed)
 - The **workspace bootstrap wrapper** (§4.1): wraps every CMD with clone-to-`/workspace` + exec
 - **File injection** (put-archive after create, before start) for MCP binaries, prompt, and event batch — no host bind-mounts, so remote fleet nodes need nothing on disk

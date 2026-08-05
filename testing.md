@@ -50,11 +50,13 @@ The tests that need a **real Docker daemon** —
 `crates/worker/tests/nats_backend.rs`, `crates/dispatcher/tests/fleet_e2e.rs` —
 are tier-2 files that self-skip on a Docker-less host through
 `test_utils::backend_suite::docker_available()`. They are not a third tier; there
-is no third tier to run. A *private NATS server* is no longer one of those
+is no third tier to run. Note that this is a per-*file* list, not a per-directory
+one: `crates/container/tests/host_backend.rs` sits beside `docker_backend.rs` and
+needs neither a daemon nor a broker. A *private NATS server* is no longer one of those
 reasons; a Docker **backend** still is, and 13 of `nats_backend.rs`'s 20 tests
 skip on that guard on a Docker-less host even though all 20 now get a server.
 `declared_kvm_without_the_device_refuses_to_start` is one of the 13 and job 408
-added its guard: it asserts a pure *config* refusal, but `daemon::build_backend`
+added its guard: it asserts a pure *config* refusal, but `daemon::local_backend`
 constructs the Docker client before it validates the `WORKER_KVM` device path,
 so on a Docker-less host the refusal under test is masked by `Socket not found:
 /var/run/docker.sock`. Sequencing the local check first would make the assertion
@@ -168,6 +170,7 @@ Pure-logic tests, no I/O, colocated with the code:
 - `store` against a **real NATS server** (`test-utils` reuses the `CHUG_TEST_NATS_URL` server when one is exported, else starts a `nats:2.10-alpine` container through testcontainers; skips only when neither is available): bucket creation, watch semantics, stream replay-from-sequence, request-reply retry
 - `vcs` against **temp bare repos on disk**: branch lifecycle, squash-merge (clean, no-op, conflict), conflict-context builder, diff-by-job-state including the Done-state `git log --grep` recovery
 - `container` against the **local Docker socket** (skipped when unavailable): launch/wait/kill/inspect/copy_file, bootstrap wrapper, resource limits
+- `container`'s `HostBackend` against **real processes on the test machine** (`crates/container/tests/host_backend.rs`, design #309 P0): the launch → inspect → logs → `logs_tail` → `copy_file` → `remove` round trip, the one-task-per-node exclusion, the group kill, and a simulated daemon restart. A host task is a process group and a directory, so this file needs **neither Docker nor NATS** and never self-skips
 - `dispatcher` with **real NATS + fake `ContainerBackend` + fake `AgentProvider`** (`test-utils`): full lifecycle runs entirely in-process — seed jobs, drive Ready→Work→Evaluation→Done, retries, rework, escalation, revoke cascades, restart reconciliation (kill and restart the dispatcher task mid-run, assert §3.6 behavior), factory batching/backpressure with synthetic ingest events
 - `api` with **real NATS + a stub responder**: route auth matrix, SSE replay via `Last-Event-ID`, secret encryption on write, ingest token validation
 

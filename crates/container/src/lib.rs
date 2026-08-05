@@ -5,6 +5,7 @@
 //! Jobs API in production.
 
 pub mod docker;
+pub mod host;
 pub mod k8s;
 
 use async_trait::async_trait;

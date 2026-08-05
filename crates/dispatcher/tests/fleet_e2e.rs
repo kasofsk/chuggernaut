@@ -81,6 +81,7 @@ async fn worker_fleet(
         docker_endpoint: local_docker_endpoint(),
         channel_binary: artifact,
         cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: None,
         kvm_projects: vec![],
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),

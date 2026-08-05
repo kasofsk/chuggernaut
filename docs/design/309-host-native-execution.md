@@ -1,6 +1,10 @@
 # Design — Host-native execution (node kind, selector, capabilities, exclusive resources)
 
-Status: PROPOSED.
+Status: PROPOSED; **P0 landed 2026-08-05 (job #434)** — `HostBackend`,
+`WORKER_MODES` routing and the `slots: 1` enforcement, off on every node. §1's
+recommendation had already shipped before P0 started; see
+[the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed)
+and its addendum on `remove` racing its own reaper.
 
 Written against the tree at `b801b76`. Every claim about current behavior was
 read out of the source and out of [spec.md](../../spec.md), not inferred from
@@ -1082,3 +1086,214 @@ tests.
   `WorkerAnnounce`, which #293 job 2 is also editing, during rollout windows the
   platform has already been burned in. The sequencing in
   [4](#4-capability-advertisement) is a hard dependency, not a preference.
+
+---
+
+## Correction, 2026-08-05 — §1 already shipped, P0 landed
+
+Appended by job #434, which implemented P0. Nothing above is edited; this
+section is the record of what the document got wrong and what building it
+taught.
+
+### §1's recommendation had already shipped
+
+Option A is not a decision P0 had to make — it was already the tree. Measured on
+`main` at `a978bd5`:
+
+- `crates/worker/src/daemon.rs:205` holds `backend: Arc<dyn ContainerBackend>`,
+  not `DockerBackend`. Correction 2 above ("a `dyn ContainerBackend` field alone
+  does not compile") was true when written and was resolved by design #322 W1,
+  which moved `with_cache_dir`/`ping_all` into one construction function and
+  `managed_running_total` onto the trait.
+- `managed_running_total` (`crates/container/src/lib.rs:251`) is already a
+  provided method defaulting to `list_managed_running().len()`, with
+  `DockerBackend` keeping the cheap label-filtered override — exactly the shape
+  §1 recommends.
+
+§1's roster is also stale. `grep -rn "impl ContainerBackend for" crates/` now
+returns **four**, not the three "the honest limit" paragraph verified:
+`FakeBackend` (`crates/test-utils/src/lib.rs`), `DockerBackend`, `FleetBackend`
+(`crates/worker/src/backend.rs`) and `StubBackend` in `lib.rs`'s own test
+module. `HostBackend` makes five.
+
+So what P0 actually owed was smaller than §1 implies: the config seam and the
+backend. The construction function §1 names `local_backend` existed as
+`build_backend`; #434 renamed it to the designed name and gave it the host
+branch.
+
+### What P0 built, and what it did not
+
+`crates/container/src/host.rs`, reachable only from a node whose `WORKER_MODES`
+names `host`, off everywhere by default. No `runtime: { mode: host }` support —
+job #401's refusal stays, and deleting it is P1's. No schema change, no epoch
+bump, no capability wire, no placement change. The job type still declares
+`image:` and a host node ignores it; the backend logs that as the lie §Phasing
+says it is, at boot and at every launch.
+
+`WORKER_HOST_ROOT` was added beside `WORKER_CACHE_DIR` (same stable-path rule,
+default `/var/lib/chuggernaut/host-tasks`) because the task directory §2
+describes needs a root and the operator must be able to put it on a disk that
+can hold one.
+
+### Which of the ten methods was actually hard
+
+The document's own question. Ranked by what building them cost, against §2's
+predictions:
+
+| Method | §2 predicted | Measured | Note |
+| --- | --- | --- | --- |
+| `remove` | "trivial to write, load-bearing to get right" | **hardest** | §2(c) under-priced it, see below |
+| `inspect` | "genuinely awkward" | **second hardest, and for a different reason** | pid identity was the *easy* half |
+| `launch` | "moderate — the path problem lives here" | moderate, but the path problem was **free** under option (iii) | |
+| `kill` | "trivial, with one caveat" | trivial | the caveat (a `setsid()` escape) is real and unaddressed |
+| `logs`, `logs_tail` | "trivial, and strictly better" | **correct — trivial and strictly better** | one fd; the offsets are definitionally stable |
+| `copy_file` | "trivial given the rebase rule" | trivial *without* a rebase rule | option (iii) makes the literal path correct |
+| `list_managed_exited`, `list_managed_running` | trivial | trivial | both derive from one `status()` |
+| `wait` | trivial | trivial | a poll over `inspect`; the daemon never calls it |
+| `managed_running_total` | free | free | the trait's default is right for a node-local backend |
+
+**Where the design under-priced the work:**
+
+1. **`remove` needs an ownership record the design does not mention.** §2(c) is
+   right that the call must delete a 5–10 GB `workspace/` and that nothing else
+   will. What it misses is that under option (iii) the workspace is a *shared,
+   fixed* path, so `remove(A)` arriving after `launch(B)` has claimed it would
+   delete B's clone. The fix is a `workspace-owner` file in the host root that
+   `remove` checks before deleting anything outside its own task directory — it
+   must survive a daemon restart, so it is a file rather than a field. Option
+   (i)'s rebase dissolves this: a per-task workspace has no shared owner.
+   `remove` also has to reclaim every path the launch materialized *outside* the
+   task directory (`/chuggernaut/prompt.md`, the ssh cert, the MCP config), so
+   `meta.json` records them.
+
+2. **`inspect`'s hard half is the exit code, not the pid.** The pid-identity
+   rule §2(b) specifies is mechanical: record field 22 of `/proc/<pid>/stat`
+   (`ps -o lstart=` off Linux) and treat a mismatch as gone. What §2 does not
+   say is that the *authority* for a task's exit status cannot be the daemon.
+   If the daemon reaps the child, then a `worker-refresh.sh` swap mid-task —
+   which spec §3.1 guarantees does not interrupt in-flight work — loses the
+   exit code, and the surviving pid rule reports a task that **succeeded** as
+   `Exited { -1 }`. So the task writes its own status: the launch command is
+   wrapped in `sh -c '"$@"; s=$?; … ; exit $s'` with the paths passed as
+   environment. The daemon's reaper is only a backstop, and the in-memory live
+   set is what keeps a just-exited task from reading as gone in the window
+   before the status file lands. Three sources, in that precedence order.
+
+3. **`/workspace` cost nothing, because option (iii) was taken.** §2(a) calls
+   this "the sharpest single finding" and the Risks section calls the rebase
+   "the schedule risk". Both are right about P1 and both are irrelevant to P0:
+   with one task per node the literal path is correct in `bootstrap_cmd`, in
+   `launch_queue.rs`'s `copy_file("/workspace/eval-result.json")`, and in
+   `agent::transcript_path`'s measured `-workspace` slug. The prototype's job
+   was to find out whether the seam fits a non-container runtime, and it does.
+   Rebasing is still the durable answer and is still not free.
+
+4. **The exclusion has to be enforced twice, not assumed once.** §2 and §5 both
+   describe `slots: 1` as configuration. Configuration is not enforcement: an
+   operator's `WORKER_SLOTS=4`, or a runtime `set_slots` raise (spec §3.1
+   operator capacity control, which the design never reconciles with the 1-slot
+   pin), puts two host tasks on one `/workspace`. #434 refuses the boot when
+   `host` is declared with `WORKER_SLOTS`/`WORKER_SLOTS_MAX` other than 1, *and*
+   refuses a second concurrent launch in the backend with `NoCapacity` — the
+   transient class, so §3.5 queues and retries and no retry budget is spent.
+
+5. **`resources.cpu`/`memory` are silently unenforced on a host node, today.**
+   §7 recommends making enforceability a capability with a hard `Launch` refusal
+   as the backstop, and that is P2/P3 work. In P0 a host launch *warns* and runs
+   unbounded, because every job type in `.chug/jobs/` declares both and refusing
+   would leave nothing to prototype against. `task_timeout` still bounds the
+   task in time. This is the one place P0 knowingly ships the "silent lie"
+   §7 option 1 rejects, and it is confined to a node an operator opted in.
+
+6. **The shipped daemon is a container, and the design never says so.** This is
+   the finding P0 did not expect and the one that most affects the proof. §6
+   reasons about the daemon as a systemd unit ("if the daemon is a systemd unit
+   and task processes are in its cgroup, `systemctl restart chug-worker` kills
+   every running task"), and §2 assumes the node's own filesystem. But
+   `deploy/prod/build-worker.sh` runs `docker run -d --name chug-worker` with
+   only `/var/run/docker.sock` and `keys` mounted — the same shape design #372
+   C3 records for `WORKER_CACHE_DIR`. A `HostBackend` inside that container
+   spawns processes in the *daemon container's* namespace, with the daemon
+   container's `/workspace` and its own root filesystem. That is not
+   host-native execution; it is a second, worse container runtime. So P0's
+   proof requires a daemon run **natively** on the node, which nothing in the
+   deploy path does today, and `build-worker.sh` deliberately carries **no
+   `WORKER_MODES` passthrough** — the mode is unreachable in the shipped
+   deployment by construction, which is the "off everywhere by default" the
+   phase asks for and is also the gap the proof has to close. Deciding what a
+   natively-run daemon looks like (its supervision, its credentials, its
+   relationship to the containerized one on a mixed-mode node) is not P0's and
+   is not currently anybody's.
+
+**Unaddressed and known:** a task that calls `setsid()` escapes the process
+group and survives `kill` (§2's caveat — the Linux answer is §6's transient
+scope, P3); secrets are readable from `/proc/<pid>/environ` by any process of
+the same uid (§8, P3); the host task inherits the daemon's environment,
+including a reachable docker socket on a mixed-mode node (§10).
+
+### Test placement, as landed
+
+Tier 1 (`crates/container/src/host.rs`, `crates/worker/src/{config,daemon}.rs`):
+the pid-identity rule including same-pid-different-start-time, `/proc` field-22
+parsing against a comm field holding spaces and parens, the exit-status wrapper,
+id/path traversal refusal, `WORKER_MODES` and `WORKER_HOST_ROOT` parsing, the
+backend-kind choice and the capacity refusal. Tier 2
+(`crates/container/tests/host_backend.rs`): the launch → inspect → logs →
+`logs_tail` → `copy_file` → `remove` round trip, the one-task-at-a-time
+exclusion, the group kill, and a simulated daemon restart asserting a lost task
+reads as `Exited`, **not** `Running`. **None of it needs Docker or NATS** — a
+host task is a process group and a directory — so the whole suite runs on a
+Docker-less evaluator.
+
+**Still not verified:** that host execution works on a real node. That needs an
+operator to set `WORKER_MODES=container,host`, `WORKER_SLOTS=1` and pin a job —
+a later proof, in the shape of `android-proof` and `gcp-proof`, and per #308 H.4
+against a boring cache-heavy build.
+
+### Addendum, 2026-08-05 — `remove` was harder than "hardest" recorded above
+
+The table above ranks `remove` hardest and blames the ownership record. CI then
+found a second, independent way for it to fail, and this one is a *race* rather
+than a missing fact.
+
+`remove` deleted the task directory in place with `remove_dir_all`. The
+daemon's order is kill-then-sweep, so at that moment the task's own reaper is
+frequently still writing `exit_code` into that same directory: the walk unlinks
+the entries, the reaper's `rename(exit_code.tmp → exit_code)` repopulates it,
+and the final `rmdir` fails with `ENOTEMPTY`. Because §2(c) asks for loud
+failure, the whole `remove` then reported **leaked disk when nothing had
+leaked** — the loudness worked exactly as designed and pointed at the wrong
+thing.
+
+It is invisible unloaded and deterministic under load: 0/12 failures on an idle
+machine, 12/12 with the cores oversubscribed, which is what a full
+`cargo test --workspace` gate looks like and is why CI found it and the targeted
+run did not.
+
+The fix is to **detach before deleting** — rename the task tree to a
+`.removing-` sibling, then delete the renamed path. The rename is atomic and
+every writer addresses the old path, so the delete has no concurrent writer at
+all; a late `write_exit_code` fails with `ENOENT` and cannot resurrect the tree,
+because `std::fs::write` never creates a parent. The rename opens a crash window
+that would leak a whole task tree, which is the §2(c) failure itself, so
+construction sweeps leftover `.removing-` trees; the leading dot is what makes
+`is_task_id` reject them, so a half-removed tree never reads back as a task.
+
+Two things generalize past this backend:
+
+1. **A container runtime hid this.** `docker rm` is one call to a daemon that
+   owns the container's whole lifecycle, so "delete the task" is atomic by
+   construction. On a host node the task directory is an ordinary directory with
+   two independent writers, and the trait's `remove` says nothing about
+   concurrency because under Docker there was none to say anything about. Every
+   host analogue inherits the trait's *signature* for free and its *isolation*
+   not at all — which is the P0 question, answered on a method the design had
+   already flagged as the load-bearing one.
+
+2. **The under-pricing is a pattern, not an instance.** §2 rated `remove`
+   "trivial to write, load-bearing to get right" and was right twice over: this
+   is the third distinct obligation found on one method (delete the workspace,
+   own the workspace, delete without a racing writer), and the first two were
+   found by reading while the third needed a loaded machine. P1 should assume
+   the remaining §2 "trivial" verdicts are about the *writing*, not the getting
+   right.
