@@ -16,7 +16,7 @@
 //!   (#167).
 //! - **SlotResolved** — a Human evaluator answered through the operator inbox.
 //! - **SlotRelaunched** / **StageLaunched** — the continuation events
-//!   (contracts.md §2): a launch effect's task ids come back and land on the
+//!   (docs/reference/contracts.md §2): a launch effect's task ids come back and land on the
 //!   round they belong to.
 //! - **StageSettled** — restart reconciliation rebuilt the round from the task
 //!   log and replays the advance-or-reduce decision (§3.6).
@@ -25,14 +25,14 @@
 //! `eval_retries` (an infra-failed slot's retries), the [`EvalView::
 //! infra_relaunch_cap`] bound on evidence-free relaunches, and `rework_budget`
 //! (a product failure's rework cycles). A required **abort** verdict skips the
-//! rework budget entirely — "not satisfiable by rework" (design-lifecycle.md).
+//! rework budget entirely — "not satisfiable by rework" (docs/reference/design-lifecycle.md).
 //!
 //! The round is a value ([`EvalRound`]), swapped wholesale by the shim exactly
 //! as C2 swaps `MergeGateState`, so "one stage in flight per job" holds by
 //! type: `slots` is the live stage, `pending` the stages not yet created,
 //! `done` the stages that passed.
 //!
-//! The `Msg` contracts this decider owns (contracts.md §1):
+//! The `Msg` contracts this decider owns (docs/reference/contracts.md §1):
 //!
 //! - `Msg::TaskExited` for a `TaskPhase::Evaluation` task — **pre:** the job is
 //!   `Evaluation` with a live execution slice, and the task is an *open* slot
@@ -54,19 +54,19 @@
 //!   type's evaluator list and budgets, the cycle, the drain flag, the clock)
 //!   and an [`EvalEvent`].
 //! - **Emits:** `(Option<EvalRound>, Vec<Transition>, Vec<Effect>, EvalStep)` —
-//!   values only. The owned effect set (contracts.md §2): `LaunchEvalStage`,
+//!   values only. The owned effect set (docs/reference/contracts.md §2): `LaunchEvalStage`,
 //!   `LaunchEvaluator`, `PutTask`, `Escalate`, and `PublishEvent` for
 //!   `job-evaluation-started`, `task-completed`, `task-failed` and
 //!   `job-rework-started`. The [`EvalStep`] names the shell bookkeeping that
 //!   follows — landing, the rework re-entry, releasing the execution slice —
 //!   all of which touch dispatcher state the pure crate cannot see.
 //! - **Guarantees:** pure and synchronous; every branch exhaustively matched
-//!   and unit-tested; asserts negative space (STYLE.md Tier 2 #2) — never
+//!   and unit-tested; asserts negative space (docs/reference/style.md Tier 2 #2) — never
 //!   resolves a slot twice, never reduces over an unresolved slot or an empty
 //!   round, never decides an exit for a task from another phase. Performs no
 //!   effect, holds no `&mut Core`.
 //! - **Spec:** §3.3; §3.2 steps 9–10; §3.6 (drain, round rebuild);
-//!   contracts.md §2; refactor-plan C5.
+//!   docs/reference/contracts.md §2; refactor-plan C5.
 
 use crate::decide::Transition;
 use crate::decide::merge_gate::group_stages;
@@ -137,7 +137,7 @@ pub struct EvalSlot {
 pub enum SlotOutcome {
     Product {
         pass: bool,
-        /// "Not satisfiable by rework" (design-lifecycle.md): a required
+        /// "Not satisfiable by rework" (docs/reference/design-lifecycle.md): a required
         /// evaluator's abort escalates at reduce instead of consuming budget.
         abort: bool,
         structured: Option<serde_json::Value>,
@@ -191,7 +191,7 @@ pub struct EvalView<'a> {
     pub infra_losses_prior: u32,
     /// Bound on evidence-free relaunches for one evaluator lineage (§3.6): on
     /// exhaustion the job escalates [`EVAL_NO_OUTPUT_REASON`] instead of
-    /// relaunching forever (STYLE.md Tier 2 #3 — every loop has a cap).
+    /// relaunching forever (docs/reference/style.md Tier 2 #3 — every loop has a cap).
     pub infra_relaunch_cap: u32,
     /// §3.6 graceful drain: launch no containers, advance no stage, run no
     /// reduce. Restart reconciliation rebuilds the round and replays the
@@ -222,7 +222,7 @@ pub struct EvalExit {
 
 /// What drove this evaluation decision. The first is [`EvalEvent::Entered`];
 /// the launch events carry the result of the effect the previous [`decide`]
-/// emitted (contracts.md §2's continuation contract).
+/// emitted (docs/reference/contracts.md §2's continuation contract).
 #[derive(Debug)]
 pub enum EvalEvent {
     /// Work is Done and the branch is rebased: fan out (§3.2 steps 9–10).
@@ -384,7 +384,7 @@ fn decide_entered(
 
 /// A stage's tasks exist: they are the round's live slots. The round is the
 /// only place their task ids are known, so this is where the fan-out's result
-/// lands (contracts.md §2's continuation contract).
+/// lands (docs/reference/contracts.md §2's continuation contract).
 fn decide_stage_launched(
     round: Option<EvalRound>,
     slots: Vec<EvalSlot>,
@@ -836,7 +836,7 @@ struct RoundVerdict {
     /// Every required evaluator passed.
     overall_pass: bool,
     /// Required evaluators that declared the work unsalvageable
-    /// (design-lifecycle.md abort verdict). Advisory aborts are plain advisory
+    /// (docs/reference/design-lifecycle.md abort verdict). Advisory aborts are plain advisory
     /// fails and never appear here.
     aborted: Vec<String>,
 }
@@ -1004,7 +1004,7 @@ fn split_project(job: &Job) -> (&str, &str) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Tier-1 coverage of every evaluation branch: pure values in, pure values
-    //! out, no NATS/Docker (testing.md tier 1). This is C5's payoff — the
+    //! out, no NATS/Docker (docs/reference/testing.md tier 1). This is C5's payoff — the
     //! reduce's budgets, the evidence-free relaunch bound and the staged
     //! short-circuit used to be reachable only through a container harness.
     //! The dispatcher's golden traces pin the same decisions end-to-end

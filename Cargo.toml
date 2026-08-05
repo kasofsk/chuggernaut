@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.lints.clippy]
-# STYLE.md Tier 1 denies. All three lints are allow-by-default in clippy, so
+# docs/reference/style.md Tier 1 denies. All three lints are allow-by-default in clippy, so
 # `cargo clippy -D warnings` cannot see them without an explicit deny here;
 # members opt in with `lints.workspace = true`. Existing violations carry a
 # site-specific `#[allow]` with a TODO pointing at the refactor-plan Track C

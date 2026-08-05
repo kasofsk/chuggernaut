@@ -14,7 +14,7 @@
 //! - **Emits:** one [`Transition`] (the WHY-stamped job → `Escalated` or
 //!   `Stalled`) and the effects `[PutTask, PublishEvent]`, in that order.
 //! - **Guarantees:** pure — no I/O, no clock, no id allocation; every input
-//!   the decision needs arrives in the view. Performs no effect (STYLE.md
+//!   the decision needs arrives in the view. Performs no effect (docs/reference/style.md
 //!   Tier 2 #1).
 //! - **Spec:** §1.2, §3.4.
 

@@ -28,7 +28,7 @@
 #   WORKER_KVM / WORKER_KVM_PROJECTS / WORKER_ANDROID_SDK_DIR / WORKER_FLUTTER_DIR /
 #     WORKER_JDK_DIR
 #     KVM passthrough (design #367), re-applied on swap; the DEVICE itself is carried forward
-#     from the live container, never from this env (docs/runbooks/worker-kvm.md)
+#     from the live container, never from this env (docs/reference/runbooks/worker-kvm.md)
 #   WORKER_NIX_GCROOTS_DIR / WORKER_NIX_CLIENT / WORKER_NIX_DAEMON_SOCKET /
 #     WORKER_NIX_STORE_DIR / WORKER_NIX_PROJECTS / WORKER_NIX_FLAKE_CLIENT /
 #     WORKER_NIX_REALISE_TIMEOUT_SECS   per-task nix GC roots (design #373 P1)
@@ -446,7 +446,7 @@ swap)
   # happens where an operator has ever set a number; carrying the boot value
   # forward is what keeps the node correct in the gap, and correct at all on a
   # node whose dispatcher is down. Capacity is CHANGED from the operator UI, not
-  # here (docs/runbooks/worker-capacity.md). Unset adds nothing, so a stock node
+  # here (docs/reference/runbooks/worker-capacity.md). Unset adds nothing, so a stock node
   # keeps the default.
   SLOTS_ARGS=""
   if [ -n "${WORKER_SLOTS:-}" ]; then

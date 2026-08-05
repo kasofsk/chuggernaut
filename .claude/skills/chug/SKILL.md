@@ -167,7 +167,7 @@ task) or `GET .../tasks/pending`.
 - If the API is unreachable: for prod check Tailscale is up and the Mini's
   stack is running (`deploy/prod/README.md`); for dev see
   `deploy/dev/README.md` "Run".
-- For dispatcher internals beyond the API, read `~/chuggernaut/spec.md`
-  (normative) and the repo's docs — `crates.md` for the crate map,
+- For dispatcher internals beyond the API, read `~/chuggernaut/docs/spec.md`
+  (normative) and the repo's docs — `docs/reference/crates.md` for the crate map,
   `docs/implementation-notes.md` for per-module rationale, `docs/design/`
   for why a thing is shaped the way it is — rather than guessing.

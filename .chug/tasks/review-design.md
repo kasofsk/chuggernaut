@@ -22,7 +22,7 @@ cite it.
      option while ignoring the obvious competitor, or that lists only upsides,
      is not done. The rejected options and their real costs must be on the page.
    - **Is it consistent with the codebase as it exists?** Spot-check its claims
-     against `spec.md` and the code it cites (read the cited paths). A design
+     against `docs/spec.md` and the code it cites (read the cited paths). A design
      that contradicts current behavior without acknowledging the change it
      proposes is a fail — send it back to either align or make the proposed
      change explicit. Markdown well-formedness and link resolution are the

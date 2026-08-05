@@ -22,7 +22,7 @@
 //! - **Emits:** the [`ScheduleDecision`]s this turn (fire and skip), plus the
 //!   `schedule-skipped` [`Effect::PublishEvent`]s that report the skips.
 //! - **Guarantees:** pure and total — no I/O, no clock, no id allocation;
-//!   performs no effect (STYLE.md Tier 2 #1), and the per-turn work is bounded
+//!   performs no effect (docs/reference/style.md Tier 2 #1), and the per-turn work is bounded
 //!   by [`SCHEDULES_MAX`].
 //! - **Spec:** §1.1 (schedules), §2.1 (`is_terminal`); design #310.
 

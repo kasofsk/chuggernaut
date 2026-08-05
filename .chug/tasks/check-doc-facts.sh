@@ -53,7 +53,7 @@
 # `<!-- runtime -->` for what is correctly absent from git (build output,
 # operator-owned files), and `<!-- absent -->` for a line that names a path
 # *because it does not exist* — a measurement of staleness, a rejected
-# alternative, a recorded deletion. They are documented in STYLE.md's doc-claim
+# alternative, a recorded deletion. They are documented in docs/reference/style.md's doc-claim
 # rule. An append-only design body is not licence to hide a false present-tense
 # claim behind one: if the sentence must keep the path, the sentence says what
 # happened to it.
@@ -314,7 +314,7 @@ if [ "$path_findings" -gt 0 ]; then
 	echo "!!!       <!-- absent -->  named BECAUSE it does not exist (a staleness measurement,"
 	echo "!!!                        a rejected alternative, a recorded deletion)"
 	echo "!!!     A path that resolves in another repo takes no marker — qualify it"
-	echo "!!!     (\`{repo}:{path}\`). See STYLE.md's doc-claim rule (Tier 2)."
+	echo "!!!     (\`{repo}:{path}\`). See docs/reference/style.md's doc-claim rule (Tier 2)."
 fi
 if [ "$const_findings" -gt 0 ]; then
 	echo "!!! check-doc-facts: $const_findings stale constant claim(s)."

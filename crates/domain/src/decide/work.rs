@@ -19,7 +19,7 @@
 //! - **Exited** — the container's verdict (§3.2 step 8): exit 0 completes the
 //!   attempt (unless the finish-line guard has a question, below), any other
 //!   exit fails it and spends the retry policy.
-//! - **OutputChecked** — the finish-line guard's continuation (contracts.md §2):
+//! - **OutputChecked** — the finish-line guard's continuation (docs/reference/contracts.md §2):
 //!   "did the branch move?" is a ref read, so the decider asks for it
 //!   ([`WorkStep::CheckOutput`]) and the answer re-enters here.
 //! - **Declined** — an operator failed a Pending human-performed attempt
@@ -34,7 +34,7 @@
 //! branch is recovered and what context carries forward — are values on
 //! [`WorkStep::Retry`], not separate policies.
 //!
-//! The `Msg` contracts this decider owns (contracts.md §1):
+//! The `Msg` contracts this decider owns (docs/reference/contracts.md §1):
 //!
 //! - `Msg::TaskExited` for a `TaskPhase::Work` task — **pre:** the job has a
 //!   live execution slice (the shim ignores a late exit from a revoked job);
@@ -57,7 +57,7 @@
 //!   submission, the pre-minted task id and session id, the §4.3 brief, the
 //!   clock) and a [`WorkEvent`].
 //! - **Emits:** `(Vec<Transition>, Vec<Effect>, WorkStep)` — values only. The
-//!   owned effect set (contracts.md §2): `CreateTask` for the attempt record,
+//!   owned effect set (docs/reference/contracts.md §2): `CreateTask` for the attempt record,
 //!   `PutJob` for the consumed claim, `PutTask` for a retired attempt,
 //!   `PublishEvent` for `job-started`, `config-warning`, `task-completed` and
 //!   `task-failed`, and `Escalate`/`Stall` for the two parks. The [`WorkStep`]
@@ -65,11 +65,11 @@
 //!   recover-or-reset, the finish-line ref read, the Evaluation hand-off — all
 //!   of which are I/O the pure crate cannot do.
 //! - **Guarantees:** pure and synchronous; every branch exhaustively matched and
-//!   unit-tested; asserts negative space (STYLE.md Tier 2 #2) — never launches
+//!   unit-tested; asserts negative space (docs/reference/style.md Tier 2 #2) — never launches
 //!   for a terminal job, never resolves an attempt twice, never spends budget
 //!   for an infrastructure loss. Performs no effect, holds no `&mut Core`.
 //! - **Spec:** §3.2; §1.2 (claims, human work); §2.2 and §14.2 (the launch-time
-//!   pass and the skew park); §3.6 (drain, infra loss); contracts.md §2;
+//!   pass and the skew park); §3.6 (drain, infra loss); docs/reference/contracts.md §2;
 //!   refactor-plan C6.
 //!
 //! **Boundary.** Retiring an infrastructure-lost attempt (the `Failed` +
@@ -241,7 +241,7 @@ pub enum EntryFailure {
 }
 
 /// What drove this Work-phase decision. [`WorkEvent::OutputChecked`] carries the
-/// result of the read [`WorkStep::CheckOutput`] asked for (contracts.md §2's
+/// result of the read [`WorkStep::CheckOutput`] asked for (docs/reference/contracts.md §2's
 /// continuation contract).
 #[derive(Debug)]
 pub enum WorkEvent {
@@ -992,7 +992,7 @@ fn work_event(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Tier-1 coverage of every Work-phase branch: pure values in, pure values
-    //! out, no NATS/Docker (`testing.md` tier 1). Before C6 the same branches
+    //! out, no NATS/Docker (`docs/reference/testing.md` tier 1). Before C6 the same branches
     //! needed a container backend and a live NATS to reach; the dispatcher's
     //! golden traces (`work_eval_merge_no_gate.yaml`, `gate_fix_fast_path.yaml`,
     //! `conflict_reentry.yaml`) pin the same decisions end-to-end.
@@ -2006,7 +2006,7 @@ mod tests {
     }
 
     /// A vanishing environment escalates rather than relaunching forever
-    /// (STYLE.md Tier 2 #3): the cap is on the lineage, not the budget.
+    /// (docs/reference/style.md Tier 2 #3): the cap is on the lineage, not the budget.
     #[test]
     fn an_infra_loss_past_the_cap_escalates() {
         let job = sample_job(JobState::Work);

@@ -8,7 +8,7 @@ been revised twice after review; the one commit between those two trees,
 [`docs/design/367-android-emulator-execution.md`](./367-android-emulator-execution.md),
 by 598 lines — and that amendment inverted the first draft's C1, which is what
 C1 is now about. Every claim about current behavior below
-was read out of `spec.md` and the source in this repo; where the brief and the
+was read out of `docs/spec.md` and the source in this repo; where the brief and the
 tree disagree, the tree wins and the disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree). Claims about *Nix* — what
 `virtualisation.docker` generates, whether nix-darwin evaluates `assertions`,
@@ -128,7 +128,7 @@ It is: **the assertion mechanism is identical; the surface it can assert *about*
 is much smaller, because the hazard the module exists to prevent lives in a
 NixOS module that has no macOS counterpart.**
 
-**C3 — the cache directory is not owned by anything today, and `spec.md` §3.1
+**C3 — the cache directory is not owned by anything today, and `docs/spec.md` §3.1
 overstates it.** §3.1 says the host cache dir "is created and owned by the worker
 daemon at startup". In the shipped deployment it is not. `WORKER_CACHE_DIR` is
 passed to the daemon **as env only** — [`deploy/prod/build-worker.sh`](../../deploy/prod/build-worker.sh)
@@ -181,7 +181,7 @@ exports two skip macros — `require_nats!` and `require_nats_config!` in
 [`crates/test-utils/src/nats.rs`](../../crates/test-utils/src/nats.rs) — plus the
 `backend_suite::docker_available()` predicate, and nothing named `e2e`;
 `git log -S 'macro_rules! e2e' --all -- crates/` returns no commit, so the macro
-was never defined in this tree. `testing.md` and `CLAUDE.md` both now say so
+was never defined in this tree. `docs/reference/testing.md` and `CLAUDE.md` both now say so
 outright ("there is no `e2e!` macro"), and that is why this is a Correction
 rather than a dated record: dating protects a claim that *was* true when written,
 and this one never was. The *name* does still survive in one place —
@@ -417,7 +417,7 @@ option declarations. Simplest to read; no shared file to reason about.
 supplying only `config` (recommended).**
 
 The deciding argument is not DRY — at three options DRY barely pays, and
-STYLE.md's simplicity principle would otherwise favour M1. It is that **the
+docs/reference/style.md's simplicity principle would otherwise favour M1. It is that **the
 host-facing surface must be identical on both boxes even where the enforcement
 is not.** A host repo should write the same three lines on `gumbo-nuc-0` and
 `gumbo-air-0` and get the same *meaning*; the fact that only one of them can
@@ -928,7 +928,7 @@ thing. But the question H.6 left open has since been answered twice over:
 
 - [#293](./293-worker-capacity.md) shipped operator capacity control.
   `platform_fleet_capacity_set` (`crates/api/src/routes.rs`) forwards
-  `{node, slots, by}`, and [`docs/runbooks/worker-capacity.md`](../runbooks/worker-capacity.md)
+  `{node, slots, by}`, and [`docs/reference/runbooks/worker-capacity.md`](../reference/runbooks/worker-capacity.md)
   states it plainly: "Set it to `0`. That is a full drain and it is a first-class
   state, not a hack." Lowering below live occupancy never kills — `free = slots −
   running` goes non-positive and placement skips the node.
@@ -945,7 +945,7 @@ runs the same direction.
 
 So the deliverable here is documentation, and it is small:
 
-1. `docs/runbooks/worker-capacity.md` gains a "before `nixos-rebuild switch` /
+1. `docs/reference/runbooks/worker-capacity.md` gains a "before `nixos-rebuild switch` /
    `darwin-rebuild switch`" section: set the node to `0`, watch `occupied` in the
    fleet status reach zero, rebuild, restore the slot count.
 2. The module's own doc header says the same thing, so the operator meets it
@@ -1098,11 +1098,11 @@ the assertions and constructions in §5; the runbook additions in §6.
 **Out:** implementing the modules (this is a design job); project toolchain
 supply, flake devshells and `runtime.env` (the next design job); host-native
 execution (#309); declaring or supervising `chug-worker` (§8); moving image
-delivery to a registry; any change to `spec.md` §3.1's wire contract — the module
+delivery to a registry; any change to `docs/spec.md` §3.1's wire contract — the module
 adds no field, no subject and no schema, which is why it needs no version-skew
 gate (§14).
 
-One documentation change to `spec.md` is implied and should ride with the
+One documentation change to `docs/spec.md` is implied and should ride with the
 implementation: §3.1's "created and owned by the worker daemon at startup" is
 inaccurate per C3 and should say what actually happens.
 
@@ -1112,13 +1112,13 @@ inaccurate per C3 and should say what actually happens.
 
 1. **`code`** — add `flake.nix` (F1), `nix/chug-node/{options,nixos,darwin}.nix`,
    and the skipping `nix flake check` stage in `.chug/tasks/ci.sh` (N1). No
-   behavior change to anything shipped. **No `MODULES.md` rows**: the registry is
+   behavior change to anything shipped. **No `docs/reference/modules.md` rows**: the registry is
    Rust-only — its header scopes it to `crates/dispatcher/src/**/*.rs`,
    `crates/domain/src/**/*.rs` and `crates/platform-ops/src/**/*.rs`, and
    `.chug/tasks/check-modules.sh` walks exactly those three directories for
    `*.rs`, so a `nix/` file gets no row and the gate would neither require nor
    check one. What the slice does owe the docs tree is a pointer: one line in
-   `crates.md`'s layout section saying `nix/` holds the host-preparation modules
+   `docs/reference/crates.md`'s layout section saying `nix/` holds the host-preparation modules
    and is not a crate.
 2. **`code`** — label the swapper container `chug.managed=true` in
    `worker-refresh.sh` (A1's third bullet), and extend
@@ -1131,10 +1131,10 @@ inaccurate per C3 and should say what actually happens.
    reads "provisioned with the node and owned by neither the daemon nor any
    container", which is C3's finding. The other two shipped in job #404, written
    from the 2026-08-03 adoption on both prod nodes rather than from this
-   document: [`docs/runbooks/worker-capacity.md`](../runbooks/worker-capacity.md)
+   document: [`docs/reference/runbooks/worker-capacity.md`](../reference/runbooks/worker-capacity.md)
    §4.1 (drain, and why the switch that *enables* A4's `live-restore` is the one
    that costs), and
-   [`docs/runbooks/chug-node-adoption.md`](../runbooks/chug-node-adoption.md)
+   [`docs/reference/runbooks/chug-node-adoption.md`](../reference/runbooks/chug-node-adoption.md)
    (the flake input, the `chug.node` block, A1b's coupled removal of a host's own
    `label!=` filter, `--override-input`, and verification). Two facts the
    adoption produced that this document did not predict are recorded there: a

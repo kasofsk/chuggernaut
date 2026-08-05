@@ -8,7 +8,7 @@ allowed-tools: [Bash, Read, Grep, Glob, Edit]
 You are guiding a user through getting a repository onto **Chuggernaut** — a
 one-time setup they'd otherwise run as a hand-copied runbook. Drive the scripts
 in `deploy/prod/`, and **verify each stage before moving to the next**. Every
-step degrades to a manual command from `deploy/prod/README.md` / `INSTALL.md`;
+step degrades to a manual command from `deploy/prod/README.md` / `README.md`;
 always say which script you are about to run before running it.
 
 ## The machine half you orchestrate
@@ -77,7 +77,7 @@ platform-owned unless they choose linked-origin.
    dispatcher so the node survives a dispatcher restart. **No restart is
    needed to pick the node up** — the daemon announces itself and the
    dispatcher merges it into the live fleet. Its capacity comes from the node,
-   not that entry (`docs/runbooks/worker-capacity.md`).
+   not that entry (`docs/reference/runbooks/worker-capacity.md`).
 
 ## Guardrails
 

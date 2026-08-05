@@ -110,7 +110,7 @@ pub struct WorkerConfig {
     /// (`WORKER_NIX_REALISE_TIMEOUT_SECS`), defaulting to
     /// [`NIX_REALISE_TIMEOUT_SECS_DEFAULT`]. The realise runs before execution
     /// begins, so no `task_timeout` covers it and an unbounded one would hang the
-    /// launch path (design #373 3c, STYLE.md Tier 2 rule 3).
+    /// launch path (design #373 3c, docs/reference/style.md Tier 2 rule 3).
     pub nix_realise_timeout_secs: u64,
     /// Node-local script that rebuilds the three node images at a given SHA and
     /// swaps the daemon (`worker-refresh.sh build <sha> <tag>` / `swap <tag>`),

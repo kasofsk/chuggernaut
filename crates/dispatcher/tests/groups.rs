@@ -11,7 +11,7 @@
 //! record and the `job-updated` event agree, and that two jobs differing only in
 //! their groups launch containers with the same environment. The last one needs
 //! a real launch, which is what makes it tier 2 rather than tier 1
-//! (`testing.md`).
+//! (`docs/reference/testing.md`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

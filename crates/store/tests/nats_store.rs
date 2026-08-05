@@ -1,4 +1,4 @@
-//! Tier-2 integration tests (testing.md): store against a real NATS server
+//! Tier-2 integration tests (docs/reference/testing.md): store against a real NATS server
 //! in Docker. Skips when the Docker daemon is unavailable.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

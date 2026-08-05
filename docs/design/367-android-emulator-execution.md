@@ -4,7 +4,7 @@ Status: PROPOSED, amended 2026-08-02 — recommendation unchanged, phase A1's me
 
 Written against the tree at `1e567e3`, amended against `fef87f9`. Every claim
 about this repository was read out of the source or out of
-[`spec.md`](../../spec.md), not inferred from a sibling design; where the brief
+[`docs/spec.md`](../spec.md), not inferred from a sibling design; where the brief
 and the tree disagree, the tree wins and the disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree). The four external claims
 the brief supplies were fetched and are quoted where used. One class of claim —
@@ -43,15 +43,15 @@ should exist; #309 and #322 decided that, and the recommendation below leaves
 both intact. It changes nothing about `runtime:`, `CONFIG_SCHEMA_EPOCH`, or the
 host backend.
 
-Related: [`spec.md`](../../spec.md) §3.1 (backends, placement, worker RPC,
+Related: [`docs/spec.md`](../spec.md) §3.1 (backends, placement, worker RPC,
 node-local build caching, "no host bind-mounts"), §3.5 (launch capacity queue),
 §14.1 (config/version skew); [#308](./308-gha-port.md) §F, §G, H.2, H.4, H.5,
 H.6 and the gap table; [#309](./309-host-native-execution.md) §4, §5a, §5b, §9,
 §10, Phasing; [#322](./322-macos-native-runtime.md);
 [#313](./313-workload-identity-image-builds.md) B-IV;
 [#355](./355-project-task-images.md); [#361](./361-per-run-placement.md);
-[#362](./362-binary-artifacts.md); [`STYLE.md`](../../STYLE.md);
-[`crates.md`](../../crates.md); [`testing.md`](../../testing.md).
+[#362](./362-binary-artifacts.md); [`docs/reference/style.md`](../reference/style.md);
+[`docs/reference/crates.md`](../reference/crates.md); [`docs/reference/testing.md`](../reference/testing.md).
 
 ---
 
@@ -504,7 +504,7 @@ a `with_devices`-style builder beside `with_cache_dir`, and populated in
 `build_host_config`.
 
 *For:* Zero wire change, zero schema change, zero dispatcher change, zero epoch
-bump. It is the mechanism `spec.md` §3.1 already blesses ("a node property added
+bump. It is the mechanism `docs/spec.md` §3.1 already blesses ("a node property added
 worker-side, not a launch input"), and #313 B-IV's "costs the dispatcher
 nothing" applies verbatim. One unit test on the produced `HostConfig`, beside
 `host_config_with_cache_adds_one_bind`.
@@ -692,7 +692,7 @@ resolve.
 ### 3.3 Recommendation: T2 now, and T5 as the complement rather than the rival
 
 **Take T2**, and note T3 as the refactor to do when a *third* mount appears —
-not before. Two mounts do not justify a list; STYLE.md's simplicity-over-
+not before. Two mounts do not justify a list; docs/reference/style.md's simplicity-over-
 generality principle applies, and #309 §9 is explicit that `WORKER_CACHE_DIR`
 "should not be overloaded — it keeps its documented contract for container mode
 unchanged."
@@ -707,7 +707,7 @@ of worker code that use them. That is a materially better position than the
 original T2 argued for, and it removes the only reason this section needed T5.
 
 **Read-only is the load-bearing property, and it is what makes the whole design
-work.** `spec.md` §3.1 permits the one cache bind because it "carries **no job
+work.** `docs/spec.md` §3.1 permits the one cache bind because it "carries **no job
 state** — it is a build accelerator only, safe to be empty/cold", and
 concurrency is safe because *sccache locks*. A nix store satisfies neither of
 those the way sccache does — it is not safe to be empty, and its absence is a
@@ -1047,7 +1047,7 @@ and it is now unlikely rather than open. If the emulator turns out to need write
 access into the SDK directory — license acceptance files, `sdkmanager` temp
 state, an adb key the SDK tree expects — then the mount cannot be read-only,
 the concurrency argument above loses its by-construction property, and an SDK
-tree satisfies neither of `spec.md` §3.1's justifications for the sccache bind.
+tree satisfies neither of `docs/spec.md` §3.1's justifications for the sccache bind.
 The answer then is *not* a lease; it is a per-container copy-up of the small
 mutable subset, with the bulk staying read-only. A lease would be the third
 answer and the worst one. This is the first thing to measure in phase A1.
@@ -1180,7 +1180,7 @@ probing for #309 §4's bootstrap-deadlock reason, with its own distinct
   slots on any node")`
 
 Both transient by the §3.5 contract, both queued, neither consuming retry
-budget. Tier 1 per [`testing.md`](../../testing.md), beside the existing
+budget. Tier 1 per [`docs/reference/testing.md`](../reference/testing.md), beside the existing
 `choose_placement` tests.
 
 **Interaction with #322, named as the brief asks.** The device grant and the
@@ -1306,7 +1306,7 @@ Android task image" line they replace.
 of #322's W2, W3, N1, N2, W4 or W5. Restated as a schedule fact: the corpus currently
 sequences Android behind six phases of macOS work it does not need.
 
-Test placement per [`testing.md`](../../testing.md): the config parses
+Test placement per [`docs/reference/testing.md`](../reference/testing.md): the config parses
 (`WORKER_KVM`, `WORKER_KVM_PROJECTS`, the stable SDK path), the produced
 `HostConfig` (device present only for an allow-listed project; absent otherwise;
 the store mount read-only and of a kind that refuses a missing source), the env
@@ -1323,7 +1323,7 @@ tree** and belongs to the consumer project's own job.
 
 ---
 
-## Contracts changed (per STYLE.md's contract-first rule)
+## Contracts changed (per docs/reference/style.md's contract-first rule)
 
 | Phase | Contract changed |
 | --- | --- |
@@ -1355,7 +1355,7 @@ tree** and belongs to the consumer project's own job.
 - **[#313](./313-workload-identity-image-builds.md) B-IV** — its allow-list is
   described as per-`(project, job type)`; the job type is not observable
   node-side (correction 5).
-- **`spec.md` §3.1** — "no host bind-mounts … The one permitted exception is a
+- **`docs/spec.md` §3.1** — "no host bind-mounts … The one permitted exception is a
   **worker-provisioned node-local build cache**" becomes a small closed class,
   and the section gains a device-passthrough sentence. This is a `docs` job, not
   part of A1. **The amendment widens this edit.** The exception's justification
@@ -1376,7 +1376,7 @@ tree** and belongs to the consumer project's own job.
   harmless but misleading in the deployed shape: it creates a directory inside
   the worker's own container, not the host path being bound (correction 12).
   Worth a doc-comment sentence when A1 is next to it, not a change of behavior.
-- **`crates.md`'s `container` row** — already noted as wrong by #309; a device
+- **`docs/reference/crates.md`'s `container` row** — already noted as wrong by #309; a device
   property does not make it wronger, but the same edit should catch it.
 
 ---

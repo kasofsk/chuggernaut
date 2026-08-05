@@ -6,7 +6,7 @@
 //!
 //! Everything here needs the single-writer actor and a real store (the record is
 //! a KV fact and the audit is a task-record fact), which is what makes it tier 2
-//! rather than tier 1 (`testing.md`). The rules themselves are pinned pure in
+//! rather than tier 1 (`docs/reference/testing.md`). The rules themselves are pinned pure in
 //! `auth::workload` — the claim set, the ADC document's shape and the
 //! `GOOGLE_APPLICATION_CREDENTIALS` rule across zero, one and two identities.
 //!

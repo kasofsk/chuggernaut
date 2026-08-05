@@ -8,7 +8,7 @@
 //! its effects, and performs the bookkeeping its `ReadyStep` names. The one
 //! piece of real work it owns is the §2.2 Ready-transition pass, which reads
 //! refs and so cannot be pure: the decider *gates* it, this *performs* it, and
-//! the verdict re-enters as the decider's next event (contracts.md §2's
+//! the verdict re-enters as the decider's next event (docs/reference/contracts.md §2's
 //! continuation contract).
 //!
 //! - **Accepts:** a job's Ready-phase events — a validated release
@@ -27,7 +27,7 @@
 //!   land between the transitions and the effects (admission is part of
 //!   committing the §2.1 record); the re-validation runs only when the decider
 //!   asked for it, so a job that was never going to move costs no ref reads.
-//! - **Spec:** §2.1, §2.2, §3.1 steps 2 and 5, §3.6 step 3; contracts.md §2.
+//! - **Spec:** §2.1, §2.2, §3.1 steps 2 and 5, §3.6 step 3; docs/reference/contracts.md §2.
 
 use crate::core::{Core, Result};
 use crate::decide::ready;
@@ -50,7 +50,7 @@ impl Core {
             .await
     }
 
-    /// The C4 shim (contracts.md §2), the four-step shape C1 set: gather the
+    /// The C4 shim (docs/reference/contracts.md §2), the four-step shape C1 set: gather the
     /// reads into the view, call the pure decider, apply its transitions through
     /// `set_state`, run its effects through `interpret` — plus the
     /// dispatcher-side bookkeeping the returned [`ready::ReadyStep`] names,

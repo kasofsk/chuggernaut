@@ -3,7 +3,7 @@
 Status: PROPOSED.
 
 Written against the tree at `470cc0c` (2026-07-30). Every claim about current
-behaviour below was read out of the source or out of [spec.md](../../spec.md);
+behaviour below was read out of the source or out of [docs/spec.md](../spec.md);
 where this document and the job brief disagree, the tree wins and the
 disagreement is recorded in §[1](#1-what-the-tree-actually-says).
 
@@ -24,15 +24,15 @@ step's input comes from*, not as a list. The agent's output is always
 **parameters**; the shell's output is always **state**. Everything else in this
 document follows from that rule.
 
-Related reading: [spec.md](../../spec.md) §1.1 (`.chug/` config root, job-type
+Related reading: [docs/spec.md](../spec.md) §1.1 (`.chug/` config root, job-type
 schema), §4.3 (provider abstraction, permission profiles, the argv-secrets
 argument), §5.3 (linked-origin projects), §6.6 (health), §12.1–12.4 (init,
 project creation, admin CLI, provider defaults);
 [deploy/prod/README.md](../../deploy/prod/README.md) (the manual runbook, which
-stays the fallback for every stage); [INSTALL.md](../../INSTALL.md) (whose
+stays the fallback for every stage); [README.md](../../README.md) (whose
 disposition is decided in §[10](#10-surface-summary-and-the-disposition-of-installmd));
-[crates.md](../../crates.md); [testing.md](../../testing.md);
-[STYLE.md](../../STYLE.md) (Tier 2 rule 3, "everything is bounded", which the
+[docs/reference/crates.md](../reference/crates.md); [docs/reference/testing.md](../reference/testing.md);
+[docs/reference/style.md](../reference/style.md) (Tier 2 rule 3, "everything is bounded", which the
 runbook design leans on hard).
 
 ---
@@ -85,7 +85,7 @@ where `$HERE` is `deploy/prod`. The script actually lives at
 `.chug/tasks/deploy-health.sh` (it is a job-type evaluator — `.chug/jobs/rollback.yaml`:57).
 So `cmd_platform` always takes the `else` branch and prints "no deploy-health.sh
 — verify the dispatcher is up manually". The header comment at
-`deploy/prod/chug-install.sh`:9 and `INSTALL.md`:26 both claim the stage
+`deploy/prod/chug-install.sh`:9 and `README.md`:26 both claim the stage
 health-gates. It does not. This is a one-line fix but it invalidates the one
 automated success signal the current flow claims to have, which matters a great
 deal when the driver is an agent that believes what the script prints.
@@ -153,7 +153,7 @@ the implementer:
   is the `review` agent evaluator. This is the exact thing §[8](#8-q5--chug-scaffolding-for-the-imported-repo)
   exists to fix, and it is *correctly* a stub today: nothing in the platform can
   guess a stranger's test command.
-- **`spec.md` §12.2 does not mention the seed at all.** It lists four steps for
+- **`docs/spec.md` §12.2 does not mention the seed at all.** It lists four steps for
   `admin project create` (counter, bare repo, `HEAD` symref, initial empty
   commit). The code does a fifth thing — `seed_files(… CODE_TEMPLATE …)`.
   §5.3 *does* document the linked-origin `CONFIG_TEMPLATE` seed. §12.2 is behind
@@ -198,7 +198,7 @@ it to a rule about *where the input comes from*:
 > and *where the value goes*, not to hold the value.
 
 Corollary 4 is not paranoia about a rogue agent; it is that agent transcripts
-are logged, summarised, and sometimes pasted into issues. `spec.md` §4.3 already
+are logged, summarised, and sometimes pasted into issues. `docs/spec.md` §4.3 already
 makes exactly this argument for the MCP config — "inline argv leaks into `ps`,
 `/proc/*/cmdline`, and crash reports" — and resolves it by writing a mode-0600
 file. The install flow inherits the reasoning.
@@ -401,13 +401,13 @@ shorter and it is not carrying (3) and (6).
 **Repo root.** Rejected alternatives: `deploy/prod/BOOTSTRAP.md` (URL is longer <!-- absent -->
 and, more importantly, invisible to someone browsing the GitHub landing page —
 the mirror's front page is a real part of the funnel) and `docs/BOOTSTRAP.md` <!-- absent -->
-(same visibility problem, and `docs/` is the project wiki per `spec.md` §9.4,
+(same visibility problem, and `docs/` is the project wiki per `docs/spec.md` §9.4,
 which is *generated* content territory). The root already holds the
-orientation documents (`CLAUDE.md`, `NORTH-STAR.md`, `STYLE.md`, `INSTALL.md`),
+orientation documents (`CLAUDE.md`, `docs/README.md`, `docs/reference/style.md`, `README.md`),
 and the raw URL `…/main/BOOTSTRAP.md` is the shortest stable thing we can print.
 
 The name is also load-bearing in a small way: `BOOTSTRAP.md` says "this is how
-you begin", where `INSTALL.md` has come to mean "the runbook for someone who
+you begin", where `README.md` has come to mean "the runbook for someone who
 already has the tree". §[10](#10-surface-summary-and-the-disposition-of-installmd)
 resolves the overlap.
 
@@ -460,7 +460,7 @@ resume primitive once `platform` actually runs init; `admin` from `chuggernaut
 admin user list` returning a `platform_admin` (the second init phase's output,
 and the field that would have made gap (d) visible on the first run),
 `services` from `launchctl print` / `systemctl --user is-active`, `health` from
-`GET /api/v1/health` (`spec.md` §6.6 — unauthenticated by design, and the gate
+`GET /api/v1/health` (`docs/spec.md` §6.6 — unauthenticated by design, and the gate
 requires a `200` *with* an `application/json` content-type, so the SPA fallback
 cannot masquerade as health), `project` from the bare repo's `main` ref,
 `scaffold` from `git -C $BARE cat-file -e main:.chug/jobs/code.yaml`.
@@ -480,7 +480,7 @@ would violate Corollary 2. `status` re-derives everything, every time.
   that property *visible*, which is what turns it into a resume mechanism rather
   than a safety net.
 - **At most two attempts per step, then stop and report.** Bounded by rule
-  (`STYLE.md` Tier 2 rule 3). The failure mode being prevented is the agent that
+  (`docs/reference/style.md` Tier 2 rule 3). The failure mode being prevented is the agent that
   retries a `cargo build` seven times against a full disk.
 - **`--dry-run` before every outward step**, which the script already supports
   globally (`chug-install.sh`:314). The document requires a dry run and a human
@@ -497,7 +497,7 @@ grow a seventh without a reason):
 1. Which repository to onboard (git URL), and whether the platform should own
    `main` (default) or the origin should (linked-origin).
 2. Which agent provider and model (`claude` | `codex`; the dispatcher refuses to
-   start with no provider, `spec.md` §12.4).
+   start with no provider, `docs/spec.md` §12.4).
 3. Admin email and password. These are the answers that create the account the
    human logs in with; they are consumed by `chug-install.sh platform`'s second
    init phase (§[10.1](#101-the-subcommand-surface)) — `--admin-email` as a flag,
@@ -530,10 +530,10 @@ possible:
 - **Never echo.** The agent does not print a secret back for confirmation, does
   not include it in a summary, and does not repeat it when reporting an error.
 - **Never argv.** Secrets reach `chuggernaut admin secret set` on **stdin**, the
-  form `deploy/prod/README.md`:134 already uses. `spec.md` §4.3 makes the same
+  form `deploy/prod/README.md`:134 already uses. `docs/spec.md` §4.3 makes the same
   argument for the MCP config. **One current exception, and it is on the
   critical path:** `chuggernaut init` takes the admin password as a flag only
-  (`crates/cli/src/init.rs`:19-22; `spec.md` §12.3 documents
+  (`crates/cli/src/init.rs`:19-22; `docs/spec.md` §12.3 documents
   `--admin-password <pass>`), so the README's bootstrap puts a real password in
   the process table and the shell history. The onboarding flow makes that worse
   by having an agent construct the command, so this design adds
@@ -710,9 +710,9 @@ lines; the credential is a NATS-KV secret and the admin pair goes to
 |---|---|
 | `CHUG_DATA` | **Ask** (default `$HOME/chuggernaut-data`) |
 | `KEYS_DIR`, `REPOS_ROOT`, `BACKUP_DEST`, `UI_ROOT` | Derive — already `${CHUG_DATA}`-relative (`env.example`:11-17) |
-| `AGENT_PROVIDER_DEFAULT`, `AGENT_MODEL_DEFAULT` | **Ask** — no default is possible; the dispatcher refuses to start without a provider (`spec.md` §12.4) |
+| `AGENT_PROVIDER_DEFAULT`, `AGENT_MODEL_DEFAULT` | **Ask** — no default is possible; the dispatcher refuses to start without a provider (`docs/spec.md` §12.4) |
 | provider credential | **Ask, but never through the agent** — a `global/agents` secret, §[4.5](#45-secrets) |
-| admin email + password | **Ask** — `chuggernaut init --admin-email/--admin-password` (`spec.md` §12.1) |
+| admin email + password | **Ask** — `chuggernaut init --admin-email/--admin-password` (`docs/spec.md` §12.1) |
 | `NATS_URL`, `HOOK_BIN`, `SESSION_TTL`, `CHUG_IMAGE_TAG`, `NATS_NETWORK` | Derive — constants for a single host |
 | `NATS_URL_CONTAINER`, `REPO_URL_BASE` | Derive **from the addressing answer** (§[5.4](#54-addressing-on-linux-the-non-obvious-blocker)) |
 | `DOCKER_NODES`, `DOCKER_SLOTS` | Derive from `uname` + socket probe + CPU count |
@@ -770,7 +770,7 @@ The last stage, `chug-install.sh access`:
    --email <admin> --ttl 720h` — into a mode-0600 file, and tells the agent the
    *path*, never the value.
 3. Verifies: `GET /api/v1/health` returns `200` with `application/json`
-   (`spec.md` §6.6), and one authenticated call (`GET /api/v1/projects`) returns
+   (`docs/spec.md` §6.6), and one authenticated call (`GET /api/v1/projects`) returns
    the imported project.
 
 The human logs into the UI with the email and password from `chuggernaut init` —
@@ -779,9 +779,9 @@ which is to say, from `platform`'s second init phase
 nothing to log in with, which is gap
 §[1.2](#12-four-more-found-while-reading)(d) surfacing at the last possible
 moment. There is no self-service signup and none is proposed here —
-`spec.md` §7.2 makes user management CLI-only, deliberately.
+`docs/spec.md` §7.2 makes user management CLI-only, deliberately.
 
-One documentation defect worth fixing alongside: `spec.md` §12.3's admin CLI
+One documentation defect worth fixing alongside: `docs/spec.md` §12.3's admin CLI
 reference lists `user create` / `list` / `role set` / `role unset` / `delete`
 but **not** `user token`, even though §6.2 (line 1583) tells machine callers to
 mint one with it and `crates/cli/src/admin.rs`:208 implements it. The onboarding
@@ -880,7 +880,7 @@ must be able to re-derive on resume. It is one clone for the whole flow, not two
 **(b) Post-import commit.** Push the history, then commit `.chug/` separately
 onto the bare repo's `main`. Rejected: it opens a window in which `main` exists
 with no config, and a job created in that window resolves its job type at a
-`base_ref` that has none (`spec.md` §1.1: the type "references
+`base_ref` that has none (`docs/spec.md` §1.1: the type "references
 `.chug/jobs/{type}.yaml` at `base_ref`"). It also needs a second write path into
 a bare repo, which is more machinery than (a), not less.
 
@@ -917,7 +917,7 @@ bytes. A shell copy of the template files under `deploy/prod/` would be a third
 
 The existing test at `crates/platform-ops/src/seed.rs`:90-104 — every seeded
 path lives under `types::CONFIG_DIR` — keeps the new command honest with
-`spec.md` §1.1 for free.
+`docs/spec.md` §1.1 for free.
 
 ### 8.3 Detecting the language and making `ci.sh` real
 
@@ -996,7 +996,7 @@ confidence:
   self-test: a `work: type: command` job whose evaluator is the scaffolded
   `ci.sh` (§[11](#11-q7--first-run-proof) rung 2). It has to be a *seeded* type
   and it has to **stay** in the repo, for two reasons. It cannot be supplied
-  out-of-band by `chug-install.sh smoke`, because `spec.md` §1.1 resolves a job's
+  out-of-band by `chug-install.sh smoke`, because `docs/spec.md` §1.1 resolves a job's
   type from `.chug/jobs/{type}.yaml` **at `base_ref`** — a type with no file on
   `main` is not a type. And seeding it only to delete it after rung 2 would throw
   away the thing you want on the second bad day: `smoke` is the cheapest possible
@@ -1046,12 +1046,12 @@ make every docs job wait for the full test suite. Note this in the scaffolded
 
 ### 8.7 The ownership-model default
 
-Keep the current default: **platform-owned + mirror**, as `INSTALL.md`:42-49
+Keep the current default: **platform-owned + mirror**, as `README.md`:42-49
 and the retired skill both describe. It is the model this repo runs on, so it is
 the only one with real mileage, and it is the one where the platform can
 *guarantee* the scaffold lands (it owns `main`).
 
-The linked-origin path (`spec.md` §5.3) is offered as the answer to "I want to
+The linked-origin path (`docs/spec.md` §5.3) is offered as the answer to "I want to
 keep GitHub-native PR review", with the trade-off stated in one line: the
 platform proposes via `chug/release-*` PRs and never owns your default branch,
 at the cost of a less-travelled code path and two `CHUG_ORIGIN_*` secrets to set
@@ -1098,7 +1098,7 @@ field is a pre-observation fallback rather than the node's capacity.
 
 ---
 
-## 10. Surface summary and the disposition of `INSTALL.md`
+## 10. Surface summary and the disposition of `README.md`
 
 ### 10.1 The subcommand surface
 
@@ -1147,12 +1147,12 @@ it. Every agent, Claude Code included, takes the `BOOTSTRAP.md` path.
 
 The order `BOOTSTRAP.md` calls them in is the diagram in §[7](#7-interlude--the-shape-of-the-whole-flow).
 
-### 10.2 `INSTALL.md`
+### 10.2 `README.md`
 
 Three options:
 
 **(a) Delete it, fold everything into `BOOTSTRAP.md`.** Clean, and rejected:
-`INSTALL.md` is the filename people look for in a repo, and a human who wants to
+`README.md` is the filename people look for in a repo, and a human who wants to
 read the install path *without* an agent driving deserves a document written for
 them.
 
@@ -1160,17 +1160,17 @@ them.
 the same sequence is precisely the duplication that deleting the
 `chug-install` skill was meant to end, and it would drift within one job.
 
-**(c) Reduce `INSTALL.md` to a signpost — recommended.** ~20 lines: what
+**(c) Reduce `README.md` to a signpost — recommended.** ~20 lines: what
 Chuggernaut is, the paste-a-prompt path (with the prompt text and a pointer to
 `BOOTSTRAP.md`), the by-hand path (`deploy/prod/README.md`), and the two
 ownership models in three lines. It stops being a runbook. Everything currently
-in `INSTALL.md`:14-53 — the phase-by-phase commands — moves to `BOOTSTRAP.md`,
+in `README.md`:14-53 — the phase-by-phase commands — moves to `BOOTSTRAP.md`,
 which is the only place it will be kept current, because it is the only place
 anyone executes it from.
 
 So the final shape is **one narrator** (`BOOTSTRAP.md`, for agents, and readable
 by humans), **one reference** (`deploy/prod/README.md`, the manual fallback for
-every stage, unchanged), and **one signpost** (`INSTALL.md`). The duplication
+every stage, unchanged), and **one signpost** (`README.md`). The duplication
 gate (`.chug/tasks/check-duplication.sh` at `threshold: 0`) is a useful backstop
 if the signpost ever starts growing steps again.
 
@@ -1185,7 +1185,7 @@ gate, the user's own tests). So the flow proves it in three rungs, each a
 subcommand with an exit code.
 
 **Rung 1 — `chug-install.sh status`.** Services running, `GET /api/v1/health`
-returns `200 application/json` (`spec.md` §6.6), the token authenticates, the
+returns `200 application/json` (`docs/spec.md` §6.6), the token authenticates, the
 bare repo has a `main` ref carrying `.chug/jobs/code.yaml`. No containers, no
 agent, seconds.
 
@@ -1206,11 +1206,11 @@ works" and "your API key works" fail identically.
 **Rung 3 — the real `code` job.** The ticket is deliberately trivial and
 deliberately *theirs*: "add a line to `README.md` describing what this
 repository does". It exercises the agent provider, the permission profile
-(`spec.md` §4.3 `Work`), the channel MCP `submit_result`, the review evaluator,
+(`docs/spec.md` §4.3 `Work`), the channel MCP `submit_result`, the review evaluator,
 the CI evaluator against the real `ci.sh`, and the merge.
 
 **What the user sees when it works.** The job page streaming the agent's output
-live as it works — `spec.md` §4.3 specifies `--output-format stream-json` for
+live as it works — `docs/spec.md` §4.3 specifies `--output-format stream-json` for
 exactly this — then the review evaluator's verdict, then the CI gate, then the
 job going Done, then the squash commit on `main`, and (platform-owned) that same
 commit on their GitHub repo within about five minutes when the mirror agent next
@@ -1259,7 +1259,7 @@ contact.
    into "service units" and "mirror + boot" once someone has a real Linux box in
    front of them.
 7. **`chuggernaut admin scaffold` — M.** CLI consumer of
-   `crates/platform-ops/src/seed.rs` (§8.2), plus the `spec.md` §12.2/§12.3
+   `crates/platform-ops/src/seed.rs` (§8.2), plus the `docs/spec.md` §12.2/§12.3
    amendments (§8.6). Depends on nothing above; can run in parallel with 3–6.
 8. **`fetch-source` + `project-import --from` — M.** One job, because it is one
    change: move the clone out of `project-import` into a `fetch-source`
@@ -1284,7 +1284,7 @@ contact.
     job (§11 rung 2). Depends on 8 and 10.
 12. **`access` — S.** UI URL, token mint to a 0600 file, authenticated probe
     (§6.2). Depends on 2.
-13. **`BOOTSTRAP.md`, `INSTALL.md` reduction, delete
+13. **`BOOTSTRAP.md`, `README.md` reduction, delete
     `.claude/skills/chug-install/` — M, `docs` type.** Last, because it
     describes the surface the jobs above create; writing it earlier guarantees
     it describes something that doesn't exist. Depends on 1–12.
@@ -1309,7 +1309,7 @@ confident install document that has never been run is worse than an honest one.
   ssh container's assumptions may not hold), SELinux labels on volume mounts,
   and `systemctl --user` under a session that has no lingering. Job 14 exists to
   turn that list into facts.
-- **The linked-origin model is the less-travelled one.** `spec.md` §5.3 and
+- **The linked-origin model is the less-travelled one.** `docs/spec.md` §5.3 and
   `crates/dispatcher/src/forge_ingest/origin.rs` are complete, and this flow
   offers it as an option, but the mileage is in the platform-owned path. The
   divergence limitation §5.3 records ("no automated resolution" when integration

@@ -1,4 +1,4 @@
-//! NATS server for tier-2 tests (testing.md), backed by a local `nats-server`
+//! NATS server for tier-2 tests (docs/reference/testing.md), backed by a local `nats-server`
 //! process or the [`testcontainers`] crate (#206, #408).
 //!
 //! ## One instance per test process (principle 2)

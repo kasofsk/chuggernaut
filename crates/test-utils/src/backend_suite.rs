@@ -12,7 +12,7 @@ use std::process::Command;
 /// True when a local Docker daemon answers; pulls the alpine test image.
 #[allow(
     clippy::expect_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub fn docker_available() -> bool {
     let up = Command::new("docker")
@@ -51,7 +51,7 @@ pub fn cfg(cmd: &str) -> ContainerLaunchConfig {
 /// Remove a test container by its `{node}/{docker_id}` id.
 #[allow(
     clippy::unwrap_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub fn rm(id: &str) {
     let cid = id.split_once('/').unwrap().1;
@@ -62,7 +62,7 @@ pub fn rm(id: &str) {
 /// must come back; within-stream order holds (cross-stream order is Docker's).
 #[allow(
     clippy::unwrap_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub async fn logs_capture_both_streams_after_exit(be: &dyn ContainerBackend, node: &str) {
     let id = be
@@ -94,7 +94,7 @@ pub async fn logs_capture_both_streams_after_exit(be: &dyn ContainerBackend, nod
 /// tail. `follow: false`, so no call ever hangs.
 #[allow(
     clippy::unwrap_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub async fn logs_tail_grows_while_running(be: &dyn ContainerBackend, node: &str) {
     let id = be
@@ -153,7 +153,7 @@ pub async fn logs_tail_grows_while_running(be: &dyn ContainerBackend, node: &str
 
 #[allow(
     clippy::unwrap_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub async fn exit_codes_round_trip(be: &dyn ContainerBackend) {
     let ok = be.launch(cfg("exit 0")).await.unwrap();
@@ -167,7 +167,7 @@ pub async fn exit_codes_round_trip(be: &dyn ContainerBackend) {
 
 #[allow(
     clippy::unwrap_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub async fn env_file_injection_and_copy_out(be: &dyn ContainerBackend) {
     let mut config = cfg(
@@ -203,7 +203,7 @@ pub async fn env_file_injection_and_copy_out(be: &dyn ContainerBackend) {
 
 #[allow(
     clippy::unwrap_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub async fn inspect_kill_and_not_found(be: &dyn ContainerBackend, node: &str) {
     let id = be.launch(cfg("sleep 30")).await.unwrap();
@@ -234,7 +234,7 @@ pub async fn inspect_kill_and_not_found(be: &dyn ContainerBackend, node: &str) {
 /// (the DockerBackend's own list is unit-covered, but the proxy path was not).
 #[allow(
     clippy::unwrap_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub async fn running_count_reflects_launch_and_exit(be: &dyn ContainerBackend, node: &str) {
     let mut config = cfg("sleep 30");

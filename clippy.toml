@@ -1,4 +1,4 @@
-# STYLE.md Tier 1, "Function length: 70 lines" — a function that fits on one
+# docs/reference/style.md Tier 1, "Function length: 70 lines" — a function that fits on one
 # screen can be reviewed as a unit. Paired with `too_many_lines = "deny"` in
 # the root Cargo.toml's `[workspace.lints.clippy]`; the threshold lives here
 # because clippy reads configuration only from this file.

@@ -1,7 +1,7 @@
 # Chuggernaut — style & blessed practices
 
 The rules that make agent-driven work on this codebase reliably high-quality.
-Companion to `NORTH-STAR.md` (target factoring) and `crates.md` (the map);
+Companion to `docs/README.md` (target factoring) and `docs/reference/crates.md` (the map);
 adapted from TigerBeetle's TIGER_STYLE where its guidance transfers to a
 Rust/TypeScript orchestrator. The performance-oriented rules there (static
 allocation, no recursion, hot-loop extraction) deliberately do **not**
@@ -90,7 +90,7 @@ that debt is what the pending checks will pin down.
   comment is caught at the commit rather than a rework cycle later.)* `//`, `/* */` and every trailing-on-a-code-line form
   are rejected; `///`, `//!`, `/** */`, `/*! */` are the only prose a source
   file may carry, and each block stays inside two sentences. Longer than that
-  is a doc: write it under `docs/` (or in the module's `MODULES.md` row) and
+  is a doc: write it under `docs/` (or in the module's `docs/reference/modules.md` row) and
   leave a pointer. *Why:* comments are scattered by construction — nobody
   reviews them as a body of knowledge, they drift out of step with the code
   they annotate, and an agent reading the tree cannot tell a current one from a
@@ -101,7 +101,7 @@ that debt is what the pending checks will pin down.
   Two carve-outs, both narrow. **Inner doc comments** (`//!`, `/*! */`, and a
   TypeScript file's first doc block) are exempt from the sentence cap: the
   module header — accepts / emits / guarantees / spec § — is the in-tree doc
-  surface NORTH-STAR §4 asks for, registered in `MODULES.md` and structurally
+  surface NORTH-STAR §4 asks for, registered in `docs/reference/modules.md` and structurally
   unable to scatter. **Machine-read directives** are not prose and are allowed:
   `jscpd:ignore-start`/`-end`, `SAFETY:`, and the eslint/ts/prettier pragmas —
   put the justification on the directive line itself. The allowlist matches the
@@ -111,7 +111,7 @@ that debt is what the pending checks will pin down.
 
   **Rule 1 is absolute; rule 2 is still a ratchet.** Job #342 deleted every
   non-doc comment in the tree — the rationale worth keeping was hoisted into
-  [`docs/implementation-notes.md`](docs/implementation-notes.md) — so the gate
+  [`docs/implementation-notes.md`](../implementation-notes.md) — so the gate
   lints every tracked Rust/TypeScript source and one non-doc comment anywhere
   fails it, changed file or not. The two-sentence cap still has pre-existing
   debt (~500 over-long doc comments), so it judges only blocks a diff adds a
@@ -142,7 +142,7 @@ verify it in seconds and must name it when rejecting.
    of `eval.rs`/`exec.rs` into `domain::decide::*` (the NORTH-STAR §1 target),
    each decider stays pure and returns `Vec<Effect>` for one interpreter to
    execute — it never performs an effect. *Why:* pure decision logic is
-   exhaustively testable at tier 1 of `testing.md`, and the decider/effects
+   exhaustively testable at tier 1 of `docs/reference/testing.md`, and the decider/effects
    seam is the whole point of the north-star factoring.
    (`chuggernaut_domain::{effects, decide}` exist as of B2/C1;
    `decide::escalation` is the worked template a new decider copies.)
@@ -197,7 +197,7 @@ verify it in seconds and must name it when rejecting.
    **Marking is a syntax, and it is checked.** A backticked path in a `.md` is
    resolved against `git ls-files` by `.chug/tasks/check-doc-facts.sh` — every
    job, every tracked `*.md`, and an **error** since design
-   [#415](docs/design/415-knowledge-architecture.md) S1b. The same script checks
+   [#415](../design/415-knowledge-architecture.md) S1b. The same script checks
    a backticked constant asserted with a value against the tree's `pub const`.
    Three HTML comments suppress both on the line that carries them, and they are
    not interchangeable:
@@ -239,12 +239,12 @@ verify it in seconds and must name it when rejecting.
    workflow mirror that did not exist and a `tier-2 ENABLED` announcement over a
    tier that self-skipped (#375, #378/#382), 17 shell suites nothing executed
    (#385), a duplication gate analysing no `.nix` files (#383), `check-modules.sh`
-   verifying row presence but never content (#382), and `testing.md`'s tier 3,
+   verifying row presence but never content (#382), and `docs/reference/testing.md`'s tier 3,
    whose fixtures went out with the v1 tree and whose `chuggernaut seed` command
    v2 never had (#394).
 
 6. **New behavior lands with a regression test at the lowest tier that can
-   express it** (`testing.md`); the correctness core (`chuggernaut_domain::state`,
+   express it** (`docs/reference/testing.md`); the correctness core (`chuggernaut_domain::state`,
    release validation) stays at near-total branch coverage. *Why:* the lower
    the tier, the more often the test actually runs.
 
@@ -267,7 +267,7 @@ verify it in seconds and must name it when rejecting.
    leaf bind that resolved the operator's symlink away, so the path existed but
    was not a store path — *identity*; fixed by binding the parent and asserting
    the canonicalized target lands under the store — *provenance*).
-   Design [#373](docs/design/373-project-toolchains.md) is the long record.
+   Design [#373](../design/373-project-toolchains.md) is the long record.
 
 ## Tier 3 — principles
 

@@ -13,10 +13,10 @@ then a worked example.
 > exceptions; a genuine emergency only lets you file the record *after* instead
 > of *before*.
 
-Background you should not re-derive: [`deploy/prod/README.md`](../../deploy/prod/README.md)
+Background you should not re-derive: [`deploy/prod/README.md`](../../../deploy/prod/README.md)
 (the standing-instance runbook — CD, the deploy legs, BuildKit caching),
-[`spec.md` §1.2](../../spec.md) (claims — human-performed work attempts) and
-`spec.md` §3.1 (worker nodes, self-refresh, node-local caching).
+[`docs/spec.md` §1.2](../../spec.md) (claims — human-performed work attempts) and
+`docs/spec.md` §3.1 (worker nodes, self-refresh, node-local caching).
 
 ---
 
@@ -99,7 +99,7 @@ a warm rebuild.
 `agent-rust`) natively on the node — context streams over SSH via `git archive`,
 so the node needs nothing but Docker and your authorized key — then restarts the
 daemon on the new `worker` image. **Safe mid-job:** job containers survive and
-the dispatcher's poll-based wait re-attaches (`spec.md` §3.1).
+the dispatcher's poll-based wait re-attaches (`docs/spec.md` §3.1).
 
 ```sh
 WORKER_SSH=worksalot@gumbo-nuc-0 \
@@ -268,7 +268,7 @@ it belongs in deploy history like any other.
 
 1. **File a `deploy`-type job** on the platform (the normal `deploy` job type,
    `.chug/jobs/deploy.yaml`).
-2. **Claim it** — `POST .../jobs/{seq}/claim` (`spec.md` §1.2). Claiming parks
+2. **Claim it** — `POST .../jobs/{seq}/claim` (`docs/spec.md` §1.2). Claiming parks
    the job's work attempt as a **pending, human-performed task** (`performed_by:
    human`) instead of launching the deploy container. It **holds no fleet slot**
    (it is Pending, not Running) and is exempt from the task-timeout scan, so it
@@ -357,11 +357,11 @@ and why the normal path couldn't work, all machine-shaped.
 
 ## See also
 
-- [`deploy/prod/README.md`](../../deploy/prod/README.md) — the standing prod
+- [`deploy/prod/README.md`](../../../deploy/prod/README.md) — the standing prod
   instance: CD, the deploy legs, BuildKit caching (#115), web-publish.
-- [`spec.md`](../../spec.md) — §1.2 claims (human-performed attempts), §3.1
+- [`docs/spec.md`](../../spec.md) — §1.2 claims (human-performed attempts), §3.1
   worker nodes / self-refresh / node-local caching, §3.3 staged evaluation.
-- Scripts referenced here: [`deploy/prod/build-worker.sh`](../../deploy/prod/build-worker.sh),
-  [`deploy/prod/restart-verify.sh`](../../deploy/prod/restart-verify.sh),
-  [`deploy/prod/worker-refresh.sh`](../../deploy/prod/worker-refresh.sh),
-  [`deploy/prod/update.sh`](../../deploy/prod/update.sh).
+- Scripts referenced here: [`deploy/prod/build-worker.sh`](../../../deploy/prod/build-worker.sh),
+  [`deploy/prod/restart-verify.sh`](../../../deploy/prod/restart-verify.sh),
+  [`deploy/prod/worker-refresh.sh`](../../../deploy/prod/worker-refresh.sh),
+  [`deploy/prod/update.sh`](../../../deploy/prod/update.sh).

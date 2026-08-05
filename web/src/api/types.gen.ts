@@ -89,7 +89,7 @@ export type InputKind = "string" | "enum";
 export type RuntimeMode = "container" | "host";
 export type WorkType = "agent" | "command" | "human";
 /**
- * Wrap-up mode after eval-pass (design-lifecycle.md).
+ * Wrap-up mode after eval-pass (docs/reference/design-lifecycle.md).
  */
 export type WrapUpMode = "merge" | "none";
 /**
@@ -154,7 +154,7 @@ export type TaskResult =
     }
   | {
       /**
-       * Eval verdict "not satisfiable by rework" (design-lifecycle.md):
+       * Eval verdict "not satisfiable by rework" (docs/reference/design-lifecycle.md):
        * implies `pass: false`; a required evaluator's abort skips the
        * remaining rework budget and escalates.
        */
@@ -212,7 +212,7 @@ export type TaskResolution =
     }
   | {
       /**
-       * Human evaluator's "not satisfiable by rework" (design-lifecycle.md);
+       * Human evaluator's "not satisfiable by rework" (docs/reference/design-lifecycle.md);
        * only meaningful on evaluator tasks, ignored elsewhere.
        */
       abort?: boolean;
@@ -1384,7 +1384,7 @@ export interface ReviewSpec {
   provider: Provider | null;
 }
 /**
- * Wrap-up declaration (design-lifecycle.md): the job's third step. A block
+ * Wrap-up declaration (docs/reference/design-lifecycle.md): the job's third step. A block
  * rather than a bare scalar so future wrap-up behavior (e.g. a
  * `deployed/{env}` tag ref) extends it without reshaping the schema.
  */

@@ -1,10 +1,10 @@
-//! The decider layer (refactor-plan C1, `contracts.md` §2, NORTH-STAR §1) —
+//! The decider layer (refactor-plan C1, `docs/reference/contracts.md` §2, NORTH-STAR §1) —
 //! one module per lifecycle phase, each a pure function
 //! `decide(view, event) -> (Vec<Transition>, Vec<Effect>)`.
 //!
 //! A decider takes a **read-only view** of the relevant job/graph state plus
 //! the driving event, and returns values: the §2.1 transitions to apply and
-//! the effects to run. It never performs an effect (STYLE.md Tier 2 #1) and
+//! the effects to run. It never performs an effect (docs/reference/style.md Tier 2 #1) and
 //! never holds `&mut Core`. The dispatcher's shim is the fixed four-step
 //! shape every phase repeats:
 //!
@@ -27,9 +27,9 @@
 //! - **Accepts:** a phase view (read-only borrows + pre-read scalars) and an
 //!   event.
 //! - **Emits:** `(Vec<Transition>, Vec<Effect>)` — values only.
-//! - **Guarantees:** pure and synchronous; asserts liberally (STYLE.md Tier 2
+//! - **Guarantees:** pure and synchronous; asserts liberally (docs/reference/style.md Tier 2
 //!   #2) on argument shape and postconditions.
-//! - **Spec:** §2.1 (transitions), §3 (the decisions); `contracts.md` §2.
+//! - **Spec:** §2.1 (transitions), §3 (the decisions); `docs/reference/contracts.md` §2.
 
 use types::{Job, JobState};
 

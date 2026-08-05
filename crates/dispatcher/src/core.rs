@@ -128,7 +128,7 @@ pub struct WorkSubmission {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalSubmission {
     pub pass: bool,
-    /// "Not satisfiable by rework" (design-lifecycle.md): implies fail; a
+    /// "Not satisfiable by rework" (docs/reference/design-lifecycle.md): implies fail; a
     /// required evaluator's abort escalates instead of consuming rework budget.
     #[serde(default)]
     pub abort: bool,
@@ -2789,7 +2789,7 @@ impl Core {
         .await
     }
 
-    /// The C1 template shim (contracts.md §2): gather the reads into the view,
+    /// The C1 template shim (docs/reference/contracts.md §2): gather the reads into the view,
     /// call the pure decider, apply its transitions through the `set_state`
     /// funnel, run its effects through the interpreter. Every later phase
     /// decider's call site copies this four-step shape.
@@ -2836,7 +2836,7 @@ impl Core {
     }
 
     /// Read-only view of the in-memory scheduling state, for the invariant
-    /// checker (contracts.md §3). Borrowing, so it is free to build; tests run
+    /// checker (docs/reference/contracts.md §3). Borrowing, so it is free to build; tests run
     /// [`check_invariants`](crate::invariants::check_invariants) on it after
     /// every message to catch state corruption at the point it is introduced.
     pub fn state(&self) -> crate::invariants::CoreState<'_> {

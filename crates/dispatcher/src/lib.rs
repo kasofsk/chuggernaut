@@ -6,7 +6,7 @@
 //! mutable state.
 //!
 //! Every module here opens with a contract-style header (accepts / emits /
-//! guarantees / spec §); `MODULES.md` at the repo root is the one-line
+//! guarantees / spec §); `docs/reference/modules.md` at the repo root is the one-line
 //! registry of these scoping-eligible modules.
 //!
 //! Two of them are **named contexts** rather than single modules

@@ -343,7 +343,7 @@ mkdir -p "$repo/.chug/tasks" "$repo/crates/newctx/src"
 {
 	echo '#!/bin/sh'
 	echo "echo ran >>\"$WORK/modcalls\""
-	echo 'echo "!!! ci: crates/newctx/src/thing.rs has no row in MODULES.md"'
+	echo 'echo "!!! ci: crates/newctx/src/thing.rs has no row in docs/reference/modules.md"'
 	echo 'exit 1'
 } >"$repo/.chug/tasks/check-modules.sh"
 chmod +x "$repo/.chug/tasks/check-modules.sh"
@@ -359,7 +359,7 @@ check_text "the registry gate was not called" "" "$(cat "$WORK/modcalls")"
 printf 'pub fn thing() {}\n' >"$repo/crates/newctx/src/thing.rs"
 git -C "$repo" add crates/newctx/src/thing.rs
 commit "$repo" "a crate the hook has never heard of"
-check "any staged crates/ path runs the registry gate" 1 "$RC" "MODULES.md registry drift"
+check "any staged crates/ path runs the registry gate" 1 "$RC" "docs/reference/modules.md registry drift"
 
 echo
 echo "pre-commit.test.sh: $pass passed, $fail failed"

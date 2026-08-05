@@ -60,7 +60,7 @@ pub async fn job_state(
 /// then every delivered revision, bounded by [`DEFAULT_TIMEOUT`].
 #[allow(
     clippy::unwrap_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub async fn job_where(
     store: &NatsStore,
@@ -84,7 +84,7 @@ pub async fn job_where(
 /// task state is caught rather than raced past.
 #[allow(
     clippy::unwrap_used,
-    reason = "TODO(style): test-harness code — STYLE.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
 )]
 pub async fn task_where(
     store: &NatsStore,

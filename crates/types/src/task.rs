@@ -257,7 +257,7 @@ pub enum TaskResult {
     },
     Agent {
         pass: bool,
-        /// Eval verdict "not satisfiable by rework" (design-lifecycle.md):
+        /// Eval verdict "not satisfiable by rework" (docs/reference/design-lifecycle.md):
         /// implies `pass: false`; a required evaluator's abort skips the
         /// remaining rework budget and escalates.
         #[serde(default)]
@@ -329,7 +329,7 @@ pub enum TaskResolution {
     },
     Fail {
         structured: serde_json::Value,
-        /// Human evaluator's "not satisfiable by rework" (design-lifecycle.md);
+        /// Human evaluator's "not satisfiable by rework" (docs/reference/design-lifecycle.md);
         /// only meaningful on evaluator tasks, ignored elsewhere.
         #[serde(default)]
         abort: bool,

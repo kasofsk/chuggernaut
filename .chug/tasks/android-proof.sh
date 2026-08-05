@@ -37,7 +37,7 @@
 # emulator exercises adb, the device and the built artifact — with no bespoke
 # structure added to a tree whose value is being stock (fixtures/mobile/README.md).
 #
-# EVERY WAIT IS BOUNDED BY WALL CLOCK (STYLE.md Tier 2 rule 3) and every bound is
+# EVERY WAIT IS BOUNDED BY WALL CLOCK (docs/reference/style.md Tier 2 rule 3) and every bound is
 # named in the failure it produces, so an emulator that never boots fails its
 # rung in minutes instead of hanging until `task_timeout`. That means every
 # `adb` call too, including the ones inside the polling loops: a half-booted
@@ -73,7 +73,7 @@ POLL_INTERVAL_SECS="${CHUG_ANDROID_POLL_INTERVAL_SECS:-2}"
 # that a busy-but-healthy device answers, short enough that a hung one retries.
 PROBE_TIMEOUT_SECS="${CHUG_ANDROID_PROBE_TIMEOUT_SECS:-15}"
 # A cap on the cmdline-tools version directories scanned, so the glob below is a
-# bounded loop like every other wait here (STYLE.md Tier 2 rule 3).
+# bounded loop like every other wait here (docs/reference/style.md Tier 2 rule 3).
 CMDLINE_TOOLS_DIRS_MAX="${CHUG_ANDROID_CMDLINE_TOOLS_DIRS_MAX:-32}"
 
 LADDER=""
@@ -189,7 +189,7 @@ wait_bounded() { # wait_bounded <secs> <what> <probe-fn>
 
 rung_1_mounts_and_env() {
 	[ -e "$KVM_DEVICE" ] ||
-		rung_fail 1 "$KVM_DEVICE is absent — this container was granted no device. Check that the job ran on the pinned node and that JOB_PROJECT is in WORKER_KVM_PROJECTS (docs/runbooks/worker-kvm.md)"
+		rung_fail 1 "$KVM_DEVICE is absent — this container was granted no device. Check that the job ran on the pinned node and that JOB_PROJECT is in WORKER_KVM_PROJECTS (docs/reference/runbooks/worker-kvm.md)"
 	[ -r "$KVM_DEVICE" ] && [ -w "$KVM_DEVICE" ] ||
 		rung_fail 1 "$KVM_DEVICE is present but not readable and writable by this container"
 	ls -l "$KVM_DEVICE"
@@ -308,7 +308,7 @@ rung_3_avdmanager() {
 	fi
 	AVDMANAGER="$ANDROID_SDK_ROOT/tools/bin/avdmanager"
 	[ -x "$AVDMANAGER" ] ||
-		rung_fail 3 "no \`avdmanager\` under $ANDROID_SDK_ROOT/cmdline-tools/*/bin NOR the deprecated $ANDROID_SDK_ROOT/tools/bin — this SDK ships neither, so rung 5 could never create an AVD. The node provisions the SDK, so add the cmdline-tools package to its configuration.nix (docs/runbooks/worker-kvm.md)"
+		rung_fail 3 "no \`avdmanager\` under $ANDROID_SDK_ROOT/cmdline-tools/*/bin NOR the deprecated $ANDROID_SDK_ROOT/tools/bin — this SDK ships neither, so rung 5 could never create an AVD. The node provisions the SDK, so add the cmdline-tools package to its configuration.nix (docs/reference/runbooks/worker-kvm.md)"
 	echo "!!! android-proof: avdmanager -> $AVDMANAGER, the DEPRECATED launcher — this SDK holds"
 	echo "!!!     no cmdline-tools/<version>/bin/avdmanager. It honours JAVA_HOME='${JAVA_HOME:-}'"
 	echo "!!!     and dies with NoClassDefFoundError javax/xml/bind if that JDK has no JAXB (#398)."

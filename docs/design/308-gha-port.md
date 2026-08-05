@@ -8,7 +8,7 @@ overstatement, one finding it was missing entirely, one made stale by shipped
 code — **plus one added phase**: see
 [What #308 got wrong](#what-308-got-wrong), which is where a downstream reader
 should look first. Every claim about *Chuggernaut's* current behavior, at both
-dates, was read out of `spec.md` and the source in this repo, not inferred from
+dates, was read out of `docs/spec.md` and the source in this repo, not inferred from
 the docs; the corrections in
 [What the brief got wrong](#what-the-brief-got-wrong) are the ones the original
 survey found.
@@ -21,10 +21,10 @@ Children (the implementable specs extracted from this survey):
 Where a claim of this doc now lives in a child, the child is cited rather than
 restated.
 
-Related: [spec.md](../../spec.md) §1.1 (job-type config), §3.1 (dispatcher
+Related: [docs/spec.md](../spec.md) §1.1 (job-type config), §3.1 (dispatcher
 backends, fleet, node-local build cache), §3.3 (staged evaluation, merge gate),
 §13 (factories and ingest), §14 (config/version skew), Appendix: Deferred;
-[design-lifecycle.md](../../design-lifecycle.md) (rework, abort);
+[docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) (rework, abort);
 [CLAUDE.md](../../CLAUDE.md) ("the evaluation gates ARE the CI");
 [deploy/prod/README.md](../../deploy/prod/README.md) §3 (GitHub Actions CD is
 already gone for one workflow), §5a/§5b (tailnet vs public exposure);
@@ -94,27 +94,27 @@ a configured cache ([A2](#a2-the-keyed-caching-gap-was-overstated)).
 
 | Capability | Where | State |
 | --- | --- | --- |
-| Staged evaluators, stage 0 gates stage 1 | `spec.md` §3.3; `.chug/jobs/_defaults.yaml` | Shipped |
+| Staged evaluators, stage 0 gates stage 1 | `docs/spec.md` §3.3; `.chug/jobs/_defaults.yaml` | Shipped |
 | Project-wide CI as an appended command evaluator | `.chug/jobs/_defaults.yaml` → `.chug/tasks/ci.sh` | Shipped |
 | Diff-aware multi-leg CI script | `.chug/tasks/ci.sh` (549 lines) | Shipped |
-| Per-container secret scoping | `spec.md` §1.1/§8.2; `.chug/jobs/deploy.yaml` | Shipped |
-| Command work + `wrap_up: none` for external effects | `spec.md` §1.1; `.chug/jobs/deploy.yaml` | Shipped |
-| Node pinning (`placement.node`) | `spec.md` §3.1; `crates/types/src/job_type.rs` | Shipped |
+| Per-container secret scoping | `docs/spec.md` §1.1/§8.2; `.chug/jobs/deploy.yaml` | Shipped |
+| Command work + `wrap_up: none` for external effects | `docs/spec.md` §1.1; `.chug/jobs/deploy.yaml` | Shipped |
+| Node pinning (`placement.node`) | `docs/spec.md` §3.1; `crates/types/src/job_type.rs` | Shipped |
 | Mixed fleet (docker endpoints + NATS worker nodes) | `crates/worker/src/backend.rs` `NodeHandle` | Shipped |
 | `ContainerBackend` implementations | `crates/container/src/docker.rs:378`, `crates/worker/src/backend.rs:539`, `crates/test-utils/src/lib.rs:343` | Three — one Docker, one NATS proxy, one fake; `crates/container/src/k8s.rs` is a stub |
-| Node-local build cache (sccache) | `spec.md` §3.1; `crates/worker/src/daemon.rs`, `WORKER_CACHE_DIR` | Shipped |
-| Three review outcomes (pass / fail / fail+abort) | `spec.md` §1.2 Abort verdict, §3.3 Reduce | Shipped |
-| Version-skew machinery | `crates/types/src/version.rs`, `spec.md` §14 | Shipped |
+| Node-local build cache (sccache) | `docs/spec.md` §3.1; `crates/worker/src/daemon.rs`, `WORKER_CACHE_DIR` | Shipped |
+| Three review outcomes (pass / fail / fail+abort) | `docs/spec.md` §1.2 Abort verdict, §3.3 Reduce | Shipped |
+| Version-skew machinery | `crates/types/src/version.rs`, `docs/spec.md` §14 | Shipped |
 | Ingest → triage → jobs (GitHub origin) | `crates/dispatcher/src/forge_ingest/` | Shipped |
-| Generic factories (`factories/{name}.yaml`) | `spec.md` §13.3 | Specced, not in the tree |
-| Runtime capacity control / richer announce | `spec.md` §3.1; [design #293](293-worker-capacity.md) | Specced + designed, not in the tree |
+| Generic factories (`factories/{name}.yaml`) | `docs/spec.md` §13.3 | Specced, not in the tree |
+| Runtime capacity control / richer announce | `docs/spec.md` §3.1; [design #293](293-worker-capacity.md) | Specced + designed, not in the tree |
 | Outbound webhooks | `crates/webhooks/src/lib.rs` | Two-line `TODO` stub |
-| Binary artifact store | `spec.md` Appendix: Deferred | Deferred |
-| Cron / schedules | — | Absent from the tree and from `spec.md`; designed as [#310](./310-scheduled-jobs.md) |
-| Job inputs (`CHUG_INPUT_*`) | `spec.md` §1.1, §6.3, §14.2; `crates/types/src/inputs.rs`, `crates/domain/src/inputs.rs` | **Shipped and deployed** (amendment [A4](#a4-job-inputs-shipped-so-gap-1-is-retired)) — `CONFIG_SCHEMA_EPOCH` was 2 when A4 landed (`crates/types/src/version.rs` is the authority today); first consumer `.chug/jobs/rollback.yaml` |
+| Binary artifact store | `docs/spec.md` Appendix: Deferred | Deferred |
+| Cron / schedules | — | Absent from the tree and from `docs/spec.md`; designed as [#310](./310-scheduled-jobs.md) |
+| Job inputs (`CHUG_INPUT_*`) | `docs/spec.md` §1.1, §6.3, §14.2; `crates/types/src/inputs.rs`, `crates/domain/src/inputs.rs` | **Shipped and deployed** (amendment [A4](#a4-job-inputs-shipped-so-gap-1-is-retired)) — `CONFIG_SCHEMA_EPOCH` was 2 when A4 landed (`crates/types/src/version.rs` is the authority today); first consumer `.chug/jobs/rollback.yaml` |
 | Matrix / fan-out over inputs | — | Absent **by decision** ([#311](./311-job-inputs.md) Decision 7), not by omission |
 | Per-run placement (a runner chosen at launch) | — | Absent, and forbidden in the obvious shape — see [A3](#a3-beacon-already-parameterizes-placement-per-run) |
-| Linked-origin projects (external host owns `main`) | `spec.md` §5.3; `crates/dispatcher/src/handlers/origin.rs`, `crates/dispatcher/tests/origin.rs` | Shipped — the mode beacon needs ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)) |
+| Linked-origin projects (external host owns `main`) | `docs/spec.md` §5.3; `crates/dispatcher/src/handlers/origin.rs`, `crates/dispatcher/tests/origin.rs` | Shipped — the mode beacon needs ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)) |
 | OIDC issuance / JWKS endpoint | — | Absent (RS256 keypair exists, §12.1); designed as [#313](./313-workload-identity-image-builds.md) half A |
 
 ## What the brief got wrong
@@ -124,7 +124,7 @@ with the tree. They matter because three of them make the port *cheaper* than th
 brief assumes and four make it *more expensive* or re-sequence it.
 
 1. **"Chuggernaut evaluators are pass/fail, so scrybert's forced three-way
-   verdict is lost."** They are not. `spec.md` §1.2 defines the **abort
+   verdict is lost."** They are not. `docs/spec.md` §1.2 defines the **abort
    verdict**: `abort: true` on `submit_eval` means "not satisfiable by rework",
    implies fail, skips the remaining rework budget and escalates immediately
    (§3.3 Reduce, §3.2 step 13). scrybert's `approve` / `request-changes` /
@@ -139,7 +139,7 @@ brief assumes and four make it *more expensive* or re-sequence it.
    That reframes decision [D2](#open-decisions) from "build something" to
    "choose a default", which is a much smaller thing to be blocked on.
 3. **"No keyed cache at all; the only mitigation is baking toolchains into the
-   image."** A node-local build cache already ships (`spec.md` §3.1 "Node-local
+   image."** A node-local build cache already ships (`docs/spec.md` §3.1 "Node-local
    build caching"): a worker sets `WORKER_CACHE_DIR`, its daemon bind-mounts one
    host directory into every container it launches and injects
    `RUSTC_WRAPPER`/`SCCACHE_DIR` (`crates/worker/src/daemon.rs`). Critically,
@@ -167,7 +167,7 @@ brief assumes and four make it *more expensive* or re-sequence it.
    prerequisite, not a free consequence of the existing abstraction.
 6. **"Add `modes`/`platform` to the announce payload as an additive field."**
    Fine in principle, but `WorkerAnnounce` in `crates/types/src/worker.rs` is
-   currently `{ node, slots, version }` while `spec.md` §3.1 already describes
+   currently `{ node, slots, version }` while `docs/spec.md` §3.1 already describes
    `{ node, slots, slots_max, capacity_epoch, capacity_generation, version }` —
    the fields [design #293](293-worker-capacity.md) adds and the code does not
    yet have. Any capability field must land *after* or *with* #293, not race it.
@@ -315,9 +315,9 @@ afterwards. **The invariant's text is broader than its enforcement**, and anyone
 citing this test as the reason gap 10 is blocked is citing it one step too far.
 Nothing the test *does* guard is diminished — no input reaches
 `with_job_evaluators` or the merge below it, which is what keeps
-[design-lifecycle.md](../../design-lifecycle.md)'s eval floor intact. The launch
+[docs/reference/design-lifecycle.md](../reference/design-lifecycle.md)'s eval floor intact. The launch
 path is covered instead by a stated, reviewer-enforced contract:
-[contracts.md](../../contracts.md) §2 — "`ContainerLaunchConfig.node` is a pure
+[docs/reference/contracts.md](../reference/contracts.md) §2 — "`ContainerLaunchConfig.node` is a pure
 function of the resolved job type."
 
 **So "make the runner an input" is not available under the current contract**,
@@ -348,7 +348,7 @@ work gap 10 generated is the contract recorded above.
 Job inputs are in the tree and deployed. `CONFIG_SCHEMA_EPOCH` was **2** when
 this amendment landed (`crates/types/src/version.rs` is the authority today,
 with `INPUTS_SCHEMA_EPOCH` as its own constant);
-the declaration is a typed schema on the job type (`spec.md` §1.1 `inputs:`); the
+the declaration is a typed schema on the job type (`docs/spec.md` §1.1 `inputs:`); the
 effective set lives on the job record and is immutable once `base_ref` is pinned
 (§1.1 `Job.inputs`); delivery is one reserved env namespace, `CHUG_INPUT_*`
 (§6.3); and `.chug/jobs/rollback.yaml` (`min_dispatcher: 2`) is the first
@@ -382,7 +382,7 @@ launchd agent — which is why `deploy/prod/README.md` §3 records the linked-or
 flow as no longer applying to this project and warns that direct pushes to GitHub
 `main` are overwritten.
 
-beacon must be the other kind: a **linked-origin** project (`spec.md` §5.3;
+beacon must be the other kind: a **linked-origin** project (`docs/spec.md` §5.3;
 implemented in `crates/dispatcher/src/handlers/origin.rs`, tier-2 coverage in
 `crates/dispatcher/tests/origin.rs`). GitHub keeps owning `main` and chuggernaut
 never pushes it; the local bare repo's `HEAD` points at a chuggernaut-owned
@@ -770,7 +770,7 @@ one nobody in this tree has priced.
 3. **Resource limits weaken.** `systemd-run` recovers most of `resources:` on
    NixOS. macOS has no cgroups, so limits become advisory — meaning `resources:`
    would **silently lie** on a macOS node. Silent lying is the failure mode
-   STYLE.md's "everything is bounded / fail fast and loud" rejects; prefer
+   docs/reference/style.md's "everything is bounded / fail fast and loud" rejects; prefer
    rejecting `resources:` on a platform that cannot honor it over accepting it
    and ignoring it.
 4. **Isolation traded for cache persistence.** The reuse *is* the win and *is*
@@ -931,7 +931,7 @@ today: one `.chug/tasks/deploy.sh` reading `$CHUG_INPUT_SERVICE`, one job type.
 
 The mechanism one would reach for first — a job-level override — is already
 ruled out, and for a good reason:
-[design-lifecycle.md](../../design-lifecycle.md) ("eval criteria are a floor,
+[docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) ("eval criteria are a floor,
 additive per job") rejects full per-job overrides because one "would let a job
 creator silently drop the type's merge-gate protections", and permits only
 *additive* evaluators. It also draws exactly the distinction a parameterization

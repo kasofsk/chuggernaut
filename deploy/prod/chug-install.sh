@@ -3,7 +3,7 @@
 # (job #80). The machine half of the `/chug-install` Claude Code skill
 # (.claude/skills/chug-install/SKILL.md), but every subcommand is runnable by
 # hand and idempotent, so the whole flow degrades to a documented runbook if the
-# skill is unavailable (deploy/prod/README.md, INSTALL.md).
+# skill is unavailable (deploy/prod/README.md, README.md).
 #
 # It COMPOSES the pieces that already exist — it does not reinvent them:
 #   - platform bringup:   boot.sh, `chuggernaut init`, install-launchd.sh, deploy-health.sh
@@ -304,7 +304,7 @@ cmd_worker_join() {
 	# written as 0 rather than a number that would only ever be wrong.
 	log "Node '$NODE' announces itself — no dispatcher restart needed. Confirm on the Cluster page (GET /api/v1/platform/fleet)."
 	log "For membership across a dispatcher restart, seed it: DOCKER_NODES=\"…, $NODE|worker|0\" (capacity comes from the node, not this number)."
-	log "Its first-boot capacity is WORKER_SLOTS at creation; change it afterwards from the Cluster page (docs/runbooks/worker-capacity.md)."
+	log "Its first-boot capacity is WORKER_SLOTS at creation; change it afterwards from the Cluster page (docs/reference/runbooks/worker-capacity.md)."
 }
 
 # ── dispatch ────────────────────────────────────────────────────────────────

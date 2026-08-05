@@ -1,4 +1,4 @@
-//! The pure domain — Chuggernaut's functional core (NORTH-STAR §1, `contracts.md`).
+//! The pure domain — Chuggernaut's functional core (NORTH-STAR §1, `docs/reference/contracts.md`).
 //!
 //! This crate is the "functional core" half of a functional-core / imperative-shell
 //! split: the dispatcher (`crates/dispatcher`) is the shell that owns I/O and the
@@ -18,7 +18,7 @@
 //!
 //! It takes a **read-only view** of the relevant job/graph state (never `&mut
 //! Core`) plus the driving event, and returns the [`Transition`]s to apply and
-//! the [`Effect`]s to run — it **never performs an effect itself** (STYLE.md
+//! the [`Effect`]s to run — it **never performs an effect itself** (docs/reference/style.md
 //! Tier 2 #1). The dispatcher's imperative shell does the rest, and its call
 //! site shrinks to a fixed shape:
 //!
@@ -33,7 +33,7 @@
 //! "view" is the narrowest honest borrow — `&Job`, the target job — and wider
 //! phases grow a wider view from that same seam.
 //!
-//! Deciders assert liberally (STYLE.md Tier 2 #2): arguments, postconditions,
+//! Deciders assert liberally (docs/reference/style.md Tier 2 #2): arguments, postconditions,
 //! and negative space (e.g. never escalate an already-terminal job).
 
 pub mod decide;

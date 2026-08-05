@@ -4,7 +4,7 @@ Status: FINDING — gap 10 needs no new Job-record field, and #311 Decision 1 st
 
 Written against the tree at `c73d76b` (2026-08-01). Every claim about
 Chuggernaut's current behavior below was read out of the source or out of
-[`spec.md`](../../spec.md) in this tree, not carried over from the brief or from
+[`docs/spec.md`](../spec.md) in this tree, not carried over from the brief or from
 the sibling designs; where the brief or a sibling doc disagrees with what the
 source says, the source wins and the disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree). The **beacon** half is
@@ -41,14 +41,14 @@ that *do* need doing are already scheduled inside
 | `placement: { node }` is a **job-type** field, repo-versioned, resolved at `base_ref` | `crates/types/src/job_type.rs` (`Placement`, `JobType::placement_node`) | Shipped |
 | The pin threads to launch through `ContainerLaunchConfig.node` at exactly three sites | `crates/dispatcher/src/exec.rs`, `crates/dispatcher/src/eval.rs`, `crates/dispatcher/src/launch_queue.rs` — each `node: job_type.placement_node().map(String::from)` | Shipped |
 | Placement itself is a pure function of policy + probed candidates + optional pin | `crates/container/src/lib.rs` (`choose_placement`, `PlacementCandidate`, `NodeLoad`) | Shipped |
-| A pin is honored or it fails — never a fallback, never spillover | `choose_placement`; `spec.md` §3.1 | Shipped |
-| "**No labels, no anti-affinity**" — the pin is the *only* affinity control | `spec.md` §3.1 | Normative today |
-| Slot accounting is **observed from the node**, not ledgered by the dispatcher | `spec.md` §3.1 ("the scheduler reads exactly one number per node"); `crates/worker/src/backend.rs` (`node_load`, `probe_worker`) | Shipped |
+| A pin is honored or it fails — never a fallback, never spillover | `choose_placement`; `docs/spec.md` §3.1 | Shipped |
+| "**No labels, no anti-affinity**" — the pin is the *only* affinity control | `docs/spec.md` §3.1 | Normative today |
+| Slot accounting is **observed from the node**, not ledgered by the dispatcher | `docs/spec.md` §3.1 ("the scheduler reads exactly one number per node"); `crates/worker/src/backend.rs` (`node_load`, `probe_worker`) | Shipped |
 | `FleetNode.reserved` is a race patch over that observation, not a ledger | `crates/worker/src/backend.rs` — its own doc comment, and `Reservation`'s | Shipped |
-| No-capacity is transient: park `Pending`, `QueuedForCapacity`, no retry budget, FIFO drain, 30-min backstop | `spec.md` §3.5; `crates/dispatcher/src/launch_queue.rs` | Shipped |
-| Runtime capacity control, including `slots: 0` as a full drain | `spec.md` §3.1; `crates/api/src/routes.rs` `platform_fleet_capacity_set`; `crates/dispatcher/src/handlers/fleet.rs` | Shipped |
+| No-capacity is transient: park `Pending`, `QueuedForCapacity`, no retry budget, FIFO drain, 30-min backstop | `docs/spec.md` §3.5; `crates/dispatcher/src/launch_queue.rs` | Shipped |
+| Runtime capacity control, including `slots: 0` as a full drain | `docs/spec.md` §3.1; `crates/api/src/routes.rs` `platform_fleet_capacity_set`; `crates/dispatcher/src/handlers/fleet.rs` | Shipped |
 | Job creation requires **Member+** on the project | `crates/api/src/routes.rs` `jobs_create` → `member_on` | Shipped |
-| Fleet capacity requires **`platform_admin`** | `crates/api/src/routes.rs` `platform_fleet_capacity_set` → `platform_admin`; `spec.md` §7.5 "Platform-level config" | Shipped |
+| Fleet capacity requires **`platform_admin`** | `crates/api/src/routes.rs` `platform_fleet_capacity_set` → `platform_admin`; `docs/spec.md` §7.5 "Platform-level config" | Shipped |
 | A factory triage **agent** may create jobs from inside a container | `crates/auth/src/nats.rs` `triage_container_permissions` grants `req.jobs.create.{owner}.{project}` | Shipped |
 | Inputs never reach job-type resolution, tier-1 tested | `crates/domain/src/release.rs` — `resolved_job_type_is_equal_for_any_two_input_maps` | Shipped |
 | `NodeCapabilities`, capability-aware `choose_placement`, `placement.leases` | [#309](309-host-native-execution.md) §4, §5a, §5b (P2, P4) | Designed, not in the tree |
@@ -96,7 +96,7 @@ predicate applied before the existing `free <= 0` and out-of-service checks.
 on the table.** k8s is cited here only as a design source for the *selection
 vocabulary*. The exclusion stands on its own, already-decided grounds:
 
-- [`design.md`](../../design.md) picks a fleet of plain Docker daemons as the v1
+- [`docs/design/000-rationale.md`](000-rationale.md) picks a fleet of plain Docker daemons as the v1
   production substrate precisely because "placement intelligence lives in the
   dispatcher", and reserves the Kubernetes Jobs backend "for consumers who
   outgrow a small fleet."
@@ -104,7 +104,7 @@ vocabulary*. The exclusion stands on its own, already-decided grounds:
   `crates/container/Cargo.toml` carries no `kube` or `k8s-openapi` dependency,
   only a comment noting that a backend impl would add them.
 - A second scheduler underneath a single-writer dispatcher is the
-  reconcile-against-a-second-writer problem `design.md` names when it excludes
+  reconcile-against-a-second-writer problem `docs/design/000-rationale.md` names when it excludes
   workflow engines "at any scale."
 
 Borrowing a vocabulary costs nothing and commits to nothing. A later reader
@@ -174,7 +174,7 @@ placement *is* that overflow path, continuously and without a human: an
 unpinned launch goes to whichever in-service node has headroom, and when none
 does it is parked `Pending` with `pending_reason: QueuedForCapacity`, burns no
 retry budget, drains FIFO on the next container exit, and escalates with
-`no_free_slots_timeout` only after the 30-minute backstop (`spec.md` §3.5).
+`no_free_slots_timeout` only after the 30-minute backstop (`docs/spec.md` §3.5).
 Porting axis B as a per-run field would be **importing a manual workaround for a
 problem the target platform does not have.**
 
@@ -204,7 +204,7 @@ design #308 §A3 rather than restating it.
 The test exists and is where #308 says it is:
 `resolved_job_type_is_equal_for_any_two_input_maps`, a `#[test]` in
 `crates/domain/src/release.rs`'s test module — tier 1 by
-[`testing.md`](../../testing.md), pure, no I/O. It builds four input maps
+[`docs/reference/testing.md`](../reference/testing.md), pure, no I/O. It builds four input maps
 (including one deliberately containing `image`, `eval`, `secrets` and `prompt`
 keys), varies `job.inputs` across them, and asserts that
 `with_job_evaluators(job_type, &job)` returns an **equal** `JobType` every time.
@@ -230,7 +230,7 @@ input-driven placement hack does not go through config resolution. **The
 invariant's text is broader than its enforcement.** Anyone citing the test as
 the reason gap 10 is blocked is citing it one step too far.
 
-The gap is cheap to close and worth closing as its own contract, per STYLE.md's
+The gap is cheap to close and worth closing as its own contract, per docs/reference/style.md's
 contract-first rule:
 
 > **`ContainerLaunchConfig.node` is a pure function of the resolved job type.**
@@ -239,8 +239,8 @@ contract-first rule:
 That is already true and already nearly self-evident from the signature —
 `JobType::placement_node(&self)` takes no `Job` — but nothing in the tree
 *states* it, so nothing stops the fourth call site from being written
-differently. Recording it in [`contracts.md`](../../contracts.md) beside the
-other launch-path contracts, and in the `spec.md` §3.1 sentence that already
+differently. Recording it in [`docs/reference/contracts.md`](../reference/contracts.md) beside the
+other launch-path contracts, and in the `docs/spec.md` §3.1 sentence that already
 says "No labels, no anti-affinity", makes it a rule a reviewer can reject by
 name. A mechanical check was considered and rejected: catching it properly needs
 taint analysis, and a grep gate over a struct-field initializer is brittle in a
@@ -301,7 +301,7 @@ one-for-one.
    expensive cache-sensitive work is `.chug/tasks/ci.sh` running as the `ci`
    command evaluator, not the work task. A Work-only pin is useless for every
    motivating case, and a pin that covers evaluators is a per-job field steering
-   the gate — the thing `design-lifecycle.md` and #311 both refuse.
+   the gate — the thing `docs/reference/design-lifecycle.md` and #311 both refuse.
 3. **It would be settable by an agent.** `triage_container_permissions`
    (`crates/auth/src/nats.rs`) grants a factory triage container
    `req.jobs.create.{owner}.{project}`. Job creation is a Member+ action at the
@@ -336,7 +336,7 @@ proposal; it is a pointer at machinery that exists:
 `crates/dispatcher/src/handlers/fleet.rs`), persisted as intent in the
 `platform` bucket, pushed to the daemon as `set_slots`. `slots: 0` is a full
 drain: the node becomes placement-inert, running containers are never killed,
-and queued launches wait for other capacity (`spec.md` §3.1).
+and queued launches wait for other capacity (`docs/spec.md` §3.1).
 
 Note the property this buys, because it also bounds the damage of any future
 pin: **drain beats a pin.** A pinned launch onto a drained node sees
@@ -359,7 +359,7 @@ No — and the beacon evidence says so more strongly than the k8s analogy does.
 
 Names should stay where `placement.node` already puts them: a repo-versioned,
 reviewed, job-type-level escape hatch for a fact that is genuinely about one
-machine and cannot be phrased as a property (`spec.md` §3.1's "the one affinity
+machine and cannot be phrased as a property (`docs/spec.md` §3.1's "the one affinity
 control"). That is the same role `spec.nodeName` plays in Kubernetes, and it is
 the right role.
 
@@ -367,7 +367,7 @@ The currency of routine selection should be capability, for the reasons above
 plus one specific to this platform: `choose_placement` is a **pure function**
 (`crates/container/src/lib.rs`) that already takes a policy, a candidate list
 and an optional pin, and is unit-tested with no daemon. A capability predicate
-is one more argument to a function whose whole design invites it (STYLE.md Tier
+is one more argument to a function whose whole design invites it (docs/reference/style.md Tier
 2 rule 1: decision logic pure, effects elsewhere). A per-run name is not a new
 argument — it is a new *source* for an existing one, and the interesting
 question with a new source is always authorization, never mechanism.
@@ -390,8 +390,8 @@ consistent in a way that is easy to miss:
 
 | Decision | Object | Authority today |
 | --- | --- | --- |
-| Which node a job type's containers land on | The repo file | Whoever can merge to the project's default branch — i.e. the full evaluator + merge-gate path (`spec.md` §3.3) |
-| How much capacity a node offers, including drain to zero | The fleet | `platform_admin` (`spec.md` §7.5 "Platform-level config") |
+| Which node a job type's containers land on | The repo file | Whoever can merge to the project's default branch — i.e. the full evaluator + merge-gate path (`docs/spec.md` §3.3) |
+| How much capacity a node offers, including drain to zero | The fleet | `platform_admin` (`docs/spec.md` §7.5 "Platform-level config") |
 | Creating a job | The job | **Member+** (`jobs_create` → `member_on`), plus any factory triage container (`triage_container_permissions`) |
 
 Placement is, today, a decision made at the two *stronger* authorities. Option B
@@ -413,10 +413,10 @@ stated concretely rather than by assertion:
    closed (`modes` ⇒ container-only, `leases` ⇒ empty). A job creator cannot
    forge one. A node name is unforgeable in the opposite direction: it is
    whatever string the creator typed, shape-checked only (`[A-Za-z0-9_-]+`,
-   `spec.md` §3.1), because the fleet list lives in the dispatcher's env and
+   `docs/spec.md` §3.1), because the fleet list lives in the dispatcher's env and
    cannot be validated offline.
 3. **Deliberate co-location is only reachable by name.** Nodes are shared:
-   `WORKER_CACHE_DIR` gives a node's jobs a common sccache directory (`spec.md`
+   `WORKER_CACHE_DIR` gives a node's jobs a common sccache directory (`docs/spec.md`
    §3.1), and under [#309](309-host-native-execution.md) §8/§10 host nodes are
    explicitly the weaker-isolation kind. A creator who can name a node can
    choose to land beside a specific victim task and its shared host state. A
@@ -476,7 +476,7 @@ changes #309's sequencing constraint that capabilities land after #293 job 3, in
 
 **With `placement.node`.** Unchanged, and re-affirmed as the escape hatch. The
 one addition is the contract statement above, which describes existing behavior
-rather than altering it. `spec.md` §3.1's "No labels, no anti-affinity" is
+rather than altering it. `docs/spec.md` §3.1's "No labels, no anti-affinity" is
 already scheduled to be amended by #309 slice 3 for the mode predicate; the
 per-run wording belongs in the same edit, and the honest form is *"placement is
 selected by node-advertised capability and, as an escape hatch, by an explicit
@@ -515,13 +515,13 @@ ledger**: allocatable minus the summed `requests` of every pod *bound* to the
 node, maintained in the scheduler's cache with entry lifetime equal to the pod's
 lifetime. Exclusivity is a subtraction against a number the scheduler owns.
 
-Chuggernaut deliberately inverted this. `spec.md` §3.1: "the node owns its
+Chuggernaut deliberately inverted this. `docs/spec.md` §3.1: "the node owns its
 capacity, and the scheduler reads exactly one number per node" — a worker
 "counts its own running `chuggernaut.managed` containers" and reports it on
 `ping`; a docker endpoint is listed through `load_by_node`
 (`crates/worker/src/backend.rs`, `node_load`). Occupancy is likewise "rebuilt
 from the live containers the backend reports — never from in-memory
-bookkeeping" (`spec.md` §3.1). **Capacity here is observation-derived, not
+bookkeeping" (`docs/spec.md` §3.1). **Capacity here is observation-derived, not
 ledgered.**
 
 `FleetNode.reserved` is not the ledger. Its own doc comment says what it is:
@@ -630,7 +630,7 @@ Why this shape is worth considering:
   `Work`/`Evaluation`/`WrapUp` and leaves a revoked job's stale `Running`
   records exactly as it found them.
 - **It matches the platform's own precedent.** Occupancy is derived from live
-  containers "never from in-memory bookkeeping" (`spec.md` §3.1); the launch
+  containers "never from in-memory bookkeeping" (`docs/spec.md` §3.1); the launch
   queue persists `queued_at` on the task record so FIFO order survives restart.
   This is the same move.
 - **It stays in the actor**, so consequence 3 above is unaffected.
@@ -644,7 +644,7 @@ The honest costs, because they are real:
   (`WrapUpStep::EscalatedDropExec`, `crates/dispatcher/src/eval.rs`) drops exec
   state with the job `Escalated`, which is **not** terminal, and today that is
   harmless only because the task in question has already exited. That is an
-  invariant a P4 implementer must assert (STYLE.md Tier 2 rule 2), not one the
+  invariant a P4 implementer must assert (docs/reference/style.md Tier 2 rule 2), not one the
   shape gives away.
 - It denormalizes a job-type-derived fact onto the task record. #309 §5b
   explicitly relies on config being read live — "a job type edited between
@@ -654,9 +654,9 @@ The honest costs, because they are real:
   semantics for a device already in use, but it is a change, and it should be
   decided rather than absorbed.
 - The derivation is a scan over live tasks per launch decision. At this fleet's
-  scale (single-digit nodes, tens of live tasks) that is free, and STYLE.md
+  scale (single-digit nodes, tens of live tasks) that is free, and docs/reference/style.md
   Tier 3 prefers the simpler shape over the faster one — but it should be
-  bounded like everything else (STYLE.md Tier 2 rule 3).
+  bounded like everything else (docs/reference/style.md Tier 2 rule 3).
 
 The third handle — the actor's own `self.active` map, which revoke removes on
 the same turn — is **not** a candidate. Triage tasks are exempt from it by
@@ -697,12 +697,12 @@ above does.
    #311 Decision 1 stands unamended, `CONFIG_SCHEMA_EPOCH` is untouched, and no
    wire record changes.
 2. **Record the launch-site contract** — `ContainerLaunchConfig.node` is a pure
-   function of the resolved job type — in `contracts.md`, and note in #308 §A3
+   function of the resolved job type — in `docs/reference/contracts.md`, and note in #308 §A3
    that the property test's coverage stops at config resolution. This is the one
    piece of new work gap 10 generates, and it is a `docs` job.
 3. **Land [#309 §5a](309-host-native-execution.md#5a-capability-aware-placement)
    as designed** when P2 arrives; it is the whole of gap 10's real content.
-   Amend `spec.md` §3.1's "No labels, no anti-affinity" in #309 slice 3 to state
+   Amend `docs/spec.md` §3.1's "No labels, no anti-affinity" in #309 slice 3 to state
    the per-run position explicitly rather than leaving it inferable.
 4. **Keep `placement.node` as the reviewed escape hatch**, unchanged.
 5. **#309 §5b stands**, with the two reasoning amendments and the derived-held-
@@ -716,7 +716,7 @@ whole document:
 - **A metered or burst node kind joins the fleet** (axis D becomes real). Even
   then the answer is a node *class* plus a policy — "prefer owned hardware,
   spill to burst" is a placement policy, `PLACEMENT_POLICY` is already
-  platform-wide config (`spec.md` §12.4) — not a per-run node name.
+  platform-wide config (`docs/spec.md` §12.4) — not a per-run node name.
 - **A case appears where the same job type must run in two different places on
   different runs, and the difference is not derivable from the job type.** That
   is the one shape none of A–D covers. Option C (narrowing capability
@@ -741,7 +741,7 @@ whole document:
   resolution only and would not catch a launch-site input read. See
   [the correction above](#correction-the-property-test-does-not-guard-the-shape-gap-10-would-take).
 - **Config paths** — #308 predates nothing relevant here, but for the record all
-  job-type config now lives under `.chug/` (`spec.md` §1.1); `.chug/jobs/*.yaml`
+  job-type config now lives under `.chug/` (`docs/spec.md` §1.1); `.chug/jobs/*.yaml`
   in this repo contains **zero** `placement:` blocks.
 - **`crates/container/src/k8s.rs`** — still a six-line stub with no `kube` or
   `k8s-openapi` dependency, as the brief states.
@@ -764,7 +764,7 @@ whole document:
 - [#309 — Host-native execution](309-host-native-execution.md), §4, §5a, §5b, P2, P4.
 - [#322 — A native (macOS) execution runtime](322-macos-native-runtime.md).
 - [#293 — Worker capacity](293-worker-capacity.md) — the observation path #309 P2 sequences behind.
-- [`spec.md`](../../spec.md) §1.1 (`placement:`, `inputs:`), §3.1 (placement, fleet, capacity control), §3.5 (launch capacity queue), §7.5 (permission rules).
-- [`design.md`](../../design.md) — the Docker-fleet decision and the k8s/workflow-engine exclusion.
-- [`contracts.md`](../../contracts.md), [`STYLE.md`](../../STYLE.md), [`testing.md`](../../testing.md).
+- [`docs/spec.md`](../spec.md) §1.1 (`placement:`, `inputs:`), §3.1 (placement, fleet, capacity control), §3.5 (launch capacity queue), §7.5 (permission rules).
+- [`docs/design/000-rationale.md`](000-rationale.md) — the Docker-fleet decision and the k8s/workflow-engine exclusion.
+- [`docs/reference/contracts.md`](../reference/contracts.md), [`docs/reference/style.md`](../reference/style.md), [`docs/reference/testing.md`](../reference/testing.md).
 - [`docs/design-docs.md`](../design-docs.md) — the header contract this document follows.

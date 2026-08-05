@@ -26,15 +26,15 @@ update, one job type (`docs`) that maintains them.
 
    | Doc | Update it when your change… |
    | --- | --- |
-   | `spec.md` | alters normative behavior — the data model, the state machine, a prompt contract |
-   | `MODULES.md` | adds, removes, renames or re-scopes a dispatcher/domain module (CI enforces this one) |
-   | `crates.md` | moves responsibility between crates, or adds a crate |
-   | `testing.md` | changes what a tier covers or how to run it |
-   | `STYLE.md` | changes a rule or the machinery enforcing one |
+   | `docs/spec.md` | alters normative behavior — the data model, the state machine, a prompt contract |
+   | `docs/reference/modules.md` | adds, removes, renames or re-scopes a dispatcher/domain module (CI enforces this one) |
+   | `docs/reference/crates.md` | moves responsibility between crates, or adds a crate |
+   | `docs/reference/testing.md` | changes what a tier covers or how to run it |
+   | `docs/reference/style.md` | changes a rule or the machinery enforcing one |
    | `CLAUDE.md` | changes a convention that bites someone who misses it |
    | `docs/` (the wiki) | changes something a reader is being taught — the operator-facing behavior of a feature |
    | `docs/implementation-notes.md` | invalidates a note there, or gives one a better home — fold it into the real doc and delete the entry |
-   | `design.md`, `docs/design/*.md` | supersedes a decision one of them argues |
+   | `docs/design/000-rationale.md`, `docs/design/*.md` | supersedes a decision one of them argues |
 
 3. **A path you name in a doc is a claim it exists.**
    `.chug/tasks/check-doc-facts.sh` resolves every backticked path against
@@ -44,7 +44,7 @@ update, one job type (`docs`) that maintains them.
    claim: `<!-- intent -->` for something designed but not built,
    `<!-- runtime -->` for build output or an operator-owned file that git will
    never hold, `<!-- absent -->` for a line whose point *is* that the path is
-   gone. All three are defined in STYLE.md's doc-claim rule; none excuses a
+   gone. All three are defined in docs/reference/style.md's doc-claim rule; none excuses a
    stale path.
 
    **A constant's value you restate is a claim too.** The same script reads a
@@ -62,7 +62,7 @@ update, one job type (`docs`) that maintains them.
 
 5. **Do not narrate the change in a doc.** Docs describe the system as it is
    now, in the present tense. Why the change was made belongs in the commit
-   message (STYLE.md Tier 2 rule 5); what it did belongs in the work summary.
+   message (docs/reference/style.md Tier 2 rule 5); what it did belongs in the work summary.
 
 6. **Say what you did in your `submit_result` summary** — which docs you
    updated, or that you checked and none were stale. "No docs needed" is a fine

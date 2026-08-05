@@ -4,7 +4,7 @@ Status: FINDING, amended 2026-08-02 — clock 3 in container mode on dedicated n
 
 Written against the tree at `5aeb439` (this branch adds only this document).
 Every claim about this repository was read out of the source or out of
-[`spec.md`](../../spec.md). Every claim about node behavior was **measured on
+[`docs/spec.md`](../spec.md). Every claim about node behavior was **measured on
 `gumbo-nuc-0` on 2026-08-02** and the commands are given, so a reader can re-run
 them rather than trust them. Where a sibling design and a measurement disagree,
 the measurement wins and the disagreement is recorded in
@@ -248,7 +248,7 @@ not a commit. The launch env carries no commit sha (`Core::container_env` has
 and the container's clone would give a task a toolchain realised from the
 previous tip. The window is seconds and the failure is a stale toolchain rather
 than a wrong one, but it is a real race and the fix is small: **carry the job
-branch's commit on the launch spec** and use `?rev=`. Per STYLE.md's
+branch's commit on the launch spec** and use `?rev=`. Per docs/reference/style.md's
 contract-first rule that is a named contract addition, sequenced with
 [P2](#sequencing), not something to leave implicit.
 
@@ -305,7 +305,7 @@ budget and the bound below both exist.
 
 A pre-launch realise happens before execution begins, and #309 §3.5 starts the
 task clock at execution. So the realise is covered by **no existing timeout** —
-a cold flake would be an unbounded hang in the launch path, which STYLE.md Tier 2
+a cold flake would be an unbounded hang in the launch path, which docs/reference/style.md Tier 2
 rule 3 forbids outright.
 
 **The worker bounds it** with a node-side realise timeout and fails the launch
@@ -600,7 +600,7 @@ re-derived inside its namespace. The first two bullets are that mistake directly
 view, not the host's. The third is its consequence for provisioning: a directory
 the daemon creates lands in the daemon's writable layer and never on the node, so
 the deploy has to create it. The invariant is stated **once**, in
-[STYLE.md](../../STYLE.md) Tier 2 rule 7 — where a worker reads it before writing
+[docs/reference/style.md](../reference/style.md) Tier 2 rule 7 — where a worker reads it before writing
 code rather than after failing — and this document does not restate it.
 
 ## P2 as shipped (job #403)
@@ -922,6 +922,6 @@ does); `crates/store/src/worker.rs` (`OP_TIMEOUT`, `REFRESH_TIMEOUT`);
 `crates/worker/src/daemon.rs` (`realise_for_launch`);
 `crates/worker/src/backend.rs` (`rpc_err`); `deploy/prod/build-worker.sh` (the
 worker's own container, and the roots dir it provisions);
-[STYLE.md](../../STYLE.md) Tier 2 rule 7 (the container-namespace invariant);
-`spec.md` §1.1, §3.1, §14.2; CLAUDE.md (factories and job-type
+[docs/reference/style.md](../reference/style.md) Tier 2 rule 7 (the container-namespace invariant);
+`docs/spec.md` §1.1, §3.1, §14.2; CLAUDE.md (factories and job-type
 config are project-owned and repo-versioned).

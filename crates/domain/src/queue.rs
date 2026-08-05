@@ -10,7 +10,7 @@
 //!   waited-for [`std::time::Duration`] and the expiry verdict against a budget.
 //! - **Guarantees:** holds only Ready jobs; lives in the actor, never
 //!   persisted; rebuilt from KV on restart. Every wait is measured against a
-//!   bound (STYLE.md Tier 2 #3) — the budget is [`QueuedLaunch::is_expired`]'s
+//!   bound (docs/reference/style.md Tier 2 #3) — the budget is [`QueuedLaunch::is_expired`]'s
 //!   argument, never an implicit constant here.
 //! - **Spec:** §3.1 step 5, §3.5.
 
@@ -83,7 +83,7 @@ impl QueuedLaunch {
     /// Has this launch outwaited the queue's max-wait budget (spec §3.5)? The
     /// budget is an argument, not a constant here: the dispatcher's default is
     /// configurable per deployment, and every wait in this codebase is bounded
-    /// by an explicit one (STYLE.md Tier 2 #3).
+    /// by an explicit one (docs/reference/style.md Tier 2 #3).
     pub fn is_expired(&self, now: DateTime<Utc>, max_wait: Duration) -> bool {
         self.waited(now) > max_wait
     }

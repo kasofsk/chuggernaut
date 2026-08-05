@@ -21,7 +21,7 @@ example. They are left as written, because the argument is the record of what
 the tree said when it was made.
 
 Written against the tree at `00dd0dc`. Every claim about current behavior below
-was read out of `spec.md` and the source in this repo; where the brief and the
+was read out of `docs/spec.md` and the source in this repo; where the brief and the
 tree disagree, the tree wins and the disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree).
 
@@ -33,18 +33,18 @@ This doc deliberately reopens a decided direction. Job **#185** (Frozen,
 contact with the tree. The supersede is argued from
 [Decision 1](#decision-1-deps-cannot-carry-membership), not assumed.
 
-Related: [spec.md](../../spec.md) §1.1 (the `Job` record, `knowledge_tags`,
+Related: [docs/spec.md](../spec.md) §1.1 (the `Job` record, `knowledge_tags`,
 derived `retry_count`/`rework_count`), §1.2 (claims), §1.4 (buckets, the `rdeps`
 derived cache), §2.1 (the state machine, Draft edits, batches, the Revoked
 cascade), §2.2 (release validation's three passes), §3.6 (startup rebuild), §4.3
 (the job brief), §4.4 (upfront knowledge injection), §6.1/§6.2 (subjects and
 HTTP), §6.3 (events), §13.4 (factory provenance), §14 (config and version skew),
-Appendix: Deferred; [design-lifecycle.md](../../design-lifecycle.md) (the job
-lifecycle); [STYLE.md](../../STYLE.md) (Tier 1 no-duplication and pure `types`;
+Appendix: Deferred; [docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) (the job
+lifecycle); [docs/reference/style.md](../reference/style.md) (Tier 1 no-duplication and pure `types`;
 Tier 2 #2 asserts, #3 bounds, #4 naming, #6 tests; Tier 3 single writer,
-simplicity, zero technical debt); [crates.md](../../crates.md) (crate
-ownership); [testing.md](../../testing.md) (test tiers);
-[NORTH-STAR.md](../../NORTH-STAR.md) and [contracts.md](../../contracts.md)
+simplicity, zero technical debt); [docs/reference/crates.md](../reference/crates.md) (crate
+ownership); [docs/reference/testing.md](../reference/testing.md) (test tiers);
+[docs/README.md](../README.md) and [docs/reference/contracts.md](../reference/contracts.md)
 (decider/effect factoring); [CLAUDE.md](../../CLAUDE.md) (single writer, `store`
 is the only crate that talks to NATS, `types` is pure data).
 
@@ -297,7 +297,7 @@ depending on one.
   without a title. This is exactly the knowledge-tag posture (spec §4.4: "tags
   without a file are skipped"), and it is what keeps the field writable without
   a repo read.
-- **Bounds** (STYLE.md Tier 2 #3): `GROUPS_COUNT_MAX = 8` per job and the
+- **Bounds** (docs/reference/style.md Tier 2 #3): `GROUPS_COUNT_MAX = 8` per job and the
   128-character name cap, both hard errors rather than truncation, both in a
   new pure `crates/types/src/groups.rs` mirroring `crates/types/src/inputs.rs`.
   `types` stays pure data (Tier 1), so the validator is one function shared by
@@ -329,7 +329,7 @@ Two consequences follow, and both are enforcement rather than prose:
 1. **No code path that composes a container's environment, prompt, or resolved
    config may read `Job.groups`.** The regression test is the one §4.3 already
    uses for `cover_html`: the job brief and the container env are byte-identical
-   with and without groups. That is the negative-space assert (STYLE.md Tier 2
+   with and without groups. That is the negative-space assert (docs/reference/style.md Tier 2
    #2) that makes "inert to execution" a property rather than an intention, and
    it is what [Decision 5](#decision-5-membership-is-mutable-after-release-including-on-terminal-jobs)
    leans on when it argues that annotating a Done job is safe.
@@ -453,7 +453,7 @@ model. Retroactive grouping is not a nice-to-have here; it is the requirement.
 writer of `jobs.*`; this is another `req.jobs.*` request into the same
 single-threaded actor. The precedent is in the tree and is exactly this shape:
 `POST .../jobs/{seq}/claim` (spec §1.2) has an operator mutate `claim_next` on a
-live, released job. STYLE.md Tier 3's invariant is one writer, not one write
+live, released job. docs/reference/style.md Tier 3's invariant is one writer, not one write
 path.
 
 **No cascade, no cleanup, no referential integrity — deliberately.** Revoking a
@@ -737,7 +737,7 @@ Per CLAUDE.md's contract-first rule for dispatcher work:
 | Contract | Change |
 | --- | --- |
 | `Job.groups` | New field, `Vec<String>`, empty on old records, omitted from the wire when empty. Written by three paths, all on the single-writer dispatcher: create, the Draft edit, and `req.jobs.groups.*`. **Mutable in every state, including terminal** |
-| Invariant | `Job.groups` is inert to execution: no container env, no prompt, no job-type resolution and no state transition reads it. Pinned by a byte-identity test on the job brief and the container env (STYLE.md Tier 2 #2, negative space) |
+| Invariant | `Job.groups` is inert to execution: no container env, no prompt, no job-type resolution and no state transition reads it. Pinned by a byte-identity test on the job brief and the container env (docs/reference/style.md Tier 2 #2, negative space) |
 | Invariant | Group names match `^[a-z0-9][a-z0-9._/-]*$`, are unique within a job, and number at most `GROUPS_COUNT_MAX`. Checked by one pure validator in `types`, shared by all three write paths |
 | Invariant | No group aggregate is ever stored. Every count, every member list and every enumeration is derived from `Core::graphs` at read time |
 | Invariant | A group has no existence independent of its members: the group set is `distinct(job.groups)` over the project, so an empty group is unrepresentable |
@@ -750,7 +750,7 @@ Per CLAUDE.md's contract-first rule for dispatcher work:
 | Epoch | **None.** `CONFIG_SCHEMA_EPOCH` is the job-type schema epoch and no job-type field changes (§14.1, §14.2) |
 
 New modules get a doc header (accepts / emits / guarantees / spec §) and a
-`MODULES.md` registry row, per the direction-of-travel rule;
+`docs/reference/modules.md` registry row, per the direction-of-travel rule;
 `.chug/tasks/ci.sh` enforces the registry.
 
 ## What this doc does not decide

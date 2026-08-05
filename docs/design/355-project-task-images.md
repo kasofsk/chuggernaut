@@ -4,7 +4,7 @@ Status: PROPOSED.
 
 Written against the tree at `fce9e33` and re-verified at `e5723c7`, which adds
 only this file. Every claim about current behavior below was read out of
-`spec.md` and the source in this repo rather than inferred from a sibling
+`docs/spec.md` and the source in this repo rather than inferred from a sibling
 design; where the brief and the tree disagree, the tree wins and the
 disagreement is recorded in [Corrections](#corrections-verified-against-the-tree).
 One class of claim in the brief is **not verifiable from this tree at all** —
@@ -16,7 +16,7 @@ such claim is marked where it is used.
 ## Problem
 
 A job type declares the container image its work and eval containers run in
-([`spec.md`](../../spec.md) §1.1: `image` is **required** for `work.type: agent |
+([`docs/spec.md`](../spec.md) §1.1: `image` is **required** for `work.type: agent |
 command`). A project cannot supply that image. It can only name one of the three
 the platform builds for itself, so the only way to get a new toolchain into a
 job is to add it to chuggernaut's own Dockerfiles — which is exactly the shape
@@ -76,7 +76,7 @@ driven by a deploy job.
    thing for a different reason.)
 
 6. **The daemon already builds images, and that is the precedent.**
-   `spec.md` §3.1 "worker self-refresh" specifies a `refresh { sha, tag }` op on
+   `docs/spec.md` §3.1 "worker self-refresh" specifies a `refresh { sha, tag }` op on
    `req.worker.{node}.>` (`RefreshRequest` in `crates/types/src/worker.rs`,
    dispatched in `crates/worker/src/daemon.rs`). The daemon fetches its own
    build context over the ssh front and runs three `docker build`s locally. No
@@ -99,7 +99,7 @@ driven by a deploy job.
    job `inputs:` (#311), with `INPUTS_SCHEMA_EPOCH = 2` frozen beside it.
 
 10. **The spec's own examples already assume registry-qualified images.**
-    `spec.md` §1.1 shows `image: registry.acme.com/agents/impl:latest` and
+    `docs/spec.md` §1.1 shows `image: registry.acme.com/agents/impl:latest` and
     `image: registry.acme.com/runners/deploy:latest`. Nothing in the code makes
     those work. The Appendix: Infrastructure Summary leaves the row open:
     `| Image registry | Harbor or Zot | ECR, GCR, GHCR |`.
@@ -187,7 +187,7 @@ A `build-image` job type builds the project's task image and pushes it; nodes
 pull it when a launch names it.
 
 *For.* One build for the whole fleet. Distribution scales to any number of nodes.
-It is the shape `spec.md` §1.1's own examples already assume (fact 10), and the
+It is the shape `docs/spec.md` §1.1's own examples already assume (fact 10), and the
 shape every other CI system uses. It composes with #313 half B: one build
 mechanism serves product and task images alike.
 
@@ -622,7 +622,7 @@ reconciliation is one more of those, for three reasons:
   reaches git per project inside the tick: the one-shot deadline scan calls
   `release::load_job_type(&self.repos, …)` for jobs it has no cached job type
   for. A ref resolve against a local bare repo is cheaper than that.
-- **It preserves the single-writer property** (`CLAUDE.md`; STYLE.md Tier 3).
+- **It preserves the single-writer property** (`CLAUDE.md`; docs/reference/style.md Tier 3).
   Desired-vs-observed lives in the actor, the `build_image` op is emitted from
   the actor, and no second writer of image state exists — which is the same
   reason `scan.rs`'s header says *"both scans run inside the single-writer loop
@@ -697,7 +697,7 @@ branch, a `build_image` op, and a node build. It contains no chuggernaut deploy,
 no `worker-refresh.sh` run, and no platform SHA. The two clocks are separated
 because the *trigger* is the project's ref, not the platform's deployed SHA.
 
-**Bounds** (STYLE.md Tier 2 #3 — everything is bounded):
+**Bounds** (docs/reference/style.md Tier 2 #3 — everything is bounded):
 
 - **One project build at a time per node.** BuildKit does not honour per-build
   CPU/memory limits, so concurrency-of-one plus a timeout is the only honest
@@ -954,7 +954,7 @@ design exists to separate.
 
 ## Contracts this changes
 
-Per STYLE.md's contract-first rule, the interfaces a `code` job implementing this
+Per docs/reference/style.md's contract-first rule, the interfaces a `code` job implementing this
 would change:
 
 | Contract | Change |
@@ -968,11 +968,11 @@ would change:
 | `NodeCapabilities` (#309 §4) | one more field, `images: Vec<String>`, absent ⇒ `[]` |
 | `container::choose_placement` | one more skip predicate; `NoCapacity("no node holds image …")` |
 | `deploy/prod/worker-refresh.sh` | the three hardcoded image names become the platform entry of a list |
-| `spec.md` | §1.1 gains `.chug/images/` and the `project/` scheme; §3.1 gains the `build_image` op and the reconciler; the Appendix's "Image registry" row gains a note that task images do not need one under this design  <!-- intent --> |
+| `docs/spec.md` | §1.1 gains `.chug/images/` and the `project/` scheme; §3.1 gains the `build_image` op and the reconciler; the Appendix's "Image registry" row gains a note that task images do not need one under this design  <!-- intent --> |
 
 ## Related
 
-- [`spec.md`](../../spec.md) §1.1 (`.chug/` config root, `image` field rules),
+- [`docs/spec.md`](../spec.md) §1.1 (`.chug/` config root, `image` field rules),
   §3.1 (worker self-refresh, placement, node-local cache), §14 (config/version
   skew), Appendix: Infrastructure Summary.
 - [`CLAUDE.md`](../../CLAUDE.md) — the per-consumer forge constraint this design

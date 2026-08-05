@@ -1,15 +1,15 @@
 # Incremental restructuring plan — Rust, no rewrite
 
-Companion to `NORTH-STAR.md` (target factoring), `contracts.md` (interface
-extraction), and `structure-assessment.md` (current-state audit). This plan
-**supersedes `ts-rewrite-plan.md`**: we are staying in Rust and refactoring the
+Companion to `docs/README.md` (target factoring), `docs/reference/contracts.md` (interface
+extraction), and `docs/reference/structure-assessment.md` (current-state audit). This plan
+**supersedes `docs/design/210-ts-rewrite-plan.md`**: we are staying in Rust and refactoring the
 existing code incrementally toward the north star. The rewrite plan's durable
 ideas — golden decision traces, effects-as-data, contract-first change rule —
 survive here as Track B; only the language migration is dropped.
 
 Design **#208** (the Python dispatcher) was the other language-migration
 proposal; it is **closed/superseded** by this decision. No dispatcher rewrite
-in any language is on the table — the surviving `ts-rewrite-plan.md` is kept
+in any language is on the table — the surviving `docs/design/210-ts-rewrite-plan.md` is kept
 only as a source of the Track-B ideas above.
 
 Ground truth this plan is based on (2026-07-24): `state.rs` is the only pure
@@ -71,7 +71,7 @@ each track extends it before it can carve; and `invariants.rs` has five rules
 batch membership, draft/claim consistency, or fleet slots — so each track
 lands its own.
 
-Once B2 lands, the contract-first change rule (`contracts.md`) is in force:
+Once B2 lands, the contract-first change rule (`docs/reference/contracts.md`) is in force:
 every dispatcher job names the `Msg` pre/postcondition, Effect, invariant, or
 trace it changes — and if it can't, writing that contract is the job's first
 commit.
@@ -82,15 +82,15 @@ These keep everything else from regressing during the migration.
 
 **A1. Reconcile the planning docs** *(docs, small)*
 Close/supersede design #208 (Python dispatcher) and mark
-`ts-rewrite-plan.md` superseded by this plan, recording the decision: staying
+`docs/design/210-ts-rewrite-plan.md` superseded by this plan, recording the decision: staying
 Rust, refactoring incrementally.
 
-**A2. Re-sync `crates.md` + create `MODULES.md`** *(docs, small)*
-`crates.md`'s dispatcher map documents a `handlers/` directory that doesn't
+**A2. Re-sync `docs/reference/crates.md` + create `docs/reference/modules.md`** *(docs, small)*
+`docs/reference/crates.md`'s dispatcher map documents a `handlers/` directory that doesn't
 exist and misses nine real modules (`channel`, `fleet`, `github`, `harvest`,
 `launch_queue`, `origin`, `run`, `seed`, `triage`). Add contract-style doc
 headers (accepts / emits / guarantees / spec §) to each dispatcher module and
-seed `MODULES.md` as the registry of scoping-eligible modules, one line of
+seed `docs/reference/modules.md` as the registry of scoping-eligible modules, one line of
 contract each.
 
 **A3. Boundary checks in CI** *(code, small — depends on A2)*
@@ -102,13 +102,13 @@ Two homes, both already-established patterns:
   all of `domain/`). These ride the existing `cargo test --workspace` in
   `.chug/tasks/ci.sh` — same enforcement route as the `committed_schemas_are_current`
   drift test.
-- The `MODULES.md`-completeness check goes in `.chug/tasks/ci.sh` itself, **before
+- The `docs/reference/modules.md`-completeness check goes in `.chug/tasks/ci.sh` itself, **before
   the Rust early-exit** (the `config_schema_gate` precedent): a docs-only diff
   skips cargo, so a registry check living only in Rust tests would be
   silently bypassed by exactly the changes most likely to break it.
 
 **A4. `clippy.toml` + the Tier 1 lint denies** *(code, small — sibling of A3)*
-A3 landed the dependency-graph half of STYLE.md Tier 1 and left the clippy
+A3 landed the dependency-graph half of docs/reference/style.md Tier 1 and left the clippy
 half unfiled. `clippy::too_many_lines`, `unwrap_used` and `expect_used` are
 all allow-by-default, so `.chug/tasks/ci.sh`'s `cargo clippy --workspace
 --all-targets -- -D warnings` could not see them and the three rules were
@@ -126,13 +126,13 @@ for `triage`/`origin`, whose three did not — see C8),
 so the debt stays greppable while new code cannot add a violation without an
 explicit, reviewable allow. Rewriting the oversized functions is Track C's
 job, one decider at a time — a blanket crate-level `#![allow]` is rejected.
-Test code takes STYLE.md's own "outside tests" exemption as a top-of-scope
+Test code takes docs/reference/style.md's own "outside tests" exemption as a top-of-scope
 `#![allow]` in `#[cfg(test)]` modules and `tests/` targets, for the two
 panic lints only; `too_many_lines` applies to tests too. A4 also lands
 `prettier` + an `npm run format:check` script in `web/`, leaving the gate
 wiring to E1.
 
-## Track B — Dispatcher contracts (`contracts.md` steps 1–3)
+## Track B — Dispatcher contracts (`docs/reference/contracts.md` steps 1–3)
 
 **B1. Invariant checker** *(code, medium)*
 Harvest the "must/always/never" statements — terminal states are absorbing,
@@ -227,7 +227,7 @@ The 1,824-line file split along its existing seams into thirteen modules, one
 per `req.*` subject family (`container`, `worker`, `status`, `projects`,
 `origin`, `access`, `jobs` + `jobs_reply`, `graph`, `tasks`, `jobtypes`,
 `repo`) plus the shared §6.5 `reply` envelope; the directory's `mod.rs` is wiring
-only. Each module carries a contract header and a `MODULES.md` row, and the
+only. Each module carries a contract header and a `docs/reference/modules.md` row, and the
 registry gate in `.chug/tasks/ci.sh` now walks nested dispatcher modules the way it
 already walked the domain crate's.
 
@@ -237,7 +237,7 @@ Group `fleet`/`cd`/`harvest`/`seed` (platform-ops) and
 directories with doc headers. Mostly `git mv`; clean up the `factory.rs` /
 `launch.rs` 2-line stubs here.
 **C8 has landed** as `platform_ops/` and `forge_ingest/`, each with a charter
-`mod.rs` and its own `MODULES.md` section; the `factory.rs`/`launch.rs` stubs
+`mod.rs` and its own `docs/reference/modules.md` section; the `factory.rs`/`launch.rs` stubs
 were already deleted by job/225, so nothing was left to absorb. The A3
 registry gate now walks the dispatcher tree recursively (`<dir>/mod.rs`
 registers as `<dir>`), the same rule it already applied to `domain`.
@@ -555,7 +555,7 @@ exist.
 **I1. Launch-queue admission** *(code, medium — depends on B2)*
 C1 moved the launch queue's *arithmetic* into `domain::queue` — the
 drain-priority class (`launch_priority`) and the max-wait budget
-(`waited`/`is_expired`) — which is exactly the scope `MODULES.md` claims for
+(`waited`/`is_expired`) — which is exactly the scope `docs/reference/modules.md` claims for
 it, and no more. Every *decision* stayed behind: at 699 lines
 `launch_queue.rs` still owns whether a `NoCapacity` launch is deferred or
 failed (`defer_launch`, `on_launch_deferred` — the two shapes differ because
@@ -565,7 +565,7 @@ and when a launch has outwaited the queue and escalates
 (`scan_launch_queue_timeouts`). None of it has a decider or a trace, and the
 timeout backstop in particular is a branch that only fires on a wedged fleet —
 precisely the kind that a golden trace can exercise and a live system cannot.
-Carve those four, and widen the `MODULES.md` `queue` row to match once it
+Carve those four, and widen the `docs/reference/modules.md` `queue` row to match once it
 lands.
 
 **I2. Occupancy + CD skew** *(code, medium — depends on B2)*

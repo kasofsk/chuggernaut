@@ -1,8 +1,8 @@
 #!/bin/sh
-# MODULES.md registry-completeness gate (refactor-plan A3).
+# docs/reference/modules.md registry-completeness gate (refactor-plan A3).
 #
-# The module registry (MODULES.md) is what jobs get scoped against, so it must
-# not drift from the tree the way crates.md's dispatcher map did: every
+# The module registry (docs/reference/modules.md) is what jobs get scoped against, so it must
+# not drift from the tree the way docs/reference/crates.md's dispatcher map did: every
 # dispatcher and domain module file has a row, and every row names a real module
 # file. Pure shell so it runs BEFORE .chug/tasks/ci.sh's Rust early-exit — a
 # docs-only diff skips cargo, and a rename or a dropped row is exactly a
@@ -16,7 +16,7 @@
 # root for both callers, a fixture root for .chug/tasks/modules-registry.test.sh).
 #
 # Exit: 0 = registry and tree agree. 1 = drift (each offending module or row is
-# named), or MODULES.md is missing.
+# named), or docs/reference/modules.md is missing.
 set -eu
 
 # The module names a src tree contributes to the registry: every `*.rs` under it,
@@ -49,7 +49,7 @@ modules_registry_rows() {
 			sub(/`.*/, "", row)
 			print row
 		}
-	' MODULES.md | sort -u
+	' docs/reference/modules.md | sort -u
 }
 
 # Both directions for one src tree: no module without a row, no row without a
@@ -60,14 +60,14 @@ modules_registry_compare() {
 	_rows="$(modules_registry_rows "$_dir")"
 	for m in $_files; do
 		printf '%s\n' "$_rows" | grep -qx "$m" || {
-			echo "!!! ci: $_dir/$m.rs has no row in MODULES.md"
+			echo "!!! ci: $_dir/$m.rs has no row in docs/reference/modules.md"
 			echo "!!!     (refactor-plan A3 registry drift — add a one-line contract row)"
 			_gate_failed=1
 		}
 	done
 	for m in $_rows; do
 		printf '%s\n' "$_files" | grep -qx "$m" || {
-			echo "!!! ci: MODULES.md lists module \`$m\` with no $_dir/$m.rs (or $_dir/$m/mod.rs)"
+			echo "!!! ci: docs/reference/modules.md lists module \`$m\` with no $_dir/$m.rs (or $_dir/$m/mod.rs)"
 			echo "!!!     (refactor-plan A3 registry drift — remove or fix the stale row)"
 			_gate_failed=1
 		}
@@ -77,8 +77,8 @@ modules_registry_compare() {
 modules_registry_gate() {
 	_disp_dir="crates/dispatcher/src"
 	[ -d "$_disp_dir" ] || return 0
-	if [ ! -f MODULES.md ]; then
-		echo "!!! ci: MODULES.md is missing — the module registry gate cannot run"
+	if [ ! -f docs/reference/modules.md ]; then
+		echo "!!! ci: docs/reference/modules.md is missing — the module registry gate cannot run"
 		exit 1
 	fi
 
@@ -93,7 +93,7 @@ modules_registry_gate() {
 	done
 
 	[ "$_gate_failed" -eq 0 ] || exit 1
-	echo "ci: MODULES.md registry gate — dispatcher, domain and context modules are in sync"
+	echo "ci: docs/reference/modules.md registry gate — dispatcher, domain and context modules are in sync"
 }
 
 modules_registry_gate

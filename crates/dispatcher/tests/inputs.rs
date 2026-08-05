@@ -6,7 +6,7 @@
 //!
 //! Everything here needs a real repo at a ref (the declaration is a file-derived
 //! fact) plus the single-writer actor, which is what makes it tier 2 rather than
-//! tier 1 (`testing.md`). The rules themselves are pinned pure in
+//! tier 1 (`docs/reference/testing.md`). The rules themselves are pinned pure in
 //! `chuggernaut_domain::inputs` and `chuggernaut_domain::decide::ready`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]

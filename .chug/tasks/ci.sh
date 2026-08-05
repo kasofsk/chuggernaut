@@ -8,7 +8,7 @@
 # which needs Docker. It never execs a `nats-server` binary itself. So this gate
 # PROVIDES the first: a communal Docker NATS when a daemon is usable, else the
 # `nats-server` the agent-rust image bakes, started here and exported as
-# CHUG_TEST_NATS_URL (deploy/prod/Dockerfile.agent-rust, testing.md) — on by
+# CHUG_TEST_NATS_URL (deploy/prod/Dockerfile.agent-rust, docs/reference/testing.md) — on by
 # default since #382, CHUG_CI_LOCAL_NATS=0 opts out. When neither happens the
 # tier self-skips.
 #
@@ -565,7 +565,7 @@ schedules_gate() {
 	cargo run --quiet -p chuggernaut -- validate "$@"
 }
 
-# --- MODULES.md registry-completeness gate (refactor-plan A3) -----------------
+# --- docs/reference/modules.md registry-completeness gate (refactor-plan A3) -----------------
 # Delegates to .chug/tasks/check-modules.sh so CI and the pre-commit hook
 # (.githooks/pre-commit) run the SAME registry check — the gate used to live
 # here as inline functions, which no other caller could reach. Pure shell, so it
@@ -579,7 +579,7 @@ modules_registry_gate() {
 	.chug/tasks/check-modules.sh
 }
 
-# --- copy-paste detection gate (STYLE.md Tier 1, ticket A5) -------------------
+# --- copy-paste detection gate (docs/reference/style.md Tier 1, ticket A5) -------------------
 # Delegates to .chug/tasks/check-duplication.sh so CI and the pre-commit hook run the
 # SAME check with the same pinned jscpd and the same .jscpd.json — "clean
 # locally" and "clean in CI" cannot diverge. Pure shell + npx, so it runs before
@@ -592,7 +592,7 @@ duplication_gate() {
 	.chug/tasks/check-duplication.sh
 }
 
-# --- comment lint (STYLE.md Tier 1) ------------------------------------------
+# --- comment lint (docs/reference/style.md Tier 1) ------------------------------------------
 # Delegates to .chug/tasks/check-comments.sh: no comments in Rust/TypeScript
 # sources except doc comments, and a doc comment is at most 2 sentences.
 # Pure shell + awk, and a RATCHET over the lines the diff adds (the script
@@ -659,7 +659,7 @@ doc_facts_gate() {
 # worlds) in the one stage whose sibling test exists to pin that invariant. The
 # total budget is checked BETWEEN suites and not after the loop, because a
 # post-loop check bounds nothing: the loop's real ceiling would be count x cap,
-# which grows with every suite the glob picks up (STYLE.md Tier 2 rule 3).
+# which grows with every suite the glob picks up (docs/reference/style.md Tier 2 rule 3).
 CI_SUITE_TIMEOUT_SECS="${CHUG_CI_SUITE_TIMEOUT_SECS:-60}"
 CI_SUITES_BUDGET_SECS="${CHUG_CI_SUITES_BUDGET_SECS:-120}"
 
@@ -813,7 +813,7 @@ fi
 # Registry-completeness runs unconditionally and before the Rust early-exit:
 # a docs-only diff (which skips cargo) is exactly what breaks it.
 modules_registry_gate
-# Copy-paste detection (STYLE.md Tier 1). Also before the Rust early-exit, and
+# Copy-paste detection (docs/reference/style.md Tier 1). Also before the Rust early-exit, and
 # also unconditional: a web-only diff skips the cargo section, and duplicated TSX
 # is exactly what a web-only diff introduces. The whole-repo run is ~30ms, so it
 # needs no diff scoping. Its own exit code is the gate (1 = clones, 2 = the check

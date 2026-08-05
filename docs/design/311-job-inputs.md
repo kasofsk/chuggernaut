@@ -31,7 +31,7 @@ dispatcher that understands a job type's, so only an epoch that dispatcher does
 not advertise turns the drop into a refusal.
 
 Written against the tree at `acdb2c6`. Every claim about current behavior below
-was read out of `spec.md` and the source in this repo; where the brief and the
+was read out of `docs/spec.md` and the source in this repo; where the brief and the
 tree disagree, the tree wins and the disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree).
 
@@ -48,16 +48,16 @@ useful version. Nothing below assumes any field, epoch or mechanism either of
 them proposes exists; where sequencing matters it is called out explicitly
 (see [Skew](#skew-what-a-new-field-costs)).
 
-Related: [spec.md](../../spec.md) §1.1 (the `Job` record, job types, the
+Related: [docs/spec.md](../spec.md) §1.1 (the `Job` record, job types, the
 field-rule matrices, the config root), §2.1 (state machine, batches), §2.2
 (release validation's three passes), §4.1 (container env), §4.3 (the job
 brief), §5.3 (the reserved `CHUG_` prefix), §8.1 (vars), §8.2 (secrets), §10.3
 (audit trail), §13.4 (factory semantics), §14 (config and version skew);
-[design-lifecycle.md](../../design-lifecycle.md) (the eval floor — the
-governing constraint); [STYLE.md](../../STYLE.md) (Tier 1 pure `types`;
+[docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) (the eval floor — the
+governing constraint); [docs/reference/style.md](../reference/style.md) (Tier 1 pure `types`;
 Tier 2 #2 asserts, #3 bounds, #4 naming, #6 tests; Tier 3 simplicity);
-[contracts.md](../../contracts.md) and [NORTH-STAR.md](../../NORTH-STAR.md)
-(decider/effect factoring); [testing.md](../../testing.md) (test tiers);
+[docs/reference/contracts.md](../reference/contracts.md) and [docs/README.md](../README.md)
+(decider/effect factoring); [docs/reference/testing.md](../reference/testing.md) (test tiers);
 [CLAUDE.md](../../CLAUDE.md) (per-consumer forge; single writer).
 
 ## Problem
@@ -78,7 +78,7 @@ all live:
    names `inputs:` on a schedule file as this doc's to add.
 
 The mechanism one reaches for first is already ruled out.
-[design-lifecycle.md](../../design-lifecycle.md) ("eval criteria are a floor,
+[docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) ("eval criteria are a floor,
 additive per job") rejects full per-job override because it "would let a job
 creator silently drop the type's merge-gate protections". **The central risk of
 this feature is that inputs become the backdoor that decision closed** — a job
@@ -135,7 +135,7 @@ choose this?":
 
 | Field | Classification | Why |
 | --- | --- | --- |
-| `eval[*]` (all of it) | **never** | The floor. Selecting an evaluator, its `run`, `prompt`, `required` or `stage` by input *is* the override design-lifecycle.md rejected |
+| `eval[*]` (all of it) | **never** | The floor. Selecting an evaluator, its `run`, `prompt`, `required` or `stage` by input *is* the override docs/reference/design-lifecycle.md rejected |
 | `image`, `eval[*].image`, `wrap_up.image` | **never** | The image is the execution contract: what tools, what CA bundle, what baked target. An input-chosen image is an input-chosen gate (the `ci` evaluator's `image` decides what `cargo` even is) |
 | `work.secrets`, `eval[*].secrets`, `wrap_up.secrets` | **never** | A computed secret name (`DEPLOY_KEY_${env}`) defeats §2.2's "every secret named in `secrets:` has an entry in the KV bucket" — the blast radius stops being readable from the file |
 | `wrap_up.*` | **never** | `type: merge \| none` decides whether the merge gate runs at all. An input flipping it to `none` skips the gate outright |
@@ -192,7 +192,7 @@ Three mechanisms, in decreasing strength:
    `PartialEq`. The invariant is: *for any job type, any job, and any two input
    maps, the `JobType` returned by the release path is equal.* That is one
    property test in `crates/domain/src/release.rs`'s test module, at the lowest
-   tier that can express it (`testing.md`), and it fails the moment anyone
+   tier that can express it (`docs/reference/testing.md`), and it fails the moment anyone
    threads inputs into config resolution. It is the closest thing to
    unrepresentable available without a newtype ceremony that `types` (pure
    data, no async, no I/O) should not carry.
@@ -419,7 +419,7 @@ operator- or schedule-supplied value into that gate's environment, one line of
 shell away from `if [ "$CHUG_INPUT_SKIP" = 1 ]; then exit 0; fi`.
 
 **The distinction that makes it hold is capability versus value.**
-design-lifecycle.md closed a threat with a specific shape: a job creator, with
+docs/reference/design-lifecycle.md closed a threat with a specific shape: a job creator, with
 nothing but a create call, *silently* drops the type's merge-gate protections.
 Unilateral, and invisible — nothing in the repo records that it happened. An
 input into an evaluator's environment is neither half of that. For the value to
@@ -968,7 +968,7 @@ Per CLAUDE.md's contract-first rule for dispatcher work:
 | `Schedule::validate_against_target` | Now takes the whole target `JobType`: an undeclared name, a value failing the declared `pattern`/`values`, and a missing `required` input are decided at config load and at `chuggernaut validate` |
 
 New modules get a doc header (accepts / emits / guarantees / spec §) and a
-`MODULES.md` registry row, per the direction-of-travel rule; `.chug/tasks/ci.sh`
+`docs/reference/modules.md` registry row, per the direction-of-travel rule; `.chug/tasks/ci.sh`
 enforces the registry.
 
 ## What this doc does not decide
@@ -979,7 +979,7 @@ enforces the registry.
 - **Per-input secret scoping** — the mechanism that would collapse the
   `environment` axis of the twelve deploy types. It is a change to the secrets
   model (§8.2), not to inputs, and it should be argued there.
-- **Job outputs.** design-lifecycle.md states "a job's output is its structured
+- **Job outputs.** docs/reference/design-lifecycle.md states "a job's output is its structured
   result, and downstream jobs' inputs resolve to it". Wiring a *dependency's*
   structured result into a dependent's inputs is a real and attractive feature,
   and it is a different one: it needs a resolution syntax, a timing rule, and a

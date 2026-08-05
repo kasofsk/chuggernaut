@@ -8,22 +8,22 @@ and `web` is the operator UI (its own `CLAUDE.md`).
 
 Don't re-derive these — read them:
 
-- `spec.md` — normative behavior (the data model, state machine, prompts). The source of truth.
-- `design.md` — rationale; `design-lifecycle.md` — the job/release lifecycle in depth.
-- `crates.md` — the crate/module map: what each crate owns and why. Read before adding a crate
+- `docs/spec.md` — normative behavior (the data model, state machine, prompts). The source of truth.
+- `docs/design/000-rationale.md` — rationale; `docs/reference/design-lifecycle.md` — the job/release lifecycle in depth.
+- `docs/reference/crates.md` — the crate/module map: what each crate owns and why. Read before adding a crate
   or moving responsibility between them.
-- `testing.md` — the test tiers and where a given test belongs (two are built;
+- `docs/reference/testing.md` — the test tiers and where a given test belongs (two are built;
   tier 3 is marked as intent, not machinery).
-- `STYLE.md` — the tiered blessed practices (machine-checkable invariants,
+- `docs/reference/style.md` — the tiered blessed practices (machine-checkable invariants,
   reviewer-checked rules, principles). Hold every change to it; reviewers reject
   by rule name.
-- `NORTH-STAR.md` — the entry point for the structural-direction cluster: target
-  factoring, and the reading order into `structure-assessment.md` (current-state
-  audit), `contracts.md` (extracting the dispatcher's interfaces), and
-  `ts-rewrite-plan.md` (the TypeScript dispatcher rewrite). Read before
+- `docs/README.md` — the entry point for the structural-direction cluster: target
+  factoring, and the reading order into `docs/reference/structure-assessment.md` (current-state
+  audit), `docs/reference/contracts.md` (extracting the dispatcher's interfaces), and
+  `docs/design/210-ts-rewrite-plan.md` (the TypeScript dispatcher rewrite). Read before
   module-scoped restructuring work.
 - `docs/implementation-notes.md` — per-module rationale, hoisted out of the comments
-  job #342 deleted. Notes, not norms: `spec.md` and the design docs still win.
+  job #342 deleted. Notes, not norms: `docs/spec.md` and the design docs still win.
 - Each `crates/*/src/lib.rs` opens with a `//!` doc comment pointing at its spec section.
 
 ## Build & test
@@ -48,14 +48,14 @@ container). So the private-server files run on a Docker-less evaluator; only the
 files needing a Docker **backend** still self-skip there. The skip guards are the
 `require_nats!` / `require_nats_config!`
 macros and `test_utils::backend_suite::docker_available()`; there is no `e2e!`
-macro, and no tier-3 suite for one to guard (`testing.md`). **A skip is free and
+macro, and no tier-3 suite for one to guard (`docs/reference/testing.md`). **A skip is free and
 must stay free**: since #407 an unreachable Docker daemon is a permanent,
 process-wide verdict answered instantly, not a 5s retry backoff per call — that
 was 55% of the suite's wall time. Measure on a **fresh** JetStream store dir
-with `RUST_MIN_STACK=16777216`, or the numbers lie (`testing.md`). And a tier-2
+with `RUST_MIN_STACK=16777216`, or the numbers lie (`docs/reference/testing.md`). And a tier-2
 binary that costs ~30s while still reporting `ok` is almost always a wait rescued
 by the core's 30s scan tick, not a slow broker — `test_utils::wait::DEFAULT_TIMEOUT`
-is **20s** so that now fails loudly instead of hiding (`testing.md`).
+is **20s** so that now fails loudly instead of hiding (`docs/reference/testing.md`).
 
 ## CI — the evaluation gates ARE the CI
 
@@ -81,9 +81,9 @@ the absence of a workflow file.
 - `.chug/tasks/ci.sh` also runs six pure-shell gates **before** those diff-aware
   stages, so a web-only or docs-only change is still gated: the `.chug/jobs/*.yaml`
   version-skew check (spec §14.3 — **advisory and early**, see below), the
-  `MODULES.md` registry check (`.chug/tasks/check-modules.sh`),
+  `docs/reference/modules.md` registry check (`.chug/tasks/check-modules.sh`),
   `.chug/tasks/check-duplication.sh` — copy-paste
-  detection via a pinned `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1;
+  detection via a pinned `jscpd@5.0.5` at `threshold: 0` (docs/reference/style.md Tier 1;
   ~30ms for the whole repo, so it is unconditional) — `.chug/tasks/check-comments.sh`,
   the comment lint, `.chug/tasks/check-doc-facts.sh`, the doc-fact gate, and
   since #385 **the repo's 20 `*.test.sh` shell suites**.
@@ -97,7 +97,7 @@ the absence of a workflow file.
   Whole-tree and every job because the claims are made by every job type: a
   `code` job orphaned ten tag-file references (#416) that a `docs`-scoped
   gate never saw. A claim that is correctly unresolvable is marked on its line —
-  `<!-- intent -->`, `<!-- runtime -->`, `<!-- absent -->` (STYLE.md's doc-claim
+  `<!-- intent -->`, `<!-- runtime -->`, `<!-- absent -->` (docs/reference/style.md's doc-claim
   rule). An unparseable token is skipped silently, and a check that cannot run
   exits **2** as a `LINTER ERROR`, never as a clean tree. `doc-lint.sh` keeps
   markdown well-formedness, relative links and the design-filename shape.
@@ -127,11 +127,11 @@ the absence of a workflow file.
   Each suite is handed
   `CHUG_CI_SHELL_SUITES=0` so the real `ci.sh` that `ci.test.sh` drives cannot
   recurse. **The gate's Debian container is the authority** — these suites assume
-  GNU tooling, so hand-running them on macOS produces false reds (`testing.md`).
+  GNU tooling, so hand-running them on macOS produces false reds (`docs/reference/testing.md`).
   Deliberately *not* in the pre-commit hook, which is ~2s by design.
 - **Comments are banned; docs are not.** `.chug/tasks/check-comments.sh` rejects
   every non-doc comment in any Rust or TypeScript source and caps doc comments at
-  two sentences (module headers exempt) — STYLE.md Tier 1. The tree holds **zero**
+  two sentences (module headers exempt) — docs/reference/style.md Tier 1. The tree holds **zero**
   non-doc comments since job #342, so rule 1 is enforced over every tracked source
   rather than only the lines a diff adds; only the two-sentence cap is still a
   ratchet. The knowledge a comment would have carried goes in a doc and the
@@ -183,7 +183,7 @@ the absence of a workflow file.
 - **`types` is pure data** — no async, no I/O. The YAML field-rules validation lives there so
   every consumer shares one implementation.
 - New behavior lands with a regression test at the **lowest tier that can express it**
-  (`testing.md`). `chuggernaut_domain::state` (`crates/domain/src/state.rs`) and release
+  (`docs/reference/testing.md`). `chuggernaut_domain::state` (`crates/domain/src/state.rs`) and release
   validation are the correctness core — keep their branch coverage near-total. The
   dispatcher re-exports it as `dispatcher::state`, so both names resolve; the code lives
   in `crates/domain`.

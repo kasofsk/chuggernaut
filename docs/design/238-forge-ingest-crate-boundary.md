@@ -14,9 +14,9 @@ half of the ticket: **forge-ingest is not separable from the lifecycle loop
 today**, the reason is specific and cheap to state, and the work that makes it
 separable is already planned as Track H.
 
-Related: [refactor-plan](../../refactor-plan.md) (Track H; the "no
-_speculative_ crate splits" rule), [NORTH-STAR §1](../../NORTH-STAR.md),
-[STYLE.md](../../STYLE.md) Tier 3 (single writer), [spec §1.2, §5.3, §3.3](../../spec.md).
+Related: [refactor-plan](215-refactor-plan.md) (Track H; the "no
+_speculative_ crate splits" rule), [NORTH-STAR §1](../README.md),
+[docs/reference/style.md](../reference/style.md) Tier 3 (single writer), [spec §1.2, §5.3, §3.3](../spec.md).
 
 ## The boundary condition
 
@@ -49,7 +49,7 @@ the merge gate directly:
 | `origin_sync`, closed arm (`origin.rs:443`) | same |
 
 `pump_merges` is the §3.3 merge-gate driver. A crate boundary here would mean
-either a second writer of `release_holds` (STYLE.md Tier 3 forbids it) or
+either a second writer of `release_holds` (docs/reference/style.md Tier 3 forbids it) or
 exporting `pump_merges` as part of the "narrow interface", which is not narrow
 — it is the landing pipeline.
 

@@ -1,9 +1,9 @@
-//! Executable invariant checker (contracts.md §3, refactor-plan.md B1).
+//! Executable invariant checker (docs/reference/contracts.md §3, docs/design/215-refactor-plan.md B1).
 //!
 //! accepts:   a read-only [`CoreState`] view of the single-writer's in-memory state.
 //! emits:     a [`Vec<Violation>`] — empty when every invariant holds.
 //! guarantees: pure and total (no I/O, no `.await`, never panics); each check is a
-//!             negative-space assertion (STYLE.md Tier 2 #2) naming the offending
+//!             negative-space assertion (docs/reference/style.md Tier 2 #2) naming the offending
 //!             job/queue entry so a failure localizes itself.
 //! spec §:    §1.4/§2.3 (graph), §2.1 (state machine), §3.1 (ready queue),
 //!            §3.2 (one attempt in flight), §3.3 (merge gate depth-1).
@@ -512,7 +512,7 @@ mod tests {
 
     /// The sink is plain in-memory data (no NATS/Docker), so its record/drain
     /// contract is unit-testable directly — the tier a test belongs at
-    /// (`testing.md`).
+    /// (`docs/reference/testing.md`).
     #[test]
     fn sink_logs_only_broken_messages_and_drains_once() {
         let clean = Fixture::new(vec![job("acme/api", 1, &[], JobState::Ready)]);

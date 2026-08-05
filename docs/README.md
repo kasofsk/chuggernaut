@@ -1,10 +1,10 @@
 # Chuggernaut — structural north star
 
-Companion to `crates.md` (the map as it exists), `structure-assessment.md`
-(the audit that motivated this), `contracts.md` (how the dispatcher's
-interfaces get extracted and formalized on the way here), `refactor-plan.md`
+Companion to `docs/reference/crates.md` (the map as it exists), `docs/reference/structure-assessment.md`
+(the audit that motivated this), `docs/reference/contracts.md` (how the dispatcher's
+interfaces get extracted and formalized on the way here), `docs/design/215-refactor-plan.md`
 (the sequenced, ticketed path that executes this factoring incrementally in
-Rust), and `STYLE.md` (the tiered blessed practices every touch is held to).
+Rust), and `docs/reference/style.md` (the tiered blessed practices every touch is held to).
 This is the **target** factoring: where the
 boundaries should sit if migration cost were no object. We are not migrating
 all at once — this document guides incremental refactoring as changes land, so
@@ -49,7 +49,7 @@ dispatcher/
                    #   PublishEvent{..}, CreateTask{..}, ...
   interpret.rs     # the ONLY place effects meet ports (container/vcs/store/agent)
   core.rs          # the mpsc loop: recv msg → domain::decide → interpret (thin!)
-  handlers/        # one module per req.* subject family (as crates.md intended)
+  handlers/        # one module per req.* subject family (as docs/reference/crates.md intended)
   contexts/        # non-lifecycle bounded contexts: factory, fleet, cd,
                    #   harvest, seed, origin, github, channel
 ```
@@ -83,16 +83,16 @@ never new writers or processes.
 
 Two smaller backend targets:
 
-- **`handlers.rs` → `handlers/`** per subject family — `crates.md` already
+- **`handlers.rs` → `handlers/`** per subject family — `docs/reference/crates.md` already
   specified this and reality had regressed to one ~1,700-line file. **Landed**
   (refactor-plan C7): thirteen modules, one per `req.*` subject family, each
-  with a contract header and a `MODULES.md` row.
+  with a contract header and a `docs/reference/modules.md` row.
 - **Promote the grab-bag modules into named contexts.** `triage`/`origin`/
   `github` (the forge-ingest context) and `fleet`/`cd`/`harvest`/`seed` (the
   platform-ops context) are bounded contexts that grew organically. **Landed**
   (refactor-plan C8): they became `crates/dispatcher/src/forge_ingest/` and
   `platform_ops/`, each a directory whose `mod.rs` carries the charter its
-  members share and a `MODULES.md` section of its own. Platform-ops has since
+  members share and a `docs/reference/modules.md` section of its own. Platform-ops has since
   graduated to its own crate (`crates/platform-ops`, refactor-plan C9), having
   met the condition that makes a crate boundary real: nothing in it needs
   `&mut Core`. Forge-ingest has not — `origin` still writes the merge gate's
@@ -154,10 +154,10 @@ correct; they need the same treatment as the backend invariants — enforcement.
 
 ## 4. Enforcement: invariants as CI, module map as registry
 
-The rule-level companion to this section is `STYLE.md` — the tiered blessed
+The rule-level companion to this section is `docs/reference/style.md` — the tiered blessed
 practices that workers and reviewers hold each change to.
 
-`crates.md` lists "invariants worth enforcing (e.g. via CI lint)" — in the
+`docs/reference/crates.md` lists "invariants worth enforcing (e.g. via CI lint)" — in the
 north star they *are* enforced, because agent-driven development erodes
 disciplinary boundaries faster than human development does:
 
@@ -166,11 +166,11 @@ disciplinary boundaries faster than human development does:
   A ~20-line script over `cargo metadata` is enough.
 - ESLint boundary rules on the web side (`ui/` can't import `data/`; only
   `data/` imports `api/`).
-- Every module directory carries a doc header, and **one MODULES.md registry**
+- Every module directory carries a doc header, and **one docs/reference/modules.md registry**
   lists every scoping-eligible module with its one-line contract. That
   registry is what jobs get scoped against — and CI failing when a new
   top-level module lacks a registry entry is what keeps it from drifting the
-  way `crates.md`'s dispatcher map did.
+  way `docs/reference/crates.md`'s dispatcher map did.
 
 ## Priority order for the incremental path
 
@@ -181,5 +181,5 @@ disciplinary boundaries faster than human development does:
 3. **Decider extraction in the dispatcher** — opportunistically, whichever
    phase the next job touches; `merge_gate` or `escalation` is a good proving
    ground before attacking `exec`.
-4. **CI boundary enforcement + MODULES.md** — cheap; do it early, since it is
+4. **CI boundary enforcement + docs/reference/modules.md** — cheap; do it early, since it is
    what keeps 1–3 from regressing during the migration.

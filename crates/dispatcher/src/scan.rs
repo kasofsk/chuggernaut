@@ -44,7 +44,7 @@ pub(crate) const WORKER_HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Dura
 pub(crate) const CAPACITY_OBSERVE_GRACE: std::time::Duration =
     std::time::Duration::from_secs(3 * 60);
 
-/// Bounded cadence for the §8 warning (STYLE.md Tier 2 principle 3: everything
+/// Bounded cadence for the §8 warning (docs/reference/style.md Tier 2 principle 3: everything
 /// is bounded). One line per node per interval — loud enough to be seen in the
 /// logs of an idle night, quiet enough that a fleet left in this state does not
 /// bury everything else.

@@ -75,7 +75,7 @@ HEALTH_INTERVAL_SECS="${HEALTH_INTERVAL_SECS:-3}"
 FLEET_TIMEOUT_SECS="${FLEET_TIMEOUT_SECS:-90}"
 FLEET_INTERVAL_SECS="${FLEET_INTERVAL_SECS:-5}"
 
-# Sanity cap on the node count the snapshot may report (STYLE.md tier-2 rule 3).
+# Sanity cap on the node count the snapshot may report (docs/reference/style.md tier-2 rule 3).
 # Our fleet is single digits; anything past this is a malformed body, not a
 # fleet.
 FLEET_NODES_MAX="${FLEET_NODES_MAX:-64}"

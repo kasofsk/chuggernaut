@@ -9,7 +9,7 @@ intent and reconciliation halves (#296–#298), `PUT
 /api/v1/platform/fleet/{node}/capacity` in `crates/api/src/routes.rs` (#299),
 the cluster view's capacity control in `web/src/pages/Cluster.tsx` (#300), and
 the ops documentation, now at
-[`docs/runbooks/worker-capacity.md`](../runbooks/worker-capacity.md) (#301).
+[`docs/reference/runbooks/worker-capacity.md`](../reference/runbooks/worker-capacity.md) (#301).
 What follows is the record of the argument, not a live proposal.
 
 Written against the tree at `a90d660`; every claim about current behavior below
@@ -22,8 +22,8 @@ and the fleet-level startup gate is narrowed so that worker capacity never
 vetoes a boot (§5a — otherwise a drain to zero would be unrecoverable from the
 UI that caused it).
 
-Related: [spec §3.1](../../spec.md) (dispatcher backends, dynamic worker
-registration), [STYLE.md](../../STYLE.md) (contract-first change rule),
+Related: [spec §3.1](../spec.md) (dispatcher backends, dynamic worker
+registration), [docs/reference/style.md](../reference/style.md) (contract-first change rule),
 [deploy/prod/README.md](../../deploy/prod/README.md) §6.
 
 ## Problem
@@ -293,7 +293,7 @@ beside `dispatcher.config` and `fleet.status`:
 }
 ```
 
-**Invariant (assert it, per [STYLE.md](../../STYLE.md) Tier 2):** no placement
+**Invariant (assert it, per [docs/reference/style.md](../reference/style.md) Tier 2):** no placement
 path ever reads `fleet.capacity`. It feeds exactly two consumers — the
 reconciler and the UI's "desired" display. This is the resolution of the
 tension: intent is stored so it can be re-asserted, and is structurally
@@ -331,7 +331,7 @@ The brief's three candidates:
 The reconciler runs on the existing scan tick (`crates/dispatcher/src/scan.rs`)
 and on any observation whose `slots` differs from intent: if
 `observed != desired`, re-send `set_slots`. Bounded, per principle 3 of
-[STYLE.md](../../STYLE.md) ("everything is bounded"): at most one push per node
+[docs/reference/style.md](../reference/style.md) ("everything is bounded"): at most one push per node
 per scan tick, and a **rejected** value is terminal — the dispatcher stops
 re-pushing a number the node refused and surfaces the rejection until the
 operator changes it. Without that, a node whose max dropped would be pushed a
@@ -416,7 +416,7 @@ deliberately kept.** The tempting simplification is to key the rule on the mere
 *presence* of a worker-endpoint node ("a worker fleet never hard-fails"), which
 would additionally make a fleet whose every daemon is down boot successfully.
 That is rejected. Whole-fleet-unreachable is the one condition
-[spec](../../spec.md) §3.6 reserves for fail-fast, and it is the deploy-time
+[spec](../spec.md) §3.6 reserves for fail-fast, and it is the deploy-time
 catcher for exactly the class of bug behind this job's incident — bad
 credentials, a wrong `NATS_URL`, a node that never came back. A design whose
 thesis is *make the silent failure loud* should not spend the loudest signal it
@@ -520,7 +520,7 @@ gating rule.
 
 ### 9. Authorization and audit
 
-- **Who:** `platform_admin` only, per [spec §7.5](../../spec.md) ("Platform-level
+- **Who:** `platform_admin` only, per [spec §7.5](../spec.md) ("Platform-level
   config"). The api gates it exactly like `platform_config_get` /
   `platform_fleet_get` in `crates/api/src/routes.rs`.
 - **Audit:** the `fleet.capacity` record carries `set_by` and `set_at`, so the
@@ -661,7 +661,7 @@ catcher for a credentials or `NATS_URL` misconfiguration.
 And in the same section's `WORKER_SLOTS` mention: it is the node's **first-boot
 value only**, not the way capacity is changed.
 
-One line in the §6 route list ([spec §6.1](../../spec.md)):
+One line in the §6 route list ([spec §6.1](../spec.md)):
 
 > `PUT /api/v1/platform/fleet/{node}/capacity  body: { slots } → 202; platform admins only. Sets the node's desired slot count (§3.1); 404 unknown node, 409 for a docker-endpoint node, 422 above the node's reported maximum.`
 
@@ -690,7 +690,7 @@ PUT /api/v1/platform/fleet/{node}/capacity
 - `req.fleet.capacity.set` — api → dispatcher, `{ node, slots, by }`, replies
   with the 202 body or the `{"error": {...}}` envelope
   (`crates/dispatcher/src/handlers/`, new `fleet` family; needs a
-  `store::subjects` helper and a `MODULES.md` row).
+  `store::subjects` helper and a `docs/reference/modules.md` row).
 - `req.worker.{node}.set_slots` — dispatcher → daemon,
   `{ slots }` → `{ accepted, slots, slots_max, epoch, generation, note }`
   (`crates/types/src/worker.rs`, `crates/worker/src/daemon.rs`).
@@ -705,7 +705,7 @@ observation.
 
 ## Implementation plan (sliced into jobs)
 
-Per the [STYLE.md](../../STYLE.md) contract-first rule, each job names the
+Per the [docs/reference/style.md](../reference/style.md) contract-first rule, each job names the
 contract it changes.
 
 | # | Job | Contract changed | Depends on |
@@ -722,7 +722,7 @@ Jobs 2 and 3 are independently useful: after job 3, tonight's failure mode is
 *visible and self-correcting* even with no UI control at all. That is the
 natural place to stop if the rest slips.
 
-Test placement, per [testing.md](../../testing.md): the ordering rule and the
+Test placement, per [docs/reference/testing.md](../reference/testing.md): the ordering rule and the
 `slots_max` bound are pure functions → tier 1 (beside `parse_slots` in
 `crates/worker/src/config.rs` and the announce merge in
 `crates/dispatcher/src/core.rs`). The ordering tests must include the cases

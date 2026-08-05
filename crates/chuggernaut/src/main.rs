@@ -1,4 +1,4 @@
-//! The chuggernaut binary: one artifact, five roles (crates.md).
+//! The chuggernaut binary: one artifact, five roles (docs/reference/crates.md).
 //!
 //! Dispatcher and API run as separate processes with different mounted keys —
 //! sharing a binary just means one artifact to version and deploy.

@@ -1,8 +1,8 @@
 # Chuggernaut v2 — Job Lifecycle Generalization
 
 Design for generalizing the job lifecycle beyond code-change jobs, sharpening the
-feedback/failure distinction, and unifying triage. Extends `design.md`; section
-references (§) are to `spec.md`.
+feedback/failure distinction, and unifying triage. Extends `docs/design/000-rationale.md`; section
+references (§) are to `docs/spec.md`.
 
 **Status:** implemented (session 9) except triage agents, which wait on
 factories (§13): `wrap_up: merge | none`, the `abort` verdict, the

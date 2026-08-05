@@ -1,4 +1,4 @@
-//! STYLE.md Tier 1 dependency-boundary guards, enforced on the existing
+//! docs/reference/style.md Tier 1 dependency-boundary guards, enforced on the existing
 //! `cargo test --workspace` in `.chug/tasks/ci.sh` — same route as the
 //! `committed_schemas_are_current` drift test (refactor-plan A3).
 //!
@@ -158,12 +158,12 @@ fn only_store_depends_on_the_nats_crate() {
     }
     assert!(
         offenders.is_empty(),
-        "only `store` may depend on async-nats (STYLE.md Tier 1), but these \
+        "only `store` may depend on async-nats (docs/reference/style.md Tier 1), but these \
          workspace crates do: {offenders:?}"
     );
 }
 
-/// STYLE.md Tier 1: `api` never depends on `dispatcher` outside dev-deps.
+/// docs/reference/style.md Tier 1: `api` never depends on `dispatcher` outside dev-deps.
 #[test]
 fn api_does_not_depend_on_dispatcher_outside_dev() {
     let g = load_graph();
@@ -173,13 +173,13 @@ fn api_does_not_depend_on_dispatcher_outside_dev() {
             assert!(
                 *dev_only,
                 "`api` must not depend on `dispatcher` outside dev-deps \
-                 (STYLE.md Tier 1)"
+                 (docs/reference/style.md Tier 1)"
             );
         }
     }
 }
 
-/// STYLE.md Tier 1: `types` stays sync — no async runtime in its subtree, so
+/// docs/reference/style.md Tier 1: `types` stays sync — no async runtime in its subtree, so
 /// neither `tokio` nor `async-nats` may appear anywhere it resolves to.
 #[test]
 fn types_subtree_is_sync() {
@@ -192,12 +192,12 @@ fn types_subtree_is_sync() {
     offenders.sort_unstable();
     assert!(
         offenders.is_empty(),
-        "`types` must stay sync (STYLE.md Tier 1) but its dependency subtree \
+        "`types` must stay sync (docs/reference/style.md Tier 1) but its dependency subtree \
          pulls in: {offenders:?}"
     );
 }
 
-/// STYLE.md Tier 1 / NORTH-STAR §1: the domain crate's dependency subtree is
+/// docs/reference/style.md Tier 1 / NORTH-STAR §1: the domain crate's dependency subtree is
 /// as sync as `types`' — purity by construction (refactor-plan C1): code that
 /// cannot resolve `tokio` or `async-nats` cannot drift into I/O.
 #[test]
@@ -211,7 +211,7 @@ fn domain_subtree_is_sync() {
     offenders.sort_unstable();
     assert!(
         offenders.is_empty(),
-        "`chuggernaut-domain` must stay pure/sync (STYLE.md Tier 1, \
+        "`chuggernaut-domain` must stay pure/sync (docs/reference/style.md Tier 1, \
          refactor-plan C1) but its dependency subtree pulls in: {offenders:?}"
     );
 }
@@ -288,7 +288,7 @@ fn dispatcher_consumes_the_platform_ops_context() {
     );
 }
 
-/// STYLE.md Tier 1 / NORTH-STAR §1: the domain code is pure and synchronous —
+/// docs/reference/style.md Tier 1 / NORTH-STAR §1: the domain code is pure and synchronous —
 /// zero `.await` in any source file of `crates/domain` (refactor-plan C1;
 /// grew out of the pre-C1 `state.rs`-only guard).
 #[test]

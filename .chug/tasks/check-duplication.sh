@@ -1,5 +1,5 @@
 #!/bin/sh
-# Copy-paste detection gate (STYLE.md Tier 1 `live`). Runs jscpd over the whole
+# Copy-paste detection gate (docs/reference/style.md Tier 1 `live`). Runs jscpd over the whole
 # repo and FAILS on any clone at all — `threshold: 0` in .jscpd.json, no ratchet.
 #
 # Why gate this at all: duplicated logic drifts apart, and the copy that didn't
@@ -111,9 +111,9 @@ fi
 rm -f "$out"
 
 if [ "$status" -ne 0 ]; then
-	echo "!!! check-duplication: duplicated code found (threshold is 0 — STYLE.md Tier 1)."
+	echo "!!! check-duplication: duplicated code found (threshold is 0 — docs/reference/style.md Tier 1)."
 	echo "!!!     Each report names both copies. Extract the shared body into a helper"
-	echo "!!!     (named after its caller, STYLE.md Tier 2 rule 4) rather than raising a"
+	echo "!!!     (named after its caller, docs/reference/style.md Tier 2 rule 4) rather than raising a"
 	echo "!!!     threshold. Reproduce locally with: .chug/tasks/check-duplication.sh"
 	exit 1
 fi

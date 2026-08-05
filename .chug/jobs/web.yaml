@@ -15,8 +15,8 @@ image: chuggernaut/agent-rust:prod   # node 22 + claude CLI ride along in the ru
 # not a pointer, and not a distillation — a second copy of a rule is what
 # drifts (design #415 D4).
 knowledge:
-  - STYLE.md
-  - NORTH-STAR.md
+  - docs/reference/style.md
+  - docs/README.md
 work:
   type: agent
   prompt: .chug/prompts/work/web.md
@@ -27,7 +27,7 @@ eval:
     stage: 0
   # Same inert doc-update placeholder as .chug/jobs/code.yaml — a web change
   # stales web/CLAUDE.md and the operator-facing wiki pages exactly as a Rust
-  # change stales spec.md.
+  # change stales docs/spec.md.
   - name: review-docs-updated
     type: agent
     prompt: .chug/tasks/review-docs-updated.md

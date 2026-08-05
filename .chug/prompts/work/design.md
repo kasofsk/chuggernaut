@@ -9,14 +9,14 @@ A `design` job produces **one markdown document** — an architecture/plan that
 argues a decision and its tradeoffs and sets direction — under
 `docs/design/{seq}-{slug}.md`. It writes prose, not code: the implementation lands in
 the `code`/`web` jobs that depend on this one and cite it. The repo's `docs/`
-tree is the project wiki (`spec.md` §9.4); design docs live under `docs/design/`.
+tree is the project wiki (`docs/spec.md` §9.4); design docs live under `docs/design/`.
 
 Before writing, orient yourself — don't re-derive what's documented:
 
-- `spec.md` — normative platform behavior; the source of truth. `design.md` and
-  `design-lifecycle.md` — existing rationale. `crates.md` — the crate/module map.
+- `docs/spec.md` — normative platform behavior; the source of truth. `docs/design/000-rationale.md` and
+  `docs/reference/design-lifecycle.md` — existing rationale. `docs/reference/crates.md` — the crate/module map.
 - Read the code and docs your design touches **at the state they exist in now**.
-  A design that silently contradicts `spec.md` or the current code is wrong —
+  A design that silently contradicts `docs/spec.md` or the current code is wrong —
   either align with it or call out the change you are proposing and why.
 
 Then:
@@ -49,7 +49,7 @@ Then:
    well-formed (closed code fences, spaced headings). Backtick'd code paths and
    restated constants are gated harder still — `.chug/tasks/check-doc-facts.sh`
    resolves them against git over the whole tree and **fails** the job, so keep
-   them accurate or mark the line (STYLE.md's doc-claim rule).
+   them accurate or mark the line (docs/reference/style.md's doc-claim rule).
 5. Commit to the current branch (you are already on the job branch) with a clear
    message, and push. `.githooks/pre-commit` runs the doc lint on your staged
    markdown as an advisory pass — it prints what a `design` job's stage-1 gate
@@ -77,6 +77,6 @@ Then:
 8. Exit 0.
 
 A reviewer will judge your document against the same brief — does it address the
-brief, are the alternatives and tradeoffs honest, is it consistent with `spec.md`
+brief, are the alternatives and tradeoffs honest, is it consistent with `docs/spec.md`
 and the codebase as they exist. If it finds problems you will be re-invoked with
 its findings.

@@ -99,7 +99,7 @@ struct CreateJobBody {
     members: Vec<u64>,
     #[serde(default)]
     knowledge_tags: Vec<String>,
-    /// Additive per-job evaluators (design-lifecycle.md); validated at release.
+    /// Additive per-job evaluators (docs/reference/design-lifecycle.md); validated at release.
     #[serde(default)]
     eval: Vec<types::Evaluator>,
     /// Gate the job on an explicit operator sign-off (§1.1 require-approval):

@@ -18,7 +18,7 @@
 //!   route it took: branch cleanup, Done, the announcement, and a batch's Done
 //!   fan-out to its members (§2.1 batches).
 //!
-//! The `Msg` contracts this decider owns (contracts.md §1):
+//! The `Msg` contracts this decider owns (docs/reference/contracts.md §1):
 //!
 //! - `Msg::TaskExited` for a `TaskPhase::WrapUp` task — **pre:** the task is
 //!   `Running` (the shim drops stale exits) and its job is `WrapUp`;
@@ -31,19 +31,19 @@
 //! - **Accepts:** a [`WrapUpView`] (the target job, its batch members' records,
 //!   the pre-read `wrap_up.run` presence, the clock) and a [`WrapUpEvent`].
 //! - **Emits:** `(Vec<Transition>, Vec<Effect>, WrapUpStep)` — values only.
-//!   The owned effect set (contracts.md §2): `LaunchWrapupTask`, `PutTask`,
+//!   The owned effect set (docs/reference/contracts.md §2): `LaunchWrapupTask`, `PutTask`,
 //!   `DeleteBranch`, `Escalate`, and `PublishEvent` for `task-completed`,
 //!   `task-failed`, `job-done` and `job-completed-via-batch`. The
 //!   [`WrapUpStep`] names the dispatcher-side bookkeeping that follows —
 //!   releasing the execution slice and the dependents fan-out — both of which
 //!   read shell state the pure crate cannot see.
 //! - **Guarantees:** pure and synchronous; every branch exhaustively matched
-//!   and unit-tested; asserts negative space (STYLE.md Tier 2 #2) — never
+//!   and unit-tested; asserts negative space (docs/reference/style.md Tier 2 #2) — never
 //!   completes a terminal job, never completes a batch member twice, never
 //!   decides a publish exit for a task from another phase. Performs no effect,
 //!   holds no `&mut Core`.
 //! - **Spec:** §3.2 step 12, §2.1 (terminal stamping, batches), §3.4;
-//!   contracts.md §2; refactor-plan C3.
+//!   docs/reference/contracts.md §2; refactor-plan C3.
 
 use crate::decide::Transition;
 use crate::effects::Effect;

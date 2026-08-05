@@ -7,14 +7,14 @@ explaining that no ticket was provided, and exit non-zero.
 
 A `docs` job maintains the **project wiki**: reference pages that *teach* —
 how something works, how to use it, where to look. The repo's `docs/` tree is
-the wiki root (`spec.md` §9.4). Design/plan documents are a different job type
+the wiki root (`docs/spec.md` §9.4). Design/plan documents are a different job type
 (`design`, under `docs/design/`); a `docs` page is reference material, not an
 argument for a decision.
 
 Before writing, orient yourself — don't re-derive what's documented:
 
-- `spec.md` — normative platform behavior (the source of truth); `crates.md` —
-  the crate/module map; `design.md` / `design-lifecycle.md` — rationale.
+- `docs/spec.md` — normative platform behavior (the source of truth); `docs/reference/crates.md` —
+  the crate/module map; `docs/design/000-rationale.md` / `docs/reference/design-lifecycle.md` — rationale.
 - **Read the code you are documenting, as it exists now.** Accuracy against the
   current code is the whole job — do not describe intended or remembered
   behavior. Spot-check every claim you make against the source.
@@ -32,7 +32,7 @@ Then:
    Backtick'd code paths (e.g. `crates/api/src/routes.rs`) and restated
    constants are gated harder still — `.chug/tasks/check-doc-facts.sh` resolves
    them against git over the whole tree and **fails** the job, so keep them
-   accurate or mark the line (STYLE.md's doc-claim rule).
+   accurate or mark the line (docs/reference/style.md's doc-claim rule).
 4. Commit to the current branch (you are already on the job branch) with a clear
    message, and push. `.githooks/pre-commit` runs the same doc lint on your
    staged markdown as an advisory pass — it prints what a `docs` job's stage-1

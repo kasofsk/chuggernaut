@@ -5,11 +5,11 @@ before maintenance, or work out why a node is running the concurrency it is.
 This page is the reference for all three.
 
 It is *not* the design argument (that is
-[design #293](../design/293-worker-capacity.md), including why it is shaped this
-way) and not the normative text ([`spec.md`](../../spec.md) §3.1, "Dynamic worker
+[design #293](../../design/293-worker-capacity.md), including why it is shaped this
+way) and not the normative text ([`docs/spec.md`](../../spec.md) §3.1, "Dynamic worker
 registration"). For the standing-instance runbook — deploys, worker refresh,
-backups — see [`deploy/prod/README.md`](../../deploy/prod/README.md); for
-mid-incident by-hand deploys, [the ad-hoc deploy runbook](./adhoc-deploy.md).
+backups — see [`deploy/prod/README.md`](../../../deploy/prod/README.md); for
+mid-incident by-hand deploys, [the ad-hoc deploy runbook](adhoc-deploy.md).
 
 ---
 
@@ -177,8 +177,8 @@ Performed twice on `gumbo-nuc-0` on 2026-08-03, uneventfully both times —
 
 **Why the first rebuild is the expensive one.** The `chug-node` module sets
 `virtualisation.docker.daemon.settings.live-restore = true`
-([`nix/chug-node/nixos.nix`](../../nix/chug-node/nixos.nix), design
-[#372](../design/372-chug-node-modules.md) §5 A4), which keeps containers alive
+([`nix/chug-node/nixos.nix`](../../../nix/chug-node/nixos.nix), design
+[#372](../../design/372-chug-node-modules.md) §5 A4), which keeps containers alive
 across a dockerd restart. But **live-restore only protects a restart that
 happens while it is already active.** Toggling it changes `daemon.settings`,
 which changes the store path the docker unit's `--config-file=` names, which
@@ -190,7 +190,7 @@ The same is true of any rebuild that changes the docker package or its settings,
 of a **reboot** (live-restore does not survive one), and of a rebuild that
 bumps a node toolchain — the new system profile stops rooting the old closure,
 so the next `nix-gc` can collect a store path a running task is still using
-(#372 §5 A5, and [`worker-kvm.md`](./worker-kvm.md) §7 for the roots that
+(#372 §5 A5, and [`worker-kvm.md`](worker-kvm.md) §7 for the roots that
 narrow this).
 
 **Telling a hot-safe rebuild from one that needs the drain.** Most rebuilds
@@ -220,7 +220,7 @@ move is to accept the loss and let the jobs retry.
 
 Adopting the module in the first place — flake input, the `chug.node` block,
 and the one edit that fails the build if you skip it — is
-[the `chug-node` adoption runbook](./chug-node-adoption.md).
+[the `chug-node` adoption runbook](chug-node-adoption.md).
 
 ---
 
@@ -339,7 +339,7 @@ precondition next to the value so the next person cannot re-derive it wrong:
 # Worker slot fields are 0 on purpose (spec §3.1): capacity comes from the node
 # itself, over ping at the startup probe and the announce thereafter. Do not put
 # numbers back here to "fix" capacity — use the Cluster page's stepper. See
-# docs/runbooks/worker-capacity.md §6.
+# docs/reference/runbooks/worker-capacity.md §6.
 DOCKER_NODES="local|unix:///Users/worksalot/.colima/default/docker.sock|0, air|worker|0, nuc|worker|0"
 ```
 
@@ -373,15 +373,15 @@ boot, so nothing else has to be undone.
 
 ## Related
 
-- [`spec.md`](../../spec.md) §3.1 — normative: slot source, precedence and merge,
+- [`docs/spec.md`](../../spec.md) §3.1 — normative: slot source, precedence and merge,
   operator capacity control, the narrowed startup rule. §6.1 for the route.
-- [design #293](../design/293-worker-capacity.md) — why one owner and two
+- [design #293](../../design/293-worker-capacity.md) — why one owner and two
   transports, what was rejected, and the incident behind it.
-- [`deploy/prod/README.md`](../../deploy/prod/README.md) §6 — worker nodes:
+- [`deploy/prod/README.md`](../../../deploy/prod/README.md) §6 — worker nodes:
   provisioning, self-refresh, image caching.
-- [the `chug-node` adoption runbook](./chug-node-adoption.md) — putting the
+- [the `chug-node` adoption runbook](chug-node-adoption.md) — putting the
   NixOS/nix-darwin modules in a host repo, and why §4.1's drain is one-time
   expensive.
-- [`worker-kvm.md`](./worker-kvm.md) — the other node knob, and §7's GC roots.
-- [ad-hoc deploy runbook](./adhoc-deploy.md) — when the normal deploy path
+- [`worker-kvm.md`](worker-kvm.md) — the other node knob, and §7's GC roots.
+- [ad-hoc deploy runbook](adhoc-deploy.md) — when the normal deploy path
   cannot run.

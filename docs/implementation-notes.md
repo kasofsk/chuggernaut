@@ -2,13 +2,13 @@
 
 **Audience:** anyone changing the modules listed below. This page is the
 **rationale archive**: when job #342 deleted every non-doc comment in the tree
-(STYLE.md Tier 1, `.chug/tasks/check-comments.sh`), the explanations that were
+(docs/reference/style.md Tier 1, `.chug/tasks/check-comments.sh`), the explanations that were
 load-bearing landed here rather than in `git log`.
 
 Read it as *notes about a module*, not as a specification. Normative behavior
-lives in [`spec.md`](../spec.md); the arguments behind a decision live in
-[`design.md`](../design.md) and [`docs/design/`](./design/); the contract of a
-module lives in its `//!` header and its [`MODULES.md`](../MODULES.md) row.
+lives in [`docs/spec.md`](spec.md); the arguments behind a decision live in
+[`docs/design/000-rationale.md`](design/000-rationale.md) and [`docs/design/`](./design/); the contract of a
+module lives in its `//!` header and its [`docs/reference/modules.md`](reference/modules.md) row.
 Where this page and any of those disagree, they win and the entry here is
 stale.
 
@@ -18,11 +18,11 @@ stale.
   (`fn`, `struct`, `impl`, `const`) the note sat next to when it was a comment.
   Items move; the tag is a hint for finding the code, not an anchor.
 - **Folding an entry into a better home is the point.** A note that belongs in
-  `spec.md`, in a design document, in a module `//!` header or in a two-sentence
+  `docs/spec.md`, in a design document, in a module `//!` header or in a two-sentence
   doc comment should be moved there by the next `docs` job that touches the
   area, and deleted from here.
 - What is *not* here: notes from test files and `#[cfg(test)]` modules (a test's
-  name carries what its comment said — `testing.md`), and one-line comments that
+  name carries what its comment said — `docs/reference/testing.md`), and one-line comments that
   only restated the code beneath them. The full pre-strip text of every deleted
   comment is in git history, at the commit before job #342.
 
@@ -157,7 +157,7 @@ stale.
 ### `crates/container/src/host.rs`
 - **fn task_env** — The launch environment is composed, never inherited (design #440 slice 1): `spawn_task` clears the daemon's environment and sets three layers, in order — the floor, the dispatcher's launch env, the two exit-status paths — so a launch declaring a floor name wins, the precedence a container's env has over its image's. The floor is `PATH` and `HOME` and nothing else: the bootstrap clones with `git` and `ssh`, which #309 §9 calls machine facts on a host node (on a nix or macOS node they live on the daemon's `PATH`, in no fixed system directory), and docker gives every container a `HOME` that git, ssh, cargo and the agent harness all key per-user state off. `TMPDIR` and `LANG` are refused because a container is given neither by its image or the runtime, so setting them would be a divergence from the docker backend rather than parity; `HOSTNAME` is refused for the opposite reason — docker sets one (the container id) and a host task simply has the node's, which `hostname` answers without a variable.
 - **fn task_env** — `PATH` falls back to the value docker gives a container whose image declares none, because measurement showed a cleared environment is not inert: the shell supplies its own compiled-in default, which is the undocumented version of the same hardcoding. `HOME` gets no fallback — there is no correct value to invent, and each tool's passwd-entry lookup is the honest answer.
-- **fn daemon_floor** — Reads the two floor names out of the daemon's environment one at a time rather than snapshotting all of it, so the docker socket and NATS credential this slice exists to withhold are never copied into the daemon's heap on the path whose point is not passing them on. `var_os` rather than `var` because a non-UTF-8 value in the daemon's environment must degrade to the `PATH` fallback, not panic in the launch path (STYLE.md Tier 1).
+- **fn daemon_floor** — Reads the two floor names out of the daemon's environment one at a time rather than snapshotting all of it, so the docker socket and NATS credential this slice exists to withhold are never copied into the daemon's heap on the path whose point is not passing them on. `var_os` rather than `var` because a non-UTF-8 value in the daemon's environment must degrade to the `PATH` fallback, not panic in the launch path (docs/reference/style.md Tier 1).
 - **fn supervised_cmd** — The *task* records its own exit status, not the daemon. If the daemon's reaper were the authority, a `worker-refresh.sh` swap mid-task — which spec §3.1 guarantees does not interrupt in-flight work — would lose the code, and the pid-identity rule would then report a task that succeeded as `Exited { -1 }`. The reaper stays as the backstop for a wrapper that never got to write.
 - **fn status** — Three sources in a fixed precedence: the written `exit_code`, then this daemon's own live set, then the pid-identity rule. The live set is what closes the window between a process dying and its status file landing; the pid rule is what covers the case the live set cannot, a daemon that restarted under a running task.
 - **fn status_after_restart** — Every unknown resolves to *gone*, including an unrecorded start time and missing meta. Design #309 §2(b): reporting a dead task as running is what spec §3.6 hears as "re-attach", which hangs the task until `task_timeout` — a slow, confusing failure instead of a loud one.
@@ -243,7 +243,7 @@ stale.
 - **fn draft_job** — Reopening a batch for editing un-absorbs its members (spec §2.1): each Batched→Frozen with `batch_id` cleared, so membership can be edited before finalize/release re-absorbs. Mirrors the revoke un-absorb.
 - **fn edit_members** — Validate the adds against current state, rejecting duplicates and candidates already in the batch. A draft reserves nothing, so a removed member simply drops from the list.
 - **fn edit_groups** — Idempotent: re-adding a label the job already carries is a no-op, not a redundant write and a `job-updated` the UI would re-render on.
-- **fn edit_groups** — Negative space (STYLE.md Tier 2 #2): this verb annotates and nothing else — no transition, no scheduling, no second writer of job state.
+- **fn edit_groups** — Negative space (docs/reference/style.md Tier 2 #2): this verb annotates and nothing else — no transition, no scheduling, no second writer of job state.
 - **fn finalize_job** — A Draft batch commits its membership at finalize (spec §2.1): re- validate every member against current state and recompute the dep/ eval unions + auto-description, exactly as an atomic create would. A stale member (or fewer than 2) fails here, leaving the batch Draft with nothing absorbed. Absorption is deferred to after the field-rule validation below passes.
 - **fn finalize_job** — Validate the (possibly recomputed) definition against the current default HEAD: the job type's §1.1 field rules (via `load_job_type`) plus the additive evaluators' name-collision / field rules (`with_job_evaluators`, over the unioned eval for a batch). Any error returns before the state write, so the job stays Draft.
 - **fn finalize_job** — A batch now absorbs its members (Frozen→Batched) and indexes its newly-committed union deps (best-effort, §2.3).
@@ -277,9 +277,9 @@ stale.
 - **fn spawn_eval_agent** — An evaluator reads the diff and judges it against the brief; the stage-1 `ci` gate owns building and testing (spec §4.3). Without this the reviewer re-runs a cold cargo build that CI is about to run anyway — minutes of shared Docker host for no added signal.
 - **fn spawn_eval_agent** — Fleet at capacity: queue this launch behind the freed-slot signal rather than reporting a verdict-less exit that would exhaust eval_retries in milliseconds (#140).
 - **fn handle_submit_eval** — abort implies fail — the verdicts are pass | fail | abort; a contradictory pass+abort submission normalizes to abort.
-- **fn resolve_eval_slot** — Precondition (contracts.md §1): the resolution must name an OPEN slot of the live round. Checked here, not decided: the operator gets an error back rather than a silently dropped verdict, and a `CoreError` is not something a pure decider can return.
+- **fn resolve_eval_slot** — Precondition (docs/reference/contracts.md §1): the resolution must name an OPEN slot of the live round. Checked here, not decided: the operator gets an error back rather than a silently dropped verdict, and a `CoreError` is not something a pure decider can return.
 - **fn on_eval_exited** — The one read this exit owes the decision: `handle_submit_eval` marks an agent evaluator's task Done (with its verdict) BEFORE the container exits, so the record must be re-read — the snapshot the exit fan-in carries may predate the verdict.
-- **fn finalize_pass** — `finalize: none` is a view input (design-lifecycle.md): the work's effect is external and the branch is scratch.
+- **fn finalize_pass** — `finalize: none` is a view input (docs/reference/design-lifecycle.md): the work's effect is external and the branch is scratch.
 - **fn pump_merges** — Draining (spec §3.6): no gate starts, no landing. An Open origin release holds the queue the same way (the post-merge integration reset is lossless because of exactly this hold).
 - **fn gather_landing_view** — Was this landing's current cycle a gate-fix round (job #154)? Read from the persisted task log so it holds across a restart.
 - **fn gather_landing_view** — Audit trail (job #154): note the gate-fix round in the squash body so the landed commit records that a mechanical compile fix was applied after review, not that the branch was re-reviewed.
@@ -336,7 +336,7 @@ stale.
 - **fn run_work** — A late exit from a job that was revoked or completed: there is nothing to decide, and this is the guard class that once panicked the actor (§3.6).
 - **fn run_work** — 3. Commit the decision: transitions first (§2.1 record is the source of truth; the task records and announcements are its artifacts).
 - **fn run_work** — 4. The artifacts of the decision. Boxed: the escalation and launch composites behind `interpret` can re-enter this phase.
-- **fn run_work_step** — The continuation hop (contracts.md §2): "did the branch move beyond base_ref?" is a ref read, so the decider gates it, this performs it, and the answer re-enters against a fresh view.
+- **fn run_work_step** — The continuation hop (docs/reference/contracts.md §2): "did the branch move beyond base_ref?" is a ref read, so the decider gates it, this performs it, and the answer re-enters against a fresh view.
 - **fn run_work_step** — Idle/Hold end the fold; Begin/Launch/Park belong to the entry and attempt shims and never come back out of this fold.
 - **fn on_infra_loss** — Count infra losses for this task's lineage (same cycle + evaluator): the freshly-stamped attempt is included, so the Nth loss sees count N.
 - **fn on_infra_loss** — Relaunch-or-escalate is Work-phase policy, so it is the C6 decider's; only the retirement above is shared with Evaluation.
@@ -465,7 +465,7 @@ stale.
 - **fn try_unblock** — The fan-out is advisory: a dependent that vanished (revoked, unknown project) is not an error, it is nothing to decide.
 - **fn run_ready** — 3. Commit the decision: transitions first (§2.1 record is the source of truth; the announcements are its artifacts, and restart reconciliation re-drives `try_unblock` for anything a crash lost).
 - **fn run_ready** — Queue admission and a batch's membership commit are part of committing the decision, so they run BEFORE the effects (the same placement C3's `drops_exec` established, and the pre-C4 write order).
-- **fn run_ready** — The continuation hop (contracts.md §2): the §2.2 pass is ref-reading I/O, so its verdict re-enters the decider as the next event against a freshly gathered view. Boxed because that re-entry is a self-recursive future.
+- **fn run_ready** — The continuation hop (docs/reference/contracts.md §2): the §2.2 pass is ref-reading I/O, so its verdict re-enters the decider as the next event against a freshly gathered view. Boxed because that re-entry is a self-recursive future.
 - **fn ready_revalidation** — The declaration travels with the verdict: the type may have grown or dropped an input since release, and this HEAD is the one the run will use — so it is also the one whose defaults get materialized (§2.2 pass 2, design #311 Decision 3). A type that failed to load declares nothing, and the errors beside it mean nothing is admitted anyway.
 - **fn ready_revalidation** — KV names are re-checked at launch, not here (§2.2): a secret set after release must not strand a job that is otherwise ready.
 
@@ -486,7 +486,7 @@ stale.
 - **fn recover_work** — Restore the persisted enqueue time (§3.5) so the queue's FIFO order and the max-wait clock survive this restart; fall back to now for records written before it existed.
 - **fn recover_work** — Crashed between marking Failed and launching the retry: replay the retry logic directly (the exit handler skips Failed tasks).
 - **fn recover_wrapup** — A gate in flight is superseded, whether its task was Running or queued under capacity pressure (§3.5): refinalize re-opens the gate fresh.
-- **fn recover_wrapup_command** — Publish ran and failed; the escalation was lost. Replay it — the merge stays (design-lifecycle.md wrap-up failure).
+- **fn recover_wrapup_command** — Publish ran and failed; the escalation was lost. Replay it — the merge stays (docs/reference/design-lifecycle.md wrap-up failure).
 - **fn recover_wrapup_command** — In flight at crash time. If the container is still alive, re-attach and let it finish (settle_running); otherwise it is dead or was never launched — relaunch a fresh attempt, the command is idempotent by contract (§3.2).
 - **fn recover_wrapup_command** — Retire the orphaned record so it does not linger as Running, then relaunch (the newer task's higher id wins any future scan).
 - **fn recover_evaluation** — Rebuild the staged round from the task log (§3.3). Stages are launched in order, so the started stages form a prefix: the last stage with any task this cycle is the one in flight (`slots`), earlier stages are `done`, later stages `pending` (no tasks yet). A single-stage job collapses to one group — identical to the pre-staging rebuild.
@@ -534,7 +534,7 @@ stale.
 - **fn scan_job_deadlines** — Deadline from Ready is a pre-work escalation (no work task): Stalled, resolved Retry/Revoke only. From Work/Evaluation it is post-work: Escalated, where Resolve is also available (§1.2, §3.5).
 
 ### `crates/dispatcher/src/workload.rs`
-- **fn WorkloadDelivery::merge_into** — Why the empty-declaration assert matches the *path* rather than the key `GOOGLE_APPLICATION_CREDENTIALS`: the env half asserts over a namespace the project shares. `container_env` inserts arbitrary names from a job type's `vars:`/`secrets:`, and release validation reserves only the `CHUG_` prefix — so a project pointing ADC at a key file baked into its own image is legitimate config, not a leaked grant. Asserting on the bare key would let that config panic `Core::handle_msg` on the single-writer loop and stall every job in the DAG, which is the failure mode STYLE.md Tier 1's no-`unwrap` rule exists to prevent. Detection is unweakened because an inherited or leaked grant is always a path this module wrote, and every path this module writes is under `CLOUD_CREDENTIAL_DIR`.
+- **fn WorkloadDelivery::merge_into** — Why the empty-declaration assert matches the *path* rather than the key `GOOGLE_APPLICATION_CREDENTIALS`: the env half asserts over a namespace the project shares. `container_env` inserts arbitrary names from a job type's `vars:`/`secrets:`, and release validation reserves only the `CHUG_` prefix — so a project pointing ADC at a key file baked into its own image is legitimate config, not a leaked grant. Asserting on the bare key would let that config panic `Core::handle_msg` on the single-writer loop and stall every job in the DAG, which is the failure mode docs/reference/style.md Tier 1's no-`unwrap` rule exists to prevent. Detection is unweakened because an inherited or leaked grant is always a path this module wrote, and every path this module writes is under `CLOUD_CREDENTIAL_DIR`.
 - **fn WorkloadDelivery::merge_into** — The assert sits at the merge rather than at the mint because the mint of a container that declared nothing returns `WorkloadDelivery::default()` and never observes the launch it is merged into (#313 A6). "The feature is off" is the path nobody exercises by hand, so the invariant is pinned against the launch's real `files`/`env` — the same shape as the bare-`HostConfig` invariant the toolchain jobs kept re-pinning. Triage and escalation launch no declaring block and so never reach here.
 
 ### `crates/domain/src/decide/authoring.rs`
@@ -542,7 +542,7 @@ stale.
 - **fn validate_member** — Batch × inputs is excluded in v1 (design #311 Decision 3): a batch collapses N members into ONE branch and one run, and values do not union the way `deps` and `eval` do — two members asking for different services have no defensible single answer. Reject with a clear field error rather than inventing one, or silently dropping a member's target.
 
 ### `crates/domain/src/decide/escalation.rs`
-- **fn decide** — Negative space (STYLE.md Tier 2 #2): terminal states are absorbing (§2.1) — deciding an escalation for a Done/Revoked job is a caller bug, and `assert_transition` would reject the transition anyway.
+- **fn decide** — Negative space (docs/reference/style.md Tier 2 #2): terminal states are absorbing (§2.1) — deciding an escalation for a Done/Revoked job is a caller bug, and `assert_transition` would reject the transition anyway.
 - **fn decide** — Record WHY on the job itself (§1.2), so operators see the reason in the header instead of digging through dispatcher logs (#69).
 
 ### `crates/domain/src/decide/eval.rs`
@@ -559,10 +559,10 @@ stale.
 - **fn decide_no_output** — The loss being decided is not in `infra_losses_prior` (its record is retired by an effect that has not run yet), so the Nth loss sees N — the same count the pre-C5 read-after-write produced.
 - **fn decide_settled** — Draining (§3.6): don't advance to the next stage, run the reduce, or open the merge gate. The resolved slots are kept; restart reconciliation rebuilds the round from the task log and replays this decision.
 - **fn decide_reduce** — The round is spent but kept: the landing reads no slots, and the execution slice (round included) is released when the job completes.
-- **fn decide_reduce** — Abort verdict: rework can't fix this — skip the remaining budget and hand the evaluators' findings to a human (design-lifecycle.md).
+- **fn decide_reduce** — Abort verdict: rework can't fix this — skip the remaining budget and hand the evaluators' findings to a human (docs/reference/design-lifecycle.md).
 
 ### `crates/domain/src/decide/merge_gate.rs`
-- **fn decide** — Negative space (STYLE.md Tier 2 #2): a landing decision only ever runs for the seq the serializer popped or parked — never a queued one.
+- **fn decide** — Negative space (docs/reference/style.md Tier 2 #2): a landing decision only ever runs for the seq the serializer popped or parked — never a queued one.
 - **fn decide** — Revoked-while-queued staleness guard: the §2.1 record is the truth; anything not WrapUp by now does not land.
 - **fn decide** — head == base_ref makes a conflict impossible by construction; treat one as the conflict path anyway rather than crash.
 - **fn decide** — Nothing to re-run; the candidate promotes directly. The CAS cannot be refused here in practice (nothing else lands between the candidate build and this promote — single writer), but the outcome still re-enters.
@@ -604,9 +604,9 @@ stale.
 - **fn insert** — Re-insert is idempotent on the reverse index: a Draft edit (spec §2.1) can drop or change a job's deps, so prune this job's id from every old upstream no longer in the new deps. Without this a stale edge would misdirect a later revoke cascade (§2.1 Revoked row), which trusts the reverse edges by state alone and does not re-check the dependent's deps.
 
 ### `crates/domain/src/inputs.rs`
-- **fn input_errors** — Negative space (STYLE.md Tier 2 #2): every error this function produces is addressed to one named input, so a caller can route it to a form field.
+- **fn input_errors** — Negative space (docs/reference/style.md Tier 2 #2): every error this function produces is addressed to one named input, so a caller can route it to a form field.
 - **fn fill_input_defaults** — A supplied value wins by being left alone; only an absent key is written. The two lines are deliberately in this order so the assert below is about the write that just happened.
-- **fn inject_input_env** — Negative space (STYLE.md Tier 2 #2): no other source inserts into this namespace. Asserted before the first write, so the diagnostic names the foreign* key rather than an input that arrived second.
+- **fn inject_input_env** — Negative space (docs/reference/style.md Tier 2 #2): no other source inserts into this namespace. Asserted before the first write, so the diagnostic names the foreign* key rather than an input that arrived second.
 - **fn inject_input_env** — Covers both halves of the invariant at one line: nothing else claimed this key, and no two input names map onto it (the injectivity the lowercase-only name rule buys).
 - **fn inject_input_env** — Postcondition: exactly one key per accepted input, and no key for anything else — the env grew by nothing but inputs.
 - **fn brief_inputs_block** — The `###` nesting is a decision, not a formatting choice (design #311 Decision 4, Option B): the block must never emit a sibling of `## Job Brief`, and what makes that hold is the charset (Decision 5) excluding `#` and every newline, not the `<untrusted_input>` delimiter. The delimiter is advisory to a model; a charset is checked. It renders for the work agent and every agent evaluator alike, because §4.3 sends one brief to both by construction and a work-only narrowing would leave the *more* suggestible gate reading inputs anyway.
@@ -668,12 +668,12 @@ stale.
 
 ### `crates/types/src/groups.rs`
 - **fn check_name** — Characters, not bytes: the charset is ASCII-only, so a multi-byte character is out of it regardless, and the count is what an operator can act on.
-- **fn check_name** — Postcondition, negative space (STYLE.md Tier 2 #2): an accepted name is ASCII, which is what lets the length bound double as a byte bound.
+- **fn check_name** — Postcondition, negative space (docs/reference/style.md Tier 2 #2): an accepted name is ASCII, which is what lets the length bound double as a byte bound.
 - **fn check_groups** — Postcondition: an accepted list is exactly as long as its distinct set, which is what lets every reader treat `groups` as a set without sorting it.
 
 ### `crates/types/src/inputs.rs`
 - **fn check_value_charset** — Characters, not bytes: the charset is ASCII-only, so a multi-byte character is out of it regardless, and reporting the character is what an author can act on.
-- **fn check_value_charset** — Postcondition, negative space (STYLE.md Tier 2 #2): an accepted value is ASCII, which is what lets the length bound double as a byte bound and what every downstream env/prompt consumer relies on.
+- **fn check_value_charset** — Postcondition, negative space (docs/reference/style.md Tier 2 #2): an accepted value is ASCII, which is what lets the length bound double as a byte bound and what every downstream env/prompt consumer relies on.
 
 ### `crates/types/src/job_type.rs`
 - **fn validate** — v1: the resolved review provider must be claude. Only statically resolvable here; a None-None chain falls back to platform config, checked by the dispatcher at release.

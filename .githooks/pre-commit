@@ -18,7 +18,7 @@
 #                                     (run from web/, so .prettierignore applies)
 #   check-comments.sh --staged        REJECTS (rule 1: no non-doc comments;
 #                                     a LINTER ERROR is a skip, not a rejection)
-#   check-modules.sh                  REJECTS (MODULES.md registry drift)
+#   check-modules.sh                  REJECTS (docs/reference/modules.md registry drift)
 #   check-duplication.sh              REJECTS (jscpd clones, threshold 0)
 #   check-doc-facts.sh --staged       REJECTS (stale path / constant claims;
 #                                     a LINTER ERROR is a skip, not a rejection)
@@ -241,9 +241,9 @@ hook_check_comments() {
 	0) ;;
 	1)
 		printf '%s\n' "$_out"
-		hook_reject "comment lint failed (STYLE.md Tier 1)." \
+		hook_reject "comment lint failed (docs/reference/style.md Tier 1)." \
 			"    Delete the comment and put what it said in a doc under docs/ (or the" \
-			"    module's MODULES.md row), or in the commit message if it is rationale." \
+			"    module's docs/reference/modules.md row), or in the commit message if it is rationale." \
 			"    Re-run with: .chug/tasks/check-comments.sh --staged"
 		;;
 	*)
@@ -254,16 +254,16 @@ hook_check_comments() {
 	hook_ran comments
 }
 
-# --- MODULES.md registry (rejects) --------------------------------------------
+# --- docs/reference/modules.md registry (rejects) --------------------------------------------
 # Triggered by any staged `crates/*` path rather than the registered src trees:
 # check-modules.sh owns that list, and a second copy here would silently stop
 # gating the next context crate carved out of the dispatcher.
 hook_check_modules() {
-	_mods="$(hook_staged_matching 'crates/*' 'MODULES.md')"
+	_mods="$(hook_staged_matching 'crates/*' 'docs/reference/modules.md')"
 	[ -n "$_mods" ] || return 0
 	[ -x .chug/tasks/check-modules.sh ] || return 0
 	if ! .chug/tasks/check-modules.sh; then
-		hook_reject "MODULES.md registry drift." \
+		hook_reject "docs/reference/modules.md registry drift." \
 			"    Add a one-line contract row for the new module (or drop the stale row)." \
 			"    Re-run with: .chug/tasks/check-modules.sh"
 	fi
@@ -282,7 +282,7 @@ hook_check_duplication() {
 	0) ;;
 	1)
 		printf '%s\n' "$_out"
-		hook_reject "duplicated code (STYLE.md Tier 1, threshold 0)." \
+		hook_reject "duplicated code (docs/reference/style.md Tier 1, threshold 0)." \
 			"    Extract the shared body into a helper named after its caller." \
 			"    Re-run with: .chug/tasks/check-duplication.sh"
 		;;
@@ -310,7 +310,7 @@ hook_check_doc_facts() {
 	0) ;;
 	1)
 		printf '%s\n' "$_out"
-		hook_reject "stale doc claims (design #415 D6, STYLE.md's doc-claim rule)." \
+		hook_reject "stale doc claims (design #415 D6, docs/reference/style.md's doc-claim rule)." \
 			"    Fix the path or the value, or mark the line <!-- intent -->," \
 			"    <!-- runtime --> or <!-- absent --> if it is correctly unresolvable." \
 			"    Re-run with: .chug/tasks/check-doc-facts.sh --staged"

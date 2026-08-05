@@ -1,8 +1,8 @@
 # Structure assessment — readiness for module-scoped work (2026-07-23)
 
 A point-in-time audit of how well the codebase is structured for scoping work
-(jobs) by abstraction layer / module. Companion to `NORTH-STAR.md`, which
-describes the target factoring this assessment motivated. `crates.md` remains
+(jobs) by abstraction layer / module. Companion to `docs/README.md`, which
+describes the target factoring this assessment motivated. `docs/reference/crates.md` remains
 the living map; this file is a snapshot and is expected to go stale.
 
 The bar: module-scoped work needs boundaries that are (a) explicit,
@@ -17,19 +17,19 @@ layering, and its two biggest files are where most UI changes land.
 
 ## What was verified (not just read)
 
-- **`crates.md` exists and is mostly honest.** The documented invariants hold
+- **`docs/reference/crates.md` exists and is mostly honest.** The documented invariants hold
   in production code: `async-nats` appears only in `store`'s Cargo.toml; `api`
   does not depend on `dispatcher` (dev-dependency only, for integration
   tests); `types` is pure data. Every crate's `lib.rs` opens with a doc
   comment tying it to its spec section. This is exactly the scaffolding
   module-scoped work needs.
-- **But `crates.md`'s dispatcher module map has drifted.** It documents a
+- **But `docs/reference/crates.md`'s dispatcher module map has drifted.** It documents a
   `handlers/` directory with one module per subject family — reality is a
   single 1,727-line `handlers.rs`. Nine current modules aren't documented at
   all: `channel`, `fleet`, `github`, `harvest`, `launch_queue`, `origin`,
-  `run`, `seed`, `triage`. *(Since closed: `crates.md` now documents all nine,
+  `run`, `seed`, `triage`. *(Since closed: `docs/reference/crates.md` now documents all nine,
   refactor-plan C7 split `handlers.rs` into `handlers/`, and the A3
-  `MODULES.md` registry gate (`.chug/tasks/check-modules.sh`, run from
+  `docs/reference/modules.md` registry gate (`.chug/tasks/check-modules.sh`, run from
   `.chug/tasks/ci.sh` and from `.githooks/pre-commit`) fails the build on a
   module without a row — this class of drift can no longer accumulate
   silently.)*
@@ -49,7 +49,7 @@ layering, and its two biggest files are where most UI changes land.
   `api.ts` directly — components fetch for themselves, so "components" vs
   "pages" is a folder split, not an abstraction layer. `JobDetail.tsx` is
   1,187 lines (over twice the next page) and is the gravity well for most UI
-  changes. There is no `web/` equivalent of `crates.md`.
+  changes. There is no `web/` equivalent of `docs/reference/crates.md`.
 
 ## Layers and modules as they exist today
 
@@ -71,7 +71,7 @@ layering, and its two biggest files are where most UI changes land.
 `scan`, `cd`, `factory`, `triage`, `reconcile`, `handlers`, `channel`,
 `fleet`, `origin`, `github`, `harvest`, `seed`, `run`, `config`.
 
-The problem: the last ~9 of these exist only in code, not in `crates.md`.
+The problem: the last ~9 of these exist only in code, not in `docs/reference/crates.md`.
 
 ### Web (folder conventions, not layers)
 
@@ -86,7 +86,7 @@ The problem: the last ~9 of these exist only in code, not in `crates.md`.
 
 ## Gaps to close for module-scoped work
 
-1. **Re-sync `crates.md`'s dispatcher map to reality** — it is the document a
+1. **Re-sync `docs/reference/crates.md`'s dispatcher map to reality** — it is the document a
    scoping scheme would key off, and it is stale exactly where it matters
    most.
 2. **Decide the module granularity for the dispatcher** — crate-level scoping
@@ -97,5 +97,5 @@ The problem: the last ~9 of these exist only in code, not in `crates.md`.
    "the web app is one module." Splitting `JobDetail.tsx` is the first
    structural move either way.
 
-`NORTH-STAR.md` turns these gaps into a target factoring and an incremental
+`docs/README.md` turns these gaps into a target factoring and an incremental
 migration order.

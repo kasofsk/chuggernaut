@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 /// Where a `knowledge:` entry's text lives.
 pub(crate) enum Source {
-    /// A repo page named by path (`STYLE.md`), read verbatim at `base_ref`.
+    /// A repo page named by path (`docs/reference/style.md`), read verbatim at `base_ref`.
     Page(String),
     /// The config-root-relative tag file a bare name resolves to
     /// (`tags/rust.md`).
@@ -97,8 +97,11 @@ mod tests {
     /// stays the tag it always was.
     #[test]
     fn entry_resolves_page_by_path_and_tag_by_name() {
-        assert!(matches!(source("STYLE.md"), Source::Page(_)));
-        assert_eq!(path_of("STYLE.md"), "STYLE.md");
+        assert!(matches!(source("docs/reference/style.md"), Source::Page(_)));
+        assert_eq!(
+            path_of("docs/reference/style.md"),
+            "docs/reference/style.md"
+        );
         assert_eq!(
             path_of("docs/implementation-notes.md"),
             "docs/implementation-notes.md"
@@ -115,11 +118,11 @@ mod tests {
     /// kept at its first occurrence.
     #[test]
     fn entries_dedupe_in_declaration_order() {
-        let defaults = ["STYLE.md".to_string(), "rust".to_string()];
-        let tags = ["rust".to_string(), "".to_string(), "NORTH-STAR.md".into()];
+        let defaults = ["docs/reference/style.md".to_string(), "rust".to_string()];
+        let tags = ["rust".to_string(), "".to_string(), "docs/README.md".into()];
         assert_eq!(
             entries(&defaults, &tags),
-            vec!["STYLE.md", "rust", "NORTH-STAR.md"]
+            vec!["docs/reference/style.md", "rust", "docs/README.md"]
         );
         assert!(entries(&[], &[]).is_empty());
     }
@@ -136,13 +139,13 @@ mod tests {
     #[test]
     fn block_composes_golden_bytes() {
         let sections = [
-            ("STYLE.md", "the rules\n".to_string()),
-            ("NORTH-STAR.md", "the target".to_string()),
+            ("docs/reference/style.md", "the rules\n".to_string()),
+            ("docs/README.md", "the target".to_string()),
         ];
         let composed = block(&sections).expect("two sections");
         assert_eq!(
             composed,
-            "## Project Knowledge\n\n### STYLE.md\nthe rules\n\n\n### NORTH-STAR.md\nthe target\n"
+            "## Project Knowledge\n\n### docs/reference/style.md\nthe rules\n\n\n### docs/README.md\nthe target\n"
         );
         assert_eq!(block(&sections).as_deref(), Some(composed.as_str()));
     }
@@ -170,7 +173,10 @@ mod tests {
             let declared = types::JobType::parse(&yaml).expect("parses").knowledge;
             assert_eq!(
                 declared,
-                vec!["STYLE.md".to_string(), "NORTH-STAR.md".to_string()],
+                vec![
+                    "docs/reference/style.md".to_string(),
+                    "docs/README.md".to_string()
+                ],
                 "{job_type} injects the pages, not a restatement of them"
             );
             for entry in entries(&declared, &[]) {

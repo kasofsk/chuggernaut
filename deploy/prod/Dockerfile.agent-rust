@@ -61,7 +61,7 @@ RUN arch="$(dpkg --print-architecture)" \
 # #382 (CHUG_CI_LOCAL_NATS=0 opts out) — which is how this image executes the
 # SHARED-server half of the NATS tier with no Docker socket at all. Only that
 # half: the private-server suites (NatsTestServer::spawn) ignore the URL and
-# still need a daemon, so both scripts name them as self-skipping (testing.md).
+# still need a daemon, so both scripts name them as self-skipping (docs/reference/testing.md).
 #
 # Arch-selected for the same reason as sccache above (deploy #347): this binary
 # IS the tier-2 mechanism on this image, so a qemu-emulated one means the tier a

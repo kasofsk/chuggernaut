@@ -258,7 +258,7 @@ fn static_errors_cloud_identities(
 /// does, and merging either one ahead of the binary breaks the same way.
 const SKEW_SCAN_DIRS: [&str; 2] = ["jobs", types::SCHEDULES_DIR];
 
-/// Config files one skew scan reads, per directory (STYLE.md Tier 2 #3).
+/// Config files one skew scan reads, per directory (docs/reference/style.md Tier 2 #3).
 const SKEW_SCAN_FILES_MAX: usize = 256;
 
 /// The first config file at `reference` declaring a `min_dispatcher` above this

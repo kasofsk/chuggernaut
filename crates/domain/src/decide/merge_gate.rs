@@ -9,7 +9,7 @@
 //!   next landing seq, or hold (gate occupied, queue held by an Open origin
 //!   release, draining, or empty).
 //! - [`decide`] — the landing state machine, re-entered per the continuation
-//!   contract (contracts.md §2): each emitted effect's result comes back as
+//!   contract (docs/reference/contracts.md §2): each emitted effect's result comes back as
 //!   the next [`LandingEvent`] against a freshly gathered [`LandingView`], so
 //!   a decision never runs on a view the world has moved under.
 //!
@@ -24,16 +24,16 @@
 //!   and a [`LandingEvent`].
 //! - **Emits:** `(MergeGateState, Vec<Transition>, Vec<Effect>, LandingStep)`
 //!   — values only; the [`LandingStep`] tells the fold what re-enters next.
-//!   The owned effect set (contracts.md §2): `SquashMerge`,
+//!   The owned effect set (docs/reference/contracts.md §2): `SquashMerge`,
 //!   `CreateSquashCandidate`, `LaunchGateStage`, `LaunchGateFix`,
 //!   `AdvanceDefault`, `RebaseOntoWithConflict`, `Escalate`, `DeleteBranch`,
 //!   `PublishEvent`, `PutJob`, `EnterWork` — plus `decide_enqueue`'s
 //!   Evaluation→WrapUp `Transition` and its `job-wrapup-started`
 //!   `PublishEvent`.
 //! - **Guarantees:** pure and synchronous; every branch exhaustively matched
-//!   and unit-tested; asserts negative space (STYLE.md Tier 2 #2). Performs
+//!   and unit-tested; asserts negative space (docs/reference/style.md Tier 2 #2). Performs
 //!   no effect, holds no `&mut Core`.
-//! - **Spec:** §3.3; contracts.md §2; refactor-plan C2.
+//! - **Spec:** §3.3; docs/reference/contracts.md §2; refactor-plan C2.
 
 use crate::decide::Transition;
 use crate::effects::Effect;
@@ -197,7 +197,7 @@ pub enum LandingStep {
     Gating,
 }
 
-/// What an eval-pass does about landing (§3.3 vs design-lifecycle.md
+/// What an eval-pass does about landing (§3.3 vs docs/reference/design-lifecycle.md
 /// `finalize: none`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnqueueStep {

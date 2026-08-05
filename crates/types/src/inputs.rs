@@ -71,7 +71,7 @@ pub const INPUT_VALUE_LEN_MAX: usize = 256;
 /// a type wanting more is a type doing two jobs.
 pub const INPUTS_COUNT_MAX: usize = 16;
 
-/// Compiled-program ceiling for a declared `pattern` (STYLE.md Tier 2 #3 —
+/// Compiled-program ceiling for a declared `pattern` (docs/reference/style.md Tier 2 #3 —
 /// everything is bounded). A pattern that narrows an identifier needs a few
 /// hundred bytes; 64 KiB is far above any real one, so a pathological
 /// declaration fails validation loudly instead of costing memory on every

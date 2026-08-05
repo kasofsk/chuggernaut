@@ -191,7 +191,7 @@ fi
 # the number it starts at before any operator intent exists, and the last resort
 # when the dispatcher is down. It is NOT how a node's concurrency is changed —
 # that is a runtime command from the operator UI (`req.worker.{node}.set_slots`),
-# which needs no ssh, no rebuild and no restart (docs/runbooks/worker-capacity.md).
+# which needs no ssh, no rebuild and no restart (docs/reference/runbooks/worker-capacity.md).
 # The passthrough stays deliberately: worker-refresh.sh's swap carries it forward,
 # so after a swap the node reports this boot value until the dispatcher reconciles
 # the recorded intent back onto it (one scan tick). Set it to something the node
@@ -299,7 +299,7 @@ fi
 # All of them empty when unset ⇒ no passthrough and no device: exactly the run this
 # script produced before Android existed. Enabling KVM on a node and granting it
 # to a project stay two separate acts — WORKER_KVM_PROJECTS is fail-closed, and
-# an empty one grants nobody. docs/runbooks/worker-kvm.md is the procedure.
+# an empty one grants nobody. docs/reference/runbooks/worker-kvm.md is the procedure.
 KVM_ENV=""
 KVM_DEVICE_ARG=""
 KVM="${WORKER_KVM:-}"

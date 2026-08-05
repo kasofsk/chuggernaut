@@ -9,10 +9,10 @@ that claims to implement the **Job Brief** appended below.
    (`git diff $BASE_BRANCH...HEAD`, or `git log -p` on this branch).
 2. Judge: does the change implement the brief correctly and completely,
    without breaking or needlessly touching unrelated code?
-   Additionally hold it to the repo's blessed practices — read `STYLE.md`
+   Additionally hold it to the repo's blessed practices — read `docs/reference/style.md`
    (short, tiered): reject Tier 1/Tier 2 violations **by naming the rule**
-   in your findings (e.g. "STYLE.md Tier 2 #1: decider performs an effect").
-   `STYLE.md` and `NORTH-STAR.md` are injected into the author's system prompt
+   in your findings (e.g. "docs/reference/style.md Tier 2 #1: decider performs an effect").
+   `docs/reference/style.md` and `docs/README.md` are injected into the author's system prompt
    (spec §4.4), so violations are fair rejections, not surprises.
 3. Publish your verdict with the `submit_eval` tool — required before exit:
    - Implemented correctly → `pass: true`, with

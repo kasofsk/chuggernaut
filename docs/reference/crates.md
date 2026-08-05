@@ -1,8 +1,8 @@
 # Chuggernaut v2 — Crate and Module Breakdown
 
-Companion to `spec.md` (normative behavior) and `design.md` (rationale). This document maps the spec onto a Rust workspace: which crates exist, what each owns, and how the dispatcher is decomposed internally.
+Companion to `docs/spec.md` (normative behavior) and `docs/design/000-rationale.md` (rationale). This document maps the spec onto a Rust workspace: which crates exist, what each owns, and how the dispatcher is decomposed internally.
 
-**See also** — for where this map is *heading*: `NORTH-STAR.md` (target factoring), `structure-assessment.md` (current-state audit against that target), `contracts.md` (extracting the dispatcher's internal interfaces), and `ts-rewrite-plan.md` (the TypeScript dispatcher rewrite).
+**See also** — for where this map is *heading*: `docs/README.md` (target factoring), `docs/reference/structure-assessment.md` (current-state audit against that target), `docs/reference/contracts.md` (extracting the dispatcher's internal interfaces), and `docs/design/210-ts-rewrite-plan.md` (the TypeScript dispatcher rewrite).
 
 ## Workspace location
 
@@ -21,7 +21,7 @@ One fat binary plus three tiny ones:
 | Crate | Kind | Spec | Purpose |
 |---|---|---|---|
 | `types` | lib | §1 | Shared domain types, no I/O |
-| `chuggernaut-domain` | lib | §2.1–2.2, §3, contracts.md §2 | The pure core (`crates/domain`): state machine, DAG, queue, release validation, effect vocabulary, deciders — no async, no I/O, by construction |
+| `chuggernaut-domain` | lib | §2.1–2.2, §3, docs/reference/contracts.md §2 | The pure core (`crates/domain`): state machine, DAG, queue, release validation, effect vocabulary, deciders — no async, no I/O, by construction |
 | `chuggernaut-platform-ops` | lib | §3.1, §3.2, §3.6, §12.2 | The platform-ops context (`crates/platform-ops`): fleet occupancy, config/deploy-drift snapshots, container harvest, project seed template — the platform's own observability and housekeeping, never a job transition |
 | `store` | lib | §1.4–1.5, §8, §9 | NATS KV/stream access; the only crate that talks to NATS |
 | `auth` | lib | §7 | JWT, SSH CA, per-job credentials, permission rules |
@@ -119,7 +119,7 @@ Depends on `container` (launches through the backend) and `store` (KO resolution
 The core. Internal module map:
 
 Each module opens with a contract-style `//!` header (accepts / emits /
-guarantees / spec §); `MODULES.md` at the repo root is the one-line registry.
+guarantees / spec §); `docs/reference/modules.md` at the repo root is the one-line registry.
 The map below mirrors the actual `crates/dispatcher/src/**/*.rs` tree; a
 directory in it groups modules under a `mod.rs` that carries the charter they
 share — for `forge_ingest/` a **named context** (NORTH-STAR §1), for
@@ -142,7 +142,7 @@ domain/ (chuggernaut-domain — pure: no tokio/async-nats/store/vcs/auth)
                    default fill the first base_ref pin performs, and delivery —
                    `CHUG_INPUT_*` env injection + the event audit fragment
                    (§1.1, §2.2, §4.1, §10.3)
-  effects.rs     — the Effect vocabulary: each port action as serde data (contracts.md §2)
+  effects.rs     — the Effect vocabulary: each port action as serde data (docs/reference/contracts.md §2)
   decide/        — the decider layer: pure `(view, event) -> (transitions, effects)`
     escalation.rs— the C1 template decider: the escalate/stall family (§1.2, §3.4)
     merge_gate.rs— the C2 landing decider: depth-1 queue + gate as a decider-owned
@@ -175,7 +175,7 @@ dispatcher/
                    decide/eval (§3.3), post-eval finalization and the depth-1 merge
                    gate driving decide/merge_gate (§3.2 step 12)
   interpret.rs   — the effect interpreter: `Core::interpret` runs one Effect through its
-                   port; the sole `&mut Core` coupling deciders keep (contracts.md §2)
+                   port; the sole `&mut Core` coupling deciders keep (docs/reference/contracts.md §2)
   invariants.rs  — executable invariant checker over the read-only CoreState view (B1)
   trace.rs       — test-only golden-trace recorder pinning decisions (B3)
   launch_queue.rs— capacity-aware launch queue: park on NoCapacity, drain on slot-freed (§3.5)
@@ -206,7 +206,7 @@ dispatcher/
   config.rs      — dispatcher config (AGENT_PROVIDER_DEFAULT etc., §12.4)
 ```
 
-Every `handlers/` module carries its own contract header and a `MODULES.md`
+Every `handlers/` module carries its own contract header and a `docs/reference/modules.md`
 row (the registry gate covers nested modules); `mod.rs` holds no request
 handling of its own — it names the families and hands each one its ports.
 
@@ -251,7 +251,7 @@ chuggernaut-channel / chuggernaut-ko / chuggernaut-harness (bins) ► types, sto
 test-utils ► types, store, container (fake backend), agent (fake provider), vcs (temp repos)
 ```
 
-Invariants worth enforcing (enforced in `test-utils/tests/boundary_guard.rs` over `cargo metadata`, refactor-plan A3): only `store` depends on `async-nats`; only `container` and `agent` know about containers; `api` never depends on `dispatcher` (they communicate exclusively over NATS); `types` has no async runtime dependency; `chuggernaut-domain` resolves neither `tokio` nor `async-nats` (nor `store`/`vcs`/`auth`) anywhere in its subtree, plus a zero-`.await` sweep over its sources; and `chuggernaut-platform-ops` (refactor-plan C9) declares only its charter's edges — the port crates it drives, never `dispatcher`, dev-deps included — with the reverse edge asserted so the arrow between context and lifecycle stays one-way. The sibling `test-utils/tests/lint_guard.rs` (refactor-plan A4) guards the other half of STYLE.md Tier 1 — the `clippy.toml` line limit, the `[workspace.lints.clippy]` denies, and every member's `lints.workspace = true` opt-in, without which a new crate would sit silently outside the clippy gate.
+Invariants worth enforcing (enforced in `test-utils/tests/boundary_guard.rs` over `cargo metadata`, refactor-plan A3): only `store` depends on `async-nats`; only `container` and `agent` know about containers; `api` never depends on `dispatcher` (they communicate exclusively over NATS); `types` has no async runtime dependency; `chuggernaut-domain` resolves neither `tokio` nor `async-nats` (nor `store`/`vcs`/`auth`) anywhere in its subtree, plus a zero-`.await` sweep over its sources; and `chuggernaut-platform-ops` (refactor-plan C9) declares only its charter's edges — the port crates it drives, never `dispatcher`, dev-deps included — with the reverse edge asserted so the arrow between context and lifecycle stays one-way. The sibling `test-utils/tests/lint_guard.rs` (refactor-plan A4) guards the other half of docs/reference/style.md Tier 1 — the `clippy.toml` line limit, the `[workspace.lints.clippy]` denies, and every member's `lints.workspace = true` opt-in, without which a new crate would sit silently outside the clippy gate.
 
 ## Not crates
 

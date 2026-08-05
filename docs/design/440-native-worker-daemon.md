@@ -3,7 +3,7 @@
 Status: PROPOSED — the prerequisite #309 P0 named and left unowned.
 
 Written against the tree at `1030704`. Every claim about current behavior below
-was read out of the source or out of [`spec.md`](../../spec.md) in this tree, not
+was read out of the source or out of [`docs/spec.md`](../spec.md) in this tree, not
 carried over from the brief or from a sibling design; where the brief and the
 tree disagree, the tree wins. Two things are relied on **secondhand** and are
 marked where they are load-bearing: the operator's `macos-runner` host
@@ -21,9 +21,9 @@ advertisement nor device leases. Those stay #309's.
 Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 2026-08-05 P0 correction (finding 6); [#372](./372-chug-node-modules.md) §6, §8;
 [#322](./322-macos-native-runtime.md) §1, §6;
-[`spec.md`](../../spec.md) §3.1 (backends, self-refresh, the drain guarantee),
-§3.6 (restart reconciliation); [`STYLE.md`](../../STYLE.md);
-[`testing.md`](../../testing.md).
+[`docs/spec.md`](../spec.md) §3.1 (backends, self-refresh, the drain guarantee),
+§3.6 (restart reconciliation); [`docs/reference/style.md`](../reference/style.md);
+[`docs/reference/testing.md`](../reference/testing.md).
 
 ---
 
@@ -51,14 +51,14 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
 | 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | Proposed |
 | 7 | `code` — `nix/chug-node/` gains the unit and the `chug.node` charter amendment; the macOS plist template and its opt-in installer | `chug.node` option surface | 4, 6 | Proposed |
-| 8 | `docs` — `spec.md` §3.1's drain guarantee narrowed to say what survives a *native* daemon restart and what does not | spec §3.1 | 2, 3 | Proposed |
+| 8 | `docs` — `docs/spec.md` §3.1's drain guarantee narrowed to say what survives a *native* daemon restart and what does not | spec §3.1 | 2, 3 | Proposed |
 
 **The ordering between 2–3 and 4–6 is load-bearing**, not a preference: flipping
 a node to a native daemon before the drain mechanism lands means the first deploy
 after the flip kills that node's in-flight host work. It binds only on a node
 that declares `host`, which today is none.
 
-Test placement per [`testing.md`](../../testing.md): `env_clear` and the
+Test placement per [`docs/reference/testing.md`](../reference/testing.md): `env_clear` and the
 refresh-precondition predicate are pure and belong beside the existing
 `crates/container/src/host.rs` and `crates/worker/src/config.rs` unit tests
 (**tier 1**); the scope escape and the survives-a-restart assertions extend
@@ -76,7 +76,7 @@ slice 7 does not change that.
 | Fact | Where | State |
 | --- | --- | --- |
 | The daemon is a container: `docker run -d --restart=always --name chug-worker` with the host's docker socket and `keys` bind-mounted | `deploy/prod/build-worker.sh:524` | Shipped |
-| So it is docker-out-of-docker: task containers are **siblings on the host**, and container mode is correct | same, plus `spec.md` §3.1 | Shipped |
+| So it is docker-out-of-docker: task containers are **siblings on the host**, and container mode is correct | same, plus `docs/spec.md` §3.1 | Shipped |
 | `HostBackend` spawns a task with `process_group(0)` and `.envs(&config.env)` — and **no `env_clear()`**, so the task inherits the daemon's whole environment | `crates/container/src/host.rs` (`spawn_task`) | **Superseded** by slice 1 (job #442): the environment is composed, not inherited |
 | A host task's exit status is written by the task's own wrapper, not by the daemon, so the daemon need not be alive when a task exits | `crates/container/src/host.rs` (`supervised_cmd`); #309 correction finding 2 | Shipped |
 | The swap runs a **detached `docker:cli` sibling** that removes `chug-worker` and re-composes `docker run` from mounts and devices recovered by `docker inspect` of the live container | `deploy/prod/worker-refresh.sh` (`swap`) | Shipped |
@@ -112,7 +112,7 @@ land on the node instead of inside a container, which is the entire point.
 
 - **The fleet record doubles, because the node name is the key.** A worker seed
   is `{name}|worker|{slots}` and `WorkerAnnounce` carries `node`
-  (`crates/worker/src/backend.rs`); merge is by name, and per `spec.md` §3.1 a
+  (`crates/worker/src/backend.rs`); merge is by name, and per `docs/spec.md` §3.1 a
   name held by a docker-endpoint seed is refused outright. Two daemons need two
   names, so one machine becomes two rows in `fleet.status`, two heartbeats and
   two version numbers.
@@ -121,7 +121,7 @@ land on the node instead of inside a container, which is the entire point.
   box is a four-way over-commit by construction, and the operator's capacity
   button has to be pressed twice to drain one machine.
 - **`worker-refresh` doubles on one docker daemon.** The deploy fans refresh out
-  per node and fails for any node that does not confirm (`spec.md` §3.1), so one
+  per node and fails for any node that does not confirm (`docs/spec.md` §3.1), so one
   machine gets two legs, two build phases contending for the same BuildKit cache,
   and a disk pre-flight sized for one generation guarding two.
 - **Two run specs, and #390 has two live things to compare.**
@@ -235,7 +235,7 @@ same way the NixOS unit's home is the consuming host repo.
 
 ## 3. The drain guarantee — the crux
 
-`spec.md` §3.1 guarantees that a worker swap does not interrupt in-flight work:
+`docs/spec.md` §3.1 guarantees that a worker swap does not interrupt in-flight work:
 `wait` is implemented dispatcher-side as an inspect poll "so worker restarts are
 transparent (containers keep running; the poll re-attaches)", and
 `worker-refresh.sh`'s swap comment states the mechanism — `docker rm -f` hits
@@ -253,7 +253,7 @@ container's life, so the property holds without anyone maintaining it. A native
 daemon whose children are host processes can only have a *conditional*
 guarantee — one that holds while a mechanism keeps working. Degrading a
 structural invariant to a conditional one is the real cost of going native, and
-`spec.md` §3.1 should say so rather than keep a sentence that is true of one mode
+`docs/spec.md` §3.1 should say so rather than keep a sentence that is true of one mode
 only (slice 8).
 
 ### The mechanism (D3)
@@ -331,11 +331,11 @@ argument for scheduled draining made below, not a reason to wait.
 
 The self-refresh is the only restart the
 platform performs automatically; every other one is an operator at a keyboard,
-who has `slots: 0` (`docs/runbooks/worker-capacity.md`) and is already told to
+who has `slots: 0` (`docs/reference/runbooks/worker-capacity.md`) and is already told to
 drain before a rebuild by `nix/chug-node/options.nix`'s own header.
 
 **The cost of the refusal, priced:** a deploy fails for a node that is running
-host work, because `spec.md` §3.1 fails the deploy for any node that does not
+host work, because `docs/spec.md` §3.1 fails the deploy for any node that does not
 confirm onto the target SHA. That converts "the deploy silently killed a build"
 into "the deploy failed and said why", which is the right trade, and it is
 bounded by `task_timeout` rather than being open-ended. It is worse for a node
@@ -532,7 +532,7 @@ leaves one.
 
 ## What this makes wrong elsewhere
 
-- **`spec.md` §3.1's drain guarantee** is written for a containerized daemon and
+- **`docs/spec.md` §3.1's drain guarantee** is written for a containerized daemon and
   becomes mode-specific; slice 8 narrows it.
 - **`nix/chug-node/options.nix`'s charter** says the module "owns no lifecycle"
   and "does NOT declare the `chug-worker` container or any unit supervising it".

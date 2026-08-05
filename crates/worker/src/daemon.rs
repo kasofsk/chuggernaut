@@ -636,7 +636,7 @@ fn nix_roots(config: &WorkerConfig) -> Result<Option<Arc<NixRoots>>, WorkerRunEr
 /// docker connection knows least about what is live.
 const NIX_REAP_INTERVAL: Duration = Duration::from_secs(3600);
 
-/// How many rooted containers the daemon tracks at once (STYLE.md Tier 2 rule
+/// How many rooted containers the daemon tracks at once (docs/reference/style.md Tier 2 rule
 /// 3). A node runs a handful of slots, so reaching this means containers are
 /// never being removed — the reaper is what recovers the roots either way.
 const NIX_ROOTED_MAX: usize = 512;

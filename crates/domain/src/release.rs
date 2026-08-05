@@ -158,7 +158,7 @@ pub fn approval_evaluator(resolved: &[Evaluator]) -> Option<Evaluator> {
     })
 }
 
-/// Layer the job's additive evaluators (design-lifecycle.md) and its approval
+/// Layer the job's additive evaluators (docs/reference/design-lifecycle.md) and its approval
 /// gate ([`Job::require_approval`]) on top of the type's list — the type's
 /// evaluators are a floor, so a name collision is an error and the merged list
 /// must still pass the §1.1 field rules. The base type already validated clean
@@ -302,7 +302,7 @@ resources:
     }
 
     /// **Inputs never influence config resolution** (design #311 Decision 1, the
-    /// invariant that keeps design-lifecycle.md's eval floor intact): for any job
+    /// invariant that keeps docs/reference/design-lifecycle.md's eval floor intact): for any job
     /// type, any job, and any two input maps, the `JobType` the release path
     /// resolves is *equal*. An input is a value delivered to a container, never a
     /// substitution into the file that decides which gates run — so this fails the

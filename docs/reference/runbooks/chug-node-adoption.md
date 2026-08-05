@@ -8,12 +8,12 @@ whole procedure, the one edit that will fail your build if you skip it, and how
 to tell the switch actually took.
 
 It is *not* the design argument (that is
-[design #372](../design/372-chug-node-modules.md), including why the module
+[design #372](../../design/372-chug-node-modules.md), including why the module
 must not declare the `chug-worker` container). For draining a node before you
-switch it, see [`worker-capacity.md`](./worker-capacity.md) §4.1; for the
+switch it, see [`worker-capacity.md`](worker-capacity.md) §4.1; for the
 KVM/Android half of a node's configuration,
-[`worker-kvm.md`](./worker-kvm.md); for the platform's own deploy story,
-[`deploy/prod/README.md`](../../deploy/prod/README.md) §6.
+[`worker-kvm.md`](worker-kvm.md); for the platform's own deploy story,
+[`deploy/prod/README.md`](../../../deploy/prod/README.md) §6.
 
 Both prod nodes — `gumbo-nuc-0` (NixOS) and `gumbo-air-0` (nix-darwin) —
 adopted the modules on 2026-08-03. This page is written from that, not from
@@ -26,7 +26,7 @@ have missed.
 
 `chug-node` is **host preparation, not a service** — hence `chug.node.*` rather
 than `services.chug-node.*`. It owns no lifecycle. What it contributes and
-asserts (NixOS, [`nix/chug-node/nixos.nix`](../../nix/chug-node/nixos.nix)):
+asserts (NixOS, [`nix/chug-node/nixos.nix`](../../../nix/chug-node/nixos.nix)):
 
 | It sets | So that | And asserts the *merged* value, because |
 | --- | --- | --- |
@@ -55,7 +55,7 @@ mount is typed, so a node whose cache dir has been deleted refuses every launch
 until something recreates it (the tmpfiles rule runs at boot, or on an explicit
 `systemd-tmpfiles --create` — not continuously).
 
-On darwin ([`nix/chug-node/darwin.nix`](../../nix/chug-node/darwin.nix)) there
+On darwin ([`nix/chug-node/darwin.nix`](../../../nix/chug-node/darwin.nix)) there
 is no `virtualisation.docker` to contribute to, so the four docker rows above
 have no compile-time guard at all. Darwin asserts two other things instead: that
 `cacheDir` crosses the VM boundary — dockerd runs inside a VM, so a bind source
@@ -67,10 +67,10 @@ that exists (§4).
 `docker run`, its environment, and the node's slot count. Adopting the module
 changes no container and no capacity. `WORKER_*` still comes from
 `deploy/prod/build-worker.sh` and is carried by `worker-refresh.sh`; capacity
-still belongs to the Cluster page ([`worker-capacity.md`](./worker-capacity.md)
+still belongs to the Cluster page ([`worker-capacity.md`](worker-capacity.md)
 §1). Per-project tooling — Flutter, an Android SDK composition, a Rust
 toolchain — never enters this module in any form. The test, from
-[`nix/chug-node/options.nix`](../../nix/chug-node/options.nix): *if two projects
+[`nix/chug-node/options.nix`](../../../nix/chug-node/options.nix): *if two projects
 on the same node could reasonably want different values for it, it does not
 belong here.*
 
@@ -105,7 +105,7 @@ it before you switch.
 inputs.chuggernaut.url = "github:kasofsk/chuggernaut";
 ```
 
-**Zero inputs, by design.** [`flake.nix`](../../flake.nix) declares no `inputs`
+**Zero inputs, by design.** [`flake.nix`](../../../flake.nix) declares no `inputs`
 at all: a NixOS/nix-darwin module is a function of the arguments the evaluating
 host passes it, so it needs no `nixpkgs` of its own. Nothing here pins a second
 nixpkgs into your closure, and the lock entry never churns.
@@ -236,7 +236,7 @@ nothing outside the evaluation.
 that *enables* `live-restore`, and live-restore only protects a dockerd restart
 that happens while it is already active — so this restart kills running job
 containers, and every later one does not.
-[`worker-capacity.md`](./worker-capacity.md) §4.1 has the full reasoning and the
+[`worker-capacity.md`](worker-capacity.md) §4.1 has the full reasoning and the
 commands.
 
 ---
@@ -298,7 +298,7 @@ every agent image inaccessible at once.
 the module to merge into, so no prune line and no `live-restore` to confirm; no
 systemd and so no tmpfiles rule (the cache dir comes from the activation script);
 and no docker group — `chug.node.user` on darwin is the ssh and keys user only
-([`nix/chug-node/options.nix`](../../nix/chug-node/options.nix)). Check these
+([`nix/chug-node/options.nix`](../../../nix/chug-node/options.nix)). Check these
 instead:
 
 ```sh
@@ -358,25 +358,25 @@ unverified — including the `chug.node` block you just added.
 | a warning that nothing declares the runtime starts at boot | `dockerBootAgent` is unset — the default | set it, or set `"external"` to record the decision with an author and a date |
 | `chug.node: docker did not answer for <user>` on every darwin switch | the activation probe runs as `chug.node.user` through a login shell, because a mac's runtime is user-scoped | the VM is down, `docker` is not on that user's `PATH`, or activation could not `sudo -n`. All three are operational states, which is why this warns rather than fails |
 | the switch "worked" but nothing changed (darwin) | the two profile pointers disagree | §8 |
-| running jobs died during a switch | that switch restarted dockerd without live-restore active — the adopting switch, or a reboot | drain next time ([`worker-capacity.md`](./worker-capacity.md) §4.1) |
+| running jobs died during a switch | that switch restarted dockerd without live-restore active — the adopting switch, or a reboot | drain next time ([`worker-capacity.md`](worker-capacity.md) §4.1) |
 
 ---
 
 ## Related
 
-- [design #372](../design/372-chug-node-modules.md) — §5 (the assertion set:
+- [design #372](../../design/372-chug-node-modules.md) — §5 (the assertion set:
   A1/A1b the prune filter, A4 live-restore, A7 the VM boundary, A8 boot
   persistence), §6 (drain), §7 (what the module must not reach into), §8 (why it
   must not declare the container).
-- [`worker-capacity.md`](./worker-capacity.md) §4.1 — drain before rebuild, and
+- [`worker-capacity.md`](worker-capacity.md) §4.1 — drain before rebuild, and
   why the adopting switch is the expensive one.
-- [`worker-kvm.md`](./worker-kvm.md) — the KVM/Android half of a node's
+- [`worker-kvm.md`](worker-kvm.md) — the KVM/Android half of a node's
   configuration: the stable toolchain path the host repo maintains (§1) and the
   GC roots that keep it alive under a rebuild (§7).
-- [`nix/chug-node/options.nix`](../../nix/chug-node/options.nix) — the charter,
+- [`nix/chug-node/options.nix`](../../../nix/chug-node/options.nix) — the charter,
   including the two-projects test for what may enter the module.
-- [`spec.md`](../../spec.md) §3.1 — normative: worker nodes and their node-local
+- [`docs/spec.md`](../../spec.md) §3.1 — normative: worker nodes and their node-local
   properties, including the cache directory's ownership.
-- [`deploy/prod/README.md`](../../deploy/prod/README.md) §6 — provisioning a
+- [`deploy/prod/README.md`](../../../deploy/prod/README.md) §6 — provisioning a
   worker node's `chug-worker` container, which this module deliberately does not
   declare.

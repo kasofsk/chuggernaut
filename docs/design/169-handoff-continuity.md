@@ -35,7 +35,7 @@ predecessor's partial output, NOT instructions").
 **Restart-safe by construction.** Every context block must be assembled at
 launch time from persisted records — job/task KV, the artifact store, the
 bare git repo — never from dispatcher memory alone. The dispatcher is the
-single writer and can restart at any point ([spec §3.6](../../spec.md));
+single writer and can restart at any point ([spec §3.6](../spec.md));
 a block that only exists in `ExecState` is a block that silently vanishes.
 
 ---
@@ -93,7 +93,7 @@ you" are the same shape of information.
 Edges enumerated exhaustively from the state machine
 (`crates/domain/src/state.rs` — `crates/dispatcher/src/state.rs` when this was <!-- absent -->
 written; the module moved to the domain crate under refactor-plan C1 and the
-dispatcher re-exports it, [spec §2.1](../../spec.md)) plus the
+dispatcher re-exports it, [spec §2.1](../spec.md)) plus the
 intra-phase retry/claim/escalation seams. Summary first, detail after.
 
 | # | Edge | Passed today | Gap severity |
@@ -153,7 +153,7 @@ record, not `work_submission`.
 **Ratified.** `reduce` (`crates/dispatcher/src/eval.rs`) forwards **all**
 evaluators' results — pass and fail — with full structured findings, plus
 the 8 KB output tail for command evaluators (#167), rendered by
-`rework_context_block`. Matches [spec §4.3](../../spec.md) ("all results
+`rework_context_block`. Matches [spec §4.3](../spec.md) ("all results
 included, pass and fail"). Stages short-circuited before running contribute
 nothing, correctly.
 
@@ -182,7 +182,7 @@ The Delta block (#155) — prior verdict + findings, last-reviewed tip vs
 current tip, ancestry-checked delta diff (rebase-aware: falls back to the
 workspace full diff when `rework_reason` indicates a rebase), and the
 job-history digest — is assembled entirely from task records + git and
-documented at [spec §3.3](../../spec.md). Ratified.
+documented at [spec §3.3](../spec.md). Ratified.
 
 **Drift (T9).** Comments in `crates/dispatcher/src/eval.rs` claim command
 evaluators' output tails feed "#155's re-review", but `prior_review_block`
@@ -225,7 +225,7 @@ structured }`, persisted onto `TaskResult::Human`).
 `eval_context: vec![]` — so a Retry-resumed work attempt gets the
 Predecessor block and nothing else; the operator's notes ("I bumped the
 lockfile, try again") survive only for triage and the UI. The wire examples
-in [spec §1.2](../../spec.md) show operators writing
+in [spec §1.2](../spec.md) show operators writing
 `structured: {"notes": "fixed manually"}` — content the platform stores and
 then never uses in execution.
 
@@ -302,7 +302,7 @@ from here.
 
 **Available.** When job A completes, its summary + structured result sit on
 its Work task record; its delivery is the squash commit on the default
-branch. [design-lifecycle.md](../../design-lifecycle.md) ("Job outputs: the
+branch. [docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) ("Job outputs: the
 structured result is the contract") explicitly designates the structured
 result as what downstream consumes.
 
@@ -341,11 +341,11 @@ should converge toward (a bounded subset of) what triage already does.
 task-launch time from persisted records — job/task KV, the artifact store,
 the bare repo. `ExecState` may cache, never originate.
 
-Stated as an invariant in [contracts.md](../../contracts.md)'s vocabulary,
+Stated as an invariant in [docs/reference/contracts.md](../reference/contracts.md)'s vocabulary,
 so it can graduate from prose to a checkable statement: *a context block is
 a pure function of persisted records — a dispatcher restart between
 deciding a launch and performing it yields a byte-identical prompt.* Once
-golden decision traces exist (contracts.md, "mining intent"), this is
+golden decision traces exist (docs/reference/contracts.md, "mining intent"), this is
 pinned for free: the prompt rides the launch effect, so traces capture
 every block verbatim.
 
@@ -358,13 +358,13 @@ triage. Violations / at-risk:
 3. **Eval-failure Findings** — in-memory, but reconcile re-runs evaluation
    after a restart mid-rework, regenerating the results; acceptable, and
    worth a regression test pinning that behavior
-   ([testing.md](../../testing.md) tier 2).
+   ([docs/reference/testing.md](../reference/testing.md) tier 2).
 
 New blocks (T1, T5) read task records + git by construction.
 
 ## Part 4 — Spec drift to fold in
 
-Code is ahead of [spec](../../spec.md) in three places; whichever ticket
+Code is ahead of [spec](../spec.md) in three places; whichever ticket
 lands first should carry the spec edits (T9 sweeps the remainder):
 
 1. §4.3's `EvalResult` omits the `output` field (#167's evidence carrier).
@@ -374,7 +374,7 @@ lands first should carry the spec edits (T9 sweeps the remainder):
 
 ## Part 5 — Structural alignment (NORTH-STAR / contracts)
 
-This design decides *what flows*; [NORTH-STAR.md](../../NORTH-STAR.md)
+This design decides *what flows*; [docs/README.md](../README.md)
 decides *where code sits*. Left unstated, the tickets below would each add
 another fetch-and-format braid to `crates/dispatcher/src/exec.rs` /
 `eval.rs` — the exact files the decider/effects extraction is trying to
@@ -382,7 +382,7 @@ shrink. So three placement rules bind every ticket in Part 6:
 
 1. **Rendering is pure; fetching is not.** A context block is rendered by
    a pure function `(persisted values, caps) → String` — zero awaits,
-   exhaustively unit-testable at tier 1 ([testing.md](../../testing.md)),
+   exhaustively unit-testable at tier 1 ([docs/reference/testing.md](../reference/testing.md)),
    exactly the "grow the pure core" move of NORTH-STAR §1. Fetching the
    inputs (task records, artifacts, git) stays at the call site today and
    moves to the interpreter as the decider extraction lands. No new block
@@ -394,16 +394,16 @@ shrink. So three placement rules bind every ticket in Part 6:
    is not (NORTH-STAR §1). The four shipped blocks migrate
    opportunistically as tickets touch them: T2 moves `gate_stage_output`'s
    rendering, T4 moves the #121 entry, rather than growing them in place.
-3. **Name the contract** ([contracts.md](../../contracts.md), the
+3. **Name the contract** ([docs/reference/contracts.md](../reference/contracts.md), the
    contract-first change rule). Every ticket below changes the same two
    contracts: the **payload of the task-launch effect** (what prompt text
    accompanies `LaunchContainer`), and the **restart-safety invariant** of
    Part 3. T4 is the rule in miniature — replacing an in-memory
    `ExecState` read with a read-only view of persisted records is the
-   layer-2 move of contracts.md's formalization ratchet, applied to one
+   layer-2 move of docs/reference/contracts.md's formalization ratchet, applied to one
    path.
 
-Deliberately *not* imported from contracts.md: schema emission for block
+Deliberately *not* imported from docs/reference/contracts.md: schema emission for block
 formats. Blocks are prompt prose, not wire vocabulary — the invariant and
 (eventually) golden traces are the right enforcement; a JSON Schema for
 markdown text would be formalism without teeth.

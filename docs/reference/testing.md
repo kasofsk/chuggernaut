@@ -3,10 +3,10 @@
 Two tiers exist and the merge gate runs both — tier 2 whenever it can reach a
 broker. A third, fixture-driven end-to-end, is **intent, not machinery**, and
 its section says so. Nothing in this repo runs nightly: the gates are the
-job-type evaluators ([CLAUDE.md](CLAUDE.md), "the evaluation gates ARE the CI").
+job-type evaluators ([CLAUDE.md](../../CLAUDE.md), "the evaluation gates ARE the CI").
 
 A tier, gate or fixture this document describes as existing is a **factual claim
-about the tree** — see [STYLE.md](STYLE.md) Tier 2 rule 5. Anything not built is
+about the tree** — see [docs/reference/style.md](style.md) Tier 2 rule 5. Anything not built is
 marked here rather than described in the present tense.
 
 ## What CI actually runs
@@ -88,7 +88,7 @@ denial is only observable as a wait: four of its assertions wait 3s each for a
 request the server must never answer. That is inherent to what it proves. It was
 19.1s until 408 bounded the fifth one, which passed a 200ms *backoff* to
 `request_with_retry(attempts = 1)` — where the backoff is never reached — and so
-waited async-nats' 10s default request timeout instead (STYLE.md Tier-2 rule 3:
+waited async-nats' 10s default request timeout instead (docs/reference/style.md Tier-2 rule 3:
 every wait a timeout).
 
 ### A skip costs nothing (job 407)
@@ -234,7 +234,7 @@ it is what keeps such a tier affordable:
 Neither mode has a schedule to inherit — nothing here runs nightly, and this repo
 has no `.chug/schedules/` at all. A built tier 3 would be released like the <!-- absent -->
 on-demand [`coverage` job type](#coverage-on-demand-never-a-gate), or scheduled
-under [spec §1.1](spec.md) ([#310](docs/design/310-scheduled-jobs.md)) if someone
+under [spec §1.1](../spec.md) ([#310](../design/310-scheduled-jobs.md)) if someone
 writes the schedule.
 
 **Building it is a separate job, and a design question first** — what seeds a
@@ -245,17 +245,17 @@ here. Do not treat this section as a work item already scoped.
 
 One tree, and it is not an e2e fixture:
 
-- [`fixtures/mobile/`](fixtures/mobile/README.md) — a stock Flutter app
+- [`fixtures/mobile/`](../../fixtures/mobile/README.md) — a stock Flutter app
   skeleton, a *build target* for the mobile-execution proofs
-  ([#367](docs/design/367-android-emulator-execution.md) A2,
-  [#322](docs/design/322-macos-native-runtime.md)). Nothing seeds it, no cargo
+  ([#367](../design/367-android-emulator-execution.md) A2,
+  [#322](../design/322-macos-native-runtime.md)). Nothing seeds it, no cargo
   test reads it, and it carries no job graph; what builds it is the on-demand
   `android-proof` job (`.chug/jobs/android-proof.yaml`), on the one node with
   `/dev/kvm`. Its README says what it is for.
 
 ## Duplication: integration tests are out of scope
 
-The copy-paste gate (`.chug/tasks/check-duplication.sh`, STYLE.md Tier 1) runs at
+The copy-paste gate (`.chug/tasks/check-duplication.sh`, docs/reference/style.md Tier 1) runs at
 `threshold: 0` over the repo, but `.jscpd.json` excludes `**/tests/**` and
 `**/*.test.*` **deliberately**: integration-test setup blocks repeat by nature —
 spawn NATS, seed a project, drive the same first three states — and forcing them
@@ -277,7 +277,7 @@ Two consequences worth knowing:
 
 ## Comments: tests are in scope
 
-The comment lint (`.chug/tasks/check-comments.sh`, STYLE.md Tier 1) covers every
+The comment lint (`.chug/tasks/check-comments.sh`, docs/reference/style.md Tier 1) covers every
 tracked Rust and TypeScript source, `tests/` included — no non-doc comment
 anywhere in the tree, and doc comments capped at two sentences on the blocks a
 change touches. A test that
@@ -351,7 +351,7 @@ no commits and merges nothing (`wrap_up: type: none`).
 
 It is deliberately not wired into `_defaults.yaml` or `ci.sh`: coverage is a
 thing you ask for, not a thing that runs on every push
-([#308](docs/design/308-gha-port.md) §G).
+([#308](../design/308-gha-port.md) §G).
 
 Two limits to read the number with. The run starts the image's `nats-server` and
 exports `CHUG_TEST_NATS_URL`, so tier-2 executes — and since job 408 the
@@ -364,5 +364,5 @@ script says so. And `coverage.lcov` plus
 `coverage-html/` leave the container only through the run's output archive: the
 script tars them to `/workspace/chug-output.tar.gz`, which the dispatcher
 harvests into the task's `output.tar.gz` artifact
-([#362](docs/design/362-binary-artifacts.md) S1, spec §3.2) — download it from
+([#362](../design/362-binary-artifacts.md) S1, spec §3.2) — download it from
 the task's artifact list. It is capped at 16 MiB and refused whole above that.

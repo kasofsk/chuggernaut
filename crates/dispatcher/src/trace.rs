@@ -1,4 +1,4 @@
-//! Golden decision traces (refactor-plan B3, `contracts.md` "mining intent").
+//! Golden decision traces (refactor-plan B3, `docs/reference/contracts.md` "mining intent").
 //!
 //! A [`TraceSink`] is a test-only observability hook: a shared, cheaply-cloned
 //! recorder a test attaches to a [`Core`](crate::core::Core) so every decision

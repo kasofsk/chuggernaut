@@ -25,7 +25,7 @@ everywhere else.
 Status: IMPLEMENTED — shipped in jobs #324, #330, #331 and #332.
 
 Written against the tree at `00dd0dc`. Every claim about current behavior below
-was read out of `spec.md` and the source in this repo; where the brief and the
+was read out of `docs/spec.md` and the source in this repo; where the brief and the
 tree disagree, the tree wins and the disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree).
 ```
@@ -137,11 +137,11 @@ document wrote about itself.
 
 ## Related
 
-- [`spec.md`](../spec.md) §9.4 — documentation jobs and the docs tree; §1.1
+- [`docs/spec.md`](spec.md) §9.4 — documentation jobs and the docs tree; §1.1
   (`groups`), §6.2 (`GET .../groups`, `GET .../designs`).
 - [`.chug/prompts/work/design.md`](../.chug/prompts/work/design.md) — the work
   prompt a `design` job runs under.
 - [design #321](./design/321-job-groups.md) — why groups are derived rather than
   stored, and Decision 8 on status hygiene without a second writer.
-- [`STYLE.md`](../STYLE.md), [`NORTH-STAR.md`](../NORTH-STAR.md) — the blessed
+- [`docs/reference/style.md`](reference/style.md), [`docs/README.md`](README.md) — the blessed
   practices and the structural direction a design is held to.

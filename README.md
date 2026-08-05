@@ -6,6 +6,9 @@ worker fleet runs the work. This is the streamlined path to get an **existing
 repo** (e.g. on GitHub) running on a fresh single host, mirroring `main` back to
 GitHub. Multi-node/HA is out of scope here — see `deploy/prod/README.md`.
 
+Everything else is documentation: [`docs/README.md`](docs/README.md) is the index,
+and [`docs/spec.md`](docs/spec.md) is the normative behavior.
+
 The fastest route is the **`/chug-install` Claude Code skill**: open this repo in
 Claude Code and run `/chug-install`. It detects what already exists, asks the
 model-choice question, runs the scripts below, and verifies each stage. The
@@ -46,7 +49,7 @@ deploy/prod/chug-install.sh worker-join --node nuc --project acme/widget
 - **Linked-origin.** GitHub stays the source of truth; the platform tracks it
   via `POST /api/v1/projects/link` + `CHUG_ORIGIN_*` secrets and opens
   `chug/release-*` PRs back. Choose this to keep GitHub-native PR review. →
-  README §12 / §5.3.
+  [`docs/spec.md`](docs/spec.md) §12 / §5.3.
 
 ⚠️ Under the default model, **direct pushes to GitHub `main` are overwritten** —
 the platform owns `main`.

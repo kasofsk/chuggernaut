@@ -1,4 +1,4 @@
-//! The effect interpreter (refactor-plan B2, `contracts.md` §2).
+//! The effect interpreter (refactor-plan B2, `docs/reference/contracts.md` §2).
 //!
 //! One place that turns an [`Effect`] value into the port call it names. It is
 //! the executable other half of [`crate::effects`]: the enum is the vocabulary
@@ -14,7 +14,7 @@
 //!   arm dispatches to the port method [`Effect::port`] and the module-header
 //!   table promise. No decision logic lives here — an arm never chooses *what*
 //!   to do, only performs the effect handed to it.
-//! - **Spec:** §3.1–3.4; `contracts.md` §2.
+//! - **Spec:** §3.1–3.4; `docs/reference/contracts.md` §2.
 
 use crate::core::{Core, Result};
 use crate::effects::{CredentialAccess, Effect};
@@ -32,7 +32,7 @@ fn cert_access(access: CredentialAccess) -> auth::ssh::CertAccess {
 }
 
 /// What performing an effect produced, for the effects whose results are
-/// decision inputs (contracts.md §2, the continuation contract): the shim
+/// decision inputs (docs/reference/contracts.md §2, the continuation contract): the shim
 /// maps an `Outcome` onto the decider's next event against a fresh view.
 /// Dispatcher-owned — it carries `vcs` port types the pure crate must not see.
 #[derive(Debug)]

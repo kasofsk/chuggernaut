@@ -310,7 +310,7 @@ pub fn stamp_event_inputs(extra: &mut serde_json::Value, inputs: &BTreeMap<Strin
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
-    //! Tier-1 coverage (`testing.md`): the validation verdict and the fill rule
+    //! Tier-1 coverage (`docs/reference/testing.md`): the validation verdict and the fill rule
     //! are pure functions of a declaration and a map, so nothing here needs NATS,
     //! Docker or a ref. The create → release → Ready sequence they compose into
     //! is pinned tier-2 (`crates/dispatcher/tests/inputs.rs`).

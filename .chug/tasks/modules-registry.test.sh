@@ -1,5 +1,5 @@
 #!/bin/sh
-# Shell test for .chug/tasks/check-modules.sh, the MODULES.md registry gate —
+# Shell test for .chug/tasks/check-modules.sh, the docs/reference/modules.md registry gate —
 # no NATS, no Docker, no cargo required.
 #
 # The gate reads the tree under its cwd, so each case runs it in a subshell
@@ -56,13 +56,13 @@ run_gate() { # <fixture-root> -> writes rc to $RC, output to $OUT
 	set -e
 }
 
-# A fixture root with a dispatcher tree and a MODULES.md carrying whatever rows
+# A fixture root with a dispatcher tree and a docs/reference/modules.md carrying whatever rows
 # the caller passes on stdin. No domain tree, so the domain half self-skips.
 fixture() { # <name> <module-path>... ; rows on stdin
 	root="$WORK/$1"
 	shift
 	rm -rf "$root"
-	mkdir -p "$root/crates/dispatcher/src"
+	mkdir -p "$root/crates/dispatcher/src" "$root/docs/reference"
 	echo '// crate root' >"$root/crates/dispatcher/src/lib.rs"
 	for m in "$@"; do
 		mkdir -p "$root/crates/dispatcher/src/$(dirname "$m")"
@@ -76,7 +76,7 @@ fixture() { # <name> <module-path>... ; rows on stdin
 		echo '| Module | Contract | Spec |'
 		echo '| --- | --- | --- |'
 		cat
-	} >"$root/MODULES.md"
+	} >"$root/docs/reference/modules.md"
 	printf '%s' "$root"
 }
 
@@ -130,14 +130,14 @@ run_gate "$root"
 check "row naming no module fails" 1 "$RC" "$OUT" \
 	'lists module `platform_ops/gone`'
 
-# --- case 5: a missing MODULES.md is a broken gate, not a pass -------------
+# --- case 5: a missing docs/reference/modules.md is a broken gate, not a pass -------------
 root="$(fixture no_registry core <<'EOF'
 | `core` | x | §1 |
 EOF
 )"
-rm "$root/MODULES.md"
+rm "$root/docs/reference/modules.md"
 run_gate "$root"
-check "missing MODULES.md fails loudly" 1 "$RC" "$OUT" "MODULES.md is missing"
+check "missing docs/reference/modules.md fails loudly" 1 "$RC" "$OUT" "docs/reference/modules.md is missing"
 
 # A context crate tree beside the dispatcher one (refactor-plan C9): modules
 # under `crates/platform-ops/src`, registered by a section naming that path.

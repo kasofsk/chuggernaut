@@ -17,7 +17,7 @@
 //!
 //! The decision half — which claims a token carries, how long it lives, and the
 //! shape of the files that carry it — is pure in `auth::workload`; this module
-//! is the I/O around it (STYLE.md Tier 2 #1, contracts.md).
+//! is the I/O around it (docs/reference/style.md Tier 2 #1, docs/reference/contracts.md).
 
 use crate::core::{Core, CoreError, Result};
 use auth::workload::{
@@ -28,7 +28,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 use types::{JobType, Task, TaskPhase, WorkloadIdentityGrant};
 
-/// The per-container cap on granted identities (STYLE.md Tier 2 #3). A
+/// The per-container cap on granted identities (docs/reference/style.md Tier 2 #3). A
 /// declaration over it fails the launch loudly rather than minting unbounded
 /// credentials.
 pub(crate) const IDENTITIES_PER_CONTAINER_MAX: usize = 8;

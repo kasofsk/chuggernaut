@@ -23,7 +23,7 @@
 //!   handed this job a launch slot, so decide whether it may still take it. A
 //!   job revoked or escalated while it waited quietly forfeits the slot.
 //!
-//! The `Msg` contracts this decider owns (contracts.md §1):
+//! The `Msg` contracts this decider owns (docs/reference/contracts.md §1):
 //!
 //! - `Msg::ReleaseJob` — **pre:** the job is `Frozen` or `Draft` and its §2.2
 //!   release-time pass succeeded (the shim rejects otherwise, so this decider
@@ -45,7 +45,7 @@
 //! - **Accepts:** a [`ReadyView`] (the target job, the pre-read dependency
 //!   verdict, the clock) and a [`ReadyEvent`].
 //! - **Emits:** `(Vec<Transition>, Vec<Effect>, ReadyStep)` — values only. The
-//!   owned effect set (contracts.md §2): `PublishEvent` for `job-finalized`,
+//!   owned effect set (docs/reference/contracts.md §2): `PublishEvent` for `job-finalized`,
 //!   `job-released` and `job-unblocked`, plus `Stall` for a failed
 //!   Ready-transition re-validation. The [`ReadyStep`] names the shell
 //!   bookkeeping that follows — queue admission, batch absorption, the
@@ -53,13 +53,13 @@
 //!   dispatcher state (the ready queue, the member records, the `vcs` port)
 //!   the pure crate cannot see.
 //! - **Guarantees:** pure and synchronous; every branch exhaustively matched
-//!   and unit-tested; asserts negative space (STYLE.md Tier 2 #2) — never
+//!   and unit-tested; asserts negative space (docs/reference/style.md Tier 2 #2) — never
 //!   admits a job whose deps are outstanding, never pins a `base_ref` on a job
 //!   it parks `Blocked`, never decides for a terminal job. Performs no effect,
 //!   holds no `&mut Core`.
 //! - **Spec:** §2.1 (Frozen/Draft→Ready|Blocked, Blocked→Ready|Stalled), §2.2
 //!   (the release-time and Ready-transition passes), §3.1 (the ready queue),
-//!   §3.5 (the launch-slot budget, via [`crate::queue`]); contracts.md §2;
+//!   §3.5 (the launch-slot budget, via [`crate::queue`]); docs/reference/contracts.md §2;
 //!   refactor-plan C4.
 //!
 //! **Boundary.** The §3.5 launch queue's *pure* half — the drain-priority
@@ -414,7 +414,7 @@ fn admitted_record(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     //! Tier-1 coverage of every Ready-phase branch: pure values in, pure values
-    //! out, no NATS/Docker (`testing.md` tier 1). The dispatcher's golden traces
+    //! out, no NATS/Docker (`docs/reference/testing.md` tier 1). The dispatcher's golden traces
     //! pin the same decisions end-to-end (`release_block_unblock.yaml`,
     //! `stall_on_revalidation_failure.yaml`).
     use super::*;

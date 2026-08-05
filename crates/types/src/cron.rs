@@ -28,7 +28,7 @@ use thiserror::Error;
 /// How many whitespace-separated fields an accepted expression carries.
 pub const CRON_FIELD_COUNT: usize = 5;
 
-/// How far back [`CronExpr::latest_occurrence`] looks (STYLE.md Tier 2 #3:
+/// How far back [`CronExpr::latest_occurrence`] looks (docs/reference/style.md Tier 2 #3:
 /// everything is bounded). A dispatcher down longer than this does not catch up
 /// on the occurrences it missed — it arms for the next one.
 pub const CRON_LOOKBACK_DAYS_MAX: u64 = 366;

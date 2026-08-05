@@ -45,7 +45,7 @@ pub struct JobType {
     pub runtime: Option<Runtime>,
     pub work: WorkSpec,
     /// The third step of the job (work → evaluation → wrap-up): what happens
-    /// after eval-pass (design-lifecycle.md).
+    /// after eval-pass (docs/reference/design-lifecycle.md).
     #[serde(default)]
     pub wrap_up: WrapUpSpec,
     pub resources: Option<Resources>,
@@ -174,7 +174,7 @@ impl ReviewSpec {
     }
 }
 
-/// Wrap-up declaration (design-lifecycle.md): the job's third step. A block
+/// Wrap-up declaration (docs/reference/design-lifecycle.md): the job's third step. A block
 /// rather than a bare scalar so future wrap-up behavior (e.g. a
 /// `deployed/{env}` tag ref) extends it without reshaping the schema.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -270,7 +270,7 @@ fn is_ascii_dashed_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
 }
 
-/// Wrap-up mode after eval-pass (design-lifecycle.md).
+/// Wrap-up mode after eval-pass (docs/reference/design-lifecycle.md).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

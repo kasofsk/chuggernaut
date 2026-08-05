@@ -50,7 +50,7 @@ resources:
   cpu: 6
   memory: 12Gi
   # NOT code.yaml's 1h shape and not coverage.yaml's doubling of it. The ladder
-  # bounds its own waits (STYLE.md Tier 2 rule 3): rung 5 cannot exceed ~13m of
+  # bounds its own waits (docs/reference/style.md Tier 2 rule 3): rung 5 cannot exceed ~13m of
   # bounded waiting and rung 4's `flutter build apk` is capped at 1h by the
   # script itself, which is the only genuinely open-ended step — a cold run
   # fetches the Gradle distribution, the AGP dependency graph and the pub cache

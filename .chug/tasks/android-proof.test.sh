@@ -16,7 +16,7 @@
 #      (LOGS_CAP, crates/worker/src/daemon.rs) and the ladder IS the deliverable.
 #   3. A FAILURE NAMES ITS RUNG EXACTLY ONCE, and the rungs AFTER it — never the
 #      failing one itself — read NOT REACHED rather than silently missing.
-#   4. EVERY WAIT REALLY IS BOUNDED (STYLE.md Tier 2 rule 3) and the failure
+#   4. EVERY WAIT REALLY IS BOUNDED (docs/reference/style.md Tier 2 rule 3) and the failure
 #      names the bound in seconds — an emulator that never reports
 #      `sys.boot_completed` must fail its rung, not hang until `task_timeout`.
 #      Including the case that bound is really for: a device that accepts the

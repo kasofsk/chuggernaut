@@ -11,7 +11,7 @@ violations of those as findings.
    (`git diff $BASE_BRANCH...HEAD`, or `git log -p` on this branch).
 2. Judge: does the change implement the brief correctly and completely,
    without breaking or needlessly touching unrelated code? Does new behavior
-   come with a regression test at the right tier (`testing.md`)?
+   come with a regression test at the right tier (`docs/reference/testing.md`)?
    Execution policy — CI runs as its own evaluator task after review, so
    don't repeat it here:
    - **Do not** run the full CI suite: no `cargo test --workspace`, no

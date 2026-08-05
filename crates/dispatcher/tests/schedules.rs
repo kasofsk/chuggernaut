@@ -9,7 +9,7 @@
 //! that the `schedule-*` events land on the jobs the design names.
 //!
 //! The loader tests need git only; the scan tests need NATS and self-skip
-//! without it (`testing.md`).
+//! without it (`docs/reference/testing.md`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

@@ -1,6 +1,6 @@
 # Dispatcher contracts — formalizing the interfaces
 
-Companion to `NORTH-STAR.md` (target factoring) and `structure-assessment.md`
+Companion to `docs/README.md` (target factoring) and `docs/reference/structure-assessment.md`
 (current-state audit). This document answers: what are the high-level
 interfaces inside the dispatcher, which contracts exist today (explicitly or
 implicitly), and how do we extract, formalize, and enforce them so they can
@@ -168,16 +168,16 @@ for command tasks. (`crates/worker/src/daemon.rs` rebuilds one node-side with
 `JobType::placement_node(&self)` takes no `Job`, so the contract is nearly
 self-evident from the signature — it is written down because a *fourth* site
 could be written otherwise and nothing in the tree would catch it. The tier-1
-property test behind [#311](docs/design/311-job-inputs.md) Decision 1,
+property test behind [#311](../design/311-job-inputs.md) Decision 1,
 `resolved_job_type_is_equal_for_any_two_input_maps`
 (`crates/domain/src/release.rs`), guards **job-type resolution**, which a
 launch-site read of `job.inputs` bypasses entirely
-([#361](docs/design/361-per-run-placement.md)). So this is a **reviewer-enforced**
+([#361](../design/361-per-run-placement.md)). So this is a **reviewer-enforced**
 contract by design: #361 considered a mechanical check and rejected it — catching
 this properly needs taint analysis, and a grep gate over a struct-field
 initializer would match a coding *shape* where `.chug/tasks/check-comments.sh`
 and `.chug/tasks/check-duplication.sh` match a lexical *fact*. Placement is a
-fleet decision (`spec.md` §3.1); a second source for `node` is a design, not a
+fleet decision (`docs/spec.md` §3.1); a second source for `node` is a design, not a
 call site. Reject one by name.
 
 ### 3. Invariants — what must always hold
@@ -229,11 +229,11 @@ a comment. The invariants enforced (each named, with its spec §):
   artifact, both roads.
 - **The doc comments with spec § refs → per-module contract headers.** The
   discipline already exists; it needs a home and a completeness check (the
-  MODULES.md registry rows should point at these).
+  docs/reference/modules.md registry rows should point at these).
 - **Serialize the vocabulary itself.** `Msg`, the Effect enum, `JobState`,
   and the KV record shapes are all serde types — emit JSON Schema from them
   and the formal interface definition becomes a build artifact, not a document
-  that drifts. (`NORTH-STAR.md` §2, applied inward.)
+  that drifts. (`docs/README.md` §2, applied inward.)
 
 ## The formalization ratchet — increasing strength
 

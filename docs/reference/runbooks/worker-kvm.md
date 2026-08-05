@@ -6,11 +6,11 @@ other node to change at all. This page is the whole procedure and its failure
 modes.
 
 It is *not* the design argument (that is
-[design #367](../design/367-android-emulator-execution.md), including why a
+[design #367](../../design/367-android-emulator-execution.md), including why a
 device passthrough beats a host runtime) and not the normative text
-([`spec.md`](../../spec.md) §3.1). For capacity, see
-[`worker-capacity.md`](./worker-capacity.md); for the standing deploy story,
-[`deploy/prod/README.md`](../../deploy/prod/README.md) §6.
+([`docs/spec.md`](../../spec.md) §3.1). For capacity, see
+[`worker-capacity.md`](worker-capacity.md); for the standing deploy story,
+[`deploy/prod/README.md`](../../../deploy/prod/README.md) §6.
 
 ---
 
@@ -361,20 +361,20 @@ Read all four of these before you set it:
 
 ## Related
 
-- [design #367](../design/367-android-emulator-execution.md) — §2.3 (the three
+- [design #367](../../design/367-android-emulator-execution.md) — §2.3 (the three
   settings), §3.3 and §3.5 (the mounts and the stable path), §3.4 (what the
   `/nix/store` mount exposes), Phasing (A1 shipped the daemon, A2 is the gradle
   proof this unblocks).
-- [design #373](../design/373-project-toolchains.md) — 3b (where the realise
+- [design #373](../../design/373-project-toolchains.md) — 3b (where the realise
   runs and its trust cost), 3c (the bound), Decision 4 and Correction C5 (the
   roots and the reaper) — the argument behind §7 above; Decision 1 (tenancy),
   Decision 2 rule 3 (the allow-list), 3a (the relative ref) and Decision 5 with
   C6 (warming as a precondition) — the argument behind §8.
-- [`spec.md`](../../spec.md) §3.1 — worker nodes, node-local properties.
-- [`worker-capacity.md`](./worker-capacity.md) — the other node knob, and the
+- [`docs/spec.md`](../../spec.md) §3.1 — worker nodes, node-local properties.
+- [`worker-capacity.md`](worker-capacity.md) — the other node knob, and the
   same "recreate the daemon to change a boot value" shape. §4.1 is the drain a
   toolchain-bumping `nixos-rebuild` needs, for §7's reason.
-- [the `chug-node` adoption runbook](./chug-node-adoption.md) — the host repo's
+- [the `chug-node` adoption runbook](chug-node-adoption.md) — the host repo's
   side: the modules that declare a node's docker, prune and cache conditions.
   It owns none of the settings on this page.
 - `deploy/prod/build-worker.sh`, `deploy/prod/worker-refresh.sh`,

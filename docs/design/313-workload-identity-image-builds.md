@@ -28,7 +28,7 @@ shipped** — a declared identity now produces a usable credential inside its ow
 container, valid at a provider nobody has registered yet (S6).
 
 Written against the tree at `d7ebfae`. Every claim about current behavior below
-was read out of [spec.md](../../spec.md) and the source in this repo; where the
+was read out of [docs/spec.md](../spec.md) and the source in this repo; where the
 brief or a sibling doc disagrees with the tree, the tree wins and the
 disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree). Every claim about Google
@@ -56,7 +56,7 @@ named where it is real in [Sequencing](#sequencing-and-what-ships-first) (slice
 S11) and in [B1](#b1-the-build-mechanism)'s `NodeCapabilities` note. Everything
 this document needs from #310, #311 and #293 is a mechanism available today.
 
-Related: [spec.md](../../spec.md) §1.1 (job types, per-container secret
+Related: [docs/spec.md](../spec.md) §1.1 (job types, per-container secret
 scoping, the config root), §2.2 (release validation's three passes), §3.1
 (fleet, worker daemon, node-local build caching, worker self-refresh), §4.1
 (container env), §4.2/§4.3 (injected files, the job brief), §5.3 (the reserved
@@ -67,10 +67,10 @@ runtime, never in NATS KV), §12.3 (admin CLI), §14 (config and version skew),
 Appendix: Infrastructure Summary, Appendix: Deferred;
 [deploy/prod/README.md](../../deploy/prod/README.md) §4 (R2 backups), §5a/§5b
 (tailnet vs public exposure), §6 (image builds on the node);
-[STYLE.md](../../STYLE.md) (Tier 1 no host-daemon reach, Tier 2 #2 asserts, #3
+[docs/reference/style.md](../reference/style.md) (Tier 1 no host-daemon reach, Tier 2 #2 asserts, #3
 bounds, #4 naming, #6 tests; Tier 3 simplicity, single writer);
 [CLAUDE.md](../../CLAUDE.md) ("the evaluation gates ARE the CI"; per-consumer
-forge); [testing.md](../../testing.md); [crates.md](../../crates.md).
+forge); [docs/reference/testing.md](../reference/testing.md); [docs/reference/crates.md](../reference/crates.md).
 
 ## Problem
 
@@ -405,7 +405,7 @@ same argument applies here, three ways:
    published at a stable URL" is a fact worth not creating for free.
 
 Where the halves live, exactly mirroring the split that already exists for
-`jwt_public.pem` (`spec.md` Appendix: Infrastructure Summary: "The JWT public
+`jwt_public.pem` (`docs/spec.md` Appendix: Infrastructure Summary: "The JWT public
 key is also mounted into the API layer for token verification; all other private
 keys are dispatcher-only"):
 
@@ -465,7 +465,7 @@ alternative — a fixed short TTL with in-flight re-minting — needs a channel 
 does not exist (a running container cannot ask the dispatcher for a fresh
 credential; §7.4's per-job NATS permissions carry no such subject) and would be
 new surface for a problem the cap already bounds. The cap is required by
-STYLE.md Tier 2 #3 and keeps us an order of magnitude under the provider's 24h
+docs/reference/style.md Tier 2 #3 and keeps us an order of magnitude under the provider's 24h
 rule even for a job type that sets `task_timeout: 12h`.
 
 The residual, named: a `deploy` job with `task_timeout: 30m`
@@ -941,7 +941,7 @@ asks, and one that a service-account key cannot answer at all.
 
 The mint itself is a §7.4-shaped launch-path concern, so it goes where the
 existing two credentials go: composed in `crates/dispatcher/src/exec.rs`, on the
-single-writer path, once per container launch. Per STYLE.md Tier 2 #2 (assert
+single-writer path, once per container launch. Per docs/reference/style.md Tier 2 #2 (assert
 negative space), assert at the injection site that no identity file is written
 for a container whose resolved declaration is empty — the inverse of #311's
 collision assert, and the one that would catch an inheritance bug.
@@ -1124,7 +1124,7 @@ and a buildx cache satisfies neither cleanly across tenants). But the **need**
 evaporates under B-IV, because the cache lives on the daemon side of the proxy
 and was already there.
 
-Two obligations follow, both required by STYLE.md Tier 2 #3 (everything is
+Two obligations follow, both required by docs/reference/style.md Tier 2 #3 (everything is
 bounded):
 
 - **Per-project cache ids** in project Dockerfiles, so two projects cannot
@@ -1292,7 +1292,7 @@ Slice labels below are `S{n}` deliberately — the `A`/`B` labels above name
 | **S11** | Fold `builder` into #309's `NodeCapabilities` so placement filters instead of failing at the build command | [#309](./309-host-native-execution.md) P2 |
 
 **The ordering S3d exists to make unmissable.** S3 spends an epoch, so per
-`spec.md` §14.3 the merge-time gate compares a config's declared
+`docs/spec.md` §14.3 the merge-time gate compares a config's declared
 `min_dispatcher` against the **deployed** dispatcher's epoch and fails the
 config's own CI with "requires dispatcher >= X; deploy first or gate it". So:
 
@@ -1312,10 +1312,10 @@ of the binary parks every job of its type with `config_schema_skew` rather than
 running it without the credential it declared.
 
 S2 being a pure function matters more than it looks: it is the piece a reviewer
-must be able to read as a whole, and per STYLE.md Tier 2 #1 and
-[contracts.md](../../contracts.md) it belongs on the decider side of the split,
+must be able to read as a whole, and per docs/reference/style.md Tier 2 #1 and
+[docs/reference/contracts.md](../reference/contracts.md) it belongs on the decider side of the split,
 with the mint's I/O (reading the KV record, writing the files) on the effect
-side. Test placement per [testing.md](../../testing.md): claim assembly, the TTL
+side. Test placement per [docs/reference/testing.md](../reference/testing.md): claim assembly, the TTL
 cap, the `sub` length bound and the field rules are pure → **tier 1**; the
 launch round trip (declared identity → two files present with the right modes,
 undeclared → no files) is **tier 2**.
@@ -1429,20 +1429,20 @@ Per CLAUDE.md's contract-first rule for dispatcher work.
 | Golden trace | A job type declaring no identities produces a container file set and env byte-identical to today's — the feature is off, not merely unused |
 
 New modules get a doc header (accepts / emits / guarantees / spec §) and a
-`MODULES.md` registry row per the direction-of-travel rule; `.chug/tasks/ci.sh`
+`docs/reference/modules.md` registry row per the direction-of-travel rule; `.chug/tasks/ci.sh`
 enforces the registry.
 
 ## What this makes wrong elsewhere
 
-- **`spec.md` §12.1 and the Appendix: Infrastructure Summary** enumerate four
+- **`docs/spec.md` §12.1 and the Appendix: Infrastructure Summary** enumerate four
   generated keypairs, and are *already* one behind:
   `crates/cli/src/keygen.rs` also generates `age_artifacts.key`.
   [A2](#a2-the-signing-key) makes six. Fix the omission and the addition in the
   same edit. The Appendix's identity row ("JWT (RS256) + SSH CA + NATS KV")
   gains an issuer.
-- **`spec.md` §7.4** says "the dispatcher issues **two** short-lived
+- **`docs/spec.md` §7.4** says "the dispatcher issues **two** short-lived
   credentials" per launch. With a declared identity it issues three.
-- **`spec.md` §10.1's "No host volume mounts"** already has one documented
+- **`docs/spec.md` §10.1's "No host volume mounts"** already has one documented
   exception (§3.1's build cache); [B1](#b1-the-build-mechanism) adds a second,
   node-side and allow-listed. §10.1 should name it rather than leave the rule
   reading as absolute.

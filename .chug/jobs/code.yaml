@@ -11,8 +11,8 @@ image: chuggernaut/agent-rust:prod
 # not a pointer, and not a distillation — a second copy of a rule is what
 # drifts (design #415 D4).
 knowledge:
-  - STYLE.md
-  - NORTH-STAR.md
+  - docs/reference/style.md
+  - docs/README.md
 work:
   type: agent
   prompt: .chug/prompts/work/code.md

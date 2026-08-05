@@ -1,4 +1,4 @@
-//! The effect vocabulary (refactor-plan B2, `contracts.md` §2).
+//! The effect vocabulary (refactor-plan B2, `docs/reference/contracts.md` §2).
 //!
 //! An [`Effect`] is one thing the dispatcher does *about* a decision — a write
 //! to the world through a port, never a decision itself. The enum names each of
@@ -13,11 +13,11 @@
 //! - **Emits:** nothing itself; `Core::interpret` (dispatcher `interpret`
 //!   module) is what turns an `Effect` into a port call.
 //! - **Guarantees:** every variant is `serde`-serializable (the vocabulary
-//!   emits JSON Schema later, `NORTH-STAR.md` §2) and carries exactly the data
+//!   emits JSON Schema later, `docs/README.md` §2) and carries exactly the data
 //!   its execution needs — no `&Core` handles, no live futures. Reads
 //!   (`jobs.get`, `tasks.list_for_job`, `counters.next`, …) are deliberately
 //!   *not* effects: they feed the decider's view of state, not its output.
-//! - **Spec:** §3.1–3.4 (the actions), `contracts.md` §2 (why).
+//! - **Spec:** §3.1–3.4 (the actions), `docs/reference/contracts.md` §2 (why).
 //!
 //! ## Variant → port method
 //!

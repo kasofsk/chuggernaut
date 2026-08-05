@@ -41,7 +41,7 @@ the reference each script composes and the fallback when a step needs a human.
 - **`/chug-install`** — the Claude Code skill (`.claude/skills/chug-install/`)
   that drives the above interactively, detects existing state, asks the
   platform-owned-vs-linked-origin question, and verifies each stage.
-- **`INSTALL.md`** (repo root) — the 15-minute quickstart.
+- **`README.md`** (repo root) — the 15-minute quickstart.
 
 The per-project GitHub mirror is now a scripted artifact too
 (`deploy/prod/chug-mirror-install.sh`), replacing the hand-built
@@ -237,7 +237,7 @@ and release it, exactly like any other job.
 
 > **When the normal deploy job can't run or finish** — a broken build toolchain
 > on a node, a stranded/stale worker daemon, the dispatcher down, image loss —
-> follow the [ad-hoc deploy runbook](../../docs/runbooks/adhoc-deploy.md): the
+> follow the [ad-hoc deploy runbook](../../docs/reference/runbooks/adhoc-deploy.md): the
 > sanctioned by-hand interventions, each with verification, and the paper-trail
 > norm (file + claim a `deploy` job, resolve `Pass` with a machine-shaped
 > record) so a manual deploy still lands in deploy history.
@@ -384,7 +384,7 @@ refresh the token and re-run the job.
 **Manual deploy / rollback** (the by-hand path — prefer a `deploy` or
 `rollback` job, which leaves a record; this is for when the platform itself is
 too broken to run one, per the [ad-hoc deploy
-runbook](../../docs/runbooks/adhoc-deploy.md)):
+runbook](../../docs/reference/runbooks/adhoc-deploy.md)):
 ```sh
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh              # deploy origin/main now
 CHUG_REPO=~/chuggernaut deploy/prod/update.sh <good-sha>   # roll back to a known-good commit
@@ -688,7 +688,7 @@ Notes:
   shows the work/eval containers; the Mini's colima shows none
   (`docker ps --filter label=chuggernaut.managed`).
 - **Capacity is changed from the UI, not here** —
-  [`docs/runbooks/worker-capacity.md`](../../docs/runbooks/worker-capacity.md) is
+  [`docs/reference/runbooks/worker-capacity.md`](../../docs/reference/runbooks/worker-capacity.md) is
   the reference for all of it. The node owns its capacity and the scheduler reads
   exactly one number per node: the one the node reported (spec §3.1). To change
   it, use the Cluster page's per-node stepper (or
@@ -721,9 +721,9 @@ Notes:
   daemons are built from the same SHA, so observed capacity is arriving from the
   first probe. Zeroing the seed on an **existing** deployment is a sequenced
   change with a precondition — do not do it from memory; follow
-  [the runbook §6](../../docs/runbooks/worker-capacity.md).
+  [the runbook §6](../../docs/reference/runbooks/worker-capacity.md).
 - **KVM for Android emulator work is a per-node opt-in** —
-  [`docs/runbooks/worker-kvm.md`](../../docs/runbooks/worker-kvm.md) is the
+  [`docs/reference/runbooks/worker-kvm.md`](../../docs/reference/runbooks/worker-kvm.md) is the
   procedure. `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR` and
   the optional `WORKER_FLUTTER_DIR` and `WORKER_JDK_DIR` (further toolchain
   leaves at `/opt/flutter` and `/opt/jdk`; unset ⇒ no mount and no
@@ -746,7 +746,7 @@ Notes:
   per node). `build-worker.sh` refuses the capacity half it can see and names
   the `WORKER_SLOTS_MAX` half no script forwards.
 - **Per-task nix GC roots are the same shape of per-node opt-in** (spec §3.1,
-  [the runbook §7](../../docs/runbooks/worker-kvm.md)). `WORKER_NIX_GCROOTS_DIR`
+  [the runbook §7](../../docs/reference/runbooks/worker-kvm.md)). `WORKER_NIX_GCROOTS_DIR`
   turns them on; `build-worker.sh` provisions the directory and mounts four
   paths into `chug-worker` itself (the store and the profiles tree read-only,
   the nix daemon socket dir and the roots dir read-write) plus, on a node with a
@@ -757,7 +757,7 @@ Notes:
   a rooting daemon with one that cannot boot. Without it a task holds store
   paths no GC root protects.
 - **`WORKER_NIX_PROJECTS` is the grant that lets a PROJECT declare its own
-  toolchain** (spec §3.1, [the runbook §8](../../docs/runbooks/worker-kvm.md)):
+  toolchain** (spec §3.1, [the runbook §8](../../docs/reference/runbooks/worker-kvm.md)):
   an allow-listed project's `runtime.env` is realised here from its job branch
   and put on the task's `PATH`. Empty grants nobody, granting it grants
   *evaluation* of that project's flake inside `chug-worker`, and the environment

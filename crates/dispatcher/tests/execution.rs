@@ -3419,7 +3419,7 @@ async fn job_evaluator_name_collision_fails_release() {
 }
 
 /// Unexpected wrap-up failure → triage, and the merge queue moves on instead
-/// of wedging (design-lifecycle.md). Simulated by deleting the job branch
+/// of wedging (docs/reference/design-lifecycle.md). Simulated by deleting the job branch
 /// out from under finalization.
 #[tokio::test]
 async fn finalize_hard_failure_escalates_instead_of_wedging() {

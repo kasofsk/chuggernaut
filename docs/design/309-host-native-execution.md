@@ -7,7 +7,7 @@ recommendation had already shipped before P0 started; see
 and its addendum on `remove` racing its own reaper.
 
 Written against the tree at `b801b76`. Every claim about current behavior was
-read out of the source and out of [spec.md](../../spec.md), not inferred from
+read out of the source and out of [docs/spec.md](../spec.md), not inferred from
 the docs; where the job brief and the tree disagree, the tree wins and the
 disagreement is recorded under [Corrections](#corrections-to-the-brief).
 
@@ -23,13 +23,13 @@ tenancy.
 Docs 2–4 (scheduled jobs; job parameterization; workload identity and image
 builds) are separate and cite this one. Nothing here decides them.
 
-Related: [spec.md](../../spec.md) §3.1 (backends, dynamic worker registration,
+Related: [docs/spec.md](../spec.md) §3.1 (backends, dynamic worker registration,
 placement, node-local build caching), §3.5 (launch capacity queue, task
 timeout), §3.6 (restart reconciliation), §14 (config/version skew), Appendix:
 Deferred; [design #293](./293-worker-capacity.md) (worker capacity — overlaps
 this work directly and is reconciled with throughout);
-[design-lifecycle.md](../../design-lifecycle.md);
-[STYLE.md](../../STYLE.md); [crates.md](../../crates.md).
+[docs/reference/design-lifecycle.md](../reference/design-lifecycle.md);
+[docs/reference/style.md](../reference/style.md); [docs/reference/crates.md](../reference/crates.md).
 
 ## Scope
 
@@ -45,7 +45,7 @@ The brief is accurate on the points that carry the argument. Four claims needed
 adjusting against the tree, and each moves work.
 
 1. **"#293 is PROPOSED and not implemented" — true of the code, not of the
-   spec.** #293's job 1 (the §3.1 amendment) has **landed**: `spec.md` §3.1 now
+   spec.** #293's job 1 (the §3.1 amendment) has **landed**: `docs/spec.md` §3.1 now
    normatively describes `WorkerAnnounce { node, slots, slots_max,
    capacity_epoch, capacity_generation, version }`, `slots` on the ping reply,
    `req.worker.{node}.set_slots`, `slots_max`/`WORKER_SLOTS_MAX`, and
@@ -53,7 +53,7 @@ adjusting against the tree, and each moves work.
    `crates/types/src/worker.rs` still has `WorkerAnnounce { node, slots,
    version }` and a `PingOk` with no `slots`, and `grep -rn "set_slots\|slots_max
    \|capacity_epoch" crates/` returns nothing. So the reconciliation target for
-   this doc is **`spec.md` as written plus #293's jobs 2–7 as scheduled** — the
+   this doc is **`docs/spec.md` as written plus #293's jobs 2–7 as scheduled** — the
    normative text is already ahead of the binary here, which is exactly the
    condition §14 exists to manage.
 2. **Making the daemon backend-polymorphic is bigger than swapping one field's
@@ -64,7 +64,7 @@ adjusting against the tree, and each moves work.
    (`crates/container/src/docker.rs`). A `dyn ContainerBackend` field alone does
    not compile. See [1](#1-backend-polymorphism).
 3. **The trait's surface is 10 required methods *plus five defaulted ones*, and
-   `spec.md` §3.1's inline listing of it is stale.** The spec's code block shows
+   `docs/spec.md` §3.1's inline listing of it is stale.** The spec's code block shows
    eight methods and omits `logs`, `logs_tail`, and all five provided methods
    (`fleet_status`, `register_worker`, `supports_dynamic_workers`,
    `mark_worker_unschedulable`, `occupancy_unavailable_nodes`). The five
@@ -113,7 +113,7 @@ label-filtered override. Construction moves into one
 that owns the cache-dir and startup-probe wiring per variant.
 
 - *For:* one seam, the one that already exists, and it is the seam
-  `crates.md` names as `container`'s charter. Adding the third implementation
+  `docs/reference/crates.md` names as `container`'s charter. Adding the third implementation
   keeps `FakeBackend` and `FleetBackend` honest about the trait rather than
   letting the daemon grow a private interface.
 - *Against:* it widens a shared trait for one caller's benefit, and it makes
@@ -127,7 +127,7 @@ hand.**
 - *For:* no trait change at all; inherent methods stay reachable per variant, so
   `managed_running_total`, `with_cache_dir` and `ping_all` need no home in the
   trait. Exhaustive matching means a new op cannot be silently missed. It is
-  arguably the simpler shape, which STYLE.md Tier 3 treats as a legitimate
+  arguably the simpler shape, which docs/reference/style.md Tier 3 treats as a legitimate
   argument on its own.
 - *Against:* it is a **second** launch seam in a codebase whose whole story is
   that there is one (`crates/container/src/lib.rs`: "the **only** launch seam").
@@ -244,7 +244,7 @@ alongside the pid (Linux: field 22 of `/proc/<pid>/stat`; macOS: `ps -o lstart`)
 and treat a mismatch as *gone*. Getting this wrong reports a dead task as
 running, which §3.6 classifies as "still running, re-attach" and hangs the task
 until `task_timeout` — a slow, confusing failure rather than a loud one. Assert
-it (STYLE.md Tier 2: assert negative space).
+it (docs/reference/style.md Tier 2: assert negative space).
 
 **(c) `remove` is now a real obligation with no runtime behind it.** In
 container mode a forgotten `remove` leaks an overlay and the §3.6 startup sweep
@@ -525,7 +525,7 @@ Two supporting facts make ping-authoritative work cleanly:
   container-only, so never learn it is not). Concretely: capabilities become
   part of `PlacementCandidate` and `choose_placement` gains a required-mode
   predicate — keeping the decision a pure, unit-tested function with no I/O,
-  which is where STYLE.md Tier 2 rule 1 wants it.
+  which is where docs/reference/style.md Tier 2 rule 1 wants it.
 
 **Why the announce is still needed and cannot be dropped:** #293 states it and
 it holds — the announce is how an *unknown* node joins, and the dispatcher
@@ -779,7 +779,7 @@ bound that actually rescues a wedged task is mode-independent.
 
 1. **Enforce where possible, advisory elsewhere.** Rejected. A `memory: 4Gi`
    that does nothing on one node and OOM-kills on another is the silent lie
-   STYLE.md Tier 2 rule 3 rejects ("everything is bounded … on hitting a bound
+   docs/reference/style.md Tier 2 rule 3 rejects ("everything is bounded … on hitting a bound
    fail fast and loud"), and it makes a job's behavior depend on invisible
    placement.
 2. **Refuse the job type at validation time.** Impossible: `validate()` is
@@ -942,7 +942,7 @@ repo per H.6, and the dispatcher stays ignorant. Fallback if reading a flake
 attribute proves fiddly in practice: a wire field, accepting the lost property —
 but try the flake attribute first.
 
-**Eviction is mandatory, not optional** (STYLE.md Tier 2 rule 3: everything is
+**Eviction is mandatory, not optional** (docs/reference/style.md Tier 2 rule 3: everything is
 bounded). Per-project caches grow without limit on a node whose disk also holds
 `/nix/store` and every task's `workspace/`. Recommend LRU by directory mtime
 against a node-configured ceiling, with the sweep bounded and loud on hitting
@@ -1027,7 +1027,7 @@ leading candidate for "harder than it looks".
 `flutter-integration-tests`.** #308 H.4 is right that it sits at the confluence
 of too many unbuilt things.
 
-## Contracts changed (per STYLE.md's contract-first rule)
+## Contracts changed (per docs/reference/style.md's contract-first rule)
 
 | # | Slice | Contract changed | Depends on |
 | --- | --- | --- | --- |
@@ -1039,7 +1039,7 @@ of too many unbuilt things.
 | 6 | `code` — `choose_placement` capability predicate + the two distinct `NoCapacity` messages; the fleet-wide "no node advertises" warning | `choose_placement` postcondition; §3.1 placement | 5 |
 | 7 | `code` — `placement.leases` (+ the "leases require a pin" rule), the actor lease table, release in `on_task_exited` **and** on the revoke path, §3.6 rebuild | `Placement` schema (nested, breaking); `on_task_exited` postcondition; `revoke_job` postcondition; §3.6 reconciliation | 6 |
 
-Test placement per [testing.md](../../testing.md): the selector field rules, the
+Test placement per [docs/reference/testing.md](../reference/testing.md): the selector field rules, the
 `WORKER_MODES` parse, the capability defaulting (`None` ⇒ container-only), and
 the extended `choose_placement` predicate are pure functions → **tier 1**, beside
 the existing `choose_placement` tests in `crates/container/src/lib.rs` and the
@@ -1050,15 +1050,15 @@ tests.
 
 ## What this makes wrong elsewhere
 
-- **`spec.md` §3.1's inline `ContainerBackend` listing** omits `logs`,
+- **`docs/spec.md` §3.1's inline `ContainerBackend` listing** omits `logs`,
   `logs_tail` and all five provided methods — already stale, fixed by slice 3.
-- **`crates.md`'s `container` row** reads "`ContainerBackend` trait + Docker and
+- **`docs/reference/crates.md`'s `container` row** reads "`ContainerBackend` trait + Docker and
   k8s implementations"; k8s is a stub and a host backend would make the row
   wrong in a second way.
 - **`crates/container/src/lib.rs`'s module doc** ("Docker socket in dev, the
   Kubernetes Jobs API in production") describes a deployment that does not
   exist.
-- **`spec.md` Appendix: Deferred** — "macOS bare metal dispatchers … Execution
+- **`docs/spec.md` Appendix: Deferred** — "macOS bare metal dispatchers … Execution
   model needs separate design" is the entry this document answers; it should
   point here rather than stay open-ended.
 

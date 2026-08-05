@@ -467,7 +467,7 @@ mod tests {
             "docs/design/nested/deep.md",
             "docs/design/.hidden.md",
             "docs/design/README",
-            "docs/runbooks/deploy.md",
+            "docs/reference/runbooks/deploy.md",
             "docs/design/.md",
         ] {
             assert_eq!(design_slug(other), None, "{other} names no design");

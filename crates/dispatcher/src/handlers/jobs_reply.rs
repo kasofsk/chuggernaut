@@ -12,7 +12,7 @@
 //! - **Guarantees:** best-effort enrichment never fails a reply — an unreadable
 //!   task log or channels bucket drops the derived field, and a broken job type
 //!   degrades to the job's own evaluators plus an error list.
-//! - **Spec:** §1.1, §4.2, §6.2; design-lifecycle.md (additive evaluators).
+//! - **Spec:** §1.1, §4.2, §6.2; docs/reference/design-lifecycle.md (additive evaluators).
 
 use super::reply::{NOT_FOUND, error_reply, ok_reply};
 use crate::core::CoreError;

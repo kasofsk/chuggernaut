@@ -1,4 +1,4 @@
-//! STYLE.md Tier 1 lint-gate guards — the clippy half of the invariants whose
+//! docs/reference/style.md Tier 1 lint-gate guards — the clippy half of the invariants whose
 //! dependency-graph half lives in `boundary_guard.rs` (refactor-plan A4).
 //!
 //! `clippy::too_many_lines`, `unwrap_used` and `expect_used` are all
@@ -18,10 +18,10 @@
 
 use std::path::{Path, PathBuf};
 
-/// STYLE.md Tier 1, "Function length: 70 lines".
+/// docs/reference/style.md Tier 1, "Function length: 70 lines".
 const LINE_LIMIT: &str = "70";
 
-/// The three denies STYLE.md Tier 1 requires the gate to enforce.
+/// The three denies docs/reference/style.md Tier 1 requires the gate to enforce.
 const TIER_ONE_LINTS: [&str; 3] = ["too_many_lines", "unwrap_used", "expect_used"];
 
 fn workspace_root() -> PathBuf {
@@ -67,7 +67,7 @@ fn clippy_toml_pins_the_style_line_limit() {
         .expect("clippy.toml sets `too-many-lines-threshold`");
     assert_eq!(
         configured, LINE_LIMIT,
-        "clippy.toml's `too-many-lines-threshold` must match STYLE.md Tier 1 \
+        "clippy.toml's `too-many-lines-threshold` must match docs/reference/style.md Tier 1 \
          (70 lines); change both or neither"
     );
 }
@@ -84,7 +84,7 @@ fn workspace_denies_the_tier_one_lints() {
         assert!(
             table.contains(&format!("{lint} = \"deny\"")),
             "[workspace.lints.clippy] must contain `{lint} = \"deny\"` — \
-             STYLE.md Tier 1 is non-negotiable and the lint is allow-by-default"
+             docs/reference/style.md Tier 1 is non-negotiable and the lint is allow-by-default"
         );
     }
 }

@@ -38,7 +38,7 @@ will run and wait.
   - `capacity_source` in the fleet snapshot is the field to check first: `seed`
     means the node has **never reported its own capacity**, which is the
     signature of the 2026-07-26 denied-announce incident. Full reference:
-    `docs/runbooks/worker-capacity.md`.
+    `docs/reference/runbooks/worker-capacity.md`.
 - **Networking gotcha**: worker containers on macOS hosts **cannot reach the
   LAN** (colima user-mode NAT). Publish/deploy jobs therefore ssh the Mini
   over the **tailnet** on port **2200** (dedicated key-only sshd,

@@ -6,7 +6,7 @@ Written against the tree at `8997c4e` (2026-08-01; the source tree is unchanged
 since `a539b7d`, which this document's first revision was written against).
 Every claim about
 Chuggernaut's current behavior below was read out of the source or out of
-[`spec.md`](../../spec.md) in this tree, not carried over from the brief or from
+[`docs/spec.md`](../spec.md) in this tree, not carried over from the brief or from
 a sibling design; where the brief or a sibling disagrees with the source, the
 source wins and the disagreement is recorded in
 [Corrections](#corrections-verified-against-the-tree). The **beacon** half is
@@ -20,7 +20,7 @@ This document closes [#308](308-gha-port.md) gap 5.
 
 `crates/store/src/artifacts.rs` holds session transcripts, container stdout and
 operator-uploaded job attachments — the record of what a task *did*. Nothing
-carries a **build output** from one job to another, and `spec.md`'s Appendix:
+carries a **build output** from one job to another, and `docs/spec.md`'s Appendix:
 Deferred still lists "Binary artifact store: S3/Minio for non-git artifacts" as
 open. [#308](308-gha-port.md) ranks that gap 5 of 11.
 
@@ -47,25 +47,25 @@ stay deferred rather than being built speculatively.
 | Fact | Where | State |
 | --- | --- | --- |
 | Blobs live in a JetStream **Object** Store — chunked internally, so not bound by `max_payload` | `crates/store/src/artifacts.rs` module header; `crates/store/src/lib.rs` (`create_object_store`) | Shipped |
-| Blobs are gzipped then age-encrypted under `age_artifacts` — a **second** keypair, held by dispatcher *and* api, so the api serves blobs directly instead of proxying through the dispatcher | `crates/store/src/artifacts.rs`; `crates/api/src/run.rs`; `spec.md` §1.6 | Shipped |
+| Blobs are gzipped then age-encrypted under `age_artifacts` — a **second** keypair, held by dispatcher *and* api, so the api serves blobs directly instead of proxying through the dispatcher | `crates/store/src/artifacts.rs`; `crates/api/src/run.rs`; `docs/spec.md` §1.6 | Shipped |
 | The artifacts bucket is created with **`max_age: 90 * DAY`** and no byte ceiling | `crates/store/src/lib.rs` `ensure_topology_inner` | Shipped |
 | `ArtifactKind` is a closed enum with exactly two variants (`session.jsonl`, `stdout.log`) | `crates/store/src/artifacts.rs` | Shipped |
 | Attachments pack content type + plaintext size into the object description, so a listing never opens a blob; capped at 16 MiB | `crates/store/src/artifacts.rs`; `crates/api/src/routes.rs` (`MAX_ATTACHMENT_BYTES`) | Shipped |
 | Artifact keys are `{owner}.{project}.{seq}.{task_id}.{kind}` — no attempt segment, because a retry is a **new task id** | `crates/store/src/keys.rs`; `crates/domain/src/decide/work.rs` (`next_task_id`) | Shipped |
 | Harvest already does exactly the operation gap 5 needs: `copy_file` out of the exited container → `ArtifactStore::put` | `crates/platform-ops/src/harvest.rs` (`collect_agent`) | Shipped |
-| Containers are removed only *after* every `logs`/`copy_file` read — the 2026-07-21 disk-leak fix | `crates/platform-ops/src/harvest.rs` (`dispose`); `spec.md` §3.1 | Shipped |
-| An evaluator already reads a file out of its own container (`/workspace/eval-result.json`) | `crates/dispatcher/src/launch_queue.rs`; `spec.md` §3.3 | Shipped |
+| Containers are removed only *after* every `logs`/`copy_file` read — the 2026-07-21 disk-leak fix | `crates/platform-ops/src/harvest.rs` (`dispose`); `docs/spec.md` §3.1 | Shipped |
+| An evaluator already reads a file out of its own container (`/workspace/eval-result.json`) | `crates/dispatcher/src/launch_queue.rs`; `docs/spec.md` §3.3 | Shipped |
 | `copy_file` is **single-file** by contract and is in the shared backend conformance suite | `crates/container/src/lib.rs`; `crates/test-utils/src/backend_suite.rs` | Shipped |
 | On a worker node, `copy_file` base64s the whole file into **one** NATS reply, with **no cap** | `crates/worker/src/daemon.rs` (`copy_file`); `crates/worker/src/backend.rs` | Shipped — and see [C3](#c3-the-real-size-regime-is-copy_file-on-a-worker-node-not-the-object-store) |
-| `logs` *is* capped, at `LOGS_CAP` = 700 KiB, with a truncation marker | `crates/worker/src/daemon.rs`; `spec.md` §3.1 | Shipped |
+| `logs` *is* capped, at `LOGS_CAP` = 700 KiB, with a truncation marker | `crates/worker/src/daemon.rs`; `docs/spec.md` §3.1 | Shipped |
 | `MAX_REQUEST_BYTES` (900 KiB) guards the worker **request** only; replies are unguarded | `crates/store/src/worker.rs` | Shipped |
-| VCS *is* the platform's artifact-passing mechanism, normatively | `spec.md` §5.1 "Artifact passing" | Normative today |
+| VCS *is* the platform's artifact-passing mechanism, normatively | `docs/spec.md` §5.1 "Artifact passing" | Normative today |
 | No retention concept below the bucket; no GC on revoke/retry; `delete_attachment` is the only explicit delete | `crates/store/src/artifacts.rs` | Shipped |
-| Binary artifact store (S3/Minio) | `spec.md` Appendix: Deferred, Appendix: Infrastructure Summary | Deferred |
+| Binary artifact store (S3/Minio) | `docs/spec.md` Appendix: Deferred, Appendix: Infrastructure Summary | Deferred |
 
 Two rows deserve emphasis before anything is proposed.
 
-**`spec.md` §5.1 already answers "how does a job hand output to another job".**
+**`docs/spec.md` §5.1 already answers "how does a job hand output to another job".**
 Its "Artifact passing" paragraph is not a placeholder: all jobs work on
 `job/{seq}`, evaluation-pass squash-merges to the default branch, and
 "downstream jobs start from the default branch — upstream work is already there
@@ -92,7 +92,7 @@ work.
 The brief says "#308 category F is wrong and this doc should correct it — #308
 says gap 5 is needed for mobile outputs (IPA/APK from the fastlane jobs)."
 Verified: the strings `IPA`, `.apk`, `TestFlight` and `Play Store` do not occur
-anywhere under `docs/` or in `spec.md`, in any case. #308's gap-5 row says only
+anywhere under `docs/` or in `docs/spec.md`, in any case. #308's gap-5 row says only
 "`crates/store/src/artifacts.rs` holds transcripts, stdout and attachments;
 there is no inter-job binary handoff", and #308 §F ("Mobile (2.5 workflows)") is
 entirely about Xcode and `xcrun simctl` needing a macOS host — it never mentions
@@ -184,7 +184,7 @@ Three consequences, in ascending order of severity:
    on top of this bound would ship a feature that works on one node kind and
    silently fails on the other.
 
-`spec.md` §3.1's small-message discipline documents the `logs` tail explicitly
+`docs/spec.md` §3.1's small-message discipline documents the `logs` tail explicitly
 and says nothing about `copy_file`. That silence is the specification bug behind
 the code bug.
 
@@ -196,7 +196,7 @@ the code bug.
 node-local, deploy-time-provisioned** file — the channel MCP binary — that a
 worker-proxying backend references by name so the bytes never ride in the launch
 payload; the daemon fails a launch naming an unknown one, and reports artifact
-hashes in `ping` (`spec.md` §3.1). It is an input-side optimization keyed to
+hashes in `ping` (`docs/spec.md` §3.1). It is an input-side optimization keyed to
 things provisioned *with the worker*, at the worker's git SHA. Nothing about it
 generalizes to per-job output: an output is not known at deploy time, is not
 shared across jobs, and must travel *from* the node rather than being found
@@ -205,7 +205,7 @@ there.
 The name collision is unfortunate. There is exactly one thing worth borrowing,
 and it is a constraint rather than a mechanism: this design exists because
 **the platform already decided that bulk bytes do not ride the worker RPC**
-(`spec.md` §3.1, "static artifacts are node-local"). C3 is that same rule being
+(`docs/spec.md` §3.1, "static artifacts are node-local"). C3 is that same rule being
 violated in the return direction.
 
 ### C5. #313 half A gives a token, not a bucket
@@ -267,21 +267,21 @@ main design argument in this document.
 
 ### Option 1 — Do nothing; retire gap 5 outright
 
-Close gap 5 as "not a gap": VCS is the artifact-passing mechanism (`spec.md`
+Close gap 5 as "not a gap": VCS is the artifact-passing mechanism (`docs/spec.md`
 §5.1), the registry is the image-passing mechanism (#313 B4), and a bucket
 via #313 half A covers anything else.
 
 *For:* zero code. Consistent with the evidence: nothing in beacon needs handoff.
 
 *Against, and this is real:* the diagnostic-capture case is unserved and the
-current workarounds are all bad. A container is removed at exit (`spec.md`
+current workarounds are all bad. A container is removed at exit (`docs/spec.md`
 §3.1), so anything not harvested is gone. Today the escape hatches are (i) print
 it to stdout — captured as `stdout.log`, but truncated to the most recent 700
 KiB on a worker node, and a truncated tarball is worthless where a truncated log
 is not; or (ii) commit it to the job branch — which then squash-merges into the
 default branch, which is wrong for a 4 MB coverage tree, and impossible for a
 `wrap_up: type: none` job whose branch is scratch and is deleted at the terminal
-state (`spec.md` §5.1, "Branch cleanup").
+state (`docs/spec.md` §5.1, "Branch cleanup").
 
 **Rejected**, but only barely, and only because option 2 is so cheap. If option
 2 turns out to cost more than the sketch below, option 1 is the correct
@@ -363,16 +363,16 @@ Independent of every feature question. Three ways:
    ground: the worker would need the `age_artifacts` identity, and the whole
    point of that keypair is that exactly two holders exist — the dispatcher
    (writes) and the api (reads). Handing a decrypt-capable key to every fleet
-   node to save one hop trades a real boundary for a small efficiency. `spec.md`
+   node to save one hop trades a real boundary for a small efficiency. `docs/spec.md`
    §10.2's dispatcher-only posture is the same argument.
 
 **Decision: ship (1) now, add (2) with the output feature, never (3).** (1) is
 correct on its own — an oversized `eval-result.json` should be an error and is
 currently a silence — and it is the honest thing to have in the tree if the
 output feature never happens. (2) as a new op keeps the N±1 contract additive
-per `spec.md` §14.1.
+per `docs/spec.md` §14.1.
 
-`spec.md` §3.1 gains a sentence putting `copy_file` under the same small-message
+`docs/spec.md` §3.1 gains a sentence putting `copy_file` under the same small-message
 discipline it already states for `logs`.
 
 ## Decision 2: a well-known path, not a schema field
@@ -387,7 +387,7 @@ type at all.**
 Per-container scoping argues for nesting the declaration where `secrets:` lives
 — `WorkSpec.secrets` and `Evaluator.secrets` — and #313 A5 makes cloud identity
 per container for the same reason. But every nested block carries
-`deny_unknown_fields` deliberately (`spec.md` §14.2: an ignored key inside an
+`deny_unknown_fields` deliberately (`docs/spec.md` §14.2: an ignored key inside an
 `Evaluator` could silently skip a merge gate). So an N-1 dispatcher meeting
 `work.outputs:` **fails the whole parse** — and it fails it *before* reading
 `min_dispatcher`, which is a top-level field in the same
@@ -409,7 +409,7 @@ answer to the brief's question — and the bump is the smallest part of the cost
 
 `eval-result.json` is the precedent, and it has **zero declaration**: the
 platform extracts one well-known path from every eval container, and a command
-evaluator that wants a structured verdict writes it (`spec.md` §3.3). Do the
+evaluator that wants a structured verdict writes it (`docs/spec.md` §3.3). Do the
 same:
 
 ```text
@@ -599,7 +599,7 @@ they scale with what a job *built*, not with how many tokens it spent.
 - **On revoke**: delete the job's outputs. Best-effort, off the actor thread,
   the same shape and the same never-fail-a-job discipline as `dispose`.
 - **Never on revoke**: transcripts, stdout, attachments. A revoked job is still
-  an audit record, and `spec.md`'s Appendix: Deferred ("terminal jobs are
+  an audit record, and `docs/spec.md`'s Appendix: Deferred ("terminal jobs are
   immutable") is the posture to preserve.
 - **On retry**: nothing. A retry is a **new task id**
   (`crates/domain/src/decide/work.rs`, `next_task_id`), so per-attempt
@@ -632,15 +632,15 @@ should be able to read the *work* container's output.
 
 **No, and no mechanism should be added.** Three reasons:
 
-- The work container is gone by then. `dispose` removes it at exit (`spec.md`
+- The work container is gone by then. `dispose` removes it at exit (`docs/spec.md`
   §3.1), long before the eval fan-out; only the stored blob remains, so this
   would be "an evaluator reads the artifact store", which is a new read path
   with new access questions, not an extension of `copy_file`.
 - It is not needed for the case in hand. A `coverage` job that wants a threshold
   gate has the same script produce the number and the verdict;
-  `eval-result.json` already carries structured rework context (`spec.md` §3.3).
+  `eval-result.json` already carries structured rework context (`docs/spec.md` §3.3).
 - The merge gate deliberately re-runs command evaluators against
-  `merge-gate/{seq}` — a *different tree*, in a fresh container (`spec.md`
+  `merge-gate/{seq}` — a *different tree*, in a fresh container (`docs/spec.md`
   §3.3). Nothing the work container built exists there, by design, because the
   gate verifies the integration rather than the change. An artifact-as-eval-input
   mechanism would sit awkwardly across that boundary and would invite exactly
@@ -666,7 +666,7 @@ is recorded so the next author starts from the constraints:
   failure, never as a default — and if it needs to tell those apart, that
   distinction is the design's first new requirement.
 - **A never-merged branch is not a problem.** Artifacts are keyed by job seq,
-  not by ref, so they outlive `job/{seq}`'s deletion (`spec.md` §5.1). This is a
+  not by ref, so they outlive `job/{seq}`'s deletion (`docs/spec.md` §5.1). This is a
   genuine argument for the object store over "commit it to the branch", and the
   only place where the deferred inter-job story would be *easier* than it looks.
 
@@ -674,11 +674,11 @@ is recorded so the next author starts from the constraints:
 
 | Slice | What | Gate on |
 | --- | --- | --- |
-| **S0** | Cap the worker `copy_file` reply and name the error; one sentence in `spec.md` §3.1 | **Landed** (job #363), as the defect fix of [Decision 1](#decision-1-fix-the-copy_file-bound-first-as-a-defect); the `copy_file` rows and [C3](#c3-the-real-size-regime-is-copy_file-on-a-worker-node-not-the-object-store) above describe the tree before it |
+| **S0** | Cap the worker `copy_file` reply and name the error; one sentence in `docs/spec.md` §3.1 | **Landed** (job #363), as the defect fix of [Decision 1](#decision-1-fix-the-copy_file-bound-first-as-a-defect); the `copy_file` rows and [C3](#c3-the-real-size-regime-is-copy_file-on-a-worker-node-not-the-object-store) above describe the tree before it |
 | **S1** | `ArtifactKind::Output`; a `Harvester::collect_output` reading `/workspace/chug-output.tar.gz` before `dispose`, wired to the **work-side** monitors only ([scope](#which-containers-are-read-and-what-that-actually-costs)); the 16 MiB cap, refused with a named error and warned rather than failing the task ([why](#the-size-band-with-numbers)); a chunked `copy_file` op | **Landed** (job #381), on the gate job #375 met: the consumer is `.chug/jobs/coverage.yaml` + `.chug/tasks/coverage.sh`. See below |
 | **S2** | The `outputs` bucket with its own `max_age` + byte ceiling; revoke-time GC | **Landed** (job #381), with S1 as required — S1 without it re-creates the 2026-07-21 disk class |
 | **S3** | Declared `outputs:` schema, cross-job reads, per-attempt selection | A **second** consumer with per-output addressing needs. Deferred, deliberately |
-| — | S3/Minio artifact store (`spec.md` Appendix: Deferred) | Stays deferred; nothing here needs it |
+| — | S3/Minio artifact store (`docs/spec.md` Appendix: Deferred) | Stays deferred; nothing here needs it |
 
 **The first consumer is in this repo, not in beacon.** [#308](308-gha-port.md)
 §G retires `rust-coverage` into "an ordinary job — coverage is a thing you ask
@@ -695,7 +695,7 @@ that is a second line next to the transcript copy.
 turn: `rust-coverage` is terminal and a human reads it (S1, or Option 3);
 the two fastlane uploads are `if: failure()` logs whose value the escalation
 path already delivers, since a failing task's stdout is harvested and the
-escalation carries it (`spec.md` §3.4); `flutter-integration-tests`'
+escalation carries it (`docs/spec.md` §3.4); `flutter-integration-tests`'
 `test-results.json` pair feeds a failure issue, which #308 §A maps onto
 Escalation. So **gap 5 is not on the beacon critical path** and should not be
 sequenced as if it were.
@@ -711,7 +711,7 @@ convention survives a backend change more gracefully than a wire contract does.
 Stated plainly, because a FINDING that cannot be falsified is an opinion:
 
 - A consumer that genuinely needs a **binary** produced by job A inside job B's
-  container, where neither VCS (`spec.md` §5.1) nor a registry digest (#313 B4)
+  container, where neither VCS (`docs/spec.md` §5.1) nor a registry digest (#313 B4)
   serves. That reopens Option 4, and its first requirement is the
   revoked/retried semantics in
   [Addressing and lifetime](#addressing-and-lifetime-if-a-consumer-ever-appears).
@@ -734,7 +734,7 @@ Stated plainly, because a FINDING that cannot be falsified is an opinion:
   what harvesting means for mobile
 - [361-per-run-placement.md](361-per-run-placement.md) — the model for handling a brief
   that overstates its case, and the source for "no job type sets `placement:`"
-- `spec.md` §1.6, §3.1, §3.3, §5.1, §14; Appendix: Deferred
+- `docs/spec.md` §1.6, §3.1, §3.3, §5.1, §14; Appendix: Deferred
 - `crates/store/src/artifacts.rs`, `crates/store/src/lib.rs`,
   `crates/store/src/keys.rs`, `crates/platform-ops/src/harvest.rs`,
   `crates/container/src/lib.rs`, `crates/worker/src/daemon.rs`,

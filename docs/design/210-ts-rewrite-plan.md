@@ -1,18 +1,18 @@
 # TypeScript dispatcher rewrite — plan
 
-> **Superseded by [`refactor-plan.md`](refactor-plan.md).** The decision is to
+> **Superseded by [`docs/design/215-refactor-plan.md`](215-refactor-plan.md).** The decision is to
 > stay in Rust and refactor the existing dispatcher incrementally toward the
 > north star — not to rewrite it in another language. Design #208 (the Python
 > dispatcher, the language-migration alternative this plan argued against) is
 > closed in the same move. This page is **retained for the ideas that outlive
 > the reversal** — golden decision traces, effects-as-data, the wire-level
 > conformance suite, and the contract-first change rule — which
-> `refactor-plan.md` carries forward as its Track B. Read it for those; do not
+> `docs/design/215-refactor-plan.md` carries forward as its Track B. Read it for those; do not
 > action the language migration, the `ts/` workspace, or the shadow/cutover
 > phases below.
 
-Companion to `NORTH-STAR.md` (target factoring), `contracts.md` (interface
-extraction), and `structure-assessment.md` (current-state audit). This is the
+Companion to `docs/README.md` (target factoring), `docs/reference/contracts.md` (interface
+extraction), and `docs/reference/structure-assessment.md` (current-state audit). This is the
 execution plan for rewriting the **dispatcher** in TypeScript, guided by those
 documents. Everything else stays: `api`, `store`-defined bucket schemas, the
 static musl MCP binaries, and the web app are unaffected (the web app later
@@ -42,7 +42,7 @@ of phase 0.
 2. **The rewrite is executed through Chuggernaut itself** — work arrives as
    scoped jobs on the platform, with dependencies expressed as the job DAG.
    This is deliberate dogfooding: the module registry and contract-first
-   change rule (`contracts.md`) exist precisely to make these jobs safely
+   change rule (`docs/reference/contracts.md`) exist precisely to make these jobs safely
    scopable. Human-supervised pieces go through the claim flow.
 3. **Contract-first during the overlap.** Any behavior change to the Rust
    dispatcher while the rewrite is in flight must land in the conformance
@@ -94,7 +94,7 @@ Each phase lists its exit gate and how it lands as platform jobs.
   including the boundary rules (domain imports nothing from adapters/interpret;
   only interpret touches adapters).
 - In Rust: add the **invariant checker** and per-module contract headers
-  (`contracts.md` step 1) — pure gain now, and it hardens the oracle.
+  (`docs/reference/contracts.md` step 1) — pure gain now, and it hardens the oracle.
 - Reconcile design #208.
 - *Jobs:* 2–3 independent `code` jobs, no deps.
 
@@ -175,8 +175,8 @@ Each phase lists its exit gate and how it lands as platform jobs.
 
 - Conformance suite + golden traces green against the TS dispatcher.
 - Shadow diff quiet in production.
-- `crates.md` updated: dispatcher marked superseded; `ts/` documented.
-- MODULES.md registry covering the TS module set — the rewrite's output is
+- `docs/reference/crates.md` updated: dispatcher marked superseded; `ts/` documented.
+- docs/reference/modules.md registry covering the TS module set — the rewrite's output is
   also the scoping-by-module structure we set out to get.
 
 ## What we explicitly are not doing

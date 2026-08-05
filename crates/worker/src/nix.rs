@@ -28,7 +28,7 @@ pub const ROOT_PREFIX: &str = "task-";
 /// the node's own listing, so a launch in flight is never reaped.
 pub const REAP_AGE_MIN: Duration = Duration::from_secs(3600);
 
-/// Iteration cap on one reaper pass (STYLE.md Tier 2 rule 3): a roots directory
+/// Iteration cap on one reaper pass (docs/reference/style.md Tier 2 rule 3): a roots directory
 /// somehow holding more than this is swept across several passes rather than
 /// blocking the daemon on one.
 const REAP_ENTRIES_MAX: usize = 4096;

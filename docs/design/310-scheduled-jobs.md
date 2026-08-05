@@ -10,7 +10,7 @@ health surface `schedule-invalid` needs, a UI badge, `timezone:`, `inputs:` —
 is still deferred.
 
 Written against the tree at `55f6595`. Every claim about current behavior below
-was read out of `spec.md` and the source in this repo;
+was read out of `docs/spec.md` and the source in this repo;
 where the brief and the tree disagree, the tree wins and the disagreement is
 recorded in [Corrections](#corrections-verified-against-the-tree).
 
@@ -19,14 +19,14 @@ Doc 2 of 4 extracting implementable specs from
 motivating case (`flutter-integration-tests` runs nightly); it fixes the
 location of the config and two semantics questions and leaves the rest here.
 
-Related: [spec.md](../../spec.md) §1.1 (the `Job` record, job types, the config
+Related: [docs/spec.md](../spec.md) §1.1 (the `Job` record, job types, the config
 root), §2.1 (state machine), §2.2 (release validation's three passes), §3.5
 (the scan and the launch capacity queue), §6.3 (events), §13 (task factories
 and ingest), §14 (config and version skew), Appendix: Deferred;
-[design-lifecycle.md](../../design-lifecycle.md) (per-job additive evaluators,
-the eval floor); [STYLE.md](../../STYLE.md) (Tier 2 #1 deciders, #3 bounds, #6
+[docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) (per-job additive evaluators,
+the eval floor); [docs/reference/style.md](../reference/style.md) (Tier 2 #1 deciders, #3 bounds, #6
 tests; Tier 3 single writer, simplicity);
-[NORTH-STAR.md](../../NORTH-STAR.md) and [contracts.md](../../contracts.md)
+[docs/README.md](../README.md) and [docs/reference/contracts.md](../reference/contracts.md)
 (decider/effect factoring); [CLAUDE.md](../../CLAUDE.md) (per-consumer forge,
 "the evaluation gates ARE the CI").
 
@@ -49,7 +49,7 @@ factories, and everything else follows from that answer.
 ## Corrections (verified against the tree)
 
 The brief is accurate in most of its detail. Six claims — five from the brief
-and one from `spec.md` itself — need adjusting, and each changes something
+and one from `docs/spec.md` itself — need adjusting, and each changes something
 downstream.
 
 1. **"Reusing factory machinery may be the right answer."** There is no factory
@@ -124,7 +124,7 @@ downstream.
 | Offline YAML validation + merge-time skew gate | `crates/cli/src/validate.rs`, `.chug/tasks/ci.sh` | Shipped, job types only |
 | Pure deciders returning effects | `crates/domain/src/decide/`, `crates/domain/src/effects.rs` | Shipped (`escalation.rs` is the template) |
 | `Job.factory` provenance | `crates/types/src/job.rs` | Field exists, no writer |
-| Factories, ingest endpoint, triage-created jobs | `spec.md` §13 | Specced, absent from the tree |
+| Factories, ingest endpoint, triage-created jobs | `docs/spec.md` §13 | Specced, absent from the tree |
 | Cron parsing, timezone database | — | No dependency in the workspace (`chrono` without `chrono-tz`) |
 
 ## Decision 1: schedules are the *other* trigger source, not a second mechanism
@@ -197,7 +197,7 @@ And it blocks the whole feature on §13, which is unimplemented and unscheduled
 
 **(B) A wholly separate scheduler subsystem** — its own config vocabulary, its
 own provenance field family, its own release policy, its own in-flight rule.
-This is what "just add cron" turns into by default. Rejected under STYLE.md
+This is what "just add cron" turns into by default. Rejected under docs/reference/style.md
 Tier 3 (simplicity; a simpler shape would do) and because the three rules above
 were already argued once in §13 — restating them with different words is how
 `auto_release` and `auto-release`, `factory` and `trigger` end up meaning
@@ -244,7 +244,7 @@ already handled:
 
 - **Merge time** — extend `chuggernaut validate` (`crates/cli/src/validate.rs`)
   to accept `.chug/schedules/*.yaml` and wire it into `.chug/tasks/ci.sh`
-  beside the existing config-skew and `MODULES.md` gates. This is the layer
+  beside the existing config-skew and `docs/reference/modules.md` gates. This is the layer
   that actually protects operators, because in this repo "enforced in CI" means
   "enforced by an evaluator" and a schedule file cannot reach HEAD without
   passing one.
@@ -256,7 +256,7 @@ already handled:
   dispatch. Reporting is the part that does not carry over cleanly; see
   [Decision 7](#decision-7-release-policy-provenance-and-events).
 
-**Bounds** (STYLE.md Tier 2 #3): a project loads at most `SCHEDULES_MAX`
+**Bounds** (docs/reference/style.md Tier 2 #3): a project loads at most `SCHEDULES_MAX`
 schedule files (proposed 64). Entries beyond the cap are refused and logged
 rather than silently truncated, and the per-tick work is therefore bounded by a
 constant per project.
@@ -290,11 +290,11 @@ matcher is a pure function over `(expression, DateTime<Utc>)`, it must live in
 `types` (which stays sync and I/O-free, per CLAUDE.md), the accepted grammar is
 a strict subset of what any crate offers — so a dependency's extra syntax would
 have to be *rejected* anyway to keep configs portable — and it is exhaustively
-testable at tier 1 of `testing.md`. Roughly a hundred lines of parse plus a
+testable at tier 1 of `docs/reference/testing.md`. Roughly a hundred lines of parse plus a
 match predicate.
 
 The honest counter-argument: hand-rolled date logic is exactly the category of
-code that looks trivial and is not, and STYLE.md's "new dependencies state
+code that looks trivial and is not, and docs/reference/style.md's "new dependencies state
 their justification" is a rule about *adding* dependencies, not a rule against
 them. If the grammar ever grows past the subset above, take a vetted crate then
 — and check two things when doing so, because crates differ on both: the field
@@ -359,7 +359,7 @@ The alternatives:
 
 - **Queue.** A backlog of stale runs. Seven queued nightly integration runs
   tell an operator nothing the one latest run does not, and an unbounded queue
-  violates STYLE.md Tier 2 #3 outright. Bound it and you have chosen a depth;
+  violates docs/reference/style.md Tier 2 #3 outright. Bound it and you have chosen a depth;
   the only defensible depth is 1, which *is* skip.
 - **Allow concurrent.** Mechanically fine — two jobs, two branches, two merges
   — but it removes the only backpressure and is actively wrong for the
@@ -667,14 +667,14 @@ property for free, which is the entire reason a restart cannot double-fire.
 
 **Rejected: its own loop.** A separate timer would still have to send a message
 into the actor, because the dispatcher is the single writer of job records and
-that must not change (STYLE.md Tier 3; CLAUDE.md). So a second loop buys only
+that must not change (docs/reference/style.md Tier 3; CLAUDE.md). So a second loop buys only
 phase independence from the other scans, and costs a second timer, a second
 message variant, and a new ordering question with `Drain` (§3.6: while draining
 the core initiates no new work — a schedule tick must respect that, and riding
 `run_scans` means it does so by construction). The 30-second tick is already
 comfortably finer than the one-minute cron floor.
 
-**But the decision is not `scan.rs`'s to make.** Per STYLE.md Tier 2 #1 and
+**But the decision is not `scan.rs`'s to make.** Per docs/reference/style.md Tier 2 #1 and
 NORTH-STAR's direction of travel, new decision logic goes into a pure decider,
 not a new `impl Core` method:
 
@@ -775,7 +775,7 @@ through the same origination path, not invented here.
 The one thing this design must **not** do, and reviewers should reject if it
 appears: templating in `description` (`{{ occurrence_at }}` and friends). A
 template language in a ticket body is parameterization with none of the typing,
-declaration or gate-safety that `design-lifecycle.md`'s constraints on per-job
+declaration or gate-safety that `docs/reference/design-lifecycle.md`'s constraints on per-job
 overrides demand — and it would be the hardest thing to remove once configs
 depend on it. Likewise, resist adding an ad-hoc `CHUG_OCCURRENCE_AT` env var:
 that is an input, and it should arrive as one.
@@ -813,7 +813,7 @@ Per CLAUDE.md's contract-first rule for dispatcher work:
 | Contract | Change |
 | --- | --- |
 | `Job.schedule` | New optional field; `None` on old records; written only by the origination path; immutable after create |
-| Invariant | At most one non-terminal job per `(project, schedule)`. Asserted before the create and re-asserted on read-back (STYLE.md Tier 2 #2's pair-across-NATS pattern) |
+| Invariant | At most one non-terminal job per `(project, schedule)`. Asserted before the create and re-asserted on read-back (docs/reference/style.md Tier 2 #2's pair-across-NATS pattern) |
 | Invariant | A schedule never fires for an occurrence at or before its **anchor** — `latest.completed_at` when a prior job exists, `first_seen_at` when none does (never the max of the two). This one property gives no-backfill, catch-up across restarts, and skipped-occurrences-consumed. It does *not* give DST fall-back safety — see [Decision 3](#decision-3-the-expression-is-5-field-cron-in-utc-full-stop) |
 | Invariant | `schedule-skipped` is emitted at most once per occurrence per dispatcher lifetime, and never for an occurrence at or before the blocking job's `created_at` |
 | Invariant | The anchor is monotonically non-decreasing for a given schedule, and every fire strictly advances it |
@@ -823,7 +823,7 @@ Per CLAUDE.md's contract-first rule for dispatcher work:
 | Golden trace | New: `schedule-fired` → `job-created` → `job-released` → `job-started` for one occurrence, and a second occurrence producing `schedule-skipped` instead |
 
 New modules get a doc header (accepts / emits / guarantees / spec §) and a
-`MODULES.md` registry row, per the direction-of-travel rule; `.chug/tasks/ci.sh`
+`docs/reference/modules.md` registry row, per the direction-of-travel rule; `.chug/tasks/ci.sh`
 enforces the registry.
 
 ## What this doc does not decide

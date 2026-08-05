@@ -9,8 +9,8 @@ Before writing code, orient yourself — don't re-derive what's documented:
 
 - `CLAUDE.md` — conventions that bite if missed (single-writer dispatcher,
   `store` is the only NATS crate, `types` is pure data).
-- `spec.md` — normative behavior; `crates.md` — which crate owns what;
-  `testing.md` — which tier a new test belongs in.
+- `docs/spec.md` — normative behavior; `docs/reference/crates.md` — which crate owns what;
+  `docs/reference/testing.md` — which tier a new test belongs in.
 
 Then:
 
@@ -50,7 +50,7 @@ Then:
 4. Commit your work to the current branch (you are already on the job
    branch) with clear commit messages, and push. `.githooks/pre-commit` runs on
    each commit: it reformats your staged files and re-stages them for you, and
-   rejects a non-doc comment, a `MODULES.md` registry gap or a duplicated block
+   rejects a non-doc comment, a `docs/reference/modules.md` registry gap or a duplicated block
    — the same checks CI runs, minutes earlier. Fix what it names. If it ever
    blocks work you cannot otherwise land, commit with `git commit --no-verify`
    and say so in your summary: unlanded work costs far more than a lint nit.

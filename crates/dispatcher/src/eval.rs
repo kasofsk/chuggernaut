@@ -25,7 +25,7 @@
 //!   fold is a `match` on a value the decider returned; every merge flows
 //!   through a per-project depth-1 queue; nothing lands on the default branch
 //!   untested against the exact tree.
-//! - **Spec:** §3.3; §3.2 step 12; contracts.md §2. Runs as `impl Core` — core
+//! - **Spec:** §3.3; §3.2 step 12; docs/reference/contracts.md §2. Runs as `impl Core` — core
 //!   stays the single writer.
 
 use crate::capacity::DecidedLaunch;
@@ -46,7 +46,7 @@ use vcs::{ConflictRebaseOutcome, RebaseOutcome};
 
 pub use crate::decide::eval::{EvalRound, EvalSlot, SlotOutcome, stage_passed};
 
-/// Hard cap on continuation hops in one evaluation fold (STYLE.md Tier 2 #3).
+/// Hard cap on continuation hops in one evaluation fold (docs/reference/style.md Tier 2 #3).
 /// Each hop consumes exactly one launch outcome — a stage fan-out or one slot's
 /// relaunch — so a real round finishes in a handful; the cap turns a decider
 /// that fails to settle into a loud error instead of a spinning actor.
@@ -146,7 +146,7 @@ impl Core {
         .await
     }
 
-    /// The C5 fold for one evaluation decision (contracts.md §2), the four-step
+    /// The C5 fold for one evaluation decision (docs/reference/contracts.md §2), the four-step
     /// shape C1 set: gather the reads into the view, call the pure decider, swap
     /// the round value it owns, apply its transitions through `set_state`, run
     /// its effects through `interpret` — and when a launch effect returns task
@@ -270,7 +270,7 @@ impl Core {
     }
 
     /// Run one decision's effects, returning the event its launch answered with
-    /// (contracts.md §2's continuation contract): a stage's slots or a
+    /// (docs/reference/contracts.md §2's continuation contract): a stage's slots or a
     /// relaunched slot's task id, which exist only once the launch ran.
     #[allow(
         clippy::expect_used,
@@ -313,7 +313,7 @@ impl Core {
         Ok(next)
     }
 
-    /// Assemble the read-only inputs for one evaluation decision (contracts.md
+    /// Assemble the read-only inputs for one evaluation decision (docs/reference/contracts.md
     /// §2: reads feed the view, they are not effects). `None` when the job has
     /// no execution slice — nothing to decide.
     async fn gather_eval_view(
@@ -1168,7 +1168,7 @@ impl Core {
     /// ([`merge_gate::MergeGateState::next_candidate`]). Wrap-up is designed
     /// to be infallible; when a landing step fails anyway (git plumbing, repo
     /// IO — not a Conflict, which has its own rework path), the job escalates
-    /// and the queue moves on instead of wedging (design-lifecycle.md).
+    /// and the queue moves on instead of wedging (docs/reference/design-lifecycle.md).
     pub(crate) async fn pump_merges(&mut self, owner: &str, project: &str) -> Result<()> {
         let slug = format!("{owner}/{project}");
         loop {
@@ -1290,7 +1290,7 @@ impl Core {
         })
     }
 
-    /// The C2 continuation fold for ONE landing (contracts.md §2): gather a
+    /// The C2 continuation fold for ONE landing (docs/reference/contracts.md §2): gather a
     /// fresh view, call the pure decider, swap its state value, apply
     /// transitions through `set_state`, run effects through `interpret` — and
     /// when an effect carries a result, feed it back as the next event until
@@ -1740,7 +1740,7 @@ impl Core {
             .await
     }
 
-    /// The C3 shim (contracts.md §2), the same four-step shape C1 set: gather
+    /// The C3 shim (docs/reference/contracts.md §2), the same four-step shape C1 set: gather
     /// the reads into the view, call the pure decider, apply its transitions
     /// through `set_state`, run its effects through `interpret` — plus the
     /// dispatcher-side bookkeeping the returned [`wrapup::WrapUpStep`] names,

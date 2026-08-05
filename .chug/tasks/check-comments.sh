@@ -1,5 +1,5 @@
 #!/bin/sh
-# Comment lint (STYLE.md Tier 1): source carries DOCS, not comments.
+# Comment lint (docs/reference/style.md Tier 1): source carries DOCS, not comments.
 #
 # Two rules over Rust and TypeScript sources:
 #
@@ -7,7 +7,7 @@
 #      forms are rejected outright. Doc comments — `///`, `//!`, `/** */`,
 #      `/*! */` — are the only prose allowed to live in a source file.
 #   2. A doc comment is at most 2 sentences. Anything longer is a doc page:
-#      write it under `docs/` (or in the module's MODULES.md row) and let the
+#      write it under `docs/` (or in the module's docs/reference/modules.md row) and let the
 #      doc comment point at it.
 #
 # Why: scattered comments are a liability — they drift out of step with the
@@ -20,7 +20,7 @@
 # Inner doc comments (`//!`, `/*! */`) are EXEMPT from rule 2 — deliberately.
 # The module header (accepts / emits / guarantees / spec §, NORTH-STAR §4) and
 # the crate-root `//!` pointing at its spec section are this repo's in-tree doc
-# surface: registered in MODULES.md, reviewed as a contract, and structurally
+# surface: registered in docs/reference/modules.md, reviewed as a contract, and structurally
 # unable to scatter (one per module). Rule 1 still applies inside them — they
 # are doc comments.
 #
@@ -31,13 +31,13 @@
 # just the changed ones, and one non-doc comment anywhere fails the gate. Rule 2
 # still has ~500 over-long doc comments to work through, so it reports only
 # blocks the diff ADDS a line inside — an edited doc comment gets trimmed rather
-# than grandfathered (the STYLE.md `unwrap_used` precedent).
+# than grandfathered (the docs/reference/style.md `unwrap_used` precedent).
 #
 # Escape hatch: NONE for prose. The narrow allowlist below covers only comments
 # a MACHINE reads — `jscpd:ignore-start`/`-end` (required by the Tier 1
 # duplication rule), `SAFETY:` on an unsafe block, and the eslint/ts/prettier
 # pragmas. Put a directive's justification on the directive line itself; put a
-# change's rationale in the commit message (STYLE.md Tier 2 rule 5).
+# change's rationale in the commit message (docs/reference/style.md Tier 2 rule 5).
 #
 # The scanner runs under LC_ALL=C, so the gate's verdict is the same on every
 # host: it works on `//`, `/*`, quotes and backticks — all ASCII — and byte
@@ -353,9 +353,9 @@ if [ "$linter_errors" -ne 0 ]; then
 fi
 
 if [ "$violations" -ne 0 ]; then
-	echo "!!! check-comments: $violations file(s) with comment violations (STYLE.md Tier 1)."
+	echo "!!! check-comments: $violations file(s) with comment violations (docs/reference/style.md Tier 1)."
 	echo "!!!     Source carries docs, not comments: delete the comment and put what it"
-	echo "!!!     said in a doc under docs/ (or the module's MODULES.md row), or in the"
+	echo "!!!     said in a doc under docs/ (or the module's docs/reference/modules.md row), or in the"
 	echo "!!!     commit message if it is rationale. Doc comments stay under 2 sentences."
 	echo "!!!     Reproduce locally with: .chug/tasks/check-comments.sh"
 fi

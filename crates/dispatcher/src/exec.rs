@@ -8,7 +8,7 @@
 //! effects, and performs the I/O the returned `WorkStep` names. That I/O is the
 //! phase's real work: the container launch (prompt, credentials, env), the §3.2
 //! branch recover-or-reset, and the finish-line ref read whose answer re-enters
-//! the decider as its next event (contracts.md §2's continuation contract).
+//! the decider as its next event (docs/reference/contracts.md §2's continuation contract).
 //!
 //! - **Accepts:** a Ready job entering Work and every rework re-entry; work
 //!   submissions; container exits, operator resolutions and infrastructure
@@ -20,7 +20,7 @@
 //!   a value the decider returned. Runs as `impl Core`, so the single writer is
 //!   preserved; the decision fold is bounded ([`WORK_FOLD_STEPS_MAX`]).
 //! - **Spec:** §3.2; §1.2 (claims, human work); §2.2 and §14.2 (the launch-time
-//!   pass); §3.6 (drain, infra loss); contracts.md §2.
+//!   pass); §3.6 (drain, infra loss); docs/reference/contracts.md §2.
 
 use crate::capacity::DecidedLaunch;
 use crate::core::{Core, CoreError, Msg, Result, TaskExit, WorkSubmission};
@@ -40,7 +40,7 @@ use types::{
 
 pub(crate) use crate::decide::work::{INFRA_LOSS_REASON, INFRA_RELAUNCH_CAP, provider_name};
 
-/// Bound on one Work decision fold (STYLE.md Tier 2 #3). The only continuation
+/// Bound on one Work decision fold (docs/reference/style.md Tier 2 #3). The only continuation
 /// hop is the §3.2 finish-line guard's branch read, so a settled fold is two
 /// steps; anything beyond this is a decider that will not converge, and failing
 /// loudly beats spinning inside the single-writer loop.
@@ -240,7 +240,7 @@ impl Core {
         }
     }
 
-    /// The C6 entry shim (contracts.md §2), the four-step shape C1 set: build the
+    /// The C6 entry shim (docs/reference/contracts.md §2), the four-step shape C1 set: build the
     /// view, decide, apply the transitions through `set_state`, run the effects
     /// through `interpret`. Returns whether the entry may proceed to attempt 1 —
     /// a parked entry (validation failure) may not.
@@ -643,7 +643,7 @@ impl Core {
         }
     }
 
-    /// The C6 fold for one Work decision (contracts.md §2), the four-step shape
+    /// The C6 fold for one Work decision (docs/reference/contracts.md §2), the four-step shape
     /// C1 set: gather the reads into the view, call the pure decider, apply its
     /// transitions through `set_state`, run its effects through `interpret` —
     /// then perform the I/O the returned [`work::WorkStep`] names, re-entering

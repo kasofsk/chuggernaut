@@ -3,7 +3,7 @@
 Status: PROPOSED.
 
 Written against the tree at `61b721d` (2026-07-30). Every claim about current
-behavior was read out of the source or out of [spec.md](../../spec.md); where
+behavior was read out of the source or out of [docs/spec.md](../spec.md); where
 this document and the job brief disagree, the tree wins and the disagreement is
 recorded under
 [Corrections](#corrections-to-the-brief-and-to-309).
@@ -35,15 +35,15 @@ native execution versus *SSHing into a Mac from an ordinary container*, versus
 doing nothing. #309 assumes host mode is wanted and argues its shape; this
 document argues the decision.
 
-Related: [spec.md](../../spec.md) §1.1 (job-type schema and the field-rules
+Related: [docs/spec.md](../spec.md) §1.1 (job-type schema and the field-rules
 matrix), §3.1 (backends, placement, worker RPC, self-refresh, node-local
 caching), §3.5 (launch capacity queue, task timeout), §3.6 (restart
 reconciliation and the two sweeps), §4.1 (workspace bootstrap), §14
 (config/version skew), Appendix: Deferred ("macOS bare metal dispatchers");
-[design.md](../../design.md) (single-writer discipline);
+[docs/design/000-rationale.md](000-rationale.md) (single-writer discipline);
 [#293](./293-worker-capacity.md) (worker capacity — landed in the wire types
-since #309 was written); [STYLE.md](../../STYLE.md);
-[testing.md](../../testing.md); [crates.md](../../crates.md).
+since #309 was written); [docs/reference/style.md](../reference/style.md);
+[docs/reference/testing.md](../reference/testing.md); [docs/reference/crates.md](../reference/crates.md).
 
 ## Corrections to the brief and to #309
 
@@ -59,7 +59,7 @@ things have moved or need adjusting, and each one moves work.
    its own frozen constant rather than reading the moving one. See
    §[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode).
 2. **#293's wire fields have landed.** #309 correction 1 recorded that
-   `spec.md` §3.1 described `slots_max` / `capacity_epoch` /
+   `docs/spec.md` §3.1 described `slots_max` / `capacity_epoch` /
    `capacity_generation` / `set_slots` while the code had none of it. The code
    has them now: `WorkerAnnounce` and `PingOk` both carry
    `slots_max`/`capacity_epoch`/`capacity_generation` as `Option`s with
@@ -124,7 +124,7 @@ Some work cannot run in a container on any host we own:
 Containers on macOS are Linux guests inside a VM — colima (which is what the
 Mini runs today, per `deploy/prod/README.md`), Docker Desktop, and Apple's
 `container` framework are all Linux VMs. There is no macOS kernel to share and
-nothing to pass through. `spec.md` Appendix: Deferred already concedes the
+nothing to pass through. `docs/spec.md` Appendix: Deferred already concedes the
 point: "**macOS bare metal dispatchers**: required for Xcode builds. Execution
 model needs separate design."
 
@@ -170,7 +170,7 @@ a real process group the platform owns. Secrets stay per-task and short-lived.
 **Against:** it is the expensive option. It needs backend polymorphism in the
 daemon, a genuinely new durable-state component
 (§[1](#1-the-durable-task-registry)), a rebase rule in shared code
-(§[2](#2-workspace-as-a-virtual-wire-path)), a normative `spec.md` §1.1/§4.1
+(§[2](#2-workspace-as-a-virtual-wire-path)), a normative `docs/spec.md` §1.1/§4.1
 change plus an epoch bump (§[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)),
 and a node-provisioning runbook the platform does not have
 (§[6](#6-node-provisioning-and-the-self-refresh-collision)). It also **gives up
@@ -191,7 +191,7 @@ it is the right amount of machinery. The costs, honestly:
   SSHing into the same Mac contend over one CoreSimulator session, one shared
   `~/Library/Developer/Xcode/DerivedData`, and one `xcode-select` setting, with
   nothing counting them. That is precisely the untracked-concurrency shape
-  [design.md](../../design.md)'s single-writer discipline exists to avoid.
+  [docs/design/000-rationale.md](000-rationale.md)'s single-writer discipline exists to avoid.
   *Concession:* the concurrency **can** be bounded with existing mechanism —
   pin the iOS job type to a dedicated 1-slot node and only one such container
   runs at a time. At that point you are paying for a whole node to serialize
@@ -357,7 +357,7 @@ Step 3 is the important one. Reporting such a task as **Running** is the bad
 failure: §3.6 classifies it as "still running, re-attach" and the task hangs
 until `task_timeout` — a slow, confusing failure. Synthesizing a nonzero exit
 makes it a loud task failure that consumes a retry and says why. Assert the
-negative space (STYLE.md Tier 2 rule 2): *no task dir ever transitions out of
+negative space (docs/reference/style.md Tier 2 rule 2): *no task dir ever transitions out of
 having an `exit_code`*, and the daemon is the only writer of a task dir.
 
 ### Restart recovery, concretely
@@ -367,7 +367,7 @@ On daemon start, before serving any op:
 1. Enumerate `{WORKER_HOST_ROOT}/*/`, **bounded** at
    `slots_max × HOST_TASK_DIRS_PER_SLOT_MAX` entries. Exceeding the bound is a
    loud startup error, not a truncated scan — an unbounded registry on a laptop
-   disk is exactly what STYLE.md Tier 2 rule 3 forbids.
+   disk is exactly what docs/reference/style.md Tier 2 rule 3 forbids.
 2. For each dir with no `exit_code`, run the liveness ladder above. Live tasks
    are **adopted with no work** (nothing to re-attach); dead ones get a
    synthesized verdict.
@@ -419,7 +419,7 @@ git clone --single-branch --filter=blob:none --branch "$JOB_BRANCH" "$REPO_URL" 
 
 and the **dispatcher** reaches back for `/workspace/eval-result.json` through
 `copy_file` (`crates/dispatcher/src/launch_queue.rs`, and documented in
-`spec.md` §4.1/§1.1 for command evaluators). Injected credentials use the second
+`docs/spec.md` §4.1/§1.1 for command evaluators). Injected credentials use the second
 fixed prefix, `/chuggernaut/` (`crates/dispatcher/src/exec.rs`).
 
 One fixed absolute path on a shared Mac means concurrent tasks collide, and a
@@ -468,7 +468,7 @@ it to `{task_dir}/workspace`. Three additions this document makes:
   `{task_dir}/workspace/*`, `/chuggernaut/*` → `{task_dir}/chuggernaut/*`, and
   **anything else is a hard `BackendError::Launch` / `NotFound`** naming the
   path. There is no fall-through to the host filesystem, and the rebase asserts
-  that its output is under the task dir (STYLE.md Tier 2 rule 2 — assert the
+  that its output is under the task dir (docs/reference/style.md Tier 2 rule 2 — assert the
   negative space). A permissive mapping is how a `copy_file` bug becomes a write
   to `/`.
 - **Symlink escape is part of totality.** The rebase resolves and re-checks
@@ -572,7 +572,7 @@ the normative docs rather than just code.
 
 **What is true today.** `ContainerLaunchConfig.image: String` and
 `WorkerLaunchRequest.image: String` are both non-optional
-(`crates/container/src/lib.rs`, `crates/types/src/worker.rs`). `spec.md` §1.1
+(`crates/container/src/lib.rs`, `crates/types/src/worker.rs`). `docs/spec.md` §1.1
 makes `image` **required** for `work.type: agent | command` and **disallowed**
 for `human`, and `JobType::validate` enforces it with `Required { field:
 "image" }` rules (`crates/types/src/job_type.rs`). A host runtime has no image.
@@ -670,7 +670,7 @@ backstop** — with the macOS consequence stated flatly: `resources_enforced:
 false` on a Mac node, `choose_placement` treats a job type declaring
 `cpu`/`memory` as requiring enforcement, and a launch that arrives anyway (via
 a pin) is a hard `BackendError::Launch` naming the field and the node. **Never a
-silent ignore** — that is the lie STYLE.md Tier 2 rule 3 rejects.
+silent ignore** — that is the lie docs/reference/style.md Tier 2 rule 3 rejects.
 
 So: **a host-mode job type on macOS must not declare `resources.cpu` or
 `resources.memory`.** `resources.task_timeout` is unaffected and still works
@@ -717,7 +717,7 @@ Two macOS-specific notes on top of #309:
 4. **Existing configs are untouched.** `runtime` absent, or `mode: container`,
    is today's rule set byte-for-byte: `image` required for agent/command,
    disallowed for human.
-5. **The field-rules matrix in `spec.md` §1.1 gains a host column**, §4.1 gains
+5. **The field-rules matrix in `docs/spec.md` §1.1 gains a host column**, §4.1 gains
    the sentence that `/workspace` is a *logical* path the backend may map, and
    §3.1 gains the host node kind. Also fix the stale inline `ContainerBackend`
    listing in §3.1 while there (it omits `logs`, `logs_tail`, and all six
@@ -899,7 +899,7 @@ shape. Scoping phase 1 to **simulator work only** removes the hardest
 provisioning problem from the critical path while still delivering the category
 that motivated the design (tests that cannot run on Linux at all). Signing gets
 its own design once host mode has run real work; guessing its shape now would be
-the deferred debt STYLE.md Tier 3 rejects.
+the deferred debt docs/reference/style.md Tier 3 rejects.
 
 ## 6. Node provisioning and the self-refresh collision
 
@@ -922,7 +922,7 @@ task records its resolved toolchain versions in its own captured stdout.
 
 ### The self-refresh collision, which is the real finding here
 
-`spec.md` §3.1's self-refresh is written around a **containerized** daemon: on
+`docs/spec.md` §3.1's self-refresh is written around a **containerized** daemon: on
 `refresh { sha, tag }` the node builds three images locally and a **detached
 sibling** does `docker rm -f chug-worker` + `docker run` of the new image
 (`deploy/prod/worker-refresh.sh`). The §3.1 **drain guarantee** depends on a
@@ -998,7 +998,7 @@ Stated plainly, because a design that only lists what it buys is not honest:
 
 Worker-local work and normative-doc work are separated deliberately: phases W
 touch only the worker/container crates and one prototype node, phases N change
-`spec.md` and the config schema. **W1–W3 need no spec change, no epoch bump, and
+`docs/spec.md` and the config schema. **W1–W3 need no spec change, no epoch bump, and
 no dispatcher behavior change** — which is what makes the prototype cheap. The
 one edit they make to shared code is `bootstrap_cmd`'s `${CHUG_WORKSPACE:-…}`
 default, which is a no-op for every container task and is why folding the rebase
@@ -1009,7 +1009,7 @@ into W2 does not cost the prototype its cheapness.
 | **W1** | `code` | Backend polymorphism: `managed_running_total` lifted onto `ContainerBackend` as a provided method; `WorkerState.backend` becomes `Arc<dyn ContainerBackend>`; one construction function owning the `with_cache_dir`/`ping_all` wiring; `WORKER_MODES` parsing in `crates/worker/src/config.rs` beside `parse_slots`/`parse_cache_dir` | — |
 | **W2** | `code` | The host backend, **including the rebase** — it is a precondition of the first launch, not hardening (§[2](#2-workspace-as-a-virtual-wire-path)): task dir under `WORKER_HOST_ROOT`, wrapper-written `exit_code`, the liveness ladder, restart recovery with the bounded startup scan, fail-loud listings (§[1](#1-the-durable-task-registry)); `CHUG_WORKSPACE` indirection in `bootstrap_cmd`, total `/workspace` + `/chuggernaut` mapping over all four surfaces with a hard error on anything unmapped, exit-time deletion of the mapped `chuggernaut/` credential tree, and the agent-shaped-launch refusal. One Mac at `slots: 1`, routed by `placement.node`, `WORKER_MODES=container,host`. The job type still declares `image:` and the node ignores it — **a deliberate lie that must never leave the prototype node**, and the one prototype-only lie in this phase; N1/N2 exist to remove it | W1 |
 | **W3** | `code` | macOS hardening, once W2 runs a real build: symlink-resolution containment and its rejection cases; `simctl`-scoped teardown on kill/remove/recovery, including orphan device sets found by the startup scan (§[5](#5-ios-specifics)); the local retention sweep; optional `nice`/`taskpolicy` self-protection | W2 |
-| **N1** | `docs` | `spec.md`: §1.1 host column in the field-rules matrix + the `runtime:` block, §3.1 host node kind and the stale trait listing, §4.1 `/workspace` as a logical path, Appendix: Deferred points here instead of staying open. `crates.md` container row | W3 |
+| **N1** | `docs` | `docs/spec.md`: §1.1 host column in the field-rules matrix + the `runtime:` block, §3.1 host node kind and the stale trait listing, §4.1 `/workspace` as a logical path, Appendix: Deferred points here instead of staying open. `docs/reference/crates.md` container row | W3 |
 | **N2** | `code` | The schema: `runtime: { mode, env }` with nested `deny_unknown_fields`, the field rules and the per-level precedence rule, `CONFIG_SCHEMA_EPOCH` 2 → 3 + frozen `RUNTIME_SCHEMA_EPOCH`, and both validate rules — `min_dispatcher >= 3`, and `mode: host` requires `work.type: command` (§[2](#2-workspace-as-a-virtual-wire-path), §[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)) | N1 |
 | **W4** | `code` | Node-side env-ref resolution: Xcode discovery, `xcode:<version>` → `DEVELOPER_DIR`, hard failure naming what is installed | N2 |
 | **W5** | `code` | Refresh precondition: decline a refresh while any host task runs, with the reason (§[6](#6-node-provisioning-and-the-self-refresh-collision)) | W2 |
@@ -1023,7 +1023,7 @@ H.4 is right that the flutter/fastlane workflows sit at the confluence of too
 many unbuilt things; what W2 needs to answer is which of the ten trait methods
 is actually hard.
 
-Test placement per [testing.md](../../testing.md): the `WORKER_MODES` parse, the
+Test placement per [docs/reference/testing.md](../reference/testing.md): the `WORKER_MODES` parse, the
 rebase rule (including the rejection cases), the liveness ladder as a pure
 function over a synthetic task dir, the `runtime:` field rules, and the
 `choose_placement` predicate are all pure → **tier 1**, beside the existing
@@ -1036,14 +1036,14 @@ one whose failure mode is a hung task.
 
 ## Contracts changed
 
-Per STYLE.md's contract-first rule, each slice names the contract it changes:
+Per docs/reference/style.md's contract-first rule, each slice names the contract it changes:
 
 | Slice | Contract |
 | --- | --- |
 | W1 | `ContainerBackend` trait surface (`managed_running_total` becomes provided); `WorkerConfig` gains `modes` |
 | W2 | New backend implementation; `ContainerId` shape unchanged (`{node}/{task_id}`); **`list_managed_exited`/`list_managed_running` postcondition strengthened: never a partial `Ok`**; new invariant — a task dir never transitions out of having an `exit_code`, and the daemon is its only writer; `bootstrap_cmd` output (clone destination becomes `${CHUG_WORKSPACE:-/workspace}` — unchanged when unset); a new **total** wire-path mapping contract with no fall-through, over paths *and* env values; credential lifetime — secrets deleted at process exit, not at `remove`; host launches refuse agent shape |
 | W3 | Mapping containment strengthened to post-normalization (symlink escape); `kill`/`remove` postcondition gains bounded device-set teardown |
-| N1 | `spec.md` §1.1 field-rules matrix, §3.1 node kinds and trait listing, §4.1 workspace bootstrap |
+| N1 | `docs/spec.md` §1.1 field-rules matrix, §3.1 node kinds and trait listing, §4.1 workspace bootstrap |
 | N2 | Job-type schema epoch (§14.1): `CONFIG_SCHEMA_EPOCH` 2 → 3, a frozen `RUNTIME_SCHEMA_EPOCH` (proposed 3, landed 4 in job #401), `JobType::validate` rules, per-level `image`/`runtime` precedence |
 | W4 | `runtime.env` scheme registry (`xcode:<version>`); launch fails hard on an unresolvable ref |
 | W5 | `refresh` precondition (declines while host tasks run) — a narrowing of §3.1's refresh contract |
@@ -1051,12 +1051,12 @@ Per STYLE.md's contract-first rule, each slice names the contract it changes:
 
 ## What this makes wrong elsewhere
 
-- **`spec.md` Appendix: Deferred** — "macOS bare metal dispatchers … Execution
+- **`docs/spec.md` Appendix: Deferred** — "macOS bare metal dispatchers … Execution
   model needs separate design" should point at this document and
   [#309](./309-host-native-execution.md) instead of staying open-ended. (Note
   the entry says *dispatchers*; what this design adds is a macOS **worker**, and
   the dispatcher stays where it is.)
-- **`crates.md`'s `container` row** reads "Docker and k8s implementations"; k8s
+- **`docs/reference/crates.md`'s `container` row** reads "Docker and k8s implementations"; k8s
   is a stub and a host backend makes the row wrong a second way.
 - **`crates/container/src/lib.rs`'s module doc** ("Docker socket in dev, the
   Kubernetes Jobs API in production") describes a deployment that does not exist.

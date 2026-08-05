@@ -132,7 +132,7 @@
       "minimum": 0
     },
     "wrap_up": {
-      "description": "The third step of the job (work → evaluation → wrap-up): what happens\nafter eval-pass (design-lifecycle.md).",
+      "description": "The third step of the job (work → evaluation → wrap-up): what happens\nafter eval-pass (docs/reference/design-lifecycle.md).",
       "$ref": "#/$defs/WrapUpSpec",
       "default": {
         "type": "merge"
@@ -500,7 +500,7 @@
       ]
     },
     "WrapUpMode": {
-      "description": "Wrap-up mode after eval-pass (design-lifecycle.md).",
+      "description": "Wrap-up mode after eval-pass (docs/reference/design-lifecycle.md).",
       "oneOf": [
         {
           "description": "Squash-merge the job branch to the default branch (merge queue, merge\ngate, conflict rework) — the code-change wrap-up.",
@@ -515,7 +515,7 @@
       ]
     },
     "WrapUpSpec": {
-      "description": "Wrap-up declaration (design-lifecycle.md): the job's third step. A block\nrather than a bare scalar so future wrap-up behavior (e.g. a\n`deployed/{env}` tag ref) extends it without reshaping the schema.",
+      "description": "Wrap-up declaration (docs/reference/design-lifecycle.md): the job's third step. A block\nrather than a bare scalar so future wrap-up behavior (e.g. a\n`deployed/{env}` tag ref) extends it without reshaping the schema.",
       "type": "object",
       "properties": {
         "image": {

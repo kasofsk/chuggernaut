@@ -10,10 +10,10 @@ Keep it in sync with the tree: every dispatcher module
 (`crates/domain/src/**/*.rs`) and every context-crate module
 (`crates/platform-ops/src/**/*.rs`) has a row, and CI fails when a new one
 lacks one (refactor-plan A3) — the mechanism that keeps this from drifting the
-way `crates.md`'s dispatcher map did. The trees nest, so a directory module
+way `docs/reference/crates.md`'s dispatcher map did. The trees nest, so a directory module
 registers under its own name (`handlers`, from its `mod.rs`) and each child
-under `handlers/<child>`. Companion docs: `crates.md` (crate map +
-rationale), `NORTH-STAR.md` (target factoring), `STYLE.md` (the rules).
+under `handlers/<child>`. Companion docs: `docs/reference/crates.md` (crate map +
+rationale), `docs/README.md` (target factoring), `docs/reference/style.md` (the rules).
 
 A **named context** (NORTH-STAR §1) — a set of modules sharing one charter —
 gets its own section here; its charter lives in the section's prose and in the
@@ -43,8 +43,8 @@ one surface.
 | `queue` | In-memory FIFO of Ready job IDs, plus the §3.5 launch queue's pure half (drain-priority class, max-wait budget arithmetic); lives in the actor, never persisted, rebuilt on restart. | §3.1, §3.5 |
 | `release` | Release validation, pure half: error vocabulary, graph wiring rules, additive-evaluator merge; the ref-reading half stays dispatcher-side. | §2.2, §2.3 |
 | `inputs` | Job inputs against their declaration: the semantic verdict (`inputs.{name}` errors) shared by release and the Ready-transition re-check, the add-only default fill the first `base_ref` pin performs, and the delivery half — `CHUG_INPUT_*` injection under the collision assert, the audit fragment the create/Ready events carry, the §4.3 brief's `### Inputs` block, and the squash body's `Inputs:` line. | §1.1, §2.2, §4.1, §4.3, §10.3 |
-| `effects` | The effect vocabulary: an `Effect` enum naming each port action as `serde` data, with a variant→port-method table. Plain data, no I/O. | contracts.md §2 |
-| `decide` | The decider layer: `Transition` + one pure module per lifecycle phase, each `decide(view, event) -> (Vec<Transition>, Vec<Effect>)`; never performs an effect. | contracts.md §2 |
+| `effects` | The effect vocabulary: an `Effect` enum naming each port action as `serde` data, with a variant→port-method table. Plain data, no I/O. | docs/reference/contracts.md §2 |
+| `decide` | The decider layer: `Transition` + one pure module per lifecycle phase, each `decide(view, event) -> (Vec<Transition>, Vec<Effect>)`; never performs an effect. | docs/reference/contracts.md §2 |
 | `decide/authoring` | The F1 authoring primitives (the decider itself lands in F1b): the §2.1 batch membership rules per candidate, and the composition a batch commits — external-dep union, evaluator union by name, auto-index description — as free functions over the project graph. | §2.1, §6.5 |
 | `decide/escalation` | The C1 template decider: the escalate/stall family — Human task + WHY stamp + Escalated/Stalled transition + announcement, as values. | §1.2, §3.4 |
 | `decide/merge_gate` | The C2 landing decider: version-skew refusal, depth-1 serialization (`gating: Option` — by type), fast-vs-gate pivot, verdict classification, gate-fix budget, conflict re-entry — a continuation machine whose effect results re-enter as events. | §3.3, §14.3 |
@@ -67,7 +67,7 @@ one surface.
 | `ready` | Ready-phase shim: gathers the view, applies `decide/ready`'s transitions and effects, then does the bookkeeping its step names — queue admission, a Draft batch's membership commit, the §2.2 re-validation hop, the Work hand-off. | §2.1, §2.2, §3.1 |
 | `exec` | Work-execution shim: gathers the view, applies `decide/work`'s transitions and effects, then performs the I/O its step names — container launch, crash recover-or-reset, the finish-line branch read, the Evaluation hand-off. | §3.2 |
 | `eval` | Evaluation shim: the launch/monitor half (evaluator prompts, the §3.3 re-review context, the pre-eval rebase) driving `decide/eval`, plus the merge-gate landing fold driving `decide/merge_gate` — both gather view → decide → swap state → apply → interpret, outcomes re-entering as events. | §3.3, §3.2 |
-| `interpret` | The effect interpreter: `Core::interpret` executes one `Effect` through the port it names; the sole `&mut Core` coupling deciders keep. | contracts.md §2 |
+| `interpret` | The effect interpreter: `Core::interpret` executes one `Effect` through the port it names; the sole `&mut Core` coupling deciders keep. | docs/reference/contracts.md §2 |
 | `trace` | Test-only golden-trace recorder: an inert-in-prod `TraceSink` a test attaches via `Core::attach_trace` to capture every `set_state` transition and `publish`/escalation effect as YAML fixtures (`tests/traces/`, regen `UPDATE_TRACES=1`); pins decisions during Track C. | refactor-plan B3 |
 | `launch_queue` | Capacity-aware launch queue: park on `NoCapacity`, drain on slot-freed, escalate past `MAX_QUEUE_WAIT`. | §3.5 |
 | `scan` | Task-timeout and one-shot job-deadline scans, plus the schedule tick that drives `decide/schedule` and originates the jobs it fires; run inside the single-writer loop; also drains the launch queue. | §3.5, §1.1 |

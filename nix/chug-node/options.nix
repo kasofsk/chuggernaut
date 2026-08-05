@@ -19,7 +19,7 @@
 #     values for it, it does not belong here — and that applies to an option's
 #     value, not only to its name.
 #   * Drain before you rebuild. Set the node's slots to 0, watch `occupied`
-#     reach zero, rebuild, restore the count (docs/runbooks/worker-capacity.md).
+#     reach zero, rebuild, restore the count (docs/reference/runbooks/worker-capacity.md).
 #     A4's `live-restore` makes the common rebuild safe to run hot; a reboot,
 #     the first rebuild that adopts this module, and any rebuild that bumps a
 #     node toolchain still need the drain.
