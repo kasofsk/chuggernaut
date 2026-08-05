@@ -1,0 +1,547 @@
+# Design — the natively-supervised worker daemon
+
+Status: PROPOSED — the prerequisite #309 P0 named and left unowned.
+
+Written against the tree at `1030704`. Every claim about current behavior below
+was read out of the source or out of [`spec.md`](../../spec.md) in this tree, not
+carried over from the brief or from a sibling design; where the brief and the
+tree disagree, the tree wins. Two things are relied on **secondhand** and are
+marked where they are load-bearing: the operator's `macos-runner` host
+configuration (not checked out in this workspace, so nothing here re-derives it,
+the way [#361](./361-per-run-placement.md) and [#362](./362-binary-artifacts.md)
+mark theirs), and `launchd`'s documented process-group teardown semantics, which
+no file in this repo states and which [slice 2](#slices) must therefore prove
+rather than assume.
+
+This document decides **one** thing: what a `chuggernaut worker` daemon that is
+not itself a container looks like. It does not touch #309's phase list, does not
+delete #401's `runtime.mode: host` refusal, and designs neither capability
+advertisement nor device leases. Those stay #309's.
+
+Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
+2026-08-05 P0 correction (finding 6); [#372](./372-chug-node-modules.md) §6, §8;
+[#322](./322-macos-native-runtime.md) §1, §6;
+[`spec.md`](../../spec.md) §3.1 (backends, self-refresh, the drain guarantee),
+§3.6 (restart reconciliation); [`STYLE.md`](../../STYLE.md);
+[`testing.md`](../../testing.md).
+
+---
+
+## Decisions
+
+| # | Decision | One-line rationale |
+| --- | --- | --- |
+| **D1** | **One daemon per node, run natively, serving both modes.** There is never a second daemon process on a node. | A native daemon reaches the host's docker socket directly, so container mode is unchanged and the container-vs-native question becomes a deployment detail; two daemons would split one machine into two fleet rows with no one summing their slots. |
+| **D2** | **Linux: a systemd unit declared by `chug.node`**, amending that module's "owns no lifecycle" charter. **macOS: a `launchd` agent in the login user's GUI domain**, the same shape `deploy/prod/install-launchd.sh` already installs for the dispatcher and api. | #372 §8's four reasons for refusing to declare the container are artifacts of the container swap; three dissolve when the daemon is native — R4 because a unit over a binary has no tag to be missing — and R3, the strongest, is answered by splitting lifecycle (nix) from run spec (the platform's env file). |
+| **D3** | **Host tasks run in their own supervision unit, not the daemon's** — Linux: a transient systemd scope per task; macOS: the process group `spawn_task` already creates, once proven. | It is the same mechanism #309 §6, §7 and §2 each independently need, and it is the only way `systemctl restart chug-worker` can stop killing in-flight work. |
+| **D4** | **And the daemon declines a `refresh` while any host task is live**, naming the task — evaluated **twice: at accept, and again at the swap boundary** beside `RefreshGate::drained`. | D3 covers a unit restart; it does not cover a reboot or a rebuild that restarts more than the unit, and the self-refresh is the only restart the platform performs *automatically* — a loud refusal there is cheap and unconditional. The accept check is the fast, informative one; the swap-boundary check is the one that is actually load-bearing, because the build phase runs between them. |
+| **D5** | **Credentials move to a root-owned `0700` directory named by the unit, not the login user's home.** `chuggernaut admin worker-creds` is unchanged; the install step in `deploy/prod/README.md` §6 changes. | The login user is in the `docker` group and is who `build-worker.sh` ssh's in as, so a creds file under that user's home is readable by anything that user runs — a strictly worse boundary than the one the mount was pretending to give. |
+| **D6** | **`build-worker.sh` renders and installs a unit + environment file; `worker-refresh.sh`'s swap collapses to "install the binary, ask the supervisor to restart".** The daemon binary is extracted from the worker image the build phase already produces. | Every mount, device and `docker inspect` carry-forward in the swap phase exists only because the daemon is a container that must be re-composed; extracting the binary keeps its build environment byte-identical to today's and needs no host Rust toolchain. |
+| **D7** | **#390's drift guard keeps its meaning and gains reach**: presence-decides-refusal over the same `WORKER_*` key set, comparing the live unit's environment against the composed environment file. | The comparison was never about docker — it is about what a recreate would drop — and a declaration that is a file on the node is legible without `docker inspect`. |
+| **D8** | **Of #309 P0's three known holes, two get worse and one gets better.** Environment inheritance (§10) and `/proc/<pid>/environ` (§8) get worse and stop being P3; the `setsid()` escape (§2) is closed on Linux for free by D3. | Blast radius is what changes: a task inheriting a *native* daemon's environment inherits the node, not a container that happens to hold a socket. |
+
+## Slices
+
+| # | Slice | Contract changed | Depends on | State |
+| --- | --- | --- | --- | --- |
+| 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | Proposed |
+| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | Proposed |
+| 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | Proposed |
+| 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | Proposed |
+| 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
+| 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | Proposed |
+| 7 | `code` — `nix/chug-node/` gains the unit and the `chug.node` charter amendment; the macOS plist template and its opt-in installer | `chug.node` option surface | 4, 6 | Proposed |
+| 8 | `docs` — `spec.md` §3.1's drain guarantee narrowed to say what survives a *native* daemon restart and what does not | spec §3.1 | 2, 3 | Proposed |
+
+**The ordering between 2–3 and 4–6 is load-bearing**, not a preference: flipping
+a node to a native daemon before the drain mechanism lands means the first deploy
+after the flip kills that node's in-flight host work. It binds only on a node
+that declares `host`, which today is none.
+
+Test placement per [`testing.md`](../../testing.md): `env_clear` and the
+refresh-precondition predicate are pure and belong beside the existing
+`crates/container/src/host.rs` and `crates/worker/src/config.rs` unit tests
+(**tier 1**); the scope escape and the survives-a-restart assertions extend
+`crates/container/tests/host_backend.rs`'s simulated-restart case (**tier 2**,
+and like the rest of that file it needs neither Docker nor NATS). Slices 4–6 are
+shell and their tests are `deploy/prod/build-worker.test.sh` and
+`deploy/prod/worker-refresh.test.sh`, which `.chug/tasks/ci.sh` already
+discovers. Nothing in this repo's CI evaluates `nix/chug-node/` (#372 §2.3) and
+slice 7 does not change that.
+
+---
+
+## What is true today
+
+| Fact | Where | State |
+| --- | --- | --- |
+| The daemon is a container: `docker run -d --restart=always --name chug-worker` with the host's docker socket and `keys` bind-mounted | `deploy/prod/build-worker.sh:524` | Shipped |
+| So it is docker-out-of-docker: task containers are **siblings on the host**, and container mode is correct | same, plus `spec.md` §3.1 | Shipped |
+| `HostBackend` spawns a task with `process_group(0)` and `.envs(&config.env)` — and **no `env_clear()`**, so the task inherits the daemon's whole environment | `crates/container/src/host.rs` (`spawn_task`) | Shipped |
+| A host task's exit status is written by the task's own wrapper, not by the daemon, so the daemon need not be alive when a task exits | `crates/container/src/host.rs` (`supervised_cmd`); #309 correction finding 2 | Shipped |
+| The swap runs a **detached `docker:cli` sibling** that removes `chug-worker` and re-composes `docker run` from mounts and devices recovered by `docker inspect` of the live container | `deploy/prod/worker-refresh.sh` (`swap`) | Shipped |
+| `nix/chug-node/` prepares the host and deliberately declares **no** unit supervising the daemon | `nix/chug-node/options.nix` charter; #372 §8 | Shipped |
+| The Mini already runs the dispatcher and api **natively under launchd**, rendered from templates | `deploy/prod/install-launchd.sh`, `deploy/prod/launchd/` | Shipped |
+| `WORKER_CACHE_DIR` is env-only — a host path the daemon passes to sibling containers, never mounted into the daemon | `deploy/prod/worker-refresh.sh` swap comment; `crates/worker/src/config.rs` | Shipped |
+| `WORKER_CHANNEL_BINARY` and `WORKER_REFRESH_SCRIPT` default to `/usr/local/lib/chuggernaut/…` — paths that are *inside the image* today but are shaped like host paths | `crates/worker/src/config.rs` | Shipped |
+| `chuggernaut admin worker-creds` writes the `.creds` at mode `0600` on the dispatcher host; the operator `scp`s it into the node login user's `chuggernaut-worker/keys/` | `crates/cli/src/admin.rs`, `crates/cli/src/keygen.rs`, `deploy/prod/README.md` §6 | Shipped |
+| Prod's nodes only ever self-refresh — `WORKER_SSH` is unset for both, so `build-worker.sh` no-ops on every deploy | `deploy/prod/README.md` | Shipped |
+
+**The consequence #309 P0 finding 6 records, restated in one line:** a
+`HostBackend` inside `chug-worker` spawns processes in the *daemon container's*
+namespace, with its filesystem and its `/workspace` — "not host-native execution;
+it is a second, worse container runtime." Host mode is settable since #439 and
+unusable, and nothing else in #309's phase list can be proven until this is
+decided.
+
+---
+
+## 1. One daemon or two
+
+**Decision: one, native, serving both modes.**
+
+The native daemon opens `unix:///var/run/docker.sock` — the same socket the
+container gets by bind mount, at the same path, which is already
+`WORKER_DOCKER_ENDPOINT`'s default in `crates/worker/src/config.rs`. So
+`DockerBackend` is unchanged, task containers stay siblings on the host, the
+labels and the two §3.6 sweeps see exactly what they see today, and container
+mode does not become a migration. What changes is that `HostBackend`'s processes
+land on the node instead of inside a container, which is the entire point.
+
+**Two daemons on a mixed-mode node, priced honestly:**
+
+- **The fleet record doubles, because the node name is the key.** A worker seed
+  is `{name}|worker|{slots}` and `WorkerAnnounce` carries `node`
+  (`crates/worker/src/backend.rs`); merge is by name, and per `spec.md` §3.1 a
+  name held by a docker-endpoint seed is refused outright. Two daemons need two
+  names, so one machine becomes two rows in `fleet.status`, two heartbeats and
+  two version numbers.
+- **Nothing sums their slots.** `probe_worker` computes `free = slots − running`
+  per row and `choose_placement` skips `free <= 0`. Two rows of 2 on a two-core
+  box is a four-way over-commit by construction, and the operator's capacity
+  button has to be pressed twice to drain one machine.
+- **`worker-refresh` doubles on one docker daemon.** The deploy fans refresh out
+  per node and fails for any node that does not confirm (`spec.md` §3.1), so one
+  machine gets two legs, two build phases contending for the same BuildKit cache,
+  and a disk pre-flight sized for one generation guarding two.
+- **Two run specs, and #390 has two live things to compare.**
+- **The sweeps get ambiguous.** §3.6 step 7 kills running managed containers that
+  no live task owns, per node. Two backends on one docker socket means each
+  daemon's `list_managed_running` can see the other's containers.
+
+**What the losing option genuinely buys**, and it is not nothing: host mode could
+be adopted on a node without touching the proven container daemon at all, with
+rollback being `rm` of one unit. The answer is that the same property comes from
+the run spec instead — the flip is one unit install plus `docker rm -f
+chug-worker`, and the rollback is `build-worker.sh` at the previous tag, which is
+an act the operator already performs. Buying incremental rollout by permanently
+doubling the fleet record is the expensive way to get it.
+
+## 2. Supervision, per platform
+
+### Linux (NixOS)
+
+**A new unit, declared by `chug.node`** — which amends that module's charter.
+`nix/chug-node/options.nix` says today that the module "does NOT declare the
+`chug-worker` container or any unit supervising it", and #372 §8 gives four
+reasons. Take them in order against a *native* daemon:
+
+- **R1 — a unit would race the swapper.** Dissolves. The race is that the
+  swapper's `docker rm -f chug-worker` is indistinguishable from a crash to a
+  supervisor, which then collides with the swapper's own `docker run` on the same
+  `--name`. A native swap has no `rm -f` and no second starter: it writes a
+  binary and asks the supervisor to restart the unit. The supervisor *is* the
+  starter.
+- **R2 — two supervisors.** Dissolves. `--restart=always` stops existing; there
+  is exactly one `Restart=always`.
+- **R3 — two sources of truth for the run spec.** **Survives, and must be
+  answered.** #372 §8 verified it as the strongest of the four: the swap
+  composes the run spec from inspected mounts plus a dozen carried-forward
+  `WORKER_*` values, each with its own recorded reason, and a nix-declared unit
+  would hold a second static copy that a reboot would resurrect.
+- **R4 — image delivery.** Dissolves, and for a different reason than R1 and R2.
+  #372 §8 already marks it "weakened but not load-bearing" per its C4
+  correction, and its residue — that a `pull = "never"` unit "fails hard the
+  moment the tag is missing, which is the exact state the prune incident
+  produced" — is an objection to a unit that runs an *image*. A native unit runs
+  an installed binary, so there is no tag to be missing and no pull policy to
+  set. #372 §8 closes by naming the precondition for the change it refused —
+  "after image delivery moves to a registry … it is not a side effect of adding
+  a module, and this design does not propose it" — and the consequence is worth
+  stating plainly: **this design does not propose it either.** What it proposes
+  is nix owning a *unit over a binary*, which is not the container §8 refused,
+  and D6 keeps the image node-built exactly as today — the binary is extracted
+  from it, so the registry precondition is never triggered.
+
+The answer to R3 is this design's own, and it is to **split lifecycle from
+configuration**. The unit is a **machine fact** and nix declares it: the binary
+path, `User`, `Restart=always`, the `EnvironmentFile=` path, the kill semantics.
+The **run spec** stays the platform's, in the environment file that
+`build-worker.sh` renders from `deploy/prod/env.example`'s per-node variables —
+the same declaration, in the same place, with the same owner.
+
+The prior support for that split is #372 §6's closing paragraph, which
+anticipates this document exactly: "the drain answer changes if **host mode**
+ships … a future `chug-node` module *would* own [it], because on a host-mode
+node the daemon is a unit the module declares." Note what is *not* support: the
+three-clocks table in #372 §7 assigns the worker daemon to the **platform**
+clock and marks it "must not touch" for the module. D2 crosses that line deliberately,
+and the split is the reason it is crossable — the module takes the lifecycle,
+which is clock 1, and touches no part of the run spec, which stays clock 2. §7's
+own operational test is satisfied: two projects on the same node cannot want
+different values for `Restart=always` or a binary path.
+
+That keeps `chug.node` free of any platform credential or dispatcher address
+(#372 §6's reason for refusing a drain hook), keeps the run spec where #265's
+silent-revert findings put it, and gives R3 a real answer rather than a denial.
+The unit runs as **root**, because it needs the docker socket and because #309
+§8's per-task user pool is only reachable from a process that can drop
+privilege — a coherence worth naming, not a coincidence.
+
+`chug.node` gains `enable`-scoped options for the unit rather than a second
+module: the daemon's binary path, the environment-file path, and whether the node
+serves host mode at all. The `virtualisation.docker` assertions in
+`nix/chug-node/nixos.nix` are untouched and stay correct — a native daemon still
+drives dockerd, so `live-restore`, `enableOnBoot` and the prune exclusion all
+still say what they say.
+
+### macOS
+
+**A `launchd` agent in the login user's GUI domain.** The shape is first-hand and
+already in this repo: `deploy/prod/install-launchd.sh` renders
+`deploy/prod/launchd/*.plist.template` and `launchctl bootstrap`s them into
+`gui/$(id -u)`, which is how the Mini runs the dispatcher and api today. A worker
+plist is one more template of the same shape. The GUI domain rather than a system
+daemon is forced, not chosen: per #322, CoreSimulator and the keychain are
+per-user-session services, so a `LaunchDaemon` would be in the wrong session.
+
+Two consequences, one of them a real finding:
+
+- **`install-launchd.sh` globs its template directory**, so dropping a worker
+  template beside the others would install a worker agent on the Mini — the
+  control-plane host, whose own colima node sits at 0 slots precisely so heavy
+  builds cannot starve it (`deploy/prod/README.md`). The worker plist therefore
+  needs its own opt-in installer or a name the glob excludes; it cannot simply
+  join the directory.
+- **The daemon runs as the task user, not root**, so macOS cannot have D5's
+  root-owned credential boundary or #309 §8's per-task user pool. That asymmetry
+  is stated rather than papered over: it is the same platform gap #322 §7 already
+  lists under "what the recommendation gives up".
+
+**Secondhand:** where the plist and the node's environment file live in the
+operator's `macos-runner` configuration is not verifiable from this workspace.
+The claim this design makes about it is only that it is the natural home, in the
+same way the NixOS unit's home is the consuming host repo.
+
+## 3. The drain guarantee — the crux
+
+`spec.md` §3.1 guarantees that a worker swap does not interrupt in-flight work:
+`wait` is implemented dispatcher-side as an inspect poll "so worker restarts are
+transparent (containers keep running; the poll re-attaches)", and
+`worker-refresh.sh`'s swap comment states the mechanism — `docker rm -f` hits
+only `chug-worker`, so job containers survive.
+
+**Start from the fact that the guarantee is already broken for host mode, today,
+on a deployed node.** With the containerized daemon and `WORKER_MODES` naming
+`host`, a host task is a process *inside* `chug-worker`, so the swapper's
+`docker rm -f chug-worker` kills it. Going native does not break the guarantee.
+It is the first opportunity to fix it.
+
+The reason it is a crux is that the guarantee changes **kind**. In container mode
+it is *structural*: the daemon has no mechanism by which it could end a sibling
+container's life, so the property holds without anyone maintaining it. A native
+daemon whose children are host processes can only have a *conditional*
+guarantee — one that holds while a mechanism keeps working. Degrading a
+structural invariant to a conditional one is the real cost of going native, and
+`spec.md` §3.1 should say so rather than keep a sentence that is true of one mode
+only (slice 8).
+
+### The mechanism (D3)
+
+**Linux: a transient systemd scope per task**, `systemd-run --scope
+--unit=chug-task-{id}`. A scope is its own cgroup, so `systemctl restart
+chug-worker` — which is what a `nixos-rebuild switch` performs — kills the
+daemon's cgroup and not the task's; the task is reparented to pid 1 and keeps
+running. This is #309 §6's own recommendation, and #309 calls it "the single most
+load-bearing implementation detail in this document on Linux" because §7 needs
+the same scope for `CPUQuota`/`MemoryMax` and §2 needs it to kill a `setsid()`
+escapee. Three requirements, one mechanism.
+
+It composes with what P0 already shipped rather than replacing it. The exit
+status is written by the task's own wrapper (`supervised_cmd`), so the daemon
+holding a `Child` handle it can no longer `wait` on costs nothing — the handle
+was already only a backstop, which is exactly why #309 correction finding 2
+called that the load-bearing decision. `inspect` stays a pure function of the
+task directory.
+
+**macOS: the process group `spawn_task` already creates.** `launchd`'s teardown
+is process-group scoped, not cgroup scoped, and `spawn_task` calls
+`process_group(0)` — so a host task is plausibly *already* outside the daemon
+agent's teardown set, and macOS may need no new mechanism at all. That is a claim
+about `launchd` semantics that no file in this repo states, so slice 2 **proves
+it with a test** — kill the daemon agent, assert the task is still live and still
+lands its `exit_code` — rather than shipping it as an assumption. If it does not
+hold, the fallback is #322 §6's second mitigation, one `launchd` job per task,
+and that is more machinery than this design should pre-commit.
+
+### What the mechanism does not cover, stated plainly
+
+The scope escape covers a **unit restart**. It does not cover:
+
+- a **reboot** — nothing survives one, on either platform, and #322 §1's boot
+  generation is how a surviving task directory is correctly read as dead;
+- a `nixos-rebuild switch` that restarts more than the daemon's unit, or a
+  `nix.gc` that collects a store path a running task is still using (#372 §6's
+  third drain case);
+- **macOS**, until slice 2's proof lands.
+
+So the mechanism is not sufficient on its own, and D4 is the backstop: **the
+daemon declines a `refresh` while any host task is live**, naming the task. This
+is #322 §6's phase-1 answer, generalized off macOS, and the argument for it is
+the same — failing fast and loud beats silently killing a forty-minute build.
+
+**Where the check lives matters more than the check.** A refresh is minutes
+long, and `refresh` in `crates/worker/src/daemon.rs` accepts and returns *before*
+`run_refresh` runs the build phase; `RefreshGate` only stops admitting launches
+when `quiesce` opens the swap window, after the build, and `drained` then waits
+only on the accept→container-exists window, not on running tasks. So a host task
+accepted after an accept-time precondition passed and still running at the swap
+is exactly the case a single check misses. The condition is therefore evaluated
+**twice**:
+
+- **At accept**, as a precondition in `refresh` — cheap, and it turns the common
+  case into an immediate, informative refusal rather than a wasted build.
+- **At the swap boundary**, in `run_refresh` after `quiesce` and beside the
+  `drained` wait. This is the one that actually holds the guarantee. It needs no
+  new machinery: `RefreshGate`'s existing handshake is where it hangs, and the
+  failure path already exists — the drain-timeout branch records a failure at
+  the `drain` stage and calls `abort()`, so a live host task at the swap takes
+  the same branch with a different reason.
+
+**A host task that appears mid-build aborts the refresh; it does not wait.**
+Waiting is the tempting option and it is wrong here: the existing drain waits
+30s, while a host task is bounded only by its job type's `task_timeout`, which
+across `.chug/jobs/` runs from `10m` to `2h`. So a waiting
+swap would either need a second, far longer timeout or would hold the swap
+window open — refusing every launch on the node — for the length of a build.
+Aborting costs the build phase's work and one deploy leg, and the deploy retries
+against a node that is by then likely idle. The one real cost is that on a busy
+host-mode node a refresh can be starved by successive tasks; that is the same
+argument for scheduled draining made below, not a reason to wait.
+
+The self-refresh is the only restart the
+platform performs automatically; every other one is an operator at a keyboard,
+who has `slots: 0` (`docs/runbooks/worker-capacity.md`) and is already told to
+drain before a rebuild by `nix/chug-node/options.nix`'s own header.
+
+**The cost of the refusal, priced:** a deploy fails for a node that is running
+host work, because `spec.md` §3.1 fails the deploy for any node that does not
+confirm onto the target SHA. That converts "the deploy silently killed a build"
+into "the deploy failed and said why", which is the right trade, and it is
+bounded by `task_timeout` rather than being open-ended. It is worse for a node
+running long host work continuously — which is an argument for draining that node
+on a schedule, not for dropping the refusal.
+
+**What in-flight host work still does not survive:** a reboot, and a host rebuild
+that restarts the world. Both are operator acts with a documented drain step in
+front of them, and neither is something the platform can make lossless.
+
+## 4. Credentials
+
+Today the container gets `keys` by a read-only bind of the node login user's
+`chuggernaut-worker/keys`, and `NATS_CREDS` names `/data/keys/worker.creds`
+inside the container. The mount's `:ro` bit is doing less than it looks: the bind
+*source* is a directory in the login user's home, so the boundary was never
+"only the container can read this".
+
+**A native daemon reads the file off the host, and the layout changes with it:**
+
+- **Owner and mode.** A root-owned directory at `0700` holding `worker.creds` and
+  `worker_git` at `0600`, outside any user's home. On Linux the unit runs as
+  root, so the daemon can read them and the task-user pool cannot — which is what
+  makes the credential boundary real rather than nominal for the first time. On
+  macOS the daemon runs as the task user and this reduces to `0600` in that
+  user's home, i.e. the status quo; #322 §7 already lists cross-task secret
+  isolation on macOS as given up.
+- **No `$HOME` in the path.** `worker-refresh.sh` records the bug this avoids:
+  the swapper runs with `HOME=/root`, so re-deriving `$HOME` there would bind an
+  empty directory and strand the daemon without NATS creds. A unit's environment
+  is not a login shell's, so a home-relative credential path is the same trap one
+  supervisor over.
+- **The node-local artifacts move with them.** `WORKER_CHANNEL_BINARY` and
+  `WORKER_REFRESH_SCRIPT` default to `/usr/local/lib/chuggernaut/…` — image paths
+  today, but already *shaped* like host paths. Materializing that same layout on
+  the host makes both defaults correct with **no change to
+  `crates/worker/src/config.rs`**.
+
+**`chuggernaut admin worker-creds` does not change.** It already mints at `0600`
+and prints the path (`crates/cli/src/admin.rs`, `crates/cli/src/keygen.rs`); it
+is local-only, signs with the account seed, and knows nothing about how the node
+consumes the file. What changes is the *install* step in `deploy/prod/README.md`
+§6: `scp` to a staging path the login user owns, then `install -o root -m 0600`
+into the daemon's directory. Rotation is unchanged — re-mint, re-install,
+restart the unit — and the restart is now a supervisor command instead of a
+container recreate.
+
+One thing the design must forbid rather than assume: the daemon's own credential
+path rides in its environment, and `spawn_task` does not `env_clear()`, so today
+a host task inherits `NATS_CREDS` pointing at the node's identity. Slice 1 is
+what closes that, and D5's file mode is what makes the leak harmless if a future
+launch path reintroduces it. Two independent guards, deliberately.
+
+## 5. What the two scripts become
+
+### `build-worker.sh`
+
+It stops composing a `docker run` line and becomes a **node-join and
+spec-apply** script: render the environment file from the same per-node
+`WORKER_*` variables it reads today, install it, install the unit (Linux) or the
+plist (macOS), and ask the supervisor to (re)start. Its pre-flight guards keep
+their meaning verbatim, because every one of them is about the **node**, not
+about docker — the image label check, the disk pre-flight, and the refusals it
+already prints with the live daemon untouched.
+
+Three things simply disappear, and they are the ones that only existed to give a
+*container* a view of the host: the KVM `--device` flag, the read-only nix mount
+arguments, and the keys bind. A native daemon has the node's devices, the node's
+`/nix`, and the node's filesystem by construction. The KVM shape check in
+`build-worker.sh` — that the toolchain path is a direct symlink into the store
+under a real parent, because the daemon container mounts the parent and resolves
+the symlink itself — is a *mount* constraint, so it can be deleted rather than
+ported. That is a real simplification of the hardest guard in the file.
+
+### `worker-refresh.sh`
+
+The **build** phase is nearly unchanged: the node still runs container tasks, so
+it still builds the agent images, still verifies labels, still retag-swaps and
+still prunes. The daemon image keeps being built too — which is D6's mechanism:
+the swap **extracts the binary from the image it just built** (`docker create` +
+`docker cp`) rather than compiling on the host. That keeps the daemon's build
+environment byte-identical to today's, needs no Rust toolchain as a node machine
+fact, and leaves the pinned Dockerfile as the single definition of how the binary
+is produced. Compiling natively on the node was the obvious alternative and is
+rejected on exactly that ground: it would make the toolchain a per-node fact that
+can drift, on a path where the failure mode is a node that will not come back.
+
+The **swap** phase collapses. Gone: the detached `docker:cli` swapper, the
+`KEYS_SRC`/`SOCK_SRC` recovery, the KVM-device carry-forward, the nix-mount
+carry-forward, the `RUN_NEW` composition, and the retained `chug-worker-swap`
+transcript — which existed because "the daemon that reports to the dispatcher is
+the very thing being replaced", a problem the supervisor's own log
+(`journalctl -u chug-worker`, or the agent's log path on macOS) already solves.
+What remains: install the extracted binary and the refresh script, then ask the
+supervisor to restart. The daemon cannot `docker rm -f` itself today and it
+cannot `systemctl restart` itself synchronously either, so the restart is
+requested and the process exits — which is what `Restart=always` and `KeepAlive`
+are for.
+
+The **environment carry-forward goes away entirely, and that is the largest
+change in the file.** Every `*_ARGS` block in the swap phase exists because
+inheritance is how a value survives a container recreate; with an environment
+file on disk, the value survives because it is written down. That deletes
+the #55/#82 silent-revert class at its root rather than defending against it
+eleven times.
+
+### #390's drift guard
+
+It keeps meaning, and gains. The guard's shape is presence-decides-refusal:
+enumerate the live daemon's `WORKER_*` environment, and refuse if the composition
+about to be applied would drop one, with the value comparison informational only.
+Natively that becomes: enumerate the live unit's environment, compare against the
+composed environment file, same key set, same refusal, same `WORKER_SPEC_DROP_OK`
+escape hatch.
+
+It gains reach in one direction and loses it in another, and both should be
+stated. It **gains** because the declaration becomes a file on the node that an
+operator can read without `docker inspect` — which matters on prod, where
+`WORKER_SSH` is unset for both nodes and `build-worker.sh` no-ops on every
+deploy, so the node's spec is currently only visible in the refresh's own stdout
+report. It **loses** the mounts-and-devices half of the comparison, which is not
+a loss: those flags stop existing, so there is nothing left to drop.
+
+## 6. What P0's known holes become
+
+The #309 P0 correction lists three, all P3 in that document's phase list. A
+native daemon moves two of them.
+
+**§10 — the task inherits the daemon's environment, including a reachable docker
+socket. Worse, and no longer P3.** Verified: `spawn_task` calls
+`.envs(&config.env)` with no `env_clear()`. Today the inherited environment is a
+container's, and it already includes a mounted `/var/run/docker.sock`, which is
+what #309 §10 calls "effectively root on the node". Natively the task
+inherits a *node* process's environment: the same socket without the indirection,
+plus the node's filesystem, plus whatever the supervisor put in the unit's
+environment — including `NATS_CREDS`. The power was already total; what grows is
+the surface and the number of ways to reach it. Slice 1 makes it a prerequisite
+of shipping native rather than a hardening step, because "the launch environment
+is exactly what the dispatcher specified" is the only version of this that is
+checkable.
+
+**§8 — secrets readable via `/proc/<pid>/environ`. Worse.** Today the readers are
+processes inside `chug-worker`, which is the daemon and its own tasks. Natively
+the readers are every process on the node running as the same uid — and the node
+login user is who `build-worker.sh` ssh's in as and who runs `docker build`. On a
+node pinned to one project this is #309 §8 option (a), accept-and-document, and
+stays P3. On a node serving more than one project it is a cross-project leak,
+so the #309 §8 per-task user pool stops being hardening and becomes the
+condition for advertising `host` on a multi-project node — #309 §8's own rule ("the
+daemon does not advertise `host` unless the user pool is provisioned"), now with
+a sharper reason to hold it.
+
+**§2 — a `setsid()` task escapes `kill`. Better, on Linux, for free.** The
+transient scope D3 mandates is a cgroup, and killing a cgroup catches an escapee
+that a process-group signal misses. So the mechanism the drain problem forces is
+the same one that closes this hole — which is #309 §2's own observation that
+three requirements share one mechanism, now with the drain as the requirement
+that makes it non-optional. **On macOS it is unchanged and still leaks**, since
+the mechanism there is the process group and a `setsid()` call is precisely what
+leaves one.
+
+---
+
+## Risks and open questions
+
+- **The macOS half is the weakest, and it is the half that motivates host mode.**
+  D3's macOS mechanism is a claim about `launchd` that this repo does not state,
+  the daemon cannot run as root there so D5's boundary does not port, and the
+  plist's home in the operator's `macos-runner` configuration is secondhand.
+  Slice 2's proof is what converts the first of those from assumption to fact;
+  the other two are stated as gaps.
+- **Amending `chug.node`'s charter is a one-way door.** #372 §8 is a carefully
+  argued refusal and this document reverses part of it. R1, R2 and R4 dissolve
+  cleanly; R3's answer — nix owns the unit, the platform owns the environment
+  file — is a *split*, and splits drift. The mitigation is that #390's guard
+  moves to the environment file with it, so a drift between the two halves is
+  detected on the same path that detects a dropped knob today.
+- **The flip is a node-down risk on a path with no fast rollback.** Prod's nodes
+  cannot be ssh'd from the Mini, so a native daemon that refuses to start leaves
+  a node that only the operator's laptop can reach. Slice 4 should carry the same
+  refuse-with-the-live-daemon-untouched discipline `build-worker.sh` already
+  applies to the KVM and nix guards, and the first flip should be a node that is
+  reachable.
+- **This design does not prove host execution works on a real node.** #309's P0
+  correction lists that as still unverified, and it stays unverified after this:
+  what this decides is the daemon that would make the proof *possible*. The proof
+  itself is a later job, in the shape of `.chug/jobs/android-proof.yaml` and
+  `.chug/jobs/gcp-proof.yaml`, and per #308 H.4 against a boring cache-heavy
+  build.
+- **Nothing here changes the fleet, the wire, or any schema.** No node change, no
+  env change on a live node, no `runtime.mode: host` edit, no epoch. That is
+  deliberate — the slices are all node-local or deploy-local, so each can land
+  and be reverted without a version-skew window.
+
+## What this makes wrong elsewhere
+
+- **`spec.md` §3.1's drain guarantee** is written for a containerized daemon and
+  becomes mode-specific; slice 8 narrows it.
+- **`nix/chug-node/options.nix`'s charter** says the module "owns no lifecycle"
+  and "does NOT declare the `chug-worker` container or any unit supervising it".
+  Slice 7 amends both lines and must cite this document beside #372 §8.
+- **#372 §6's closing paragraph** already anticipates this: "the drain answer
+  changes if **host mode** ships … a future `chug-node` module *would* own
+  [it]". This is that document; the paragraph should point here.
+- **`deploy/prod/README.md` §6's worker-join steps** describe a `scp` into the
+  login user's home and a `docker run`; slices 4–6 replace both.
+- **#322 §6's self-refresh collision** is resolved for the general case here.
+  Its phase-1 refusal is adopted as D4 rather than superseded, and its phase-2
+  per-task `launchd` job stays the macOS fallback if slice 2's proof fails.
