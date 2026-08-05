@@ -716,7 +716,7 @@ existing `Core::create_job` / `Core::release_job` for each. Promoting creation
 to a real `Effect` is a larger change than schedules need; it is a seam, not
 this doc's work.
 
-**Config loading does no git I/O on the tick.** Reading `.chug/schedules/` at
+**Config loading does no git I/O on the tick.** Reading `.chug/schedules/*.yaml` at
 HEAD means a repo tree read plus a file read per schedule — subprocess work
 that must not run on the single-writer loop every 30 seconds. The schedule
 table is instead held in memory and refreshed:

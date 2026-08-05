@@ -133,7 +133,7 @@ argument.
    eight open with a `# Design …` heading and a prose `Status:` line.
 
 4. **The tree's naming convention embeds the design job's seq, and #185's
-   proposed artifact does not match it.** #185 asks for `docs/design/epics.md`
+   proposed artifact does not match it.** #185 asks for `docs/design/epics.md` <!-- absent -->
    and states that nothing durable should reference design-job seq numbers as
    identity. Every one of the eight docs in the tree is named
    `<seq>-<slug>.md`. This is not a contradiction of #185's principle — the
@@ -664,7 +664,7 @@ destroys the marker the design depends on, and neither is fixable without
 changing what `deps` mean for every other job in the graph.
 
 Concretely: #185's job should be revoked or refiled as an amendment, and
-`docs/design/epics.md` should not be written. Its two surviving points are
+`docs/design/epics.md` should not be written. Its two surviving points are <!-- absent -->
 absorbed here rather than left in a job description, per its own point 2.
 
 ### #86 — untouched, with one coherence requirement

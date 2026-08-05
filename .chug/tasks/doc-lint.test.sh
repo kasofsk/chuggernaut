@@ -211,12 +211,13 @@ else
 	check "foreign-rooted paths are skipped, not warned" 0 "$RC" "$OUT" \
 		"0 error(s), 0 warning(s)"
 
-	# 15. Both markers suppress the warning on the line that carries them.
+	# 15. All three markers suppress the warning on the line that carries them.
 	write_doc markers.md \
 		'Images come from `.chug/images.yaml`. <!-- intent -->' \
-		'The bundle is built into `web/dist`. <!-- runtime -->'
+		'The bundle is built into `web/dist`. <!-- runtime -->' \
+		'`docs/design/epics.md` was never written. <!-- absent -->'
 	run_sut_repo docs/markers.md
-	check "intent and runtime markers suppress the warning" 0 "$RC" "$OUT" \
+	check "intent, runtime and absent markers suppress the warning" 0 "$RC" "$OUT" \
 		"0 error(s), 0 warning(s)"
 
 	# 16. A marker is line-scoped: the unmarked line beside it still warns.

@@ -313,7 +313,7 @@ project-repo churn.
 ## 1. The declaration
 
 **Where: `.chug/images/<name>.yaml`, one file per image**, in the project repo,
-mirroring `.chug/jobs/<name>.yaml` and `.chug/tags/`. Spec §1.1 makes `.chug/`
+mirroring `.chug/jobs/<name>.yaml` and `.chug/tags/{tag}.md`. Spec §1.1 makes `.chug/`
 the config root; `dispatcher::project_config::entries` already lists any flat
 config directory at either layout (fact 11), so the resolution code is reuse, not
 new.
@@ -337,7 +337,7 @@ having a default at all.
 
 Three alternatives were weighed for the location:
 
-| | A: `.chug/images/<name>.yaml` | B: one `.chug/images.yaml` map | C: inline in the job type |
+| | A: `.chug/images/<name>.yaml` | B: one `.chug/images.yaml` map | C: inline in the job type  <!-- absent --> |
 | --- | --- | --- | --- |
 | Matches existing layout | **yes** (`jobs/`, `prompts/`, `tasks/`, `tags/`) | no | n/a |
 | Per-file `deny_unknown_fields` | **yes** | yes | yes |
@@ -429,7 +429,7 @@ the collision question answer itself:
   config (a scheme the parser recognises), `chug-proj/…` on the node (a prefix no
   platform image uses).
 
-An unresolvable `project/<name>` — no such file in `.chug/images/` — is a
+An unresolvable `project/<name>` — no such file in `.chug/images/` — is a <!-- intent -->
 **config error at load**, in the same class as any other malformed job type, not
 a launch-time surprise.
 
@@ -881,7 +881,7 @@ required for `agent`/`command` work and that a host runtime has no image.
 **A host node does not participate in project task images, and that is
 consistent rather than a gap.** The two are the *same slot in two modes*: the
 project-declared, repo-versioned, node-resolved reference to a pinned
-environment. `image: project/ci` + `.chug/images/` is to container mode what
+environment. `image: project/ci` + `.chug/images/` is to container mode what <!-- intent -->
 `runtime.env: nix:…#ci` is to host mode. Both are declared under `.chug/`, both
 are resolved by the node, both are opaque to the dispatcher, and both are
 mutually exclusive with the other by the field rules #322 §3 sketches (`env`
@@ -967,7 +967,7 @@ would change:
 | `NodeCapabilities` (#309 §4) | one more field, `images: Vec<String>`, absent ⇒ `[]` |
 | `container::choose_placement` | one more skip predicate; `NoCapacity("no node holds image …")` |
 | `deploy/prod/worker-refresh.sh` | the three hardcoded image names become the platform entry of a list |
-| `spec.md` | §1.1 gains `.chug/images/` and the `project/` scheme; §3.1 gains the `build_image` op and the reconciler; the Appendix's "Image registry" row gains a note that task images do not need one under this design |
+| `spec.md` | §1.1 gains `.chug/images/` and the `project/` scheme; §3.1 gains the `build_image` op and the reconciler; the Appendix's "Image registry" row gains a note that task images do not need one under this design  <!-- intent --> |
 
 ## Related
 

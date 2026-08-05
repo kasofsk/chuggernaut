@@ -105,7 +105,7 @@ as events elsewhere in the tree, and matching that keeps one story.
 
 ## Recommendation
 
-1. Do not carve `crates/forge-ingest` before H1 and H2 land. Re-run C9's
+1. Do not carve `crates/forge-ingest` before H1 and H2 land. Re-run C9's <!-- intent -->
    second half as a follow-on ticket that depends on them; its acceptance is
    unchanged (own crate, no dispatcher internals beyond the interface,
    integration tests green, registry updated).

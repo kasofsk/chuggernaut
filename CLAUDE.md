@@ -168,8 +168,10 @@ the absence of a workflow file.
 - **`types` is pure data** — no async, no I/O. The YAML field-rules validation lives there so
   every consumer shares one implementation.
 - New behavior lands with a regression test at the **lowest tier that can express it**
-  (`testing.md`). `dispatcher::state` and release validation are the correctness core — keep
-  their branch coverage near-total.
+  (`testing.md`). `chuggernaut_domain::state` (`crates/domain/src/state.rs`) and release
+  validation are the correctness core — keep their branch coverage near-total. The
+  dispatcher re-exports it as `dispatcher::state`, so both names resolve; the code lives
+  in `crates/domain`.
 - Factories and job-type config are **project-owned and repo-versioned** — v2 is a
   per-consumer forge, not a shared control plane. Config travels with the project repo.
 - **`infra/` holds terraform roots, and they are versioned.** Config travels with the

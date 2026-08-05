@@ -33,11 +33,16 @@
 #      trailing `:193` or `:42-79` line citation is stripped and the file itself
 #      still checked.
 #
-#      Two markers suppress the warning on the line that carries them, for the
-#      two ways an unresolvable path is correct rather than stale:
+#      Three markers suppress the warning on the line that carries them, for the
+#      three ways an unresolvable path is correct rather than stale:
 #      `<!-- intent -->` for what is designed but not built, `<!-- runtime -->`
 #      for what is correctly absent from git (build output, operator-owned
-#      files). They are documented in STYLE.md's doc-claim rule.
+#      files), and `<!-- absent -->` for a line that names a path *because it
+#      does not exist* — a measurement of staleness, a rejected alternative, a
+#      recorded deletion. The third was added by design #415 S2, which could not
+#      empty the warning list without it: a doc cannot record "path X is stale"
+#      without writing X, and neither of the first two markers is true of such a
+#      line. They are documented in STYLE.md's doc-claim rule.
 #   4. Design filenames — a `.md` directly under `docs/design/` must be named
 #      `{seq}-{slug}.md`: leading digits, a hyphen, then a lowercase-kebab slug.
 #      That is the shape the Designs view sorts and labels by and the shape the
@@ -248,7 +253,7 @@ extract() {
 			print "LINK:" NR ":" substr(s, RSTART + 2, RLENGTH - 3)
 			s = substr(s, RSTART + RLENGTH)
 		}
-		if ($0 ~ /<!--[ \t]*(intent|runtime)[ \t]*-->/) next
+		if ($0 ~ /<!--[ \t]*(intent|runtime|absent)[ \t]*-->/) next
 		t = $0
 		while (match(t, /`[^`]+`/)) {
 			tok = substr(t, RSTART + 1, RLENGTH - 2)
@@ -370,6 +375,8 @@ echo "doc-lint: $errors error(s), $warnings warning(s) across $(printf '%s\n' "$
 if [ "$path_warnings" -gt 0 ]; then
 	echo "doc-lint: a referenced path that is correctly unresolvable is marked on its own line —"
 	echo "doc-lint:   <!-- intent -->  designed, not built    <!-- runtime -->  absent from git on purpose"
+	echo "doc-lint:   <!-- absent -->  named because it does not exist (a stale-path measurement,"
+	echo "doc-lint:                    a rejected alternative, a recorded deletion)"
 	echo "doc-lint: see STYLE.md's doc-claim rule (Tier 2). Anything else is a stale claim: fix the path."
 fi
 if [ "$const_warnings" -gt 0 ]; then

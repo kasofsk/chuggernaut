@@ -10,7 +10,9 @@ mutate cloud state when it is wrong.
 | [`gcp-proof/`](./gcp-proof) | A workload identity pool and OIDC provider **inside the existing, shared `daekon-ai` project**, and the two-service-account/two-bucket fixture that the `gcp-proof` job type climbs (design #313 half A, slice S6) |
 
 There are no beacon resources here and there never will be: beacon's
-`infra/gcp-workload-id/` is operator-owned and lives in beacon's own repo. This
+`kasofsk/beacon:infra/gcp-workload-id/` is operator-owned and lives in beacon's
+own repo — the `{repo}:{path}` form is deliberate, because a bare path implies
+this tree. This
 root's attribute condition names `kasofsk/chuggernaut`, so beacon's eventual
 provider is a **separate resource** that this one cannot grow into by accident.
 

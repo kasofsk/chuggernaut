@@ -91,7 +91,9 @@ you" are the same shape of information.
 ## Part 2 — The continuity matrix
 
 Edges enumerated exhaustively from the state machine
-(`crates/dispatcher/src/state.rs`, [spec §2.1](../../spec.md)) plus the
+(`crates/domain/src/state.rs` — `crates/dispatcher/src/state.rs` when this was <!-- absent -->
+written; the module moved to the domain crate under refactor-plan C1 and the
+dispatcher re-exports it, [spec §2.1](../../spec.md)) plus the
 intra-phase retry/claim/escalation seams. Summary first, detail after.
 
 | # | Edge | Passed today | Gap severity |

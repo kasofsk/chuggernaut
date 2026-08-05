@@ -1,10 +1,13 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — S0, S1a, S1c and S8 landed; D1–D15 decided, S1b–S12 intent.
+Status: IMPLEMENTED IN PART — S0, S1a, S1c, S2 and S8 landed; D1–D15 decided, S1b and S3–S12 intent.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
-[D8](#d8-tags-point-they-do-not-carry) while landing (job #416), and S1c landed
-as `doc-lint.sh` rule 5 (job #437). D13–D15 and S9–S12 were added on 2026-08-05
+[D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
+as `doc-lint.sh` rule 5 (job #437), and job #436 landed S2, emptying the
+path-warning list — see the
+[2026-08-05 correction](#correction--2026-08-05-job-436-s2-swept-and-a-third-marker).
+D13–D15 and S9–S12 were added on 2026-08-05
 by job #435, written against the tree at `810a91b`; their three measurements were
 read out of that commit and three claims in the ticket that proposed them did not
 survive it — see the
@@ -47,12 +50,12 @@ what can be checked mechanically is.**
 | --- | --- | --- |
 | **D1** | Two kinds of doc, opposite update rules: **reference** (present tense, no history) and **design** (append-only decision record). There is no third kind — plans become design docs with slice tables | [D1](#d1-two-kinds-of-doc-and-only-two) |
 | **D2** | Every design doc opens with a **mutable current-state head**; the body below is append-only | [D2](#d2-every-design-doc-opens-with-a-mutable-current-state-head) |
-| **D3** | `docs/concepts.md` is an **index of pointers**, not a glossary — a concept keeps its natural home | [D3](#d3-the-concept-registry-routes-it-does-not-hold) |
+| **D3** | `docs/concepts.md` is an **index of pointers**, not a glossary — a concept keeps its natural home | [D3](#d3-the-concept-registry-routes-it-does-not-hold)  <!-- intent --> |
 | **D4** | Ban duplicate **definitions**; allow duplicate **mentions** | [D4](#d4-ban-duplicate-definitions-allow-duplicate-mentions) |
 | **D5** | `CLAUDE.md` may **gloss and link**, never define | [D5](#d5-claudemd-may-gloss-never-define) |
 | **D6** | Four mechanical checks in one pure-shell `check-doc-facts.sh`, resolved against **git, not the filesystem** — [D15](#d15-structural-health-index-completeness-and-orphans) adds a fifth | [D6](#d6-four-mechanical-checks) |
 | **D7** | A **git-derived staleness ledger** marks docs *suspect*, not wrong | [D7](#d7-the-staleness-ledger) |
-| **D8** | ~~Knowledge tags become **pointers, not payload**~~ — **reversed while landing** (job #416, [S8](#slices)): knowledge is delivered as **payload**, and `.chug/tags/` is empty | [D8](#d8-tags-point-they-do-not-carry), superseded by the [2026-08-04 correction](#correction--2026-08-04-job-416-d8-reversed-m1-and-m5-restated) |
+| **D8** | ~~Knowledge tags become **pointers, not payload**~~ — **reversed while landing** (job #416, [S8](#slices)): knowledge is delivered as **payload**, and `.chug/tags/` is empty | [D8](#d8-tags-point-they-do-not-carry), superseded by the [2026-08-04 correction](#correction--2026-08-04-job-416-d8-reversed-m1-and-m5-restated)  <!-- absent --> |
 | **D9** | `review-docs-updated` gets **narrow, blocking** teeth | [D9](#d9-the-evaluator-judges-only-what-a-script-cannot) |
 | **D10** | The **implementing job** updates the design doc it implements | [D10](#d10-the-implementing-job-owns-the-update) |
 | **D11** | A **ratchet, not a flag day** | [D11](#d11-a-ratchet-not-a-flag-day) |
@@ -92,21 +95,21 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S0** | Triage `progress.md`: amend `spec.md` §5.1 (the artifact-store clause is false) and §10.2's single-age-key claim, repoint `.claude/skills/chug/SKILL.md`, then delete the file | **Landed** (job #432), in that order. §5.1 now states the NATS-internal store and keeps the S3/Minio deferral as its own claim; §10.2 names both age identities (§12.1 and the infrastructure appendix follow); the skill points at `spec.md` and the repo's docs |
 | **S1a** | Fix `doc-lint.sh` rule 4's four false-positive classes in place and resolve against git; the two markers. Still a warning, still `docs`/`design`-scoped | **Landed** (job #433) — the classes turned out to be five, and the whole-tree count fell 313 → 66. See [S1a as landed](#s1a-as-landed-re-measured) |
 | **S1b** | Move that logic into `check-doc-facts.sh` — pre-stage, every job, whole-tree, **error** — and delete rule 4 from `doc-lint.sh`. Once S2 has cleared the real findings | S1a, S2 |
-| **S1c** | Check 2 (constant values) + a `.test.sh` suite covering both | **Landed** (job #437) — check 2 is rule 5 of `doc-lint.sh`, a warning like check 1, and found **11** real mismatches across 5 design docs. See [S1c as landed](#s1c-as-landed) |
-| **S2** | The one-time sweep: the ~6 real path findings, the `*_SCHEMA_EPOCH` restatements, `state.rs` in its seven files; delete `spec_original.md` and `wiki/Welcome.md` | S1a |
+| **S1c** | Check 2 (constant values) + a `.test.sh` suite covering both | **Landed** (job #437) — check 2 is rule 5 of `doc-lint.sh`, a warning like check 1, and found **11** real mismatches across 6 design docs. See [S1c as landed](#s1c-as-landed) |
+| **S2** | The one-time sweep: the ~6 real path findings, the `*_SCHEMA_EPOCH` restatements, `state.rs` in its seven files; delete `spec_original.md` and `wiki/Welcome.md` | **Landed** (job #436) — 66 → **0** path warnings whole-tree; added the third marker `absent`; both files deleted. See the [2026-08-05 correction](#correction--2026-08-05-job-436-s2-swept-and-a-third-marker)  <!-- absent --> |
 | **S3** | **The move** — every doc into `docs/`, per D12; updates the ~730 references (283 of them outside markdown, 134 for `STYLE.md` alone) and `check-modules.sh`'s own path | S1b, S2 |
-| **S4** | `docs/concepts.md` + the seed concept set + check 4 (definitional shape) | S3 |
+| **S4** | `docs/concepts.md` + the seed concept set + check 4 (definitional shape) | S3  <!-- intent --> |
 | **S5** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1), check 3 (slice ↔ merged job) | S3 |
 | **S6** | The staleness ledger (D7) | S3 |
 | **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | S5 |
-| **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `STYLE.md` / `NORTH-STAR.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded |
+| **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `STYLE.md` / `NORTH-STAR.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded  <!-- absent --> |
 | **S9** | `docs/reference/docs.md` <!-- intent --> — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | S3, S5 |
 | **S10** | `docs/README.md` <!-- intent --> gains a one-line catalogue row per tracked doc; **check 5** compares catalogue ↔ tree both ways, `check-modules.sh`'s shape ([D15](#d15-structural-health-index-completeness-and-orphans)) | S3 |
 | **S11** | `docs/overview.md` <!-- intent --> — the synthesis page ([D13](#d13-the-synthesis-page-is-a-reference-doc)); any `wiki/` prose note resolved into it and reduced to a link | S3, S4 |
 | **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Four rows are landed — S0, S1a, S1c and S8.** Every other row above is intent,
+**Five rows are landed — S0, S1a, S1c, S2 and S8.** Every other row above is intent,
 marked as such per STYLE.md's doc-claim rule — which this document is partly
 written to make enforceable.
 
@@ -139,14 +142,27 @@ Three corrections to what is written below, all discovered by re-measuring:
   from `testing.md` — is neither a glob, an absolute path, a template nor a
   citation, and it was the largest silent class. It is refused by requiring the
   first segment to be a tracked top-level entry.
-- **`.chug/tags/` does not exist at all**, so `CLAUDE.md`'s "`tags/` … lives
-  under `.chug/`" and every `.chug/tags/*` citation are stale together. Add it
-  to [S2](#slices)'s sweep; it is not in the ten listed under
-  [two markers](#two-markers-not-one).
-- **41 of the 66 remaining warnings are in this document**, which names the
-  stale paths as its subject rather than claiming they exist. Neither marker
-  fits that — marking them `intent` would be false — so [S1b](#slices) cannot go
-  whole-tree-error until it decides how a doc cites a path it is arguing about.
+- **The `.chug/tags/` directory is not in the tree** <!-- absent --> — job #416 deleted its one
+  file. What S1a read as eleven stale citations is two different things, and S2
+  separated them: the **tag mechanism is live** (`.chug/tags/{tag}.md`,
+  `req.tags.list`, `types::config_paths`), so a citation of the *location* is a
+  correct claim about a product interface that this repo happens not to
+  populate, and only a citation of the deleted
+  `north-star-blessed-practices.md` is stale. The first is written in its
+  generic form, the second is marked `absent`.
+- **A doc that names a path *because it does not exist* is a third case, and S2
+  decided it** — 41 of the 66 warnings were in this document, which cites the
+  stale paths as its subject. Neither `intent` nor `runtime` is true of such a
+  line, and there is no rewrite: a measurement of staleness cannot be recorded
+  without writing the path it measured. Hence the third marker,
+  `<!-- absent -->`, defined in [S1a's marker set](#two-markers-not-one) and in
+  STYLE.md's doc-claim rule. [S1b](#slices)'s whole-tree promotion is no longer
+  blocked on this question.
+- **A path that resolves in another repo takes no marker.** `infra/README.md`
+  named beacon's workload-identity terraform root as a bare path, which implies
+  this tree; it is now written `kasofsk/beacon:infra/gcp-workload-id/`. Rewriting
+  beats a fourth marker because the bare path misleads a human reader too — the
+  marker would have fixed only the checker.
 
 ### S1c as landed
 
@@ -159,11 +175,15 @@ per-suite cap.
 Re-measured on this base rather than carried from [M3](#the-problem-measured):
 `*_SCHEMA_EPOCH` is mentioned **105 times across 16 markdown files**
 (`git grep -o '_SCHEMA_EPOCH' -- '*.md'`), up from the 92/13 measured at
-`28e5aa1`. Of those, check 2 reports **11 real mismatches**, in five design docs
+`28e5aa1`. Of those, check 2 reports **11 real mismatches**, in six design docs
 — #308 (2), #311 (1), #313 (2), #321 (1), #322 (4), #355 (1) — and **no false
 positives** over all 70 tracked `.md`. They are left standing: [S2](#slices)
 owns the sweep and decides which are stale claims and which want
-`<!-- intent -->`. Two of the eleven are the ones this design was written
+`<!-- intent -->`. S2 landed and left all eleven standing — every one is a dated
+statement inside an append-only body, correct as history and wrong only as
+present tense; see the
+[2026-08-05 correction](#correction--2026-08-05-job-436-s2-swept-and-a-third-marker).
+Two of the eleven are the ones this design was written
 about: #313's restatement of #311's Skew section, and #322's audit note.
 
 Three design decisions this slice owned, all resolved toward silence:
@@ -206,18 +226,19 @@ Not "docs drift" in the abstract. Seven measurements at `28e5aa1`:
 
 | # | Measurement | Value |
 | --- | --- | --- |
-| M1 | Files naming `crates/dispatcher/src/state.rs` or `dispatcher::state` — **which does not exist** | **7** |
+| M1 | Files naming `crates/dispatcher/src/state.rs` or `dispatcher::state` — **which does not exist** | **7**  <!-- absent --> |
 | M2 | Repo-relative path claims in markdown / of those, not tracked in git | **292 / 20** |
 | M3 | `*_SCHEMA_EPOCH` mentions in markdown, against one `pub const` in `crates/types/src/version.rs` | **92**, across **13** files |
 | M4 | `spec_original.md`: lines / inbound references / last touched | **1,251 / 0 / 2026-07-20** |
-| M5 | Lines shared between `.chug/tags/north-star-blessed-practices.md` and `STYLE.md`, which define the same rules | **2 of 60** |
+| M5 | Lines shared between `.chug/tags/north-star-blessed-practices.md` — a file job #416 has since deleted — and `STYLE.md`, which defined the same rules | **2 of 60**  <!-- absent --> |
 | M6 | `docs/design/`: docs / total lines / largest | **17 / 16,024 / 1,440** |
 | M7 | `doc-lint.sh` "referenced path not found" warnings on a whole-tree run / of those, real | **256 / ~6** |
 
 **M1 is the one that matters most, and it is not cosmetic.** The seven files are
 `CLAUDE.md`, `STYLE.md`, `testing.md`, `NORTH-STAR.md`,
-`.chug/prompts/work/design.md`, `.chug/tags/north-star-blessed-practices.md` and
-`docs/design/169-handoff-continuity.md`. CLAUDE.md's mention is **normative** —
+`.chug/prompts/work/design.md`, `.chug/tags/north-star-blessed-practices.md` — <!-- absent -->
+gone since, deleted by job #416 — and `docs/design/169-handoff-continuity.md`.
+CLAUDE.md's mention is **normative** —
 "`dispatcher::state` and release validation are the correctness core — keep
 their branch coverage near-total" — so the file every agent reads first
 instructs it to protect a module that is not there. A stale count is
@@ -225,7 +246,7 @@ embarrassing; a stale directive is acted on.
 
 **M7 is the finding that reframes the work, and it was found last.** A path
 check already exists — `.chug/tasks/doc-lint.sh` rule 4 — and it has named
-`crates/dispatcher/src/state.rs` as unresolvable ever since the module was
+`crates/dispatcher/src/state.rs` as unresolvable ever since the module was <!-- absent -->
 removed. The signal was never absent; it was never *aimed*, and it never bit.
 Both halves are structural:
 
@@ -323,7 +344,7 @@ The resolution is demotion, not a new category:
   `ts-rewrite-plan.md` suspect. That is the correct verdict, and no rule had to
   be written to reach it.
 - **`NORTH-STAR.md` is a routing doc**, which is what a docs index is. It
-  becomes `docs/README.md` ([D12](#d12-where-everything-lives)).
+  becomes `docs/README.md` ([D12](#d12-where-everything-lives)). <!-- intent -->
 - **`progress.md` is a session diary** and is deleted, after triage — see
   [S0](#s0-progressmd-is-three-things-fused).
 
@@ -349,7 +370,7 @@ claiming `Landed (job #N)` must correspond to a merged `job/N` commit.
 
 ## D3. The concept registry routes; it does not hold
 
-`docs/concepts.md` maps concept → owning `doc#anchor`. It does **not** contain
+`docs/concepts.md` maps concept → owning `doc#anchor`. It does **not** contain <!-- intent -->
 the definitions.
 
 The alternative — lift every definition into a glossary — makes
@@ -386,8 +407,9 @@ shape outside the owning doc is a violation. Two shapes cover the corpus —
 `**Term.**` opening a list item, and `**Term** is|are|means|refers to`.
 
 That narrow rule catches the real instance. `STYLE.md:231` and
-`.chug/tags/north-star-blessed-practices.md:50` both open with the identical
-string `- **Single writer.** The dispatcher is the only writer of job records,`
+`.chug/tags/north-star-blessed-practices.md:50` — since deleted by job #416 — <!-- absent -->
+both opened with the identical string
+`- **Single writer.** The dispatcher is the only writer of job records,`
 — and per M5 the rest of the two passages diverge, which is exactly why nothing
 token-based was going to find them.
 
@@ -410,7 +432,7 @@ would exempt the single most damaging instance in the tree.
 
 ## D6. Four mechanical checks
 
-One pure-shell `.chug/tasks/check-doc-facts.sh`, in the pre-stage beside
+One pure-shell `.chug/tasks/check-doc-facts.sh`, in the pre-stage beside <!-- intent -->
 `check-modules.sh`, called by CI and the pre-commit hook.
 
 | # | Check | Catches |
@@ -484,7 +506,7 @@ that class at the commit, which is why the two are not redundant.
 Discovered while measuring M2, and it would have been a real defect. The first
 run of the path check used `[ -e ]` and reported **22** unresolvable claims in a
 fresh worktree versus **16** in a built checkout. The six-claim difference is
-`target/`, `web/dist` and `deploy/dev/data/` — build output that exists on a
+`target/`, `web/dist` and `deploy/dev/data/` — build output that exists on a <!-- runtime -->
 developer's machine and not in CI.
 
 > **The check resolves against `git ls-files`.** A filesystem check makes the
@@ -496,16 +518,16 @@ developer's machine and not in CI.
 The 20 untracked claims are three different things, and collapsing them would
 force authors to lie:
 
-- **Stale** (10) — `crates/dispatcher/src/state.rs`, `crates/channel/`,
-  `crates/forge-ingest`, `crates/platform-ops/templates/smoke/`,
-  `.chug/tags/backend.md`, `docs/design/epics.md`, `docs/BOOTSTRAP.md`,
-  `deploy/prod/BOOTSTRAP.md`, `deploy/prod/install-systemd.sh`,
-  `deploy/prod/systemd/`. These are the bug. Fix them.
-- **Intent** (4) — `.chug/images.yaml`, `.chug/images/`, `.chug/schedules/`,
+- **Stale** (10) — `crates/dispatcher/src/state.rs`, `crates/channel/`, <!-- absent -->
+  `crates/forge-ingest`, `crates/platform-ops/templates/smoke/`, <!-- absent -->
+  `.chug/tags/backend.md`, `docs/design/epics.md`, `docs/BOOTSTRAP.md`, <!-- absent -->
+  `deploy/prod/BOOTSTRAP.md`, `deploy/prod/install-systemd.sh`, <!-- absent -->
+  `deploy/prod/systemd/`. These are the bug. Fix them. <!-- absent -->
+- **Intent** (4) — `.chug/images.yaml`, `.chug/images/`, `.chug/schedules/`, <!-- intent -->
   `.claude/CLAUDE.md`. Designed, not built. `<!-- intent -->`.
-- **Runtime** (6) — `web/dist`, `target/`, `deploy/dev/data/`,
-  `deploy/dev/out/…`, `deploy/prod/chuggernaut.env` (operator-owned, on the
-  Mini), `deploy/dev/data/keys/claude.token`. Correctly absent from git and
+- **Runtime** (6) — `web/dist`, `target/`, `deploy/dev/data/`, <!-- runtime -->
+  `deploy/dev/out/…`, `deploy/prod/chuggernaut.env` (operator-owned, on the <!-- runtime -->
+  Mini), `deploy/dev/data/keys/claude.token`. Correctly absent from git and <!-- runtime -->
   correctly named in docs. `<!-- runtime -->`.
 
 The `intent` marker is what finally gives STYLE.md's existing doc-claim rule
@@ -666,15 +688,15 @@ that is a document lives under `docs/`, per the tree in the head.
 
 | From | To | Why |
 | --- | --- | --- |
-| `spec.md` | `docs/spec.md` | Normative; earns top level |
-| `STYLE.md`, `testing.md`, `crates.md`, `contracts.md`, `MODULES.md` | `docs/reference/` | Describe the system as it is |
-| `design-lifecycle.md`, `structure-assessment.md` | `docs/reference/` | Both describe current behavior, not a decision |
-| `design.md` | `docs/design/000-rationale.md` | It argues a position |
+| `spec.md` | `docs/spec.md` | Normative; earns top level  <!-- intent --> |
+| `STYLE.md`, `testing.md`, `crates.md`, `contracts.md`, `MODULES.md` | `docs/reference/` | Describe the system as it is  <!-- intent --> |
+| `design-lifecycle.md`, `structure-assessment.md` | `docs/reference/` | Both describe current behavior, not a decision  <!-- intent --> |
+| `design.md` | `docs/design/000-rationale.md` | It argues a position  <!-- intent --> |
 | `refactor-plan.md`, `ts-rewrite-plan.md` | `docs/design/NNN-*.md` | [D1](#d1-two-kinds-of-doc-and-only-two): a plan is a design with slices |
-| `NORTH-STAR.md` | `docs/README.md` | A routing doc is a docs index |
+| `NORTH-STAR.md` | `docs/README.md` | A routing doc is a docs index  <!-- intent --> |
 | `INSTALL.md` | `README.md` | The root entry point should be what a human lands on |
 | `spec_original.md`, `progress.md` | deleted | [D11](#d11-a-ratchet-not-a-flag-day), [S0](#s0-progressmd-is-three-things-fused) |
-| `.chug/prompts/`, `.chug/tags/`, `.chug/tasks/*.md` | **stay** | The platform reads them from `.chug/` (`spec.md` §1.1); moving them breaks the product, not a link. Every rule still reaches them — below |
+| `.chug/prompts/`, `.chug/tags/{tag}.md`, `.chug/tasks/*.md` | **stay** | The platform reads them from `.chug/` (`spec.md` §1.1); moving them breaks the product, not a link. Every rule still reaches them — below |
 | `wiki/` | **stays, reclassified** | Diagrams, not prose; `Welcome.md` deleted — below |
 
 ### `.chug/prompts/` — stays put, and every rule reaches it
@@ -682,7 +704,7 @@ that is a document lives under `docs/`, per the tree in the head.
 The work and review prompts are not exempt prose. They are read by **every**
 agent on **every** job, they carry path claims, and `.chug/prompts/work/design.md`
 is one of M1's seven files — line 31 hands each design job
-`crates/dispatcher/src/state.rs` as its worked example of a path citation, so
+`crates/dispatcher/src/state.rs` as its worked example of a path citation, so <!-- absent -->
 the prompt teaching agents to cite paths accurately cites a module that does not
 exist.
 
@@ -692,7 +714,7 @@ path is a product interface, not a link. What applies to them:
 - **Check 1, no special case.** Neither `doc-lint.sh` nor the check that replaces
   it applies any directory filter — the selection block
   (`.chug/tasks/doc-lint.sh:42-79`) picks `*.md` and nothing narrower — so
-  `.chug/prompts/`, `.chug/tags/` and the root docs are one population whenever
+  `.chug/prompts/`, `.chug/tags/{tag}.md` and the root docs are one population whenever
   they are in scope. After [S1b](#slices) that scope is every tracked `*.md` on
   every job, which is how the prompt's own stale citation gets caught.
 - **[D5](#d5-claudemd-may-gloss-never-define)'s rule, verbatim.** A prompt may
@@ -837,7 +859,7 @@ is *delivered*. Turning delivery into a pointer aimed at the same distilled tag
 file would have left the second definition — and M5 — exactly where they were,
 plus a file read. Job #416 splits them and decides both:
 
-- **What the tag is.** `.chug/tags/north-star-blessed-practices.md` is deleted.
+- **What the tag is.** `.chug/tags/north-star-blessed-practices.md` is deleted. <!-- absent -->
   `knowledge:` now names a repo page by path, so `.chug/jobs/{code,design,docs,web}.yaml`
   declare `STYLE.md` and `NORTH-STAR.md` — the documents that define the rules,
   not a restatement of them. This is D4 applied to the most deliberate violation
@@ -1273,3 +1295,97 @@ Continuing [the triggers above](#what-would-refute-this).
   is **generated from the catalogue** rather than written — not a looser rule. A
   page assembled from `docs/README.md` <!-- intent -->'s rows cannot hold a
   definition, because it holds nothing that was not already a link.
+
+## Correction — 2026-08-05, job #436 (S2 swept, and a third marker)
+
+**66 → 0**, measured whole-tree at both ends with
+`git ls-files '*.md' | xargs sh .chug/tasks/doc-lint.sh`, on base `810a91b`.
+S1a's decomposition held for most of the list and was wrong about three things,
+each of which changed what the fix had to be.
+
+### What was actually stale, and what replaced it
+
+| Stale claim | Replaced by |
+| --- | --- |
+| `crates/dispatcher/src/state.rs` — `CLAUDE.md`, `testing.md` (×2), `.chug/prompts/work/design.md`, [#169](169-handoff-continuity.md) | `crates/domain/src/state.rs` — the module moved to the pure crate under refactor-plan C1 <!-- absent --> |
+| `.chug/tags/backend.md` in the `code` project template | `.chug/tags/{tag}.md`, the generic form; the template teaches a *consumer's* layout <!-- absent --> |
+| `.chug/schedules/` as a bare directory ([#310](310-scheduled-jobs.md)) | `.chug/schedules/*.yaml` — the shape `schedules.rs` and `ci.sh` actually read | <!-- absent -->
+| beacon's `infra/gcp-workload-id/` (`infra/README.md`) | `kasofsk/beacon:infra/gcp-workload-id/` — repo-qualified | <!-- absent -->
+
+Everything else resolved to a marker: `intent` for [D12](#d12-where-everything-lives)'s
+target tree and for [#323](323-paste-a-prompt-onboarding.md)/[#355](355-project-task-images.md)'s
+unbuilt proposals, `runtime` for build output and operator-owned files, `absent`
+for the rest.
+
+### Three findings that corrected the plan
+
+- **`dispatcher::state` was never broken.** M1 counts files naming
+  `crates/dispatcher/src/state.rs` **or** `dispatcher::state` and calls the <!-- absent -->
+  module non-existent; `CLAUDE.md`'s normative line was cited as the worst
+  instance. But `crates/dispatcher/src/lib.rs:45` re-exports
+  `chuggernaut_domain::{… state}`, so `dispatcher::state` resolves. Only the
+  **file path** was stale. The directive was pointing at real code the whole
+  time — the docs now name `crates/domain/src/state.rs` as the definition site
+  and say the re-export exists, because a reader who greps the dispatcher's
+  `src/` for the file still finds nothing.
+- **The `.chug/tags/*` citations were not eleven stale references.** Job #416
+  deleted `north-star-blessed-practices.md`, not the tag mechanism — its own
+  correction says so explicitly. Citing the deleted file is stale; citing
+  `.chug/tags/{tag}.md` is a correct claim about a live product interface that
+  this repo does not populate. Marking the second class stale, or the first
+  class intent, would each have been a lie in a different direction.
+- **No `*_SCHEMA_EPOCH` number outside an append-only design body is wrong.**
+  M3's 92 mentions across 13 files decompose into symbolic references
+  (`spec.md`, `CLAUDE.md`, `docs/implementation-notes.md` — no number to rot)
+  and dated statements inside design bodies, which are correct *as history*.
+  The one present-tense number in a reference doc, `infra/README.md`'s
+  `CONFIG_SCHEMA_EPOCH` (5), is right. So S2 fixed none — the exposure is real
+  but it is [S1c](#slices)'s mechanical check, not a hand-edit. S1c landed
+  (job #437) while this branch was open and **confirms the reading**: rule 5
+  reports 11 mismatches, all eleven inside append-only design bodies, none in a
+  reference doc. The conclusion was reached by hand and is now checked.
+
+### The third marker
+
+`<!-- absent -->` — a line that names a path *because it does not exist*. The
+head's [S1a findings](#the-problem-measured) flagged that 41 of the 66 warnings
+were in this document and that neither existing marker fit; the reason no
+rewrite fits either is that a measurement of staleness cannot be recorded
+without writing the path it measured. `intent` would claim these paths are
+coming, `runtime` that they exist on a machine; both are false. Its guard
+against becoming a general silencer is that a reader who deletes the marker must
+still read the line as asserting the path is gone.
+
+**That guard binds this document's own body, and three lines failed it on the
+first pass.** M5, the M1 file list, and the [D4](#d4-ban-duplicate-definitions-allow-duplicate-mentions)
+worked example each named the deleted `.chug/tags/north-star-blessed-practices.md` <!-- absent -->
+in the present tense and carried an `absent` marker — a live claim silenced,
+which is the one move this slice was written to prevent. A [D2](#d2-every-design-doc-opens-with-a-mutable-current-state-head)
+body cannot be rewritten to dodge it, but it can be **annotated**: each now says
+the file is gone and who deleted it, leaving the argument untouched. That is the
+shape [#169](169-handoff-continuity.md)'s edge citation already took. An
+append-only body is not a licence to leave a false present-tense claim standing
+behind a marker — if the sentence must keep the path, the sentence says what
+happened to it.
+
+A path resolving in **another repo** was the fourth case S1a did not anticipate.
+It takes no marker: qualify it (`{repo}:{path}`) or write the per-project config
+slot generically. A marker would have satisfied the checker and left the prose
+misleading, which is the wrong half of the problem to solve.
+
+### A [D10](#d10-the-implementing-job-owns-the-update) failure, one job after the rule merged
+
+**Ten of the twelve** `.chug/tags/*` warnings were **created by job #416** — it
+deleted `north-star-blessed-practices.md` and left the references behind: six
+citations of the directory, which had no other file, plus four of the file
+itself (one carrying a `:50` line citation). The brief for this job counted
+eleven; the twelfth and the two it miscounted are the `code` template's
+`backend.md`, which `git log --all -- .chug/tags/backend.md` shows **never
+existed in this repo** — it is an example of a *consumer's* tag file, so #416
+did not orphan it and it is the cross-repo case, not a D10 failure.
+
+D10 says the implementing job updates what its change made stale; #416 merged
+after D10 did. The rule existed and was not followed, which is evidence for
+[S1b](#slices)'s teeth rather than against them: D10 is a rule an agent can mean
+to follow and still miss, and rule 4 at whole-tree-error would have caught all
+ten at the gate.

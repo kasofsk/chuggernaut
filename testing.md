@@ -160,7 +160,7 @@ whole-tier run except for the files that need a real Docker daemon.
 Pure-logic tests, no I/O, colocated with the code:
 
 - `types` — job type YAML parsing and the §1.1 field-rules matrices (table-driven: every field × work/eval subtype combination), task resolution `kind` validity (§1.2), serde round-trips for every wire type
-- `dispatcher::state` — the §2.1 transition table, table-driven: every (state, trigger, guard) row asserts the resulting state and effects; invalid transitions assert rejection. The rework-budget boundary (`N ≤ rework_budget`), retry exhaustion, one-shot deadline, and pre-Work escalation rules each get explicit cases
+- `chuggernaut_domain::state` (`crates/domain/src/state.rs`, re-exported as `dispatcher::state`) — the §2.1 transition table, table-driven: every (state, trigger, guard) row asserts the resulting state and effects; invalid transitions assert rejection. The rework-budget boundary (`N ≤ rework_budget`), retry exhaustion, one-shot deadline, and pre-Work escalation rules each get explicit cases
 - `store` key encoding — base64url round-trips for emails and KO subject/predicate including `.`/`/`-containing values; var/secret name validation
 - `agent` prompt assembly — rework context block formatting, KO dedup with narrower-scope-wins
 - `auth` — permission rules table (§7.5), SSH principal formatting, JWT claim round-trips
@@ -232,7 +232,7 @@ it is what keeps such a tier affordable:
    and a hard token budget.
 
 Neither mode has a schedule to inherit — nothing here runs nightly, and this repo
-has no `.chug/schedules/` at all. A built tier 3 would be released like the <!-- intent -->
+has no `.chug/schedules/` at all. A built tier 3 would be released like the <!-- absent -->
 on-demand [`coverage` job type](#coverage-on-demand-never-a-gate), or scheduled
 under [spec §1.1](spec.md) ([#310](docs/design/310-scheduled-jobs.md)) if someone
 writes the schedule.
@@ -335,7 +335,7 @@ these suites cover.
 
 - `test-utils` owns: the NATS harness (shared: `CHUG_TEST_NATS_URL`, else a testcontainers-run `nats` container; private: a local `nats-server -js` process per caller, else a private container), temp-repo builder, fake backend/provider, record-fixture builders (`fixture::job` — one blank `types::Job` a test edits into its case, not a project fixture), and the skip guards: the `require_nats!`/`require_nats_config!` macros for NATS and `backend_suite::docker_available()` for Docker. There is no `e2e!` macro
 - Every bug fix lands with a regression test at the lowest tier that can express it
-- Coverage is tracked per crate (v1 discipline carries over); `dispatcher::state` and `release` validation are held to ~100% branch coverage — they are the correctness core
+- Coverage is tracked per crate (v1 discipline carries over); `chuggernaut_domain::state` and `release` validation are held to ~100% branch coverage — they are the correctness core
 
 ## Coverage: on demand, never a gate
 

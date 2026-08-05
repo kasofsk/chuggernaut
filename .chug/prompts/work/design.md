@@ -28,7 +28,7 @@ Then:
    the options you weighed, give each option's tradeoffs **honestly** (including
    the one you rejected and why), and recommend a direction. Cite the spec
    sections and code paths you rely on — write repo paths in backticks (e.g.
-   `crates/dispatcher/src/state.rs`) so they read as references. Link related
+   `crates/domain/src/state.rs`) so they read as references. Link related
    docs with **relative** links.
 2. **Open it with the header contract** — an `# ` title on line 1, then a
    `Status:` line carrying the **status and nothing else**: one short, complete

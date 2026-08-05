@@ -64,7 +64,7 @@ status` fails, the `!` makes the branch taken, and `colima start` exits 127 —
 `deploy/prod/install-launchd.sh` is `launchctl`/`plutil` end to end.
 `deploy/prod/chug-install.sh`:146 says the systemd path is "best-effort and
 UNTESTED — templates under deploy/prod/systemd (if present)" and **there is no
-`deploy/prod/systemd` directory**, so on Linux `cmd_platform` prints a warning
+`deploy/prod/systemd` directory**, so on Linux `cmd_platform` prints a warning <!-- absent -->
 and installs nothing. `deploy/prod/chug-mirror-install.sh`:76 guards its entire
 scheduler block on `command -v launchctl`, so on Linux the mirror remote is
 configured and then never pushed.
@@ -398,9 +398,9 @@ shorter and it is not carrying (3) and (6).
 
 ### 3.4 Where it lives
 
-**Repo root.** Rejected alternatives: `deploy/prod/BOOTSTRAP.md` (URL is longer
+**Repo root.** Rejected alternatives: `deploy/prod/BOOTSTRAP.md` (URL is longer <!-- absent -->
 and, more importantly, invisible to someone browsing the GitHub landing page —
-the mirror's front page is a real part of the funnel) and `docs/BOOTSTRAP.md`
+the mirror's front page is a real part of the funnel) and `docs/BOOTSTRAP.md` <!-- absent -->
 (same visibility problem, and `docs/` is the project wiki per `spec.md` §9.4,
 which is *generated* content territory). The root already holds the
 orientation documents (`CLAUDE.md`, `NORTH-STAR.md`, `STYLE.md`, `INSTALL.md`),
@@ -540,7 +540,7 @@ possible:
   `init --admin-password-stdin` as the form `chug-install.sh platform` uses
   (a small CLI change, folded into job 1 of §[12](#12-q8--follow-on-work), with
   the flag retained for compatibility and a §12.3 line added).
-- **Never commit.** `deploy/prod/chuggernaut.env` is gitignored
+- **Never commit.** `deploy/prod/chuggernaut.env` is gitignored <!-- runtime -->
   (`.gitignore:15`); the document has the agent assert that with `git
   check-ignore` rather than trust it, since the user's own repo — the one being
   scaffolded — has a *different* `.gitignore` that the agent will be writing
@@ -588,9 +588,9 @@ where Docker Desktop is least appropriate.
 
 ### 5.2 The service-manager split
 
-New: `deploy/prod/systemd/` holding `chuggernaut-{boot,dispatcher,api}.service`
+New: `deploy/prod/systemd/` holding `chuggernaut-{boot,dispatcher,api}.service` <!-- intent -->
 templates (and `chuggernaut-mirror@.service` + `.timer` for the per-project
-mirror), plus `deploy/prod/install-systemd.sh` mirroring `install-launchd.sh`'s
+mirror), plus `deploy/prod/install-systemd.sh` mirroring `install-launchd.sh`'s <!-- intent -->
 contract exactly: render templates for *this* checkout, install, reload,
 idempotent, with an `uninstall` verb.
 
@@ -1137,8 +1137,8 @@ Changed:
 - **`preflight`** gains `cargo`, `docker buildx`, `docker compose`, `rsync`,
   docker-group and CLI-plugin-symlink checks (§5.3).
 
-New files: `BOOTSTRAP.md` (root), `deploy/prod/install-systemd.sh`,
-`deploy/prod/systemd/*.template`, `crates/platform-ops/templates/smoke/`,
+New files: `BOOTSTRAP.md` (root), `deploy/prod/install-systemd.sh`, <!-- intent -->
+`deploy/prod/systemd/*.template`, `crates/platform-ops/templates/smoke/`, <!-- intent -->
 `chuggernaut admin scaffold` in `crates/cli/src/admin.rs`. One new CLI flag:
 `init --admin-password-stdin` (`crates/cli/src/init.rs`, §[4.5](#45-secrets)).
 
@@ -1252,7 +1252,7 @@ contact.
    `build_host_config` (`crates/container/src/docker.rs`:605) plus a unit test
    (§5.4). Independent of 1–4 and can run in parallel; the Linux path depends on
    it.
-6. **Linux substrate — L.** `boot.sh` runtime branch, `deploy/prod/systemd/`
+6. **Linux substrate — L.** `boot.sh` runtime branch, `deploy/prod/systemd/` <!-- intent -->
    templates, `install-systemd.sh`, the `services` dispatcher, the mirror
    scheduler on systemd, `enable-linger` and docker-group handling (§5.2).
    Depends on 2 and 5. The largest and least proven item; expect it to split
@@ -1278,7 +1278,7 @@ contact.
     `crates/platform-ops/templates/` (§8.5). Depends on 9, since uncommenting
     the gate is only safe once something verifies it.
 11. **`smoke`: the template and the subcommand — M.** Add
-    `crates/platform-ops/templates/smoke/` (so its bytes come from the one
+    `crates/platform-ops/templates/smoke/` (so its bytes come from the one <!-- intent -->
     template surface, §8.2), seed it with the scaffold, and add the
     `chug-install.sh smoke` subcommand that creates, releases and waits on the
     job (§11 rung 2). Depends on 8 and 10.

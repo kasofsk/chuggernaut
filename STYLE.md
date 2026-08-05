@@ -197,13 +197,28 @@ verify it in seconds and must name it when rejecting.
    **Marking is a syntax, and it is checked.** A backticked path in a `.md` is
    resolved against `git ls-files` by `.chug/tasks/doc-lint.sh`'s referenced-path
    check (a warning today; design [#415](docs/design/415-knowledge-architecture.md)
-   S1b promotes it). Two HTML comments suppress it, and they are not
+   S1b promotes it). Three HTML comments suppress it, and they are not
    interchangeable:
 
    | Marker | Means | Use for |
    | --- | --- | --- |
    | `<!-- intent -->` | designed, not built | a path a decision proposes and no commit has created |
    | `<!-- runtime -->` | correctly absent from git | build output, operator-owned files, anything a `.gitignore` excludes on purpose |
+   | `<!-- absent -->` | named *because* it does not exist | a stale-path measurement, a rejected alternative, a recorded deletion — the line's own point is the absence |
+
+   The three are ordered by tense: `intent` is a path that should exist later,
+   `runtime` is one that exists on a real machine but not in git, and `absent`
+   is one that exists nowhere and the sentence says so. `absent` is the
+   narrowest: it is honest only when a reader who deleted the marker would still
+   read the line as asserting the path is gone. Writing it on "see
+   `crates/foo/bar.rs`" is self-evidently false, which is the property that <!-- absent -->
+   keeps it from becoming a general silencer.
+
+   A path that resolves in **another repo** takes no marker: qualify it instead
+   (`kasofsk/beacon:infra/gcp-workload-id/`), or write the per-project config
+   slot in its generic form (`.chug/tags/{tag}.md`). A bare path implies this
+   tree, so the rewrite fixes the prose for a human reader and not just for the
+   checker.
 
    The same script checks a **restated constant**: a backticked
    `SCREAMING_SNAKE_CASE` name that resolves to a `pub const` in the tree and is
@@ -212,9 +227,11 @@ verify it in seconds and must name it when rejecting.
    checked, and `<!-- intent -->` marks the value a slice will bump it *to*.
 
    A marker covers **the line that carries it**, so put it at the end of the
-   line making the claim; a claim on the next line is judged on its own. Neither
+   line making the claim; a claim on the next line is judged on its own. No
    marker is a way to silence a path that is simply stale — that is an edit, not
-   a marker. *Why:* one week produced five — a `.github/`
+   a marker. An append-only design body is no exemption: it cannot be rewritten,
+   but it can be annotated, so the sentence keeps the path and says what happened
+   to it. *Why:* one week produced five — a `.github/`
    workflow mirror that did not exist and a `tier-2 ENABLED` announcement over a
    tier that self-skipped (#375, #378/#382), 17 shell suites nothing executed
    (#385), a duplication gate analysing no `.nix` files (#383), `check-modules.sh`

@@ -13,8 +13,9 @@ this project is defined *here*, versioned with the code it operates on:
   (`.chug/tasks/review-code.md`). Job types reference them by path via `run:` /
   `prompt:`.
 - `.chug/prompts/` — work prompts for job types.
-- `.chug/tags/*.md` — (optional) **knowledge tags**: `.chug/tags/backend.md` defines what
-  the `backend` tag means; tag a job at creation to attach it.
+- `.chug/tags/*.md` — (optional) **knowledge tags**: `.chug/tags/{tag}.md` defines what
+  that tag means, so a `backend.md` there defines the `backend` tag; tag a job at
+  creation to attach it.
 
 Validate any of it offline with `chuggernaut validate .chug/jobs/*.yaml`, and get
 in-editor validation via `chuggernaut schema job-type > .chug/jobs/.schema.json`
