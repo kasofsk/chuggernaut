@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — S0, S1a, S1b, S1c, S2, S3 and S8 landed; D1–D15 decided, S4–S12 intent.
+Status: IMPLEMENTED IN PART — S0, S1a, S1b, S1c, S2, S3, S5a and S8 landed; D1–D15 decided, S4–S12 intent.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
 [D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
@@ -17,6 +17,10 @@ that correction's nineteen doc comments and paid the doc-length ratchet they
 carried; the gate-scope gap that let them through is **recorded and left open**,
 not closed — see the
 [#443 finding](#finding--2026-08-05-job-443-the-doc-comment-residue-and-the-gate-scope-it-fell-through).
+S5 split while landing (job #444): **S5a** is check 3, the slice ↔ merged-job
+check, and it is live; **S5b** is the head retrofit and the plan demotion, still
+intent — see the
+[S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split).
 D13–D15 and S9–S12 were added on 2026-08-05
 by job #435, written against the tree at `810a91b`; their three measurements were
 read out of that commit and three claims in the ticket that proposed them did not
@@ -109,26 +113,37 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S2** | The one-time sweep: the ~6 real path findings, the `*_SCHEMA_EPOCH` restatements, `state.rs` in its seven files; delete `spec_original.md` and `wiki/Welcome.md` | **Landed** (job #436) — 66 → **0** path warnings whole-tree; added the third marker `absent`; both files deleted. See the [2026-08-05 correction](#correction--2026-08-05-job-436-s2-swept-and-a-third-marker)  <!-- absent --> |
 | **S3** | **The move** — every doc into `docs/`, per D12; updates the ~730 references (283 of them outside markdown, 134 for `docs/reference/style.md` alone) and `check-modules.sh`'s own path | **Landed** (job #441) — fourteen `git mv`s in one commit, the runbooks folded into `docs/reference/runbooks/` with them. See the [S3 correction](#correction--2026-08-05-job-441-s3-the-move) |
 | **S4** | `docs/concepts.md` + the seed concept set + check 4 (definitional shape) | S3  <!-- intent --> |
-| **S5** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1), check 3 (slice ↔ merged job) | S3 |
+| **S5a** | Check 3 (slice ↔ merged job) — the detector for the drift this head suffered twice | **Landed** (job #444) — one shape, `**Landed** (job #N)` in a `docs/design/*.md` table row, resolved against the `job/N:` squash-merge subject; a doc with no slice table is silent. See the [S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split) |
+| **S5b** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1) | S3, S5a — the retrofit writes the shape check 3 already reads |
 | **S6** | The staleness ledger (D7) | S3 |
-| **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | S5 |
+| **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | S5b |
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `docs/reference/style.md` / `docs/README.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded  <!-- absent --> |
-| **S9** | `docs/reference/docs.md` <!-- intent --> — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | S3, S5 |
+| **S9** | `docs/reference/docs.md` <!-- intent --> — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | S3, S5b |
 | **S10** | `docs/README.md` <!-- intent --> gains a one-line catalogue row per tracked doc; **check 5** compares catalogue ↔ tree both ways, `check-modules.sh`'s shape ([D15](#d15-structural-health-index-completeness-and-orphans)) | S3 |
 | **S11** | `docs/overview.md` <!-- intent --> — the synthesis page ([D13](#d13-the-synthesis-page-is-a-reference-doc)); any `wiki/` prose note resolved into it and reduced to a link | S3, S4 |
 | **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Six rows are landed — S0, S1a, S1b, S1c, S2 and S8.** Every other row above is intent,
-marked as such per docs/reference/style.md's doc-claim rule — which this document is partly
-written to make enforceable.
+**Eight rows are landed — S0, S1a, S1b, S1c, S2, S3, S5a and S8.** Every other row
+above is intent, marked as such per docs/reference/style.md's doc-claim rule — which this
+document is partly written to make enforceable. This sentence read *six* and omitted
+S3 until job #444 corrected it, four jobs after S3 merged: a count in the head is
+exactly the class of claim [check 4 cannot own](#what-check-4-cannot-do-and-what-took-its-slot),
+so it is a reviewer's to catch.
 
 This head went stale **within a day of merging**: job #416 landed S8 on
 2026-08-04, appended its correction to the body per [D10](#d10-the-implementing-job-owns-the-update),
 and left the table above still saying nothing was implemented and still naming
 job #87 as live work. That is the drift **check 3** (slice ↔ merged job,
-[S5](#slices)) exists to catch, and check 3 does not exist yet — so a human had
-to notice. Recorded as evidence for the ordering, not filed away.
+[S5a](#slices)) exists to catch, and it did not exist yet — so a human had to
+notice. Check 3 now exists (job #444) and **would still not have caught either
+half**: both are *under*-claims — a head saying `PROPOSED — no slice
+implemented` over a slice that had merged, and a row naming #87 as future work
+after it was revoked — and check 3 resolves claims that a job *did* land. The
+correction is recorded rather than argued away in
+[the S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split);
+the under-claim is [D7](#d7-the-staleness-ledger)'s and
+[D9](#d9-the-evaluator-judges-only-what-a-script-cannot)'s, not check 3's.
 
 ### S1a as landed, re-measured
 
@@ -1630,3 +1645,71 @@ rewriting an append-only body into `spec.md → spec.md` would turn a measuremen
 into a tautology. That is
 [#441's ruling](#what-the-gate-could-not-see-and-what-was-run-instead) and it
 holds unchanged.
+
+## Correction — 2026-08-05, job #444 (S5a: check 3 landed, and S5 split)
+
+**S5 was two jobs, and only the first is here.** Check 3 is
+`.chug/tasks/check-doc-facts.sh`'s third rule, live on every job at the same
+pre-stage as checks 1 and 2 and with the same verdict — an error. The head
+retrofit and the plan demotion are S5b and are untouched: they want the check to
+exist first, so the shape they write is verified as it lands rather than
+audited afterwards.
+
+**One shape, and it is the shape S5b should write:** `**Landed** (job #N)` in a
+cell of a markdown table row, in `docs/design/*.md`. That was not a choice
+between #362's convention and #440's — the check matches the **row**, not a
+column, and the two conventions differ only in which column carries the state
+(#440 declares a `State` column; #362 and this document's head put it in the
+gate cell). Matching the row covers both without inventing a third.
+`Shipped (job #N)` is accepted as the synonym [#373](373-project-toolchains.md)
+already uses, and its `(job #384, <sha>)` is why the job number is read
+without requiring the closing parenthesis. Nothing else is a claim: a bare
+`**Landed**`, a job number that is not `#<digits>`, the same sentence in prose
+rather than a table row, and any markdown outside `docs/design/`.
+
+**Absent is absent — decided, not overlooked.** A slice naming a job that was
+**Revoked** and one naming a job that never existed produce the same finding,
+because git records neither. The distinction is real (the row naming revoked #87
+above is the instance) and only the platform API knows it, which is precisely
+why the gate does not reach for it: job #421 is the precedent, where a gate that
+asks an API it may not be able to reach degrades to a silent pass. Absent is the
+safer verdict and the remedy is identical either way — the row is wrong, and its
+author rewrites it.
+
+**The job doing the landing is exempt**, or [D10](#d10-the-implementing-job-owns-the-update)
+would be unsatisfiable: the row and the merge commit are the same commit, so
+`job/N` cannot exist when CI gates it. Its number comes from `$JOB_ID`, set in
+every task container, and from a `job/N` branch name in a local checkout —
+never from the network. This row is the first user of that exemption.
+
+**What it does not catch, stated rather than implied.** Check 3 resolves claims
+that a job *did* land. Both drifts recorded in the head above are the opposite
+shape — a `Status: PROPOSED — no slice implemented` head over a slice that had
+merged, and a row naming #87 as future work after its revocation — and **check 3
+would have caught neither.** An omission makes no claim for git to contradict.
+Detecting it needs the doc-to-commit association nothing in the tree records,
+which is [D7](#d7-the-staleness-ledger)'s ledger (a doc older than the paths it
+names is *suspect*) and [D9](#d9-the-evaluator-judges-only-what-a-script-cannot)'s
+reviewer. D6's check 3 is implemented exactly as it is written there; the
+half of the motivating failure it reaches is the `Status: IMPLEMENTED` rule,
+which fires only on the strict word — `IMPLEMENTED IN PART`, this head's own
+status, is not it.
+
+**Silence is the design, and it is most of the corpus.** Measured at this
+commit: 22 design docs, of which **4 carry a slice claim at all** — #362 with 3
+claims, #373 with 2, #440 with 1 and this one with 8 (including the S5a row
+above), 14 in total, every one of them resolving. The other 18 produce no
+records; M7's lesson is
+that a gate which guesses is a gate somebody turns off, and check 3 is now an
+error in the pre-stage of every job, so a false positive stops the fleet rather
+than annoying an author. It stands down whole, rather than reporting every row,
+when the history holds no `job/N:` commit or the checkout is shallow — with no
+index to resolve against, refusing is the only safe verdict.
+
+Cost, re-measured at this branch's merge with `e41c294`: the whole-tree run is
+**0.80s** against 0.78s for the same script without check 3, best of three on
+this container over 69 tracked `*.md`. `check-doc-facts.test.sh` is
+**63 cases in 0.45s**, of which 16 are check 3's and 10 of those assert silence:
+no slice table, four unparseable rows, prose, `IMPLEMENTED IN PART`, a table
+with no landed row, markdown outside `docs/design/`, and a history holding no
+`job/N:` commit at all.

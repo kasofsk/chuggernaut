@@ -91,9 +91,9 @@ the absence of a workflow file.
 - **A doc's claims about the tree are gated on every job, whole-tree, as an
   error.** `.chug/tasks/check-doc-facts.sh` resolves every backticked path claim
   in every tracked `*.md` against `git ls-files`, and every backticked constant
-  asserted with a value against the `pub const` in the tree — the two checks of
+  asserted with a value against the `pub const` in the tree — checks 1 and 2 of
   design [#415](docs/design/415-knowledge-architecture.md) D6, which lived in
-  `doc-lint.sh` as warnings until S1b moved them here (~0.6s whole-tree).
+  `doc-lint.sh` as warnings until S1b moved them here (~0.8s whole-tree).
   Whole-tree and every job because the claims are made by every job type: a
   `code` job orphaned ten tag-file references (#416) that a `docs`-scoped
   gate never saw. A claim that is correctly unresolvable is marked on its line —
@@ -101,6 +101,16 @@ the absence of a workflow file.
   rule). An unparseable token is skipped silently, and a check that cannot run
   exits **2** as a `LINTER ERROR`, never as a clean tree. `doc-lint.sh` keeps
   markdown well-formedness, relative links and the design-filename shape.
+- **A slice table cannot claim a job that never merged.** Check 3 (#415 S5a,
+  job #444) resolves `**Landed** (job #N)` in a `docs/design/*.md` table row
+  against a `job/N: {type}` squash-merge commit, and refuses a head saying
+  `Status: IMPLEMENTED` over a row still `Proposed`. It reads git, never the
+  platform API, so a revoked job and one that never existed are the same
+  finding. The job doing the landing is exempt — #415 D10 has it write the row
+  in the same commit, so `job/N` cannot exist yet; its number comes from
+  `$JOB_ID` or a `job/N` branch name. Everything else is skipped in silence: a
+  doc with no slice table, a row it cannot parse, markdown outside
+  `docs/design/`, and the whole check when the history holds no `job/N:` commit.
 - **Version skew is gated twice, and only the dispatcher's half is authoritative.**
   The **dispatcher** refuses to merge a branch whose `.chug/jobs/*.yaml` or
   `.chug/schedules/*.yaml` declares a `min_dispatcher` above the running

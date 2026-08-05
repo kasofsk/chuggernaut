@@ -230,6 +230,18 @@ verify it in seconds and must name it when rejecting.
    is the tense — a past-tense or dated statement (`was 2 when this landed`) is
    not a claim about today's tree and is not checked.
 
+   The **landed slice** is the third claim the same script resolves, and the
+   shape is fixed: `**Landed** (job #N)` in a cell of a `docs/design/*.md` table
+   row must correspond to a `job/N: {type}` squash-merge commit
+   ([#415](../design/415-knowledge-architecture.md) D6 check 3, S5a), and a head
+   reading `Status: IMPLEMENTED` must leave no row `Proposed`. Write that shape,
+   not a paraphrase — a row the check cannot parse is skipped, which buys
+   silence rather than approval. The markers do not reach it: a slice claims a
+   job, not a path, and the only honest fix for a row the history contradicts is
+   the row. The job landing the slice is exempt, because [#415
+   D10](../design/415-knowledge-architecture.md#d10-the-implementing-job-owns-the-update)
+   has it write the row in the same commit its merge creates.
+
    A marker covers **the line that carries it**, so put it at the end of the
    line making the claim; a claim on the next line is judged on its own. No
    marker is a way to silence a path that is simply stale — that is an edit, not

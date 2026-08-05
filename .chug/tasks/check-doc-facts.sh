@@ -1,6 +1,6 @@
 #!/bin/sh
-# Doc-fact gate — design #415 D6 checks 1 and 2. Two mechanical claims a
-# markdown file makes about THIS tree, both resolved against git and never the
+# Doc-fact gate — design #415 D6 checks 1, 2 and 3. Three mechanical claims a
+# markdown file makes about THIS tree, all resolved against git and never the
 # filesystem, so the verdict cannot depend on whether the caller ran
 # `cargo build` (the reason .chug/tasks/check-modules.sh's header gives for its
 # own shape):
@@ -11,6 +11,10 @@
 #   2. Asserted constant values agree — a backticked SCREAMING_SNAKE_CASE name
 #      that resolves to an integer `pub const` in this tree, asserted with a
 #      value on the same line, must state the tree's value.
+#   3. A slice claiming a landed job matches the git history — a slice-table row
+#      in `docs/design/*.md` saying `**Landed** (job #N)` must correspond to a
+#      `job/N: {type}` squash-merge commit, and a doc whose head says
+#      `Status: IMPLEMENTED` must have no slice row still in an unlanded state.
 #
 # Both were rules 3 and 5 of .chug/tasks/doc-lint.sh and MOVED here whole (slice
 # S1b). What they DECIDE is unchanged — S1a fixed check 1's precision, S1c
@@ -47,9 +51,48 @@
 # quiet); a name resolving to two consts that disagree is silent too, because
 # there is no way to pick and a guess is worse than nothing.
 #
-# Three markers suppress BOTH checks on the line that carries them, for the
-# three ways a claim is correct rather than stale: `<!-- intent -->` for what is
-# designed but not built (and for the value a slice will bump a constant to),
+# Check 3 (slice S5) reads ONE shape, and it is the shape the retrofit of the
+# remaining design-doc heads should write: `**Landed** (job #N)` in a cell of a
+# markdown table row, per #362's sequencing table. That row shape is the union
+# of the two conventions already in the tree — #440 carries the state in its own
+# `State` column, #415 and #362 carry it in the gate cell, and a check that
+# matches the row rather than the column matches both without a third
+# convention. `Shipped (job #N)` is accepted as the synonym #373 already uses;
+# nothing else is. A row whose state is a bare `**Landed**`, a job number that
+# is not `#<digits>`, a claim in prose rather than a table row, and any markdown
+# outside `docs/design/` are all SKIPPED, and a doc with no slice table produces
+# no records at all — most design docs have none, and #415 M7 says a gate that
+# guesses is a gate someone turns off.
+#
+# Rule 2 is narrower still: it fires only inside a table that already carries a
+# landed claim (so the check knows it found the slice table and not some other
+# one), only when the head's `Status:` word is exactly `IMPLEMENTED` — not
+# `IMPLEMENTED IN PART` — and only on a cell that is exactly one unlanded state
+# word (`Proposed`, `Planned`, `Deferred`, `Pending`, `Intent`, `Not started`,
+# `Not landed`, `In progress`, bold or plain). A gate cell that argues its state
+# in a sentence is not judged.
+#
+# ABSENT IS ABSENT: a job that was Revoked and one that never existed are the
+# same finding, reported the same way. #415's own head named revoked job #87 as
+# live work, so the distinction is real — but only the platform API knows it,
+# and a gate that depends on a reachable API degrades to a silent pass (job
+# #421, the config-skew gate). The remedy is identical either way: the row is
+# wrong and the author rewrites it.
+#
+# The job currently landing is exempt, because D10 requires the implementing job
+# to mark its own slice landed IN THE SAME COMMIT — so `job/N` cannot yet exist
+# when that commit is gated. Its number comes from `$JOB_ID` (set in every task
+# container) and from a `job/N` branch name, never from the network. Check 3
+# also stands down whole when the history holds no `job/N:` commit at all or the
+# checkout is shallow: with no index to resolve against, refusing is the only
+# safe verdict.
+#
+# Three markers suppress BOTH the path and the constant check on the line that
+# carries them, for the three ways a claim is correct rather than stale. They do
+# not reach check 3: a slice row is a claim about a job, not about a path, and
+# `<!-- intent -->` on a row asserting `**Landed**` would be a contradiction
+# rather than an escape. `<!-- intent -->` is for what is designed but not
+# built (and for the value a slice will bump a constant to),
 # `<!-- runtime -->` for what is correctly absent from git (build output,
 # operator-owned files), and `<!-- absent -->` for a line that names a path
 # *because it does not exist* — a measurement of staleness, a rejected
@@ -103,7 +146,8 @@ cd "$root" || doc_facts_unrunnable "cannot enter the repo root $root"
 # start with; a token rooted anywhere else belongs to some other repo.
 tracked_index="$(mktemp)"
 const_index="$(mktemp)"
-trap 'rm -f "$tracked_index" "$const_index"' EXIT
+job_index="$(mktemp)"
+trap 'rm -f "$tracked_index" "$const_index" "$job_index"' EXIT
 git ls-files >"$tracked_index" 2>/dev/null || : >"$tracked_index"
 [ -s "$tracked_index" ] || doc_facts_unrunnable \
 	"\`git ls-files\` listed nothing — check 1 has no index to resolve against."
@@ -145,6 +189,38 @@ const_value() {
 		$1 == n { if (found && $2 != value) multi = 1; value = $2; found = 1 }
 		END { if (found && !multi) print value }
 	' "$const_index"
+}
+
+# --- The merged-job index check 3 resolves against ---------------------------
+# One line per job this history squash-merged, read from the commit subjects
+# (`job/{N}: {type}`) for the same reason check 1 reads `git ls-files`: the
+# claim is about what merged, and only git knows that offline. A shallow
+# checkout or a history with no such subject leaves check 3 with nothing to
+# resolve against, so it stands down rather than reporting every row.
+git log --format='%s' 2>/dev/null \
+	| awk '/^job\/[0-9]+:[ \t]/ { sub(/^job\//, ""); sub(/:.*$/, ""); print }' \
+	| sort -u >"$job_index" || : >"$job_index"
+job_index_usable=1
+[ -s "$job_index" ] || job_index_usable=0
+[ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo unknown)" = "false" ] \
+	|| job_index_usable=0
+
+# The job whose commit cannot exist yet: this one. It joins the index rather
+# than being compared beside it, so the lookup stays one `grep -qx` and cannot
+# be broken by the caller's `IFS`. `$JOB_ID` is set in every task container and
+# the branch name carries it in a local checkout.
+case "${JOB_ID:-}" in
+"" | *[!0123456789]*) : ;;
+*) echo "$JOB_ID" >>"$job_index" ;;
+esac
+_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+case "${_branch#job/}" in
+"$_branch" | "" | *[!0123456789]*) : ;;
+*) echo "${_branch#job/}" >>"$job_index" ;;
+esac
+
+job_merged() { # <seq>
+	grep -qx "$1" "$job_index"
 }
 
 # --- Select the markdown to check -------------------------------------------
@@ -229,6 +305,81 @@ doc_facts_scan() {
 	' "$1"
 }
 
+# Check 3's scanner, over a `docs/design/*.md` only. Emits
+# `SLICE:<line>:<seq>` for each landed claim, and — inside a table that carries
+# one, in a doc whose status is exactly `IMPLEMENTED` — `UNLANDED:<line>:<row
+# label>|<state>` for each row still in an unlanded state.
+doc_facts_scan_slices() {
+	awk '
+	function trim(c) {
+		sub(/^[ \t]*[*_]*[ \t]*/, "", c)
+		sub(/[ \t]*[*_]*[ \t]*$/, "", c)
+		return c
+	}
+	function flush_table(   i) {
+		if (landed) for (i = 1; i <= held; i++) print pending[i]
+		landed = 0
+		held = 0
+	}
+	BEGIN {
+		fence = 0; implemented = 0; seen_status = 0; in_table = 0; landed = 0; held = 0
+		unlanded["proposed"] = 1; unlanded["planned"] = 1; unlanded["deferred"] = 1
+		unlanded["pending"] = 1; unlanded["intent"] = 1; unlanded["not started"] = 1
+		unlanded["not landed"] = 1; unlanded["in progress"] = 1
+	}
+	{
+		if ($0 ~ /^[[:space:]]*(```|~~~)/) { fence = !fence; next }
+		if (fence) next
+		if (!seen_status && $0 ~ /^Status:/) {
+			seen_status = 1
+			s = $0
+			sub(/^Status:[ \t]*/, "", s)
+			st = match(s, /^[A-Za-z][A-Za-z ]*/) ? substr(s, 1, RLENGTH) : ""
+			sub(/[ \t]+$/, "", st)
+			implemented = (st == "IMPLEMENTED")
+		}
+		if ($0 !~ /^[ \t]*\|/) { if (in_table) flush_table(); in_table = 0; next }
+		in_table = 1
+		t = $0
+		while (match(t, /(Landed|Shipped)[*_ \t]*\(job #[0-9]+/)) {
+			hit = substr(t, RSTART, RLENGTH)
+			t = substr(t, RSTART + RLENGTH)
+			sub(/^[^#]*#/, "", hit)
+			print "SLICE:" NR ":" hit
+			landed = 1
+		}
+		if (!implemented) next
+		n = split($0, cells, "|")
+		label = n > 1 ? trim(cells[2]) : ""
+		for (i = 2; i <= n; i++) {
+			state = trim(cells[i])
+			if (state != "" && (tolower(state) in unlanded))
+				pending[++held] = "UNLANDED:" NR ":" label "|" state
+		}
+	}
+	END { if (in_table) flush_table() }
+	' "$1"
+}
+
+# One `SLICE` record: silent unless the history holds no such merge.
+doc_facts_check_slice() { # <file> <line> <seq>
+	[ "$job_index_usable" = 1 ] || return 0
+	job_merged "$3" && return 0
+	echo "!!! check-doc-facts: $1:$2: slice claims a job that never merged -> job #$3"
+	slice_findings=$((slice_findings + 1))
+	return 0
+}
+
+# One `UNLANDED` record: the doc says IMPLEMENTED and this row says otherwise.
+doc_facts_check_unlanded() { # <file> <line> <label>|<state>
+	_label="${3%%|*}"
+	_state="${3#*|}"
+	[ -n "$_label" ] || _label="(unlabelled)"
+	echo "!!! check-doc-facts: $1:$2: Status: IMPLEMENTED but slice $_label is $_state"
+	slice_findings=$((slice_findings + 1))
+	return 0
+}
+
 # One `PATH` record: a finding, or silence when the token is not a claim this
 # checkout can judge.
 doc_facts_check_path() { # <file> <line> <token>
@@ -282,6 +433,7 @@ doc_facts_check_const() { # <file> <line> <name>=<claimed>
 
 path_findings=0
 const_findings=0
+slice_findings=0
 checked=0
 
 IFS='
@@ -290,6 +442,10 @@ for f in $files; do
 	[ -f "$f" ] || continue # a deleted doc shows in a diff but has no content
 	checked=$((checked + 1))
 	out="$(doc_facts_scan "$f")"
+	case "$f" in
+	docs/design/*.md) out="$out
+$(doc_facts_scan_slices "$f")" ;;
+	esac
 	while IFS= read -r rec; do
 		[ -n "$rec" ] || continue
 		kind="${rec%%:*}"
@@ -299,6 +455,8 @@ for f in $files; do
 		case "$kind" in
 		PATH) doc_facts_check_path "$f" "$ln" "$val" ;;
 		CONST) doc_facts_check_const "$f" "$ln" "$val" ;;
+		SLICE) doc_facts_check_slice "$f" "$ln" "$val" ;;
+		UNLANDED) doc_facts_check_unlanded "$f" "$ln" "$val" ;;
 		esac
 	done <<-RECORDS
 		$out
@@ -324,7 +482,17 @@ if [ "$const_findings" -gt 0 ]; then
 	echo "!!!       <!-- intent -->  the value a slice will bump it to, not the value today"
 fi
 
-_findings=$((path_findings + const_findings))
+if [ "$slice_findings" -gt 0 ]; then
+	echo "!!! check-doc-facts: $slice_findings slice claim(s) the git history does not support."
+	echo "!!!     A slice row says a job landed. Either the job never merged (a revoked job"
+	echo "!!!     and one that never existed read the same here — both mean the row is wrong),"
+	echo "!!!     or the doc's head says IMPLEMENTED while a row is still unlanded."
+	echo "!!!     Write the row as \`**Landed** (job #N)\` only once \`job/N\` is merged;"
+	echo "!!!     the job doing the landing is exempt, because it writes the row in the same"
+	echo "!!!     commit (design #415 D10)."
+fi
+
+_findings=$((path_findings + const_findings + slice_findings))
 if [ "$_findings" -ne 0 ]; then
 	echo "!!!     Reproduce locally with: .chug/tasks/check-doc-facts.sh"
 	exit 1

@@ -241,6 +241,159 @@ run_in "$TREE" --staged
 check "staged mode checks only the staged markdown" 0 "$RC" "$OUT" \
 	"check-doc-facts: clean (1 markdown file(s) checked, staged)"
 
+# --- Check 3: a slice claiming a landed job ----------------------------------
+# $DESIGN owns its own history, which is what check 3 resolves against: two
+# squash-merge subjects and nothing else, so #381 and #442 merged here and #999
+# never did. `JOB_ID` is cleared because the suite may run inside a task
+# container whose own job number would otherwise be exempt.
+DESIGN="$WORK/design"
+mkdir -p "$DESIGN/docs/design"
+git -C "$DESIGN" -c init.defaultBranch=main init -q
+JOB_ID=""
+export JOB_ID
+design_commit() { # <subject>
+	printf 'x\n' > "$DESIGN/docs/design/.keep"
+	git -C "$DESIGN" add docs >/dev/null 2>&1
+	git -C "$DESIGN" -c user.email=t@e -c user.name=t commit -q --allow-empty -m "$1" >/dev/null 2>&1
+}
+design_commit 'job/381: code'
+design_commit 'job/442: code'
+write_design() { # <name> <line>...
+	name="$1"; shift
+	{ for l in "$@"; do printf '%s\n' "$l"; done; } > "$DESIGN/docs/design/$name"
+	git -C "$DESIGN" add "docs/design/$name" >/dev/null 2>&1 || true
+}
+run_design() { run_in "$DESIGN" "$@"; }
+
+# 17. Both shapes in the tree — #362/#415's state-in-the-gate-cell and #440's
+#     own State column — resolve against the same history, which is why check 3
+#     matches the row and not a column.
+write_design 900-both-shapes.md \
+	'# Design #900' '' 'Status: PROPOSED.' '' '## Slices' '' \
+	'| Slice | What | Gate on |' \
+	'| --- | --- | --- |' \
+	'| **S0** | The first slice | **Landed** (job #381), with the sweep it needed |' \
+	'' \
+	'| # | Slice | Depends on | State |' \
+	'| --- | --- | --- | --- |' \
+	'| 1 | The other table | — | **Landed** (job #442) |'
+run_design docs/design/900-both-shapes.md
+check "landed slices matching the history pass" 0 "$RC" "$OUT" "check-doc-facts: clean"
+
+# 18. The #416 defect: a row claiming a job the history does not hold. A revoked
+#     job and one that never existed are the same finding, deliberately.
+write_design 901-never-merged.md \
+	'# Design #901' '' 'Status: PROPOSED.' '' \
+	'| Slice | What | Gate on |' \
+	'| --- | --- | --- |' \
+	'| **S1** | A slice that did not land | **Landed** (job #999) |'
+run_design docs/design/901-never-merged.md
+check "a slice claiming a job that never merged fails" 1 "$RC" "$OUT" \
+	"docs/design/901-never-merged.md:7: slice claims a job that never merged -> job #999"
+
+# 19. The #415-head defect: IMPLEMENTED over a row that is still Proposed.
+write_design 902-implemented.md \
+	'# Design #902' '' 'Status: IMPLEMENTED — every slice shipped.' '' \
+	'| # | Slice | State |' \
+	'| --- | --- | --- |' \
+	'| 1 | The one that landed | **Landed** (job #381) |' \
+	'| 2 | The one that did not | Proposed |'
+run_design docs/design/902-implemented.md
+check "IMPLEMENTED over an unlanded row fails" 1 "$RC" "$OUT" \
+	"docs/design/902-implemented.md:8: Status: IMPLEMENTED but slice 2 is Proposed"
+
+# 20. Most design docs carry no slice table at all. Silence is what keeps the
+#     fleet running (#415 M7), so it gets a case of its own — including a table
+#     that is not a slice table.
+write_design 903-no-slices.md \
+	'# Design #903' '' 'Status: IMPLEMENTED — no slices here.' '' \
+	'It argues a position and sequences nothing.' '' \
+	'| Thing | Where | State |' \
+	'| --- | --- | --- |' \
+	'| The decider | in the domain crate | Shipped |' \
+	'| The second one | nowhere yet | Proposed |'
+run_design docs/design/903-no-slices.md
+check "a design doc with no slice table is silent" 0 "$RC" "$OUT" "check-doc-facts: clean"
+
+# 21. A row the check cannot parse is skipped, never guessed at.
+unparsed_n=0
+for unparsed in \
+	'| **S1** | A slice | **Landed** |' \
+	'| **S1** | A slice | **Landed** (job #S1) |' \
+	'| **S1** | A slice | Landed in job 999 |' \
+	'| **S1** | A slice | **Landed** (in job 999) |'; do
+	unparsed_n=$((unparsed_n + 1))
+	write_design "904-unparsed-$unparsed_n.md" \
+		'# Design #904' '' 'Status: PROPOSED.' '' \
+		'| Slice | What | Gate on |' '| --- | --- | --- |' "$unparsed"
+	run_design "docs/design/904-unparsed-$unparsed_n.md"
+	check "an unparseable row is skipped: $unparsed" 0 "$RC" "$OUT" "check-doc-facts: clean"
+done
+
+# 22. A claim outside a table row is prose, not a slice, and is not judged.
+write_design 905-prose.md \
+	'# Design #905' '' 'Status: PROPOSED.' '' \
+	'**Landed** (job #999) for the coverage job — this is a paragraph, not a slice.'
+run_design docs/design/905-prose.md
+check "a landed claim in prose is not a slice row" 0 "$RC" "$OUT" "check-doc-facts: clean"
+
+# 23. `IMPLEMENTED IN PART` is not `IMPLEMENTED`; rule 2 does not fire on it.
+write_design 906-in-part.md \
+	'# Design #906' '' 'Status: IMPLEMENTED IN PART — S1 landed, S2 intent.' '' \
+	'| # | Slice | State |' '| --- | --- | --- |' \
+	'| 1 | The one that landed | **Landed** (job #381) |' \
+	'| 2 | The one that did not | Proposed |'
+run_design docs/design/906-in-part.md
+check "IMPLEMENTED IN PART is not IMPLEMENTED" 0 "$RC" "$OUT" "check-doc-facts: clean"
+
+# 24. Rule 2 needs the slice table identified by a landed row in it. Without
+#     one, the check does not know which table it is reading, and says nothing.
+write_design 907-no-landed-row.md \
+	'# Design #907' '' 'Status: IMPLEMENTED — shipped in jobs #314-#319.' '' \
+	'| # | Job | Depends on |' '| --- | --- | --- |' \
+	'| 1 | The slice | — |' '| 2 | The next one | Proposed |'
+run_design docs/design/907-no-landed-row.md
+check "a table with no landed row is not judged as a slice table" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 25. Check 3 is scoped to `docs/design/`; the same row elsewhere is not a slice.
+printf '| **S1** | A slice | **Landed** (job #999) |\n' > "$DESIGN/docs/notes.md"
+git -C "$DESIGN" add docs/notes.md >/dev/null 2>&1
+run_design docs/notes.md
+check "a landed row outside docs/design/ is not a slice claim" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 26. The job doing the landing is exempt — D10 has it write the row in the same
+#     commit, so `job/N` cannot exist yet when that commit is gated. Both
+#     sources of its number are tested: the container's `JOB_ID`, and a `job/N`
+#     branch in a local checkout.
+write_design 908-inflight.md \
+	'# Design #908' '' 'Status: PROPOSED.' '' \
+	'| Slice | What | Gate on |' '| --- | --- | --- |' \
+	'| **S1** | The slice this job is landing | **Landed** (job #700) |'
+JOB_ID=700 run_design docs/design/908-inflight.md
+check "the landing job is exempt via JOB_ID" 0 "$RC" "$OUT" "check-doc-facts: clean"
+run_design docs/design/908-inflight.md
+check "without that exemption the same row fails" 1 "$RC" "$OUT" \
+	"slice claims a job that never merged -> job #700"
+git -C "$DESIGN" checkout -q -b job/700
+run_design docs/design/908-inflight.md
+check "the landing job is exempt via the job/N branch name" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+git -C "$DESIGN" checkout -q main
+
+# 27. A history holding no `job/N:` commit gives check 3 nothing to resolve
+#     against, so it stands down rather than reporting every row. $REPO has no
+#     commits at all.
+mkdir -p "$REPO/docs/design"
+printf '%s\n' '# Design #909' '' 'Status: PROPOSED.' '' \
+	'| Slice | What | Gate on |' '| --- | --- | --- |' \
+	'| **S1** | A slice | **Landed** (job #999) |' > "$REPO/docs/design/909-no-history.md"
+git -C "$REPO" add docs/design >/dev/null 2>&1 || true
+run_sut_repo docs/design/909-no-history.md
+check "no job/N commit in the history stands check 3 down" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
 # --- A prerequisite that is missing is loud, and is not a pass ----------------
 # 16. Outside a git checkout the check refuses to judge rather than falling back
 #     to the filesystem — exit 2, a LINTER ERROR, distinct from both verdicts.

@@ -313,9 +313,10 @@ these suites cover.
   `agent-rust` container: **36.8s for the 17 that existed then**, of which
   `deploy/prod/update-refresh.test.sh` alone is 27.1s (stub polling sleeps);
   `android-proof.test.sh` (#367 A2) adds ~9s, most of it three deliberately short
-  emulator bounds it waits out. `check-doc-facts.test.sh` (#415 S1b) adds 0.27s
-  for 47 cases — it stubs nothing, because both checks it pins read a throwaway
-  `git init` fixture rather than the tree.
+  emulator bounds it waits out. `check-doc-facts.test.sh` (#415 S1b, S5a) adds
+  0.45s for 63 cases — it stubs nothing, because all three checks it pins read a
+  throwaway `git init` fixture rather than the tree: check 3 gets its own, whose
+  two `job/N:` commits *are* the history it resolves against.
   The total is checked **between** suites, not after the loop — otherwise the
   real ceiling would be suite-count × per-suite cap — and the failure names the
   suites it therefore never ran. The per-suite cap is applied with `timeout`,
