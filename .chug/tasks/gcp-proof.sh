@@ -186,7 +186,7 @@ claim_is "$claims" sub "$EXPECT_SUB" || rung_fail 2 "sub is not \"$EXPECT_SUB\" 
 claim_is "$claims" project "$EXPECT_PROJECT" || rung_fail 2 "the project claim is not \"$EXPECT_PROJECT\" — the provider's attribute condition refuses this token before any binding is consulted"
 claim_is "$claims" job_type "$EXPECT_JOB_TYPE" || rung_fail 2 "the job_type claim is not \"$EXPECT_JOB_TYPE\""
 claim_is "$claims" container "$EXPECT_CONTAINER" || rung_fail 2 "the container claim is not \"$EXPECT_CONTAINER\" — per-container scoping (#313 A5) is not expressible cloud-side without it"
-claim_is "$claims" workload "$EXPECT_WORKLOAD" || rung_fail 2 "the workload composite is not \"$EXPECT_WORKLOAD\" — this is the exact string the principalSet member percent-encodes"
+claim_is "$claims" workload "$EXPECT_WORKLOAD" || rung_fail 2 "the workload composite is not \"$EXPECT_WORKLOAD\" — this is the exact string the principalSet member ends with"
 
 # The 127-byte cap is a hard error at exchange time, so spend a comparison here
 # rather than a round trip discovering it (#313 A1).
@@ -297,10 +297,14 @@ case "$code" in
 	;;
 *)
 	rung_fail 3b "iamcredentials refused to mint for $service_account (HTTP $code): $(http_detail)
-      Suspect the principalSet member first. The \`/\` in the project component
-      must be percent-encoded as %2F; a literal \`/\` applies cleanly, grants
-      NOTHING, and surfaces as an ordinary 403. Compare against
-      \`terraform output principal_set\` (infra/README.md)."
+      Suspect the principalSet member first: a member that matches nothing applies
+      cleanly, grants NOTHING, and surfaces as an ordinary 403. The \`/\` in the
+      project component is LITERAL — job #427 was refused with it percent-encoded
+      as %2F, and beacon's working binding uses the literal form. Compare against
+      \`terraform output principal_set\`, then the two next suspects in order: IAM
+      propagation delay (a fresh binding can take minutes), then whether
+      \`roles/iam.workloadIdentityUser\` carries this permission at all — if not,
+      the role is \`roles/iam.serviceAccountTokenCreator\` (infra/README.md)."
 	;;
 esac
 access=$(jq -r '.accessToken // empty' <"$BODY_FILE" 2>/dev/null || :)

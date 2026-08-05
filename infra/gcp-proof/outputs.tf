@@ -38,7 +38,7 @@ output "denied_bucket" {
 }
 
 output "principal_set" {
-  description = "The member string the whole proof turns on. The `%2F` is load-bearing; a literal `/` applies cleanly and grants nothing."
+  description = "The member string the whole proof turns on. The `/` in the project component is literal; a member that matches nothing applies cleanly and grants nothing."
   value       = local.principal_set
 }
 

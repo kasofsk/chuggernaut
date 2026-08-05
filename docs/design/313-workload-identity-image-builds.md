@@ -352,8 +352,17 @@ and the binding that expresses the operator's sentence:
 
 ```text
 principalSet://iam.googleapis.com/projects/{n}/locations/global/
-  workloadIdentityPools/{pool}/attribute.workload/kasofsk%2Fbeacon:deploy:work
+  workloadIdentityPools/{pool}/attribute.workload/kasofsk/beacon:deploy:work
 ```
+
+> **Amended 2026-08-05 (job #428).** This example percent-encoded the `/` as
+> `%2F`. The `/` is **literal**: beacon's working GitHub-Actions binding uses
+> `.../attribute.repository/kasofsk/beacon` *(secondhand — the operator's
+> 2026-08-04 inspection; that repo is not in this workspace)*, and Google's own
+> guidance documents the same form. Job #427 was refused at rung 3b with the
+> encoded member. Still **unproven by observation** — the literal form has not
+> yet been applied and re-run; see [`infra/README.md`](../../infra/README.md),
+> "The `/` is literal".
 
 The provider-level `attribute_condition` is the tenancy fence and the binding is
 the authority fence — two independent checks, which is the shape Google's own

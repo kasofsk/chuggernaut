@@ -148,18 +148,58 @@ know. `project_id` and `bucket_prefix` are still overridable; bucket names are
 globally unique, so a collision means overriding `bucket_prefix` and nothing else
 changes.
 
-### The `%2F` is load-bearing
+### The `/` is literal — and this is a retraction
 
 The IAM member is:
 
 ```text
-principalSet://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/workloadIdentityPools/{pool}/attribute.workload/kasofsk%2Fchuggernaut:gcp-proof:work
+principalSet://iam.googleapis.com/projects/{PROJECT_NUMBER}/locations/global/workloadIdentityPools/{pool}/attribute.workload/kasofsk/chuggernaut:gcp-proof:work
 ```
 
-A literal `/` in place of `%2F` **applies cleanly and grants nothing**. The
-failure is open-looking: there is no error at apply time, and the error at use
-time names the *issuer*, not the member. `terraform output principal_set` prints
-the exact string that was applied — compare it before suspecting anything else.
+The `/` inside the project component is **literal**. It is the *member* that is
+load-bearing, not any particular encoding of it: a member that matches nothing
+**applies cleanly and grants nothing**, and the failure is open-looking — no
+error at apply time, and an error at use time that names the *issuer* rather than
+the member. `terraform output principal_set` prints the exact string that was
+applied; compare it before suspecting anything else.
+
+**What this section used to say was wrong.** Until job #428 it asserted the
+opposite — that the `/` "must be percent-encoded as `%2F`" and that a literal `/`
+grants nothing — and `mod.tf` encoded it accordingly. That was written as
+established fact without checking the working binding in the operator's other
+repo (the [#415](../docs/design/415-knowledge-architecture.md) M1 class: a
+present-tense claim about behaviour, asserted rather than checked). The failure
+mode it described is real; the direction was backwards.
+
+The evidence for the literal form:
+
+- Job #427 reached rung 3b with the `%2F` member and was refused with
+  `403 Permission 'iam.serviceAccounts.getAccessToken' denied`. **Rung 3 passed
+  in the same run**, so the JWK set, the issuer, the audience and the attribute
+  condition are all correct — only the binding fails to match.
+- The operator's **working** GitHub-Actions binding, in production, is
+  `~/beacon/infra/gcp-workload-id/mod.tf:34` and reads
+  `.../attribute.repository/kasofsk/beacon` — a literal `/`. That repo is not in
+  this workspace; this is the operator's 2026-08-04 inspection relied on
+  *(secondhand)*, on the same terms as #361 and #362.
+- Google's own Workload Identity Federation guidance for GitHub Actions uses the
+  same literal form (`attribute.repository/octo-org/octo-repo`).
+
+**This is a hypothesis with strong circumstantial support, not a proven fix.**
+It has *not* been established by changing only this and observing a pass: the
+literal form has never been applied here. The operator re-applies and re-runs
+`gcp-proof` to settle it.
+
+If the literal form is **also** refused, the next hypotheses, in order:
+
+1. **IAM propagation delay.** A freshly written workload-identity binding can
+   take minutes to take effect; re-run before changing anything.
+2. **The role may not carry the permission.** If
+   `roles/iam.workloadIdentityUser` does not grant
+   `iam.serviceAccounts.getAccessToken`, the binding needs
+   `roles/iam.serviceAccountTokenCreator` instead.
+
+One hypothesis at a time, or the next run tells us nothing.
 
 ---
 
@@ -391,7 +431,7 @@ the run stops at the first failure.
 | 1 | The credential is injected, at the promised modes | (a) has not merged, or the job type lost its `workload_identities:` |
 | 2 | The claims are what was minted — decoded **locally**, no network | The issuer's claim assembly changed; the cloud would refuse this too, and this names the field |
 | 3 | The STS accepts the exchange | The JWKS upload (§5), or (c)/(d) not done |
-| 3b | The federated token impersonates the SA | The `%2F` member in the `workloadIdentityUser` binding — a literal `/` applies cleanly and grants nothing |
+| 3b | The federated token impersonates the SA | The member in the `workloadIdentityUser` binding — one that matches nothing applies cleanly and grants nothing; the `/` is literal, per the retraction above |
 | 4 | The granted read succeeds | The objectViewer binding on the granted bucket; 3b already proved the member |
 | 5 | The ungranted read is **refused** | A grant wider than the terraform declares — a real finding |
 | 5b | An evaluator declaring no identity gets **nothing** | Injection is not per-container; #313 A5 non-inheritance is broken |

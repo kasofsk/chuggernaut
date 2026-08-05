@@ -342,7 +342,7 @@ verdict "quotes the transport error" "$(found "$SANDBOX/out7c.txt" "Could not re
 # --- case 7d: impersonation is refused -------------------------------------------------------
 # Split from rung 3 on purpose: the STS accepting the token and the SA refusing
 # the impersonation are different findings, and only 3b's is about the member.
-echo "case 7d: a refused impersonation fails rung 3b, and names the %2F member"
+echo "case 7d: a refused impersonation fails rung 3b, and names the member first"
 reset_case
 : >"$STATE/impersonation_fails"
 run_ladder "$SANDBOX/out7d.txt"
@@ -351,7 +351,9 @@ verdict "exits non-zero" "$(non_zero "$STATUS")"
 verdict "names rung 3b" "$(found "$SANDBOX/out7d.txt" "RUNG 3b FAILED")"
 verdict "rung 3 still reads PASS" "$(found "$SANDBOX/out7d.txt" "rung 3 the STS accepts the exchange: PASS")"
 verdict "rung 3b reads FAIL" "$(found "$SANDBOX/out7d.txt" "rung 3b the federated token impersonates the service account: FAIL")"
-verdict "names the %2F member as the first suspect" "$(found "$SANDBOX/out7d.txt" "%2F")"
+verdict "names the principalSet member as the first suspect" "$(found "$SANDBOX/out7d.txt" "Suspect the principalSet member first")"
+verdict "says the slash is literal, not encoded" "$(found "$SANDBOX/out7d.txt" "is LITERAL")"
+verdict "names the ordered next suspects" "$(found "$SANDBOX/out7d.txt" "serviceAccountTokenCreator")"
 verdict "names the service account" "$(found "$SANDBOX/out7d.txt" "$SA")"
 verdict "rung 4 reads NOT REACHED" "$(found "$SANDBOX/out7d.txt" "rung 4 the granted read succeeds: NOT REACHED")"
 verdict "reads no bucket" "$(missing "$CMD_LOG" "storage.googleapis.com")"

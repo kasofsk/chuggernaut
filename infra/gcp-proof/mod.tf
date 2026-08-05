@@ -54,17 +54,37 @@ locals {
   # here ONLY to build the member string, never re-derived in CEL.
   workload = "${var.chug_project}:${var.job_type}:${var.container}"
 
-  # THE LOAD-BEARING STRING. The `/` inside the project component must be
-  # percent-encoded as `%2F` — an IAM member with a literal `/` is accepted at
-  # apply time and simply matches nothing, so a mistake here fails OPEN-LOOKING:
-  # no grant, and an error that names the issuer rather than the member.
+  # THE LOAD-BEARING STRING, and the `/` in it is LITERAL.
+  #
+  # RETRACTION (2026-08-05, job #428). This line used to `replace(local.workload,
+  # "/", "%2F")` under a comment asserting the opposite: that "an IAM member with
+  # a literal `/` is accepted at apply time and simply matches nothing". That
+  # comment was written as established fact and never checked. The failure MODE it
+  # describes is real — a member that matches nothing applies cleanly and fails
+  # open-looking, with a 403 that names the issuer rather than the member — but
+  # the direction is backwards, and it cost job #427 a run: rung 3 passed (so the
+  # JWK set, issuer, audience and attribute condition are all correct) and 3b was
+  # refused with `Permission 'iam.serviceAccounts.getAccessToken' denied` against
+  # the `%2F` member.
+  #
+  # The evidence for the literal form: the operator's WORKING GitHub-Actions
+  # binding in production, `~/beacon/infra/gcp-workload-id/mod.tf:34`, reads
+  # `.../attribute.repository/kasofsk/beacon` — a literal `/`. That repo is not in
+  # this workspace, so this is the operator's 2026-08-04 inspection relied on
+  # *(secondhand)*, on the same terms as #361 and #362. Google's own Workload
+  # Identity Federation guidance for GitHub Actions uses the same literal form
+  # (`attribute.repository/octo-org/octo-repo`).
+  #
+  # NOT YET PROVEN. Nothing here has been observed to pass; the operator re-applies
+  # and re-runs `gcp-proof` to settle it. infra/README.md, under "The `/` is
+  # literal", records the ordered next hypotheses if it is also refused.
   principal_set = join("", [
     "principalSet://iam.googleapis.com/projects/",
     data.google_project.proof.number,
     "/locations/global/workloadIdentityPools/",
     google_iam_workload_identity_pool.chug.workload_identity_pool_id,
     "/attribute.workload/",
-    replace(local.workload, "/", "%2F"),
+    local.workload,
   ])
 
   # Which service account reads which bucket. The map is the whole fixture: the
