@@ -533,7 +533,7 @@
           ]
         },
         "run": {
-          "description": "Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up\nhook): a shell command run in the WrapUp phase *after* the squash lands\non the default branch, against the merged main content. It ships the\nmerged result — a web job publishing its built UI, say — so it only runs\nonce the merge is final, and never at all if the job is revoked or\nescalated before landing. Valid with `type: merge` only. A non-zero exit\nescalates the job (the merge is not undone). The command clones the\ndefault branch, so it must be idempotent (a restart may re-launch it).",
+          "description": "Optional post-merge command (spec §3.2,\ndocs/reference/design-lifecycle.md wrap-up hook): a shell command run in\nthe WrapUp phase *after* the squash lands on the default branch, against\nthe merged main content, and valid with `type: merge` only. It ships the\nmerged result — a web job publishing its built UI, say — so it runs only\nonce the merge is final and never at all if the job is revoked or\nescalated before landing; a non-zero exit escalates the job without\nundoing the merge, and it clones the default branch, so it must be\nidempotent (a restart may re-launch it).",
           "type": [
             "string",
             "null"

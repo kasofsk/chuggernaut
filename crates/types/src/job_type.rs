@@ -193,14 +193,15 @@ pub struct WrapUpSpec {
     /// (`.chug/tasks/web-publish.sh` → `web-publish`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up
-    /// hook): a shell command run in the WrapUp phase *after* the squash lands
-    /// on the default branch, against the merged main content. It ships the
-    /// merged result — a web job publishing its built UI, say — so it only runs
-    /// once the merge is final, and never at all if the job is revoked or
-    /// escalated before landing. Valid with `type: merge` only. A non-zero exit
-    /// escalates the job (the merge is not undone). The command clones the
-    /// default branch, so it must be idempotent (a restart may re-launch it).
+    /// Optional post-merge command (spec §3.2,
+    /// docs/reference/design-lifecycle.md wrap-up hook): a shell command run in
+    /// the WrapUp phase *after* the squash lands on the default branch, against
+    /// the merged main content, and valid with `type: merge` only. It ships the
+    /// merged result — a web job publishing its built UI, say — so it runs only
+    /// once the merge is final and never at all if the job is revoked or
+    /// escalated before landing; a non-zero exit escalates the job without
+    /// undoing the merge, and it clones the default branch, so it must be
+    /// idempotent (a restart may re-launch it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
     /// Image for the `run` container; falls back to the job's top-level image

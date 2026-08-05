@@ -340,13 +340,11 @@ async fn a_revoked_job_can_be_grouped() {
     assert_eq!(updated.state, JobState::Revoked);
 }
 
-/// **The inertness assert**, container half (design #321 Decision 3, STYLE.md
-/// Tier 2 #2 — negative space): two jobs of one type, identical but for their
-/// groups, launch a work agent and an evaluator whose environment and prompt are
-/// the same. No code path that composes a container's environment, prompt or
-/// resolved config may read `Job.groups`, and this is what makes that a property
-/// rather than an intention — it is also the whole reason mutating a terminal
-/// job's record is safe.
+/// **The inertness assert**, container half (design #321 Decision 3,
+/// docs/reference/style.md Tier 2 #2 — negative space): no code path composing
+/// a container's environment, prompt or resolved config may read `Job.groups`,
+/// so two jobs of one type identical but for their groups launch a work agent
+/// and an evaluator whose environment and prompt are the same.
 ///
 /// The job-identity keys ([`PER_JOB_ENV_KEYS`]) are excluded because these are
 /// two different jobs; every other key is compared by value, and the group names

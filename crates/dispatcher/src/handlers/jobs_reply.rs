@@ -21,11 +21,9 @@ use vcs::RepoManager;
 
 /// Resolved evaluation criteria for one job: the type's evaluators (with
 /// project defaults merged, §1.1) plus the job's additive ones
-/// (design-lifecycle.md), each annotated with its source. Resolved at the
-/// job's pinned `base_ref`, or default-branch HEAD before Ready — the same
-/// ref execution will use. Type-load failures degrade to the job's own
-/// evaluators plus the error list rather than a hard error, so the UI can
-/// still render something for a job whose type YAML is currently broken.
+/// (docs/reference/design-lifecycle.md), each annotated with its source.
+/// Resolved at the job's pinned `base_ref`, or default-branch HEAD before
+/// Ready — the same ref execution will use.
 pub(super) async fn job_criteria(
     store: &NatsStore,
     repos: &RepoManager,

@@ -109,11 +109,11 @@ fn every_member_opts_into_the_workspace_lints() {
 }
 
 /// A crate-level `#![allow]` of any Tier 1 lint would silence the gate for a
-/// whole crate. Violations are annotated per site instead, so the debt stays
-/// greppable and new code cannot inherit an exemption. Test *targets* keep
-/// their file-level allow — STYLE.md scopes the panic lints to "outside
-/// tests" — so only `src/` is swept, and only at column zero, where a crate
-/// root's inner attributes live.
+/// whole crate, so violations are annotated per site instead and the debt stays
+/// greppable. Test *targets* keep their file-level allow —
+/// docs/reference/style.md scopes the panic lints to "outside tests" — so only
+/// `src/` is swept, and only at column zero, where a crate root's inner
+/// attributes live.
 #[test]
 fn no_crate_level_allow_of_the_tier_one_lints() {
     let mut offenders = Vec::new();

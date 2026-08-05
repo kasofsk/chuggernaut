@@ -968,10 +968,10 @@ export interface Job {
    */
   escalation?: Escalation | null;
   /**
-   * Additive per-job evaluators (design-lifecycle.md): layered on top of the
-   * type's `eval:` list at execution. The type's evaluators are a floor —
-   * creation can add criteria, never remove or override them. Name
-   * collisions with the type's evaluators are a release-time error.
+   * Additive per-job evaluators (docs/reference/design-lifecycle.md): layered
+   * on top of the type's `eval:` list at execution, so the type's evaluators
+   * are a floor — creation can add criteria, never remove or override them.
+   * Name collisions with the type's evaluators are a release-time error.
    */
   eval: Evaluator[];
   /**
@@ -1037,11 +1037,12 @@ export interface Job {
    */
   knowledge_tags: string[];
   /**
-   * Member job ids absorbed into this batch (design-lifecycle.md, spec §2.1
-   * batches). Empty for an ordinary job; non-empty marks this job as a
-   * **batch** — one branch implementing all members, evaluated under the
-   * union of their criteria, whose single merge completes every member.
-   * Serde-defaulted so records written before batches deserialize.
+   * Member job ids absorbed into this batch
+   * (docs/reference/design-lifecycle.md, spec §2.1 batches); empty for an
+   * ordinary job, and serde-defaulted so records written before batches
+   * deserialize. Non-empty marks this job as a **batch** — one branch
+   * implementing all members, evaluated under the union of their criteria,
+   * whose single merge completes every member.
    */
   members: number[];
   /**
@@ -1404,14 +1405,15 @@ export interface WrapUpSpec {
    */
   name?: string | null;
   /**
-   * Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up
-   * hook): a shell command run in the WrapUp phase *after* the squash lands
-   * on the default branch, against the merged main content. It ships the
-   * merged result — a web job publishing its built UI, say — so it only runs
-   * once the merge is final, and never at all if the job is revoked or
-   * escalated before landing. Valid with `type: merge` only. A non-zero exit
-   * escalates the job (the merge is not undone). The command clones the
-   * default branch, so it must be idempotent (a restart may re-launch it).
+   * Optional post-merge command (spec §3.2,
+   * docs/reference/design-lifecycle.md wrap-up hook): a shell command run in
+   * the WrapUp phase *after* the squash lands on the default branch, against
+   * the merged main content, and valid with `type: merge` only. It ships the
+   * merged result — a web job publishing its built UI, say — so it runs only
+   * once the merge is final and never at all if the job is revoked or
+   * escalated before landing; a non-zero exit escalates the job without
+   * undoing the merge, and it clones the default branch, so it must be
+   * idempotent (a restart may re-launch it).
    */
   run?: string | null;
   /**

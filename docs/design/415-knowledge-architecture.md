@@ -12,7 +12,11 @@ S1b landed on 2026-08-05 (job #438): both checks are
 [S1b correction](#correction--2026-08-05-job-438-s1b-landed-and-the-eleven).
 S3 landed on 2026-08-05 (job #441): the root holds `README.md` and `CLAUDE.md`
 and nothing else — see the
-[S3 correction](#correction--2026-08-05-job-441-s3-the-move).
+[S3 correction](#correction--2026-08-05-job-441-s3-the-move). Job #443 cleared
+that correction's nineteen doc comments and paid the doc-length ratchet they
+carried; the gate-scope gap that let them through is **recorded and left open**,
+not closed — see the
+[#443 finding](#finding--2026-08-05-job-443-the-doc-comment-residue-and-the-gate-scope-it-fell-through).
 D13–D15 and S9–S12 were added on 2026-08-05
 by job #435, written against the tree at `810a91b`; their three measurements were
 read out of that commit and three claims in the ticket that proposed them did not
@@ -1555,3 +1559,74 @@ comment's debt.
 twice. And `docs/README.md` is still `NORTH-STAR.md`'s prose under a new name:
 it routes, which is why D12 sends it here, but the catalogue that makes it an
 index is [S10](#slices)'s.
+
+## Finding — 2026-08-05, job #443 (the doc-comment residue, and the gate scope it fell through)
+
+The nineteen doc comments
+[#441 left standing](#the-ratchet-that-stopped-19-references-and-why-they-stayed)
+now name the post-move paths. Section anchors were kept — "STYLE.md Tier 2 #3"
+became "docs/reference/style.md Tier 2 #3" — because the rule number is the half
+a reader needs and only the document half was ever broken. One citation named
+`refactor-plan.md`, which S3 moved to `docs/design/215-refactor-plan.md`; it
+travelled with the rest.
+
+### Paying the ratchet was the change; the rename was nineteen tokens
+
+The substitution changes no sentence count — `.md` is not a terminator to
+`check-comments.sh`'s scanner — so nothing was *pushed* over the two-sentence
+cap. Every one of the nineteen blocks was already 3–6 sentences and
+grandfathered, and the edit is simply what made rule 2 look at them: all
+nineteen failed the gate on the first commit. So the debt #441 deferred was paid
+here rather than deferred again. All nineteen now sit at two sentences or fewer,
+seven bullets and one new `crates/types/src/platform.rs` section carry the prose
+that would not compress into `docs/implementation-notes.md`
+([D12](#d12-where-everything-lives)'s archive), and the four schemars
+descriptions among them were **regenerated** into
+`.chug/schemas/api.schema.json`, `.chug/schemas/job-type.schema.json` and
+`web/src/api/types.gen.ts` rather than hand-edited — `committed_schemas_are_current`
+asserts byte equality either way.
+
+### The gate's scope is markdown, and that is a limit, not an oversight
+
+Every one of the nineteen survived a green `.chug/tasks/check-doc-facts.sh` on
+every job since S1b. That is the check working as specified:
+[D6](#d6-four-mechanical-checks) scopes it to `*.md`, because the thing it set
+out to verify is a **doc's** claim about the tree. The residue lives outside that
+scope, and outside it is the larger half. Measured on this branch with `git grep
+-o`, `docs/reference/style.md` appears **122** times inside markdown and **149**
+times outside it; `docs/reference/contracts.md`, **32** inside and **50**
+outside, all fifty of them in `.rs`. For the documents the rules actually live
+in, most references to them are somewhere no gate reads.
+
+### A citation is not a path claim, so check 1 does not extend to it
+
+Widening check 1 to `*.rs` verbatim would be the wrong repair. Check 1 resolves
+a **path claim**: a backticked, repo-relative path a doc asserts exists. None of
+the nineteen made one. "STYLE.md Tier 2 #3" is a **citation** — a document named
+by title, unbackticked, in prose, beside the section that carries the rule, in a
+comment that never had to resolve to compile. A rule that caught it would have to
+be citation-shaped: it would need the set of documents that may be named by
+title, it would have to treat the section anchor as part of the token rather than
+as noise, and it would have to stay silent about the hundreds of ordinary `docs/`
+paths already in those same files. Different corpus, different token grammar,
+different false-positive profile — a second check, not a wider first one.
+
+Whether that belongs in an existing slice, in a new one, or nowhere at all is
+**left open for the operator**. The argument against is real: a stale citation is
+a wrong pointer, not a broken build, and the whole-tree `git grep` a rename
+already runs found all nineteen without any gate's help. This job deliberately
+did not touch `check-doc-facts.sh` — it blocks every job in the fleet, and
+widening its corpus on the back of a cleanup is how a gate acquires a false
+positive nobody budgeted for.
+
+### What still carries the pre-move names, on purpose
+
+`STYLE.md`, `contracts.md`, `design-lifecycle.md` and `refactor-plan.md` survive
+in markdown in exactly one file — this one — across
+[D1](#d1-two-kinds-of-doc-and-only-two) and D12's move tables,
+[M5](#the-problem-measured)'s `comm -12` command, #441's residue table, and this
+section. They name the pre-move paths because that is what they measured, and
+rewriting an append-only body into `spec.md → spec.md` would turn a measurement
+into a tautology. That is
+[#441's ruling](#what-the-gate-could-not-see-and-what-was-run-instead) and it
+holds unchanged.

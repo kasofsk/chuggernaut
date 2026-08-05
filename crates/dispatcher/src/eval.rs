@@ -1223,11 +1223,11 @@ impl Core {
         }
     }
 
-    /// Assemble the read-only inputs for one landing decision (contracts.md
-    /// §2: reads feed the view, they are not effects). Re-gathered before
-    /// EVERY `decide` call — the continuation contract's freshness rule, so a
-    /// decision never runs on a view the world moved under. `parked` carries
-    /// the gate round's (candidate commit, old head) on a verdict entry.
+    /// Assemble the read-only inputs for one landing decision
+    /// (docs/reference/contracts.md §2: reads feed the view, they are not
+    /// effects). Re-gathered before EVERY `decide` call — the continuation
+    /// contract's freshness rule, so a decision never runs on a view the world
+    /// moved under.
     async fn gather_landing_view(
         &self,
         owner: &str,

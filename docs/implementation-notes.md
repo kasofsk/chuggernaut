@@ -284,6 +284,7 @@ stale.
 - **fn gather_landing_view** — Was this landing's current cycle a gate-fix round (job #154)? Read from the persisted task log so it holds across a restart.
 - **fn gather_landing_view** — Audit trail (job #154): note the gate-fix round in the squash body so the landed commit records that a mechanical compile fix was applied after review, not that the branch was re-reviewed.
 - **fn gather_landing_view** — A batch lands as one squash that completes every member, so open the commit body with the member list — otherwise git history records only `job/{batchseq}: {type}` with no trace of which tickets it closed (spec §2.1 batches; mirrors the create_batch auto-index). Composed by `squash_body_preamble`, which is pure so the body shape is pinned tier-1 rather than only through a real landing.
+- **fn gather_landing_view** — `parked` carries the gate round's (candidate commit, old head) on a verdict entry.
 - **fn squash_body_preamble** — Order is the audit story, not aesthetics: *which tickets* landed, then *what target* they acted on, then the agent's own words. A job that is neither batched nor parameterized returns the summary unchanged, which is what keeps every commit body in the history byte-identical to what it was.
 - **fn run_landing** — Fold-local carry between rounds: the conflict files feeding the context composition, and the candidate commit a gate round parks (both arrive one round before the decision that consumes them).
 - **fn run_landing** — An escalation out of the landing releases the exec slice BEFORE its Escalate effect runs (parity with the pre-C2 order: the escalation task's cycle must not read the dropped exec state).
@@ -338,6 +339,7 @@ stale.
 - **fn run_work** — 4. The artifacts of the decision. Boxed: the escalation and launch composites behind `interpret` can re-enter this phase.
 - **fn run_work_step** — The continuation hop (docs/reference/contracts.md §2): "did the branch move beyond base_ref?" is a ref read, so the decider gates it, this performs it, and the answer re-enters against a fresh view.
 - **fn run_work_step** — Idle/Hold end the fold; Begin/Launch/Park belong to the entry and attempt shims and never come back out of this fold.
+- **fn gather_work_view** — The task id and session id are minted on every hop rather than only where a launch needs them: a pure decision cannot read or mint, so both have to be in the view before the decider picks its branch.
 - **fn on_infra_loss** — Count infra losses for this task's lineage (same cycle + evaluator): the freshly-stamped attempt is included, so the Nth loss sees count N.
 - **fn on_infra_loss** — Relaunch-or-escalate is Work-phase policy, so it is the C6 decider's; only the retirement above is shared with Evaluation.
 - **fn handle_submit_result** — Persist it, not just cache it: the submission arrives while the container is still running (§4.2 ack-then-exit), so a dispatcher restart in that window used to lose the agent's summary entirely — ExecState rebuilds as None, and the commit message reads from it. The task is still Running; the exit handler fills in the rest.
@@ -397,8 +399,11 @@ stale.
 - **fn spawn_fleet_capacity_handler** — An unattributed change would leave the record's audit stamp lying; `unknown` says what actually happened instead.
 
 ### `crates/dispatcher/src/handlers/groups.rs`
-- **fn group_docs** — Absent is the ordinary case, not an error: a group may name a design that has not been written yet (spec §4.4's posture for a knowledge tag with no file).
+- **fn group_docs** — Absent is the ordinary case, not an error: a group may name a design that has not been written yet (spec §4.4's posture for a knowledge tag with no file). A name in another namespace, and a name whose document is not there, are simply missing from the returned map.
+- **fn group_docs** — The join runs **name → path**, through `types::design_doc_path` — the convention stated in the same module that decides what a name may be, which is what keeps the shape-legal `design/../../etc/passwd` from resolving to a path here at all. Running it in this direction is also what lets an ungrouped project — and any project whose groups name no design — pay nothing: with nothing to look up there is no branch to resolve and no tree to walk. `req.designs.list` needs the opposite direction, and enumerates instead.
 - **fn design_docs** — Listed by the tree and gone by the read is not a state one resolved HEAD produces; treat it as a document with nothing in its head rather than failing the whole registry over one blob.
+- **fn design_docs** — One resolved HEAD serves the listing and every read, so a document's status always belongs to the tree the listing came from.
+- **fn design_docs** — `project_config::entries` is deliberately not reused: it resolves the `.chug/` config root and its repo-root fallback, and the design directory has no second location to resolve — a "design doc" at the repo root would be a coincidence, not a layout.
 
 ### `crates/dispatcher/src/handlers/jobs.rs`
 - **fn jobs_transition** — #166 Draft → Frozen: finalize the edited definition (validate like release, park re-batchable). 409 in any non-Draft state.
@@ -407,6 +412,7 @@ stale.
 ### `crates/dispatcher/src/handlers/jobs_reply.rs`
 - **fn job_reply_with_awaiting** — A terminal job (Done/Revoked) asks nothing of a human, even if a stale Pending task record lingers in its log (a pre-fix zombie). Guard here so the derived field agrees with list_pending's terminal-job filter.
 - **fn job_reply_with_awaiting** — `claimed` marks a parked claimed attempt: a human is actively working it (§1.2 claims), vs. passively awaited human input.
+- **fn job_criteria** — Type-load failures degrade to the job's own evaluators plus the error list rather than a hard error, so the UI can still render something for a job whose type YAML is currently broken.
 
 ### `crates/dispatcher/src/handlers/jobtypes.rs`
 - **fn spawn_jobtypes_handlers** — req.jobtypes.get.{owner}.{project} — one type in full, for the library UI. Payload: { name }. Returns raw YAML plus the parsed type (defaults merged — the platform's view of what runs), or parse errors.
@@ -690,11 +696,15 @@ stale.
 - **fn validate_workload_identities** — A name is shape-checked here because it is a `cloud-identities.*` KV key segment, not an env var name: the charset is the subject-safe one fleet node names use, so a dotted name is refused at parse rather than surfacing later as an unsatisfiable "is not set" at release.
 - **fn validate_runtime** — The `xcode:` scheme rule is written before anything can satisfy it (design #373 Decision 2 rule 1 / #322 §3): it keeps a container-mode Xcode declaration from validating today, and when host mode is implemented it is already the rule that routes Xcode to a Mac.
 
+### `crates/types/src/platform.rs`
+- **struct FleetCapacity** — Storing operator intent and keeping it structurally incapable of placing work is the whole resolution of design #293's tension: intent is persisted so it can be re-asserted after a daemon restart, and the invariant that no placement path reads it is what stops it becoming a second scheduler input.
+
 ### `crates/types/src/resources.rs`
 - **fn parse_memory** — Only a bare non-negative integer is a legal numeric part; this rejects signs, decimals, and stray unit letters (the "g" in "5g", "GB" in "4GB").
 
 ### `crates/types/src/rollup.rs`
 - **fn group_rollups** — Ascending seq, so every group's member list reads in filing order regardless of the order the records arrived in.
+- **const DESIGNS_MAX** — The bound is set far above the handful of design documents that exist; it is there for the repo that grows a design directory of thousands, not for today's tree.
 
 ### `crates/types/src/task.rs`
 - **fn task_time_ms** — A span that runs backwards is host clock skew, not negative work: count it as no span rather than letting it subtract from the total.

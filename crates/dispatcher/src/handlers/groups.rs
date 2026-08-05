@@ -186,21 +186,12 @@ async fn project_jobs(
 }
 
 /// The document each `design/`-namespaced name among `names` resolves to at
-/// default-branch HEAD, keyed by group name. A name in another namespace, and a
-/// name whose document is not there, are simply absent.
+/// default-branch HEAD, keyed by group name.
 ///
-/// The join runs **name → path**, through `types::design_doc_path` — the
-/// convention stated in the same module that decides what a name may be, which
-/// is what keeps the shape-legal `design/../../etc/passwd` from resolving to a
-/// path here at all. Running it in this direction is also what lets an
-/// ungrouped project — and any project whose groups name no design — pay
-/// nothing: with nothing to look up there is no branch to resolve and no tree
-/// to walk. `req.designs.list` needs the opposite direction, and enumerates
-/// instead.
-///
-/// Bounded (STYLE.md Tier 2 #3): the distinct group count is bounded only by
-/// `GROUPS_COUNT_MAX` × the project's jobs, so at most `types::DESIGNS_MAX`
-/// documents are looked up and a drop is logged, never silent.
+/// Bounded (docs/reference/style.md Tier 2 #3): the distinct group count is
+/// bounded only by `GROUPS_COUNT_MAX` × the project's jobs, so at most
+/// `types::DESIGNS_MAX` documents are looked up and a drop is logged, never
+/// silent.
 async fn group_docs<'a>(
     repos: &RepoManager,
     owner: &str,
@@ -244,16 +235,10 @@ async fn group_docs<'a>(
 /// direction a name→path lookup cannot serve: a design nobody has ticketed has
 /// no group name to look it up by.
 ///
-/// One resolved HEAD serves the listing and every read, so a document's status
-/// always belongs to the tree the listing came from. Bounded twice (STYLE.md
-/// Tier 2 #3): at most `types::DESIGNS_MAX` documents are read — a drop is
-/// logged, never silent — and each read parses only the document's opening
-/// lines rather than scanning a 60 KB body.
-///
-/// `project_config::entries` is deliberately not reused: it resolves the
-/// `.chug/` config root and its repo-root fallback, and `docs/design/` has no
-/// second location to resolve — a "design doc" at the repo root would be a
-/// coincidence, not a layout.
+/// Bounded twice (docs/reference/style.md Tier 2 #3): at most
+/// `types::DESIGNS_MAX` documents are read — a drop is logged, never silent —
+/// and each read parses only the document's opening lines rather than scanning
+/// a 60 KB body.
 async fn design_docs(
     repos: &RepoManager,
     owner: &str,

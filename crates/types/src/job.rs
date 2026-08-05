@@ -40,11 +40,12 @@ pub struct Job {
     /// creation, validated (existence, no cycles) at release.
     #[serde(default)]
     pub deps: Vec<u64>,
-    /// Member job ids absorbed into this batch (design-lifecycle.md, spec §2.1
-    /// batches). Empty for an ordinary job; non-empty marks this job as a
-    /// **batch** — one branch implementing all members, evaluated under the
-    /// union of their criteria, whose single merge completes every member.
-    /// Serde-defaulted so records written before batches deserialize.
+    /// Member job ids absorbed into this batch
+    /// (docs/reference/design-lifecycle.md, spec §2.1 batches); empty for an
+    /// ordinary job, and serde-defaulted so records written before batches
+    /// deserialize. Non-empty marks this job as a **batch** — one branch
+    /// implementing all members, evaluated under the union of their criteria,
+    /// whose single merge completes every member.
     #[serde(default)]
     pub members: Vec<u64>,
     /// Set on a member job absorbed into a batch: the batch job's id. `Some`
@@ -61,10 +62,10 @@ pub struct Job {
     pub base_ref: Option<String>,
     /// Union of job type defaults and operator-supplied tags at creation.
     pub knowledge_tags: Vec<String>,
-    /// Additive per-job evaluators (design-lifecycle.md): layered on top of the
-    /// type's `eval:` list at execution. The type's evaluators are a floor —
-    /// creation can add criteria, never remove or override them. Name
-    /// collisions with the type's evaluators are a release-time error.
+    /// Additive per-job evaluators (docs/reference/design-lifecycle.md): layered
+    /// on top of the type's `eval:` list at execution, so the type's evaluators
+    /// are a floor — creation can add criteria, never remove or override them.
+    /// Name collisions with the type's evaluators are a release-time error.
     #[serde(default)]
     pub eval: Vec<Evaluator>,
     /// The job may not pass evaluation without an explicit operator sign-off

@@ -134,8 +134,8 @@ impl Graph {
     }
 }
 
-/// STYLE.md Tier 1: `store` is the only crate that talks NATS. No other
-/// workspace crate may list `async-nats` as a direct dependency.
+/// docs/reference/style.md Tier 1: `store` is the only crate that talks NATS,
+/// so no other workspace crate may list `async-nats` as a direct dependency.
 ///
 /// The name spells the crate hyphenated, not as the `async_nats` import path,
 /// so `topology_guard` (which forbids that identifier in test sources) reads

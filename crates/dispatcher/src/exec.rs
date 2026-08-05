@@ -782,12 +782,9 @@ impl Core {
         }
     }
 
-    /// Assemble the read-only inputs for one Work decision (contracts.md §2:
-    /// reads feed the view, they are not effects). `None` when the job has no
-    /// execution slice — nothing to decide. The task id and session id are minted
-    /// on every hop rather than only where a launch needs them: a pure decision
-    /// cannot read or mint, so both have to be in the view before the decider
-    /// picks its branch.
+    /// Assemble the read-only inputs for one Work decision
+    /// (docs/reference/contracts.md §2: reads feed the view, they are not
+    /// effects). `None` when the job has no execution slice — nothing to decide.
     async fn gather_work_view(
         &self,
         owner: &str,
@@ -2318,16 +2315,13 @@ mod tests {
         );
     }
 
-    /// **The inertness assert** (design #321 Decision 3, STYLE.md Tier 2 #2 —
-    /// negative space): `Job::groups` is an operator annotation, so the brief a
-    /// job's agents read must be byte-identical with and without it. This is the
-    /// property that makes editing a **terminal** job's record defensible — a
-    /// group cannot change what any job did, because it cannot reach anything a
-    /// job runs. `job_brief_block` is the single choke point where the brief is
-    /// injected (work, eval, triage), and `batch_brief_block` is its batch twin,
-    /// so both are pinned here; the container-env half of the property is pinned
-    /// by `groups_never_reach_the_container_env` (tier 2), which needs a real
-    /// launch.
+    /// **The inertness assert** (design #321 Decision 3, docs/reference/style.md
+    /// Tier 2 #2 — negative space): `Job::groups` is an operator annotation, so
+    /// the brief a job's agents read must be byte-identical with and without it,
+    /// which is the property that makes editing a **terminal** job's record
+    /// defensible. Both brief choke points are pinned here (`job_brief_block`
+    /// for work/eval/triage, `batch_brief_block` for batches); the container-env
+    /// half is `groups_never_reach_the_container_env` (tier 2).
     #[test]
     fn groups_never_reach_the_job_brief() {
         use super::{batch_brief_block, job_brief_block};

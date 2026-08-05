@@ -291,11 +291,9 @@ pub struct FleetNode {
 /// dispatcher — the single writer — in the `platform` bucket under
 /// `fleet.capacity`, beside `dispatcher.config` and `fleet.status`.
 ///
-/// **Invariant (STYLE.md Tier 2 #2, asserted): no placement path ever reads this
-/// record.** It feeds exactly two consumers — the §4 reconciler and the UI's
-/// "desired" display — which is the whole resolution of the design's tension:
-/// intent is stored so it can be re-asserted after a daemon restart, and is
-/// structurally incapable of placing work. The scheduler reads *observed*
+/// **Invariant (docs/reference/style.md Tier 2 #2, asserted): no placement path
+/// ever reads this record.** It feeds exactly two consumers — the §4 reconciler
+/// and the UI's "desired" display — while the scheduler reads *observed*
 /// capacity ([`crate::worker::ObservedCapacity`]) and nothing else.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]

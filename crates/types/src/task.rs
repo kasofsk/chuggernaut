@@ -143,12 +143,13 @@ pub enum TaskPhase {
     /// squash commit (spec §3.3 Merge Gate). Only present when the default
     /// branch HEAD moved past `base_ref` while the job was in flight.
     MergeGate,
-    /// Post-merge wrap-up command (spec §3.2, design-lifecycle.md wrap-up hook):
-    /// a `wrap_up.run` command task launched *after* the squash lands on the
-    /// default branch, run against the merged main content. Its existence in the
-    /// task log is the restart-reconciliation marker that the merge already
-    /// landed and only the publish remains (§3.6). A non-zero exit escalates —
-    /// the merge is already final.
+    /// Post-merge wrap-up command (spec §3.2,
+    /// docs/reference/design-lifecycle.md wrap-up hook): a `wrap_up.run` command
+    /// task launched *after* the squash lands on the default branch, run against
+    /// the merged main content. Its existence in the task log is the
+    /// restart-reconciliation marker that the merge already landed and only the
+    /// publish remains (§3.6); a non-zero exit escalates, the merge being
+    /// already final.
     WrapUp,
     /// Operator-dispatched triage (spec §1.2): an advisory agent run over the
     /// whole job state that produces a written assessment + recommendation.

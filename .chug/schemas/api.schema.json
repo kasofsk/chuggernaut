@@ -986,7 +986,7 @@
           ]
         },
         "eval": {
-          "description": "Additive per-job evaluators (design-lifecycle.md): layered on top of the\ntype's `eval:` list at execution. The type's evaluators are a floor —\ncreation can add criteria, never remove or override them. Name\ncollisions with the type's evaluators are a release-time error.",
+          "description": "Additive per-job evaluators (docs/reference/design-lifecycle.md): layered\non top of the type's `eval:` list at execution, so the type's evaluators\nare a floor — creation can add criteria, never remove or override them.\nName collisions with the type's evaluators are a release-time error.",
           "type": "array",
           "default": [],
           "items": {
@@ -1028,7 +1028,7 @@
           }
         },
         "members": {
-          "description": "Member job ids absorbed into this batch (design-lifecycle.md, spec §2.1\nbatches). Empty for an ordinary job; non-empty marks this job as a\n**batch** — one branch implementing all members, evaluated under the\nunion of their criteria, whose single merge completes every member.\nSerde-defaulted so records written before batches deserialize.",
+          "description": "Member job ids absorbed into this batch\n(docs/reference/design-lifecycle.md, spec §2.1 batches); empty for an\nordinary job, and serde-defaulted so records written before batches\ndeserialize. Non-empty marks this job as a **batch** — one branch\nimplementing all members, evaluated under the union of their criteria,\nwhose single merge completes every member.",
           "type": "array",
           "default": [],
           "items": {
@@ -2300,7 +2300,7 @@
           "const": "MergeGate"
         },
         {
-          "description": "Post-merge wrap-up command (spec §3.2, design-lifecycle.md wrap-up hook):\na `wrap_up.run` command task launched *after* the squash lands on the\ndefault branch, run against the merged main content. Its existence in the\ntask log is the restart-reconciliation marker that the merge already\nlanded and only the publish remains (§3.6). A non-zero exit escalates —\nthe merge is already final.",
+          "description": "Post-merge wrap-up command (spec §3.2,\ndocs/reference/design-lifecycle.md wrap-up hook): a `wrap_up.run` command\ntask launched *after* the squash lands on the default branch, run against\nthe merged main content. Its existence in the task log is the\nrestart-reconciliation marker that the merge already landed and only the\npublish remains (§3.6); a non-zero exit escalates, the merge being\nalready final.",
           "type": "string",
           "const": "WrapUp"
         },
@@ -2841,7 +2841,7 @@
           ]
         },
         "run": {
-          "description": "Optional post-merge command (spec §3.2, design-lifecycle.md wrap-up\nhook): a shell command run in the WrapUp phase *after* the squash lands\non the default branch, against the merged main content. It ships the\nmerged result — a web job publishing its built UI, say — so it only runs\nonce the merge is final, and never at all if the job is revoked or\nescalated before landing. Valid with `type: merge` only. A non-zero exit\nescalates the job (the merge is not undone). The command clones the\ndefault branch, so it must be idempotent (a restart may re-launch it).",
+          "description": "Optional post-merge command (spec §3.2,\ndocs/reference/design-lifecycle.md wrap-up hook): a shell command run in\nthe WrapUp phase *after* the squash lands on the default branch, against\nthe merged main content, and valid with `type: merge` only. It ships the\nmerged result — a web job publishing its built UI, say — so it runs only\nonce the merge is final and never at all if the job is revoked or\nescalated before landing; a non-zero exit escalates the job without\nundoing the merge, and it clones the default branch, so it must be\nidempotent (a restart may re-launch it).",
           "type": [
             "string",
             "null"

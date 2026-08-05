@@ -105,11 +105,11 @@ impl InvariantSink {
 }
 
 /// A read-only view of the single-writer's in-memory scheduling state — the
-/// subset the invariants constrain. Borrowing, so building it costs nothing;
-/// [`Core::state`](crate::core::Core::state) hands one out. Kept as a distinct
-/// type (rather than checking `&Core` directly) so the checker stays pure and
-/// independently constructible in unit tests, and so the future decider view
-/// (contracts.md layer 2) has a seam to grow from.
+/// subset the invariants constrain; borrowing, so building it costs nothing,
+/// and [`Core::state`](crate::core::Core::state) hands one out.
+/// Distinct from `&Core` so the checker stays pure and independently
+/// constructible in unit tests, and so the future decider view
+/// (docs/reference/contracts.md layer 2) has a seam to grow from.
 pub struct CoreState<'a> {
     /// One job graph per project slug (`owner/project`).
     pub graphs: &'a HashMap<String, JobGraph>,

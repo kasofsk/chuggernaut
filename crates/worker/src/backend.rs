@@ -261,11 +261,11 @@ fn evaluate_startup(nodes: &[NodeCapacity]) -> Result<StartupCapacity, BackendEr
     Err(BackendError::Unavailable(detail.into()))
 }
 
-/// What [`evaluate_startup`] concluded about the fleet's live capacity. The
+/// What [`evaluate_startup`] concluded about the fleet's live capacity; the
 /// zero-capacity start is a distinct outcome rather than a bare `Ok(())`
-/// because it must be *loud*: §5a's trade of a crash-loop for a warning is only
-/// correct while the warning actually happens. The decision stays pure and the
-/// caller performs the log (STYLE.md Tier 2: deciders return, they don't do).
+/// because §5a's trade of a crash-loop for a warning is only correct while the
+/// warning actually happens. The decision stays pure and the caller performs
+/// the log (docs/reference/style.md Tier 2: deciders return, they don't do).
 #[derive(Debug, PartialEq, Eq)]
 enum StartupCapacity {
     /// At least one reachable node has `slots > 0`.

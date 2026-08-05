@@ -55,8 +55,8 @@ pub fn spawn_checked(mut core: Core) -> (CoreHandle, InvariantSink) {
 }
 
 /// Assert every dispatcher data invariant holds against a `Core` the test owns
-/// in-process (contracts.md §3, refactor-plan.md B1/B1a). Call it after each
-/// `Core` call.
+/// in-process (docs/reference/contracts.md §3,
+/// docs/design/215-refactor-plan.md B1/B1a); call it after each `Core` call.
 ///
 /// [`dispatcher::invariants::check_invariants`] is the single source of truth for
 /// what "always/never" means; this is only the assertion hook.

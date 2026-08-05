@@ -32,10 +32,10 @@ use crate::job::{Job, JobState};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Most design documents one `GET .../designs` enumerates (STYLE.md Tier 2 #3).
-/// Eight exist today; the bound is what stops a repo that grows a
-/// `docs/design/` of thousands from turning one read into thousands of blob
-/// reads. Documents past it are dropped from the reply and logged, never
+/// Most design documents one `GET .../designs` enumerates
+/// (docs/reference/style.md Tier 2 #3): the bound is what stops a repo that
+/// grows a `docs/design/` of thousands from turning one read into thousands of
+/// blob reads. Documents past it are dropped from the reply and logged, never
 /// silently — a truncated listing that reads as complete is the failure worth
 /// avoiding.
 pub const DESIGNS_MAX: usize = 128;

@@ -95,10 +95,10 @@ use types::{
 pub const INFRA_LOSS_REASON: &str = "infra_loss";
 
 /// Max infrastructure relaunches for one task lineage (this cycle, this
-/// evaluator) before escalating with reason [`INFRA_LOSS_REASON`] (§3.6). Bounds
-/// a genuinely-vanishing environment so it escalates instead of looping forever
-/// (STYLE.md Tier 2 #3). Shared with the Evaluation phase, which loses
-/// containers the same way.
+/// evaluator) before escalating with reason [`INFRA_LOSS_REASON`] (§3.6),
+/// shared with the Evaluation phase, which loses containers the same way.
+/// Bounds a genuinely-vanishing environment so it escalates instead of looping
+/// forever (docs/reference/style.md Tier 2 #3).
 pub const INFRA_RELAUNCH_CAP: u32 = 3;
 
 /// Machine code for a work attempt that exited 0 but left nothing behind (§3.2
