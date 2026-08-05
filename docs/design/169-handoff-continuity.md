@@ -1,6 +1,12 @@
 # Design #169 — Task-handoff continuity: the matrix
 
-Status: DRAFT.
+Status: DRAFT — the audit is the deliverable and it stands; the nine tickets in
+[Part 6](#part-6--the-tickets-prioritized) are a prioritized backlog, not a
+slice table. **No ticket carries a job number**, and nothing in the tree or in
+the commit subjects maps a `T`-label to one, so this document is deliberately
+left without a landed-state table: attributing one would be a guess, and a
+guessed slice row is the drift [#415](415-knowledge-architecture.md) exists to
+prevent.
 
 Produced in an interactive session (2026-07-24, operator + Claude) from a
 code-level audit of the dispatcher at `0c6ad52` — every claim about current

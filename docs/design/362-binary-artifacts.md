@@ -1,6 +1,6 @@
 # Design — Binary artifact handoff between jobs (gap 5)
 
-Status: FINDING — gap 5 is a harvest-and-retention gap, not a store; the cross-job half is retired.
+Status: FINDING — gap 5 is a harvest-and-retention gap, not a store; the cross-job half is retired. S0–S2 landed (jobs #363, #381); S3 stays deferred behind a second consumer.
 
 Written against the tree at `8997c4e` (2026-08-01; the source tree is unchanged
 since `a539b7d`, which this document's first revision was written against).
@@ -15,6 +15,25 @@ re-derives it — the artifact inventory is the operator's 2026-08-01 inspection
 relied on secondhand and marked as such wherever it is load-bearing.
 
 This document closes [#308](308-gha-port.md) gap 5.
+
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original argument and its dated corrections,
+never edited into the prose above them.*
+
+The finding holds: gap 5 is a harvest-and-retention gap, and the harvest half
+shipped. The rows below are the states of [Sequencing](#sequencing)'s table,
+which keeps each slice's full argument.
+
+| Slice | What | State |
+| --- | --- | --- |
+| **S0** | Cap the worker `copy_file` reply and name the error | **Landed** (job #363) |
+| **S1** | `ArtifactKind::Output`, `collect_output` on the work-side monitors, the 16 MiB cap, a chunked `copy_file` op | **Landed** (job #381) |
+| **S2** | The `outputs` bucket with its own `max_age` + byte ceiling; revoke-time GC | **Landed** (job #381) |
+| **S3** | Declared `outputs:` schema, cross-job reads, per-attempt selection | Deferred — gated on a **second** consumer with per-output addressing needs |
+| — | The S3/Minio artifact store | Stays deferred; nothing here needs it |
 
 ## The question
 

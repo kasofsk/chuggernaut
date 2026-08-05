@@ -1,6 +1,6 @@
 # Design #372 — `chug-node`: NixOS and nix-darwin modules for worker-host preparation
 
-Status: PROPOSED — supersedes design job #265.
+Status: IMPLEMENTED IN PART — slices 1 and 3 landed (jobs #383, #404) and both prod nodes are adopted; slice 2 and slice 1's CI stage are open. Supersedes design job #265.
 
 Written against the tree at `5aeb439`, this branch's base. The first draft was written at `fef87f9` and has
 been revised twice after review; the one commit between those two trees,
@@ -17,6 +17,32 @@ fetched while writing (nixpkgs `nixos-25.05`, nix-darwin `master`) and are cited
 with what was read, not with what is remembered. This design carries forward
 job #265's decision and its "must not declare the container" conclusion; it does
 not reopen either.
+
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original argument, never edited.*
+
+**The modules exist and are adopted; one slice is unstarted and one shipped
+short of what it asked for.** `flake.nix` and `nix/chug-node/` are in the tree,
+both prod nodes were adopted on 2026-08-03 (secondhand — the host repo is not
+checked out here), and the runbooks record what that adoption taught. Slice 1
+landed **without** the skipping `nix flake check` stage it also asked for:
+`.chug/tasks/ci.sh` has no nix stage, so nothing in this repo's CI evaluates
+`nix/chug-node/` — a gap [#440](440-native-worker-daemon.md) slice 7 inherits
+and names.
+
+The rows below are [10. Implementation slices](#10-implementation-slices)'s four
+numbered items with their states; the section itself is prose and stays that
+way.
+
+| Slice | What | State |
+| --- | --- | --- |
+| **1** | `flake.nix`, `nix/chug-node/{options,nixos,darwin}.nix`, and a skipping `nix flake check` stage in `.chug/tasks/ci.sh` | **Landed** (job #383) for the flake and the modules; the CI stage did **not** land and is still open |
+| **2** | Label the swapper container `chug.managed=true` in `worker-refresh.sh`, and lock it in `deploy/managed-label.test.sh` | Proposed — `deploy/prod/worker-refresh.sh` still applies no such label to the swapper |
+| **3** | `docs` — the drain-before-rebuild section, the §3.1 cache-ownership correction, and the host-repo adoption runbook | **Landed** (job #404); the §3.1 correction landed separately in jobs #379/#380 |
+| **4** | Adoption in the host repo | Done outside this platform's job graph — the 2026-08-03 adoption on both prod nodes, reported in [`docs/reference/runbooks/chug-node-adoption.md`](../reference/runbooks/chug-node-adoption.md) |
 
 ## What could not be verified, and what that means
 

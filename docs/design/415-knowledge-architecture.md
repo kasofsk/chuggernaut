@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — S0, S1a, S1b, S1c, S2, S3, S5a and S8 landed; D1–D15 decided, S4–S12 intent.
+Status: IMPLEMENTED IN PART — S0, S1a, S1b, S1c, S2, S3, S5a, S5b and S8 landed; D1–D15 decided, S4 and S6–S12 intent.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
 [D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
@@ -18,9 +18,15 @@ carried; the gate-scope gap that let them through is **recorded and left open**,
 not closed — see the
 [#443 finding](#finding--2026-08-05-job-443-the-doc-comment-residue-and-the-gate-scope-it-fell-through).
 S5 split while landing (job #444): **S5a** is check 3, the slice ↔ merged-job
-check, and it is live; **S5b** is the head retrofit and the plan demotion, still
-intent — see the
+check, and it is live — see the
 [S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split).
+**S5b** — the head retrofit — landed on 2026-08-05 (job #445): every
+`docs/design/*.md` now carries a `Status:` line, eleven of them carry a slice
+table in check 3's shape (nine retrofitted, plus this doc and
+[#440](440-native-worker-daemon.md), which already had one), and the three
+demoted plans say what they are. What it
+deliberately did *not* do is invent a slice table for a doc that had none — see
+the [S5b correction](#correction--2026-08-05-job-445-s5b-the-head-retrofit).
 D13–D15 and S9–S12 were added on 2026-08-05
 by job #435, written against the tree at `810a91b`; their three measurements were
 read out of that commit and three claims in the ticket that proposed them did not
@@ -114,7 +120,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S3** | **The move** — every doc into `docs/`, per D12; updates the ~730 references (283 of them outside markdown, 134 for `docs/reference/style.md` alone) and `check-modules.sh`'s own path | **Landed** (job #441) — fourteen `git mv`s in one commit, the runbooks folded into `docs/reference/runbooks/` with them. See the [S3 correction](#correction--2026-08-05-job-441-s3-the-move) |
 | **S4** | `docs/concepts.md` + the seed concept set + check 4 (definitional shape) | S3  <!-- intent --> |
 | **S5a** | Check 3 (slice ↔ merged job) — the detector for the drift this head suffered twice | **Landed** (job #444) — one shape, `**Landed** (job #N)` in a `docs/design/*.md` table row, resolved against the `job/N:` squash-merge subject; a doc with no slice table is silent. See the [S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split) |
-| **S5b** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1) | S3, S5a — the retrofit writes the shape check 3 already reads |
+| **S5b** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1) | **Landed** (job #445) — 22 docs given a `Status:` line, nine given a lifted slice table, no table invented for a doc that had none. See the [S5b correction](#correction--2026-08-05-job-445-s5b-the-head-retrofit) |
 | **S6** | The staleness ledger (D7) | S3 |
 | **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | S5b |
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `docs/reference/style.md` / `docs/README.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded  <!-- absent --> |
@@ -124,7 +130,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Eight rows are landed — S0, S1a, S1b, S1c, S2, S3, S5a and S8.** Every other row
+**Nine rows are landed — S0, S1a, S1b, S1c, S2, S3, S5a, S5b and S8.** Every other row
 above is intent, marked as such per docs/reference/style.md's doc-claim rule — which this
 document is partly written to make enforceable. This sentence read *six* and omitted
 S3 until job #444 corrected it, four jobs after S3 merged: a count in the head is
@@ -1713,3 +1719,74 @@ this container over 69 tracked `*.md`. `check-doc-facts.test.sh` is
 no slice table, four unparseable rows, prose, `IMPLEMENTED IN PART`, a table
 with no landed row, markdown outside `docs/design/`, and a history holding no
 `job/N:` commit at all.
+
+## Correction — 2026-08-05, job #445 (S5b: the head retrofit)
+
+**Every design doc now carries a `Status:` line, and the corpus is 22.** The
+three that had none were the plans [D1](#d1-two-kinds-of-doc-and-only-two)
+demoted — `000-rationale.md`, `210-ts-rewrite-plan.md`, `215-refactor-plan.md` —
+and two of the three are **dormant**, which is now what their status says rather
+than something a reader infers from a git date. Design #210 is superseded and
+unexecuted; #215 was partly executed and has had no owner since 2026-07-31;
+`000-rationale.md` is foundational and not normative. Marking either plan `PROPOSED` would have been
+the comfortable lie: it reads as scheduled work.
+
+**Scoped by what each doc already had, and the boundary was the whole point.**
+Nine docs had a sequencing, phase or slice table and got a head slice table
+lifted from it in check 3's shape (designs 293, 308, 309, 313, 322, 362, 367,
+372 and 373). The lift is a *state* table — slice id, a one-line what, and
+the state — with the body's own table left untouched and linked, because several of
+those rows are a paragraph each and duplicating them would double the doc to say
+nothing new. **No slice table was invented.** [#169](169-handoff-continuity.md)
+is the case that decided the rule — its Part 6 is nine prioritized tickets with
+sizes, which looks exactly like a slice table until you try to fill in the state
+column: no ticket carries a job number and nothing maps a `T`-label to one, so
+its head says that instead of guessing.
+
+**One decisions table was lifted and the rest of the decision half was left
+undone — this is the retrofit's other boundary.**
+[D2](#d2-every-design-doc-opens-with-a-mutable-current-state-head) asks the head
+to carry a decisions table as well as a slice table, and one doc already had
+one: [#313](313-workload-identity-image-builds.md)'s dated `Decisions taken,
+2026-08-04` is a four-row table whose own preamble says it exists "so a slice can
+cite one line rather than re-read a section", so D1–D4 were lifted into its head
+as written, minus the `Rejected, and why it stays` column — that stays written
+once, in the body. Nowhere else was there a table to lift.
+[#373](373-project-toolchains.md) has five numbered `Decision` sections and
+[#362](362-binary-artifacts.md) two; four of #373's five headings state the
+verdict in the heading, as both of #362's do, but the reasoning under them is pages
+of argument with no one-line rationale to carry up, so those rows would have to
+be *written* rather than lifted — the same fabrication the invented-slice-table
+rule forbids one column over. [#440](440-native-worker-daemon.md) has a
+decisions table only because its author wrote it with the doc, which is what D2
+expects going forward. The other eight tier-A heads therefore carry the state
+half and not the decision half; filling it in is a per-doc rewrite by somebody
+who can re-read the argument, and it is left undone deliberately rather than
+overlooked.
+
+**Four docs were deliberately not touched.** [#310](310-scheduled-jobs.md),
+[#311](311-job-inputs.md) and [#321](321-job-groups.md) already open with a
+multi-line `Status:` naming every shipping job and what stayed deferred — the
+head's job, done under a different name — and [#440](440-native-worker-daemon.md)
+already carries a decisions table and a `State`-column slice table. Converting
+any of them would have been a heading rename over prose that is already correct.
+
+**Two findings the retrofit produced that no gate could have.** First, a phase
+can be satisfied by somebody else's job: [#322](322-macos-native-runtime.md)'s W1
+and N2 are what #309 P0 (job #434) and job #401 landed for
+[#373](373-project-toolchains.md), so this document's two cheapest macOS phases
+were paid for at container scope by tickets that never cited it. Second, a slice
+can land *short of what it asked for* and read as done —
+[#372](372-chug-node-modules.md) slice 1 shipped `flake.nix` and `nix/chug-node/`
+in job #383 but not the `nix flake check` stage in the same bullet, so nothing in
+this repo's CI evaluates those modules. Both are under-claims of the kind the
+[S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split)
+says check 3 cannot see; both are now written down where a reader will hit them.
+
+**Measured after the retrofit**, same command shape as S5a's count: **11** of the
+22 design docs carry a slice claim, up from 4, and **46** rows resolve against a
+`job/N:` squash-merge commit, up from 14. `check-doc-facts.sh` is clean
+whole-tree over 69 markdown files. This document's own S5b row is the second
+user of [D10](#d10-the-implementing-job-owns-the-update)'s same-commit
+exemption — the S5a row was the first, and it was written to make this one
+possible.

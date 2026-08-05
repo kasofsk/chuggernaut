@@ -1,5 +1,16 @@
 # TypeScript dispatcher rewrite — plan
 
+Status: SUPERSEDED and DORMANT — **nobody is executing this plan, and nobody is
+expected to.** [#215](215-refactor-plan.md) reversed the decision it argues
+(stay in Rust, refactor incrementally); the last substantive edit was 2026-07-24
+(job #224) and no phase below is scheduled work. The phases are retained for the
+ideas that outlive the reversal — golden decision traces, effects-as-data, the
+wire-level conformance suite, the contract-first change rule — which #215
+carries as its Track B and where they are actually tracked. There is no slice
+table: a dormant plan's phases are not slices, and giving them landed states
+would imply a queue that does not exist. The blockquote below is the original
+supersession note, left as written.
+
 > **Superseded by [`docs/design/215-refactor-plan.md`](215-refactor-plan.md).** The decision is to
 > stay in Rust and refactor the existing dispatcher incrementally toward the
 > north star — not to rewrite it in another language. Design #208 (the Python

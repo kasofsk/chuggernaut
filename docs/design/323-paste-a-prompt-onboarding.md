@@ -1,6 +1,13 @@
 # Design — paste-a-prompt onboarding: stand up an instance and onboard your own repo
 
-Status: PROPOSED.
+Status: PROPOSED — **nothing here is built and no job has been filed against
+it.** `BOOTSTRAP.md` does not exist, and the Claude Code skill
+(`.claude/skills/chug-install/SKILL.md`) is still the only narrator. One later
+decision bears on it without resolving it:
+[#415](415-knowledge-architecture.md) D12 rules that the repo root keeps only
+`README.md` and `CLAUDE.md`, which the root-level `BOOTSTRAP.md` proposed below
+would have to be reconciled with. No slice table — this document has none to
+lift.
 
 Written against the tree at `470cc0c` (2026-07-30). Every claim about current
 behaviour below was read out of the source or out of [docs/spec.md](../spec.md);

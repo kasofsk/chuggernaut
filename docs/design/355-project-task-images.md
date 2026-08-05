@@ -1,6 +1,13 @@
 # Design #355 — Project-supplied task images (#308 gap 12)
 
-Status: PROPOSED.
+Status: PROPOSED — **not built and unowned.** There is no
+`PROJECT_IMAGE_SCHEMA_EPOCH` in `crates/types/src/version.rs`, no `build_image`
+worker op and no project-supplied image anywhere in the tree. The part of this
+document that is live is §3's sequencing rule — the epoch is a counter, not a
+reservation — which it adopted from
+[#313](313-workload-identity-image-builds.md) and which every epoch bump since
+has followed. No slice table: this document sequences an epoch, not a set of
+slices.
 
 Written against the tree at `fce9e33` and re-verified at `e5723c7`, which adds
 only this file. Every claim about current behavior below was read out of

@@ -1,6 +1,8 @@
 # Design #308 — Porting beacon's GitHub Actions onto Chuggernaut
 
-Status: PROPOSED, amended 2026-07-30 (job #320).
+Status: PROPOSED, amended 2026-07-30 (job #320) — a survey whose job was to
+spawn children; all four were written and **all four** have shipped code. The
+port itself has not begun. See [Current state](#current-state).
 
 The original was written against the tree at `0346a80`; the amendment against
 `00dd0dc`. **Four corrections to this doc's own claims** — one retraction, one
@@ -30,6 +32,44 @@ backends, fleet, node-local build cache), §3.3 (staged evaluation, merge gate),
 already gone for one workflow), §5a/§5b (tailnet vs public exposure);
 [docs/design/293-worker-capacity.md](293-worker-capacity.md) (in-flight changes
 to the same announce payload this doc wants to extend).
+
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original survey, its 2026-07-30 amendment and
+its corrections, never edited into the prose above them.*
+
+**This is a survey, and its job was to spawn children.** All four children were
+written and all four have shipped code — [#309](309-host-native-execution.md) P0
+(job #434), [#310](310-scheduled-jobs.md) (jobs #359/#360),
+[#311](311-job-inputs.md) slice A (job #314) and
+[#313](313-workload-identity-image-builds.md) half A (job #413). Shipped is not
+the same as in use: #309 P0 is off on every node and #313 half A's deploy and
+provider registration are still open, both as the rows below say. The port
+itself — beacon's
+workflows actually running here — has not begun, and **cannot be judged from
+this tree**: `~/beacon` is not checked out, so every phase whose work lives in
+that repo is reported below as unknown rather than guessed.
+
+The rows below are the states of [Ordering](#ordering)'s table, which is a
+dependency reading rather than a commitment, and which keeps each phase's
+argument. **Phase numbers are never reassigned** — the children cite them.
+
+| Phase | Work | State |
+| --- | --- | --- |
+| **0** | Land this doc | **Landed** (job #308), amended by job #320 |
+| **0b** | Onboard beacon as a linked-origin project | Unknown here — the work is in the operator's and beacon's repos |
+| **1** | CI as evaluators (category B) | Unknown here — same reason |
+| **2** | Host-exec backend prototype on one node | **Landed** (job #434) as [#309](309-host-native-execution.md) P0, off on every node |
+| **3** | Cron (category E) | **Landed** (job #359), with (job #360) for the dispatcher half — [#310](310-scheduled-jobs.md)'s minimum useful version |
+| **4** | OIDC issuer + JWKS + WIF provider | **Landed** (job #413) in part — [#313](313-workload-identity-image-builds.md) half A's code; the deploy and the provider registration are open |
+| **5** | Deploys, forward-only (category C) | Not started |
+| **6** | Image build and push (category D) | Not started — #313 half B is still a design |
+| **7** | Node-level exclusive resources | Not started — #309 P4 |
+| **8** | Mobile and simulator jobs on host nodes (category F) | Started on the Android leg only — [#367](367-android-emulator-execution.md) A1/A2 landed (jobs #374, #395); the macOS leg ([#322](322-macos-native-runtime.md)) has not |
+| **9** | Job inputs → unblocks rollback | **Landed** (job #314) — [#311](311-job-inputs.md) slice A, with jobs #315–#317 and #319 |
+| **10** | Per-run placement | Answered, not scheduled — [#361](361-per-run-placement.md) found gap 10 needs no new field |
 
 ## Provenance
 

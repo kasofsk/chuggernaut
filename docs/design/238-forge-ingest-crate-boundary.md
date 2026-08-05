@@ -1,6 +1,10 @@
 # Design #238 — forge-ingest stays in the dispatcher (for now)
 
-Status: FINDING.
+Status: FINDING — still true at this commit. `crates/dispatcher/src/forge_ingest/`
+is still four modules inside the dispatcher crate and nothing has moved out of
+it. The finding decides one thing — do not force the split yet — and the work
+that would make it separable is [#215](215-refactor-plan.md)'s Track H, which
+is dormant. There is no slice table because this document proposes no work.
 
 Written against the tree at `01624fd`, the parent of the C9 commit that moved
 platform-ops out. Every claim below was read out of the source, not inferred

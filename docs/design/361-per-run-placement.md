@@ -1,6 +1,8 @@
 # Design — Per-run placement: how a run picks its node (gap 10)
 
-Status: FINDING — gap 10 needs no new Job-record field, and #311 Decision 1 stands unamended.
+Status: FINDING — gap 10 needs no new Job-record field, and #311 Decision 1
+stands unamended. Closed and unchanged since 2026-08-01; it opens no work, so
+there is no slice table.
 
 Written against the tree at `c73d76b` (2026-08-01). Every claim about
 Chuggernaut's current behavior below was read out of the source or out of

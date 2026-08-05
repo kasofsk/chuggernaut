@@ -31,6 +31,37 @@ this work directly and is reconciled with throughout);
 [docs/reference/design-lifecycle.md](../reference/design-lifecycle.md);
 [docs/reference/style.md](../reference/style.md); [docs/reference/crates.md](../reference/crates.md).
 
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original argument and its dated corrections,
+never edited into the prose above them.*
+
+One phase has landed and one landed early and out of order. P0 is in the tree
+(`crates/container/src/host.rs`, `WORKER_MODES`) and is **off on every node** —
+no node advertises `host`, and `runtime.mode: host` is still refused by
+`validate()`. P1's schema half arrived ahead of it in job #401, driven by
+[#373](373-project-toolchains.md); what P1 still owes is the host row's own
+field rules and the deletion of that refusal. Everything from P2 on is
+unstarted: no `NodeCapabilities` record exists in the tree.
+[#440](440-native-worker-daemon.md) is the design for the native-supervision
+prerequisite P0 named and left unowned.
+
+The rows below are the states of [Phasing](#phasing)'s table, which keeps each
+phase's full argument; the seven-row table in
+[Contracts changed](#contracts-changed-per-docsreferencestylemds-contract-first-rule)
+is the same work sliced by contract, not a second plan.
+
+| Phase | What | State |
+| --- | --- | --- |
+| **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed) |
+| **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) in part — the block and the epoch shipped for #373; the host row's field rules and the unsupported-refusal deletion are open |
+| **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | Proposed — gated on P1 and #293 job 3 |
+| **P3** | Per-task users; `resources_enforced`; transient scopes | Proposed — gated on P2 |
+| **P4** | Device leases | Proposed — only when a host node must run a second, non-device-bound task concurrently |
+| **P5** | Declared caches + GC roots + warm set | Proposed — gated on P1, independent of P2–P4 |
+
 ## Scope
 
 This **adds** a node kind. It does not replace containers, and a mixed fleet is

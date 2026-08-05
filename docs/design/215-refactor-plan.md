@@ -1,5 +1,22 @@
 # Incremental restructuring plan — Rust, no rewrite
 
+Status: PARTLY EXECUTED, now DORMANT — **no track is being worked, and the plan
+has no owner.** Several tickets did land as ordinary jobs, and the body records
+that unevenly. **B1, C1 and C7** carry a landed marker in their own paragraph;
+**C6**'s is inside the shared C2–C6 paragraph; Track D's marker sits on **D2**,
+not D1. **A2, A3 and A4** landed too but say so only obliquely — A3's landing is
+asserted inside A4's paragraph, and A2's, A3's and A4's evidence is in the tree
+(`docs/reference/modules.md`, `.chug/tasks/check-modules.sh`, and `clippy.toml`
+plus the workspace lint denies, in that order) rather than in a marker here. The last
+implementing job to amend this file did so
+on 2026-07-31 (job #342); nothing has been picked up since. Its reversal of
+[#210](210-ts-rewrite-plan.md) stands, and
+[#238](238-forge-ingest-crate-boundary.md) is a finding filed against its Track
+H. Read it as the standing map of the restructuring, not as a queue somebody is
+working. There is no slice table: the tracks are prose paragraphs and the
+per-ticket landed markers are where they were written — lifting them into a
+table would be inventing a plan shape the document never had.
+
 Companion to `docs/README.md` (target factoring), `docs/reference/contracts.md` (interface
 extraction), and `docs/reference/structure-assessment.md` (current-state audit). This plan
 **supersedes `docs/design/210-ts-rewrite-plan.md`**: we are staying in Rust and refactoring the

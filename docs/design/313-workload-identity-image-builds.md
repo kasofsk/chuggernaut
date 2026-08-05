@@ -72,6 +72,52 @@ bounds, #4 naming, #6 tests; Tier 3 simplicity, single writer);
 [CLAUDE.md](../../CLAUDE.md) ("the evaluation gates ARE the CI"; per-consumer
 forge); [docs/reference/testing.md](../reference/testing.md); [docs/reference/crates.md](../reference/crates.md).
 
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original argument and its dated amendments,
+never edited into the prose above them.*
+
+**Half A's code is done; its deployment and its provider registration are not,
+and half B is still a design.** A declared identity mints a real token inside
+its own container against an issuer no cloud provider has been told about, so
+nothing authenticates end to end yet: S3d (a dispatcher carrying epoch 5 reaches
+prod) and S6 (the operator registers the provider) are the two open links, and
+both are operator work rather than code. Half B — the image build and push —
+has no slice past S9 and no owner.
+
+**Half A's four decisions**, lifted from [Decisions taken,
+2026-08-04](#decisions-taken-2026-08-04). The operator took all four on that
+date; each is argued in the section named, and the rejected options and the
+reasoning that keeps them stay in the body table, which is the only place they
+are written.
+
+| # | Decision | Argued in |
+| --- | --- | --- |
+| **D1** | **An uploaded JWK set and no public endpoint.** Register the provider with `--jwk-json-path` and `--issuer-uri https://chug.kasofsk.xyz` — a stable identifier we control, not a URL anyone fetches. No Funnel, no tunnel, no relay, **no inbound path to `gumbo-mini-0`** | [A4](#a4-the-public-reachability-problem-the-crux), with a live revisit trigger in [What would change D1](#what-would-change-d1) |
+| **D2** | **`workload_identities: [name]`, a named reference.** Each name resolves against a project-scoped `cloud-identities.{owner}.{project}.{name}` record | [A5](#named-reference-or-inline-cloud-configuration) |
+| **D3** | **The issuer emits `workload` as a claim**, computed dispatcher-side, not assembled cloud-side in CEL | [A1](#sub-versus-custom-claims) |
+| **D4** | **The exchanged token impersonates a service account**, mirroring beacon's current posture — so `service_account` is **populated** in every `cloud-identities` record | [A5](#a5-per-container-scoping), [B2](#b2-registry-auth-falls-out-of-half-a) |
+
+The rows below are the states of [Sequencing, and what ships
+first](#sequencing-and-what-ships-first)'s table, which keeps each slice's
+content and its dependency. `A`/`B` name *sections* of this document, not units
+of work.
+
+| Slice | What | State |
+| --- | --- | --- |
+| **S1** | Issuer keypair, mounts, `kid` from the public-key thumbprint | **Landed** (job #410) |
+| **S2** | Token minting + claim assembly as a pure function — [`crates/auth/src/workload.rs`](../../crates/auth/src/workload.rs) | **Landed** (job #411) |
+| **S3** | `workload_identities:` on `work`/`eval[]`/`wrap_up`, field rules, the epoch bump and the frozen feature epoch, the KV + admin CLI + release-validation check | **Landed** (job #413) |
+| **S3d** | *Deploy:* a dispatcher carrying epoch 5 reaches prod | Pending — **not optional**, and not a code slice |
+| **S4** | Injection at launch: two injected files, `GOOGLE_APPLICATION_CREDENTIALS`, audit fields — [`crates/dispatcher/src/workload.rs`](../../crates/dispatcher/src/workload.rs) | **Landed** (job #414) |
+| **S5** | Discovery + JWKS routes on the api, unexposed — [`crates/api/src/oidc.rs`](../../crates/api/src/oidc.rs) | **Landed** (job #412) |
+| **S6** | *Operator:* register the provider with the uploaded JWK set; attribute condition; one IAM binding; prove it in a work container | Pending — the terraform and the six-rung proof are authored ([`infra/gcp-proof/`](../../infra/gcp-proof), [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml)); the `apply` is the operator's |
+| **S7** | *Operator:* a registry confirmed | Pending — runs in parallel with S1–S6 |
+| **S8** | *Node config:* proxy + allow-list + `placement.node` pin on one builder node | Proposed |
+| **S9** | A real `build-image` job type: SHA tag, digest recorded, digest-resolves evaluator | Proposed — gated on S6, S7, S8 |
+
 ## Problem
 
 Two halves that are one question — **how does a job get a credential, and what

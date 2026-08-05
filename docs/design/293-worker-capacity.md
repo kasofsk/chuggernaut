@@ -26,6 +26,28 @@ Related: [spec §3.1](../spec.md) (dispatcher backends, dynamic worker
 registration), [docs/reference/style.md](../reference/style.md) (contract-first change rule),
 [deploy/prod/README.md](../../deploy/prod/README.md) §6.
 
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original argument, never edited.*
+
+Done and deployed. Capacity has one source of truth — the daemon's live
+announce, ordered by `(capacity_epoch, capacity_generation)` — and an operator
+changes it from the cluster view. Nothing here is open. The rows below are the
+states of [Implementation plan (sliced into jobs)](#implementation-plan-sliced-into-jobs),
+which keeps each job's contract and its dependency.
+
+| Job | What | State |
+| --- | --- | --- |
+| **1** | `docs` — the spec §3.1 capacity-ownership amendment and the §6.1 route line | **Landed** (job #295) |
+| **2** | `code` — worker protocol + daemon: `set_slots`, the capacity fields on `PingOk`/`WorkerAnnounce`, `WORKER_SLOTS_MAX`, re-announce on adopt | **Landed** (job #296) |
+| **3** | `code` — dispatcher observation: ordered ingest from both transports, the narrowed startup gate, roster provenance fields, the never-observed warning | **Landed** (job #297) |
+| **4** | `code` — intent + reconciliation: the `fleet.capacity` record, its handler, the bounded re-push, the "placement never reads intent" invariant | **Landed** (job #298) |
+| **5** | `code` — api: `PUT /api/v1/platform/fleet/{node}/capacity`, platform-admin gate, snapshot passthrough | **Landed** (job #299) |
+| **6** | `web` — the cluster-view control and its six display states | **Landed** (job #300) |
+| **7** | `docs` + ops — the runbook, the ops skill, `deploy/prod/env.example`, and the sequenced `DOCKER_NODES` change | **Landed** (job #301) |
+
 ## Problem
 
 A worker node's slot count is expressed in three places, and none of them is

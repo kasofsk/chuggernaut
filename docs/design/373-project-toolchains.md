@@ -1,6 +1,6 @@
 # Design #373 — Project-supplied toolchains: nix environments in container mode (clock 3)
 
-Status: FINDING, amended 2026-08-02 — clock 3 in container mode on dedicated nodes; image+env layer; P1 shipped, 45s cap (C6).
+Status: FINDING, amended 2026-08-02 — clock 3 in container mode on dedicated nodes; image+env layer; P1 shipped (job #384), 45s cap (C6); P2 shipped (job #403).
 
 Written against the tree at `5aeb439` (this branch adds only this document).
 Every claim about this repository was read out of the source or out of
@@ -30,6 +30,28 @@ The three smaller divergences are recorded in
 [P1 as shipped](#p1-as-shipped-job-384). Everything in that section is read out
 of the merged tree; where it and the argument above it disagree, the merged tree
 wins.
+
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original argument and its two dated
+as-shipped sections, never edited into the prose above them.*
+
+**Both slices shipped.** `runtime.env` is accepted in container mode, the store
+is mounted and the environment injected, and the realise step runs in the worker
+under a 45-second ceiling. The finding that motivated it stands: clock 3 belongs
+in container mode on dedicated nodes, and warming is a scheduled job rather than
+a platform mechanism — so there is no third slice and none is planned.
+
+The rows below are the states of [Sequencing](#sequencing)'s table, which keeps
+each slice's full argument and its dependency.
+
+| Slice | What | State |
+| --- | --- | --- |
+| **P1** | The realise step in the worker: the store, profiles and daemon-socket mounts, the bounded realise, the per-task GC root and its reaper | **Shipped (job #384)** — realise fires only for a KVM-admitted launch; see [P1 as shipped](#p1-as-shipped-job-384) |
+| **P2** | `runtime.env` accepted in container mode: the field rule, relative-ref rewriting, the store mount and env injection, `WORKER_NIX_PROJECTS` | **Shipped (job #403)** — see [P2 as shipped](#p2-as-shipped-job-403) |
+| — | Warming | Not a platform slice — [Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism) |
 
 ## The question
 

@@ -1,6 +1,8 @@
 # Design — a native (macOS) execution runtime for iOS/Xcode jobs
 
-Status: PROPOSED.
+Status: PROPOSED — no macOS-specific work has been done; W1 and N2 were
+satisfied generically by [#309](309-host-native-execution.md) P0 (job #434) and
+job #401. See [Current state](#current-state).
 
 Written against the tree at `61b721d` (2026-07-30). Every claim about current
 behavior was read out of the source or out of [docs/spec.md](../spec.md); where
@@ -44,6 +46,39 @@ reconciliation and the two sweeps), §4.1 (workspace bootstrap), §14
 [#293](./293-worker-capacity.md) (worker capacity — landed in the wire types
 since #309 was written); [docs/reference/style.md](../reference/style.md);
 [docs/reference/testing.md](../reference/testing.md); [docs/reference/crates.md](../reference/crates.md).
+
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original argument, never edited.*
+
+**No macOS work has been done, and two of the phases were satisfied generically
+by somebody else.** W1 is exactly what [#309](309-host-native-execution.md) P0's
+first slice landed (job #434), and N2's schema is what job #401 landed for
+[#373](373-project-toolchains.md) — so this document's two cheapest phases are
+already paid for, at container scope. What remains is entirely macOS: the
+`/workspace` rebase (`CHUG_WORKSPACE` is not in the tree), the `simctl`-scoped
+teardown, Xcode discovery, the refresh precondition and the runbook. No node in
+the fleet runs macOS host tasks; `runtime.mode: host` is still refused by
+`validate()`.
+
+The rows below are the states of [Phased implementation
+sketch](#phased-implementation-sketch)'s table, which keeps each phase's full
+argument and its dependency.
+
+| Phase | What | State |
+| --- | --- | --- |
+| **W1** | Backend polymorphism: the provided `managed_running_total`, `Arc<dyn ContainerBackend>`, `WORKER_MODES` parsing | **Landed** (job #434), as #309 P0's slice 1 rather than as macOS work |
+| **W2** | The host backend **including the rebase**, on one Mac at `slots: 1` | **Landed** (job #434) in part — the backend, the task dir under `WORKER_HOST_ROOT` and the exit-status wrapper exist and are Linux-proven; the `CHUG_WORKSPACE` indirection, the total `/workspace` mapping, the credential-tree teardown and the agent-shaped-launch refusal are not |
+| **W3** | macOS hardening: symlink containment, `simctl`-scoped teardown, the retention sweep | Proposed — nothing macOS-specific is in the tree |
+| **N1** | `docs/spec.md`: the host column, the host node kind, `/workspace` as a logical path | Proposed |
+| **N2** | The `runtime: { mode, env }` schema, its field rules, the epoch bump and both validate rules | **Landed** (job #401) for #373's container-mode need; the host row's own field rules are #309 P1's remainder |
+| **W4** | Node-side env-ref resolution: Xcode discovery, `xcode:<version>` → `DEVELOPER_DIR` | Proposed — the `xcode:`-is-host-only *validate* rule shipped with N2; no resolution exists |
+| **W5** | Refresh precondition: decline a refresh while a host task runs | Proposed — redesigned as [#440](440-native-worker-daemon.md) slice 3 |
+| **N3** | The macOS node runbook in `deploy/prod/README.md` | Proposed |
+| **P1** | `NodeCapabilities` on ping/announce + the `choose_placement` predicate | Proposed — #309 P2 and [#367](367-android-emulator-execution.md) A3 are the same slice; no such record exists yet |
+| **P2** | Per-task launchd jobs, agent work on a Mac, device leases, signing | Later, deliberately |
 
 ## Corrections to the brief and to #309
 

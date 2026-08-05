@@ -1,6 +1,6 @@
 # Design #367 — Android emulator execution: a container with `/dev/kvm`, not a host runtime
 
-Status: PROPOSED, amended 2026-08-02 — recommendation unchanged, phase A1's mechanism rewritten.
+Status: IMPLEMENTED IN PART, amended 2026-08-02 — recommendation unchanged, phase A1's mechanism rewritten; A1 and A2 have since landed (jobs #374, #395), A3 and A4 are open.
 
 Written against the tree at `1e567e3`, amended against `fef87f9`. Every claim
 about this repository was read out of the source or out of
@@ -52,6 +52,38 @@ H.6 and the gap table; [#309](./309-host-native-execution.md) §4, §5a, §5b, �
 [#355](./355-project-task-images.md); [#361](./361-per-run-placement.md);
 [#362](./362-binary-artifacts.md); [`docs/reference/style.md`](../reference/style.md);
 [`docs/reference/crates.md`](../reference/crates.md); [`docs/reference/testing.md`](../reference/testing.md).
+
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original argument and its 2026-08-02
+amendment, never edited into the prose above them.*
+
+**The recommendation shipped, and the Android leg did precede #322 W2 as
+predicted.** A1 and A2 are in the tree: `WORKER_KVM` / `WORKER_KVM_PROJECTS`
+gate a per-project `/dev/kvm` device and a read-only `/nix/store` mount, the
+Android environment is injected beside the cache env, and
+[`.chug/jobs/android-proof.yaml`](../../.chug/jobs/android-proof.yaml) plus
+[`.chug/tasks/android-proof.sh`](../../.chug/tasks/android-proof.sh) climb the
+ladder on a pinned node. What is still true from the original argument: the work
+is **pinned** with `placement.node`, because nothing advertises capabilities —
+A3 is the same unbuilt slice as [#309](309-host-native-execution.md) P2 and
+[#322](322-macos-native-runtime.md) P1, and it is only needed when a second KVM
+node exists.
+
+The rows below are the states of [7. Sequencing: what ships first, and what it
+unblocks](#7-sequencing-what-ships-first-and-what-it-unblocks)'s table, which
+keeps each phase's full argument.
+
+| Phase | What | State |
+| --- | --- | --- |
+| **A0** | *Operator:* the store secret-scan gate and a stable SDK path in the node's `configuration.nix` | Pending — in the operator's repo, not this one; the rest was already done (correction 10) |
+| **A1** | `WORKER_KVM` + `WORKER_KVM_PROJECTS`, the device and read-only store mount, the Android env vars, the pinned job type | **Landed** (job #374) |
+| **A2** | The proof ladder: mounts and env → `emulator -accel-check` → the toolchains → a `flutter` build → an emulator boot | **Landed** (job #395) |
+| **A3** | `NodeCapabilities` with `features` + the `choose_placement` predicate — one slice serving #309 P2 and #322 P1 | Proposed — needed only when a second KVM node exists |
+| **A4** | `placement.features` as a job-type field + the epoch bump | Proposed — only when the pin stops expressing the requirement |
+| **never** | Device leases for Android | Not planned — §[4](#4-exclusivity-and-why-android-does-not-need-a-lease); #309 §5b stays, motivated by iOS |
 
 ---
 
