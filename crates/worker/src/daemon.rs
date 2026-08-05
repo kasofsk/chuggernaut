@@ -504,6 +504,18 @@ fn enforce_host_capacity(slots: u32, slots_max: u32) -> Result<(), WorkerRunErro
     )))
 }
 
+/// The mechanism this node puts host tasks in, or a refused boot (design #440
+/// D3). Probed here for the same reason [`enforce_host_capacity`] is checked
+/// here: a node that advertised `host` and then parented its tasks to the daemon
+/// would lose every one of them to the restart that swaps the daemon.
+async fn enforce_host_supervision(
+    node: &str,
+) -> Result<container::host::Supervision, WorkerRunError> {
+    container::host::probe_supervision()
+        .await
+        .map_err(|reason| WorkerRunError::Config(container::host::host_refusal(node, &reason)))
+}
+
 /// Build the backend for the runtimes the node declares (design #322 W1, #309
 /// P0) — the one construction site, so the docker backend's inherent
 /// `with_cache_dir` / `ping_all` wiring happens here and nowhere else. A node
@@ -512,16 +524,21 @@ fn enforce_host_capacity(slots: u32, slots_max: u32) -> Result<(), WorkerRunErro
 async fn local_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
     if backend_kind(&config.modes) == WorkerMode::Host {
         enforce_host_capacity(config.slots, config.slots_max)?;
+        let supervision = enforce_host_supervision(&config.node).await?;
         tracing::warn!(
             node = %config.node,
             host_root = %config.host_root.display(),
             workspace = %container::host::HOST_WORKSPACE,
+            supervision = ?supervision,
             "WORKER_MODES names host: this node runs every launch as a HOST PROCESS and ignores \
              the declared image — #309 P0 calls that deliberately a lie that must never leave the \
              prototype node"
         );
-        let backend =
-            container::host::HostBackend::new(config.node.clone(), config.host_root.clone())?;
+        let backend = container::host::HostBackend::new(
+            config.node.clone(),
+            config.host_root.clone(),
+            supervision,
+        )?;
         return Ok(Arc::new(backend));
     }
     let mut backend = DockerBackend::new(vec![DockerNodeConfig {

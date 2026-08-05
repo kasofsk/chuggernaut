@@ -16,6 +16,12 @@
 //!
 //! The declared `image` is ignored. #309 P0 calls that "deliberately a lie that
 //! must never leave the prototype node", so every launch says so in the log.
+//!
+//! Each task is launched into its own **supervision unit** ([`Supervision`],
+//! design #440 D3) rather than the daemon's, so the restart that swaps the
+//! daemon leaves in-flight work running (spec §3.1). A node that cannot create
+//! one must not advertise `host` at all — [`probe_supervision`] measures it and
+//! [`host_refusal`] says why.
 
 use crate::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
@@ -84,9 +90,144 @@ const PATH_FALLBACK: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/
 /// same shape `signal_refresh_build` uses for the refresh script's build.
 const KILL_GRACE: std::time::Duration = std::time::Duration::from_secs(20);
 
+const SYSTEMD_RUN: &str = "systemd-run";
+const SYSTEMCTL: &str = "systemctl";
+
+/// How long either `systemd` call gets to answer, because both wait on the
+/// manager's own job queue and a wedged bus would otherwise hang the daemon's
+/// boot silently. Expiry is a named refusal or a logged failure, never a pass.
+const SYSTEMD_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Unit-name prefix for a task's transient scope, so every unit a host node
+/// creates is greppable and none can collide with a machine's own.
+const UNIT_PREFIX: &str = "chug-task-";
+
 /// Poll interval for [`ContainerBackend::wait`], which is trait-completeness
 /// only — §3.1 polls dispatcher-side and the daemon never calls it.
 const WAIT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How a host task is held **outside** the daemon's own supervision unit
+/// (design #440 D3), which is what lets the daemon be restarted under running
+/// work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Supervision {
+    /// A transient systemd scope per task. A scope is its own cgroup, so the
+    /// restart that swaps the daemon's unit reaches the daemon and not the task
+    /// (#309 §6), and a cgroup kill also reaches a `setsid()` escapee (#440 D8).
+    Scope,
+    /// The process group [`spawn_task`] creates, which is the unit `launchd`
+    /// tears down by. **Unproven** — the assertion is an operator procedure,
+    /// `docs/reference/runbooks/macos-host-supervision-proof.md`.
+    ProcessGroup,
+}
+
+/// Ask this node to create one transient scope, so "this node can supervise a
+/// host task" is measured rather than assumed. The macOS answer is
+/// [`Supervision::ProcessGroup`] without a probe, because there is nothing to
+/// create.
+pub async fn probe_supervision() -> Result<Supervision, String> {
+    if !cfg!(target_os = "linux") {
+        return Ok(Supervision::ProcessGroup);
+    }
+    let unit = format!(
+        "chug-probe-{}-{:x}.scope",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    );
+    let mut probe = tokio::process::Command::new(SYSTEMD_RUN);
+    probe
+        .args(scope_args(&unit))
+        .args(["/bin/sh", "-c", ":"])
+        .kill_on_drop(true);
+    scope_verdict(
+        tokio::time::timeout(SYSTEMD_BOUND, probe.output())
+            .await
+            .ok(),
+    )
+}
+
+/// The probe's verdict, taken as data so the refusal is testable on a machine
+/// that has no systemd to fail against. `None` is the bound expiring, which is a
+/// refusal like any other rather than a boot that hangs.
+fn scope_verdict(
+    outcome: Option<std::io::Result<std::process::Output>>,
+) -> Result<Supervision, String> {
+    match outcome {
+        Some(Ok(out)) if out.status.success() => Ok(Supervision::Scope),
+        Some(Ok(out)) => Err(format!(
+            "{SYSTEMD_RUN} --scope exited {}: {}",
+            out.status.code().unwrap_or(-1),
+            first_line(&out.stderr)
+        )),
+        Some(Err(e)) => Err(format!("{SYSTEMD_RUN} is unusable on this node: {e}")),
+        None => Err(format!(
+            "{SYSTEMD_RUN} --scope did not answer within {}s — this node's systemd cannot start a \
+             unit promptly enough to supervise a task",
+            SYSTEMD_BOUND.as_secs()
+        )),
+    }
+}
+
+/// Why a node may not advertise `host` when [`probe_supervision`] refused. A
+/// node that fell back to daemon-parented tasks would lose every in-flight task
+/// to the next daemon restart while still claiming the mode — the silent lie
+/// #309 §7 rejects.
+pub fn host_refusal(node: &str, reason: &str) -> String {
+    format!(
+        "node {node} cannot create a supervision unit for a host task, so it must not advertise \
+         WORKER_MODES=host: {reason} — design #440 D3 puts each host task in its own transient \
+         scope because a task in the daemon's own unit is killed by the restart that swaps the \
+         daemon (#309 §6)"
+    )
+}
+
+/// The flags every transient scope this backend creates carries. `--collect` is
+/// what reclaims the unit when the task's last process exits, so a node that
+/// runs for months does not accumulate dead scopes.
+fn scope_args(unit: &str) -> [String; 5] {
+    [
+        "--scope".to_string(),
+        "--quiet".to_string(),
+        "--collect".to_string(),
+        format!("--unit={unit}"),
+        "--".to_string(),
+    ]
+}
+
+/// The transient unit one task runs in.
+fn unit_name(task: &str) -> String {
+    format!("{UNIT_PREFIX}{task}.scope")
+}
+
+/// The argv a launch becomes under this node's mechanism (design #440 D3).
+/// `--scope` runs the command from `systemd-run` itself, so the composed
+/// environment, the cwd and the log fds are inherited exactly as they are
+/// without it.
+pub fn supervised_launch(supervision: Supervision, unit: &str, cmd: Vec<String>) -> Vec<String> {
+    match supervision {
+        Supervision::ProcessGroup => cmd,
+        Supervision::Scope => {
+            let mut argv = vec![SYSTEMD_RUN.to_string()];
+            argv.extend(scope_args(unit));
+            argv.extend(cmd);
+            argv
+        }
+    }
+}
+
+/// The first line of a tool's stderr, so a failure reaches a log line without
+/// carrying a paragraph into it.
+fn first_line(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
 
 /// One host task's durable identity, written once at launch. The start time is
 /// what makes a recycled pid readable as *gone* across a daemon restart (#309
@@ -106,6 +247,11 @@ pub struct TaskMeta {
     /// Absolute paths this launch materialized outside the task directory, so
     /// `remove` reclaims exactly what it wrote and nothing beside it.
     pub files: Vec<String>,
+    /// The transient scope this task runs in (#440 D3), `None` on a node whose
+    /// mechanism is the process group. `kill` reaches through it to a `setsid()`
+    /// escapee the group no longer holds.
+    #[serde(default)]
+    pub unit: Option<String>,
 }
 
 /// Host-process execution on one node (design #309 P0). Serves every launch
@@ -115,6 +261,10 @@ pub struct HostBackend {
     node: String,
     root: PathBuf,
     workspace: PathBuf,
+    /// The mechanism every launch goes into (#440 D3), named by the caller
+    /// rather than probed here — the daemon probes once at boot and refuses to
+    /// serve `host` at all when the node has none.
+    supervision: Supervision,
     /// Serializes the whole of [`ContainerBackend::launch`], so the
     /// one-task-per-node check and the task directory it publishes cannot race
     /// a second concurrent launch on the daemon's op semaphore.
@@ -130,8 +280,12 @@ impl HostBackend {
     /// The node's host backend, rooted at `root` and cloning into
     /// [`HOST_WORKSPACE`]. The root is created if absent — it is worker-owned
     /// node state, not an operator precondition.
-    pub fn new(node: impl Into<String>, root: impl Into<PathBuf>) -> Result<Self, BackendError> {
-        Self::with_workspace(node, root, HOST_WORKSPACE)
+    pub fn new(
+        node: impl Into<String>,
+        root: impl Into<PathBuf>,
+        supervision: Supervision,
+    ) -> Result<Self, BackendError> {
+        Self::with_workspace(node, root, HOST_WORKSPACE, supervision)
     }
 
     /// [`Self::new`] with the workspace path named explicitly. A real node only
@@ -142,6 +296,7 @@ impl HostBackend {
         node: impl Into<String>,
         root: impl Into<PathBuf>,
         workspace: impl Into<PathBuf>,
+        supervision: Supervision,
     ) -> Result<Self, BackendError> {
         let root = root.into();
         std::fs::create_dir_all(&root)
@@ -151,6 +306,7 @@ impl HostBackend {
             node: node.into(),
             root,
             workspace: workspace.into(),
+            supervision,
             launching: tokio::sync::Mutex::new(()),
             live: Arc::new(Mutex::new(HashSet::new())),
             counter: AtomicU64::new(0),
@@ -436,11 +592,13 @@ fn materialize(file: &InjectedFile) -> Result<String, BackendError> {
 }
 
 /// Materialize the injected files, open the merged log and spawn the task into
-/// its own process group. The group is the unit `kill` signals, the way a
-/// container runtime kills a whole cgroup (#309 §2).
+/// its own supervision unit and its own process group (#440 D3). Both are units
+/// `kill` signals, the way a container runtime kills a whole cgroup (#309 §2).
 fn spawn_task(
     dir: &Path,
     config: &ContainerLaunchConfig,
+    supervision: Supervision,
+    unit: &str,
 ) -> Result<(std::process::Child, TaskMeta), BackendError> {
     let mut files = Vec::with_capacity(config.files.len());
     for file in &config.files {
@@ -452,7 +610,7 @@ fn spawn_task(
         .try_clone()
         .map_err(|e| BackendError::Launch(format!("{OUTPUT_LOG}: {e}")))?;
 
-    let wrapped = supervised_cmd(&config.cmd)?;
+    let wrapped = supervised_launch(supervision, unit, supervised_cmd(&config.cmd)?);
     use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(&wrapped[0]);
     command
@@ -477,6 +635,7 @@ fn spawn_task(
         job: config.env.get("JOB_ID").and_then(|v| v.parse().ok()),
         task: config.env.get("CHUG_TASK_ID").and_then(|v| v.parse().ok()),
         files,
+        unit: matches!(supervision, Supervision::Scope).then(|| unit.to_string()),
     };
     Ok((child, meta))
 }
@@ -544,6 +703,42 @@ fn reclaim_failure(result: std::io::Result<()>, what: &str) -> Option<String> {
     }
 }
 
+/// The argv one signal to a task's scope becomes, factored out of
+/// [`signal_unit`] the way [`supervised_launch`] is, so the D8 half is asserted
+/// on a machine with no systemd to send it to.
+fn kill_unit_args(unit: &str, signal: &str) -> [String; 3] {
+    [
+        "kill".to_string(),
+        format!("--signal={signal}"),
+        unit.to_string(),
+    ]
+}
+
+/// Signal every process in a task's transient scope, bounded by
+/// [`SYSTEMD_BOUND`]. This is the half that reaches a `setsid()` escapee (#309
+/// §2, #440 D8): the escapee leaves the process group and stays in the cgroup.
+async fn signal_unit(unit: &str, signal: &str) {
+    let mut kill = tokio::process::Command::new(SYSTEMCTL);
+    kill.args(kill_unit_args(unit, signal)).kill_on_drop(true);
+    match tokio::time::timeout(SYSTEMD_BOUND, kill.output()).await {
+        Ok(Ok(out)) if out.status.success() => (),
+        Ok(Ok(out)) => tracing::info!(
+            unit,
+            signal,
+            "host kill: scope already gone: {}",
+            first_line(&out.stderr)
+        ),
+        Ok(Err(e)) => tracing::error!(unit, signal, "host kill: {SYSTEMCTL} is unusable: {e}"),
+        Err(_) => tracing::error!(
+            unit,
+            signal,
+            "host kill: {SYSTEMCTL} did not answer within {}s — only the process-group signal \
+             reached this task, so a setsid() escapee is still running",
+            SYSTEMD_BOUND.as_secs()
+        ),
+    }
+}
+
 /// Signal a process group, negating the pgid exactly as
 /// `daemon::kill_process_group` does. A zero or negative pgid is refused rather
 /// than sent — `kill(0, …)` would reach the daemon's own group.
@@ -578,7 +773,7 @@ impl ContainerBackend for HostBackend {
         std::fs::create_dir_all(&dir)
             .map_err(|e| BackendError::Launch(format!("{}: {e}", dir.display())))?;
 
-        let (child, meta) = spawn_task(&dir, &config)?;
+        let (child, meta) = spawn_task(&dir, &config, self.supervision, &unit_name(&task))?;
         let encoded = serde_json::to_vec(&meta)
             .map_err(|e| BackendError::Launch(format!("{META_JSON}: {e}")))?;
         std::fs::write(dir.join(META_JSON), encoded)
@@ -613,15 +808,22 @@ impl ContainerBackend for HostBackend {
         if read_exit_code(&dir).is_some() {
             return Ok(());
         }
-        tracing::warn!(node = %self.node, id = %id, pgid = meta.pgid, "host kill: SIGTERM to the process group");
+        tracing::warn!(node = %self.node, id = %id, pgid = meta.pgid, unit = ?meta.unit, "host kill: SIGTERM to the process group and the scope");
         signal_group(meta.pgid, libc::SIGTERM);
+        if let Some(unit) = meta.unit.as_deref() {
+            signal_unit(unit, "SIGTERM").await;
+        }
         let pgid = meta.pgid;
+        let unit = meta.unit.clone();
         let dir = dir.clone();
         tokio::spawn(async move {
             tokio::time::sleep(KILL_GRACE).await;
             if read_exit_code(&dir).is_none() {
                 tracing::warn!(pgid, "host kill: group ignored SIGTERM — SIGKILL");
                 signal_group(pgid, libc::SIGKILL);
+                if let Some(unit) = unit.as_deref() {
+                    signal_unit(unit, "SIGKILL").await;
+                }
             }
         });
         Ok(())
@@ -815,6 +1017,7 @@ mod tests {
             job: None,
             task: None,
             files: Vec::new(),
+            unit: None,
         };
         assert_eq!(
             status_after_restart(Some(&meta), Some("918273")),
@@ -974,6 +1177,124 @@ mod tests {
         );
     }
 
+    /// A host task is launched into its **own** transient scope (design #440
+    /// D3), which is what a `systemctl restart` of the daemon's unit does not
+    /// reach — and the wrapped argv is the task's own, unaltered.
+    #[test]
+    fn a_host_task_is_launched_into_its_own_supervision_unit() {
+        let cmd: Vec<String> = ["sh", "-c", "cargo build"].map(String::from).to_vec();
+        let unit = unit_name("host-1a2b-0");
+        assert_eq!(unit, "chug-task-host-1a2b-0.scope");
+        assert!(
+            unit.chars()
+                .all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
+            "a unit name systemd would refuse: {unit}"
+        );
+
+        let scoped = supervised_launch(Supervision::Scope, &unit, cmd.clone());
+        assert_eq!(
+            &scoped[..6],
+            &[
+                "systemd-run".to_string(),
+                "--scope".to_string(),
+                "--quiet".to_string(),
+                "--collect".to_string(),
+                format!("--unit={unit}"),
+                "--".to_string(),
+            ],
+            "the scope is transient, silent on the task's own log, and reclaimed"
+        );
+        assert_eq!(&scoped[6..], &cmd[..], "the task's argv is passed through");
+
+        assert_eq!(
+            supervised_launch(Supervision::ProcessGroup, &unit, cmd.clone()),
+            cmd,
+            "macOS has no unit to create — the process group is the mechanism"
+        );
+    }
+
+    /// A `setsid()` escapee leaves the process group and stays in the cgroup, so
+    /// `kill` addresses the scope by name at both stages (design #440 D8) — the
+    /// group signal alone misses it by construction.
+    #[test]
+    fn a_killed_task_is_signalled_through_its_scope_at_both_stages() {
+        let unit = unit_name("host-1a2b-0");
+        for signal in ["SIGTERM", "SIGKILL"] {
+            let args = kill_unit_args(&unit, signal);
+            assert_eq!(
+                args,
+                [
+                    "kill".to_string(),
+                    format!("--signal={signal}"),
+                    unit.clone()
+                ],
+                "systemctl kill takes the signal as a flag and the unit as the pattern"
+            );
+        }
+        assert_ne!(
+            kill_unit_args(&unit, "SIGTERM"),
+            kill_unit_args(&unit, "SIGKILL"),
+            "the escalation is a different signal to the same unit, not a repeat"
+        );
+        assert_eq!(
+            supervised_launch(Supervision::ProcessGroup, &unit, vec!["true".to_string()]),
+            vec!["true".to_string()],
+            "a node with no scope records no unit, so kill signals only the group"
+        );
+    }
+
+    /// A node that cannot create a supervision unit must not advertise `host`
+    /// (design #440 D3): the refusal names the node and carries the probe's own
+    /// reason, because a silent fall back to daemon-parented tasks is the lie
+    /// #309 §7 rejects.
+    #[test]
+    fn a_node_that_cannot_create_a_unit_may_not_advertise_host() {
+        use std::os::unix::process::ExitStatusExt;
+        let failed = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"Failed to connect to bus: No such file or directory\nmore\n".to_vec(),
+        };
+        let reason = scope_verdict(Some(Ok(failed))).unwrap_err();
+        assert!(reason.contains("systemd-run"), "{reason}");
+        assert!(reason.contains("Failed to connect to bus"), "{reason}");
+        assert!(
+            !reason.contains("more"),
+            "one line, not a paragraph: {reason}"
+        );
+
+        let missing = scope_verdict(Some(Err(std::io::Error::from(
+            std::io::ErrorKind::NotFound,
+        ))))
+        .unwrap_err();
+        assert!(missing.contains("systemd-run"), "{missing}");
+
+        let expired = scope_verdict(None).unwrap_err();
+        assert!(
+            expired.contains(&format!("{}s", SYSTEMD_BOUND.as_secs())),
+            "a wedged bus refuses the boot by name rather than hanging it: {expired}"
+        );
+        assert!(
+            host_refusal("gumbo-nuc-0", &expired).contains(&expired),
+            "the bound's expiry is a refusal like any other"
+        );
+
+        let refusal = host_refusal("gumbo-nuc-0", &reason);
+        assert!(refusal.contains("gumbo-nuc-0"), "{refusal}");
+        assert!(refusal.contains("WORKER_MODES=host"), "{refusal}");
+        assert!(
+            refusal.contains(&reason),
+            "the probe's own reason: {refusal}"
+        );
+
+        let ok = std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        assert_eq!(scope_verdict(Some(Ok(ok))), Ok(Supervision::Scope));
+    }
+
     /// `remove` detaches the task tree before deleting it, so the reaper still
     /// writing this task's `exit_code` cannot repopulate a directory
     /// `remove_dir_all` is walking — which fails with `ENOTEMPTY`.
@@ -1018,7 +1339,9 @@ mod tests {
         std::fs::write(leftover.join("nested").join("big"), b"target/").unwrap();
         std::fs::create_dir_all(root.join("host-2-0")).unwrap();
 
-        let backend = HostBackend::with_workspace("w1", &root, root.join("ws")).unwrap();
+        let backend =
+            HostBackend::with_workspace("w1", &root, root.join("ws"), Supervision::ProcessGroup)
+                .unwrap();
         assert!(!leftover.exists(), "a detached tree is reclaimed at boot");
         assert_eq!(
             backend.task_ids().unwrap(),
@@ -1033,7 +1356,9 @@ mod tests {
     #[test]
     fn ids_outside_the_root_are_not_found() {
         let root = std::env::temp_dir().join(format!("chug-host-ids-{}", std::process::id()));
-        let backend = HostBackend::with_workspace("w1", &root, root.join("ws")).unwrap();
+        let backend =
+            HostBackend::with_workspace("w1", &root, root.join("ws"), Supervision::ProcessGroup)
+                .unwrap();
         assert_eq!(
             backend.task_dir(&"w1/host-1-0".to_string()).unwrap(),
             root.join("host-1-0")

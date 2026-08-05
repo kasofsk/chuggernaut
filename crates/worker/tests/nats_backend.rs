@@ -1351,6 +1351,58 @@ async fn host_mode_without_one_slot_refuses_to_start() {
     assert!(err.contains("/workspace"), "must name what collides: {err}");
 }
 
+/// A node that cannot create a supervision unit refuses to advertise `host`
+/// (design #440 D3), because a daemon-parented task is killed by the restart
+/// that swaps the daemon. Asserted only where the node genuinely cannot — on a
+/// systemd host the probe succeeds and there is no refusal to observe.
+#[tokio::test]
+async fn host_mode_without_a_supervision_unit_refuses_to_start() {
+    let Err(reason) = container::host::probe_supervision().await else {
+        eprintln!("skipping: this machine CAN create a supervision unit, so there is no refusal");
+        return;
+    };
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let config = WorkerConfig {
+        node: "w1".into(),
+        slots: 1,
+        slots_max: 1,
+        modes: vec![WorkerMode::Host],
+        nats_url: server.url().to_string(),
+        nats_creds: None,
+        docker_endpoint: local_docker_endpoint(),
+        channel_binary: "/nonexistent/chuggernaut-channel".into(),
+        cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-supervision-test"),
+        kvm_device: None,
+        kvm_projects: vec![],
+        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        flutter_dir: None,
+        jdk_dir: None,
+        nix_gcroots_dir: None,
+        nix_projects: Vec::new(),
+        nix_flake_client: "/nix/var/nix/profiles/system/sw/bin/nix".into(),
+        nix_client: NIX_CLIENT_DEFAULT.into(),
+        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
+        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
+        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
+        refresh_script: None,
+        refresh_git_url: None,
+        refresh_git_key: "/data/keys/worker_git".into(),
+    };
+    let err = worker::run(config).await.unwrap_err().to_string();
+    assert!(err.contains("w1"), "must name the node: {err}");
+    assert!(
+        err.contains("WORKER_MODES=host"),
+        "must name the mode: {err}"
+    );
+    assert!(
+        err.contains(&reason),
+        "must carry the probe's reason: {err}"
+    );
+}
+
 /// A node whose `WORKER_KVM` device is absent refuses to come up, naming the
 /// device (design #367 §2.3) — the same fail-loud shape a declared mode without
 /// a backend gets. A node that advertises a capability it cannot serve would

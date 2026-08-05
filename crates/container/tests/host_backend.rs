@@ -4,10 +4,15 @@
 //!
 //! Every backend here is given its own root **and its own workspace path**, so
 //! the suite never touches the machine's real `/workspace`.
+//!
+//! Three tests are the exception and say so on the way past: design #440 D3's
+//! transient scope needs a systemd with a cgroup-v2 hierarchy that this
+//! evaluator does not have, so they self-skip loudly through `scope_or_skip`
+//! rather than certifying the mechanism vacuously.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use container::host::{HOST_ROOT_DEFAULT, HOST_WORKSPACE, HostBackend};
+use container::host::{HOST_ROOT_DEFAULT, HOST_WORKSPACE, HostBackend, Supervision};
 use container::{ContainerBackend, ContainerLaunchConfig, ContainerStatus, InjectedFile};
 use std::collections::HashMap;
 
@@ -26,7 +31,13 @@ fn temp_root(name: &str) -> std::path::PathBuf {
 }
 
 fn backend(root: &std::path::Path) -> HostBackend {
-    HostBackend::with_workspace("w1", root.join("tasks"), root.join("workspace")).unwrap()
+    HostBackend::with_workspace(
+        "w1",
+        root.join("tasks"),
+        root.join("workspace"),
+        Supervision::ProcessGroup,
+    )
+    .unwrap()
 }
 
 fn cfg(script: &str) -> ContainerLaunchConfig {
@@ -58,6 +69,15 @@ fn hold_until_released(release: &std::path::Path) -> String {
 
 fn release(path: &std::path::Path) {
     std::fs::write(path, b"go").unwrap();
+}
+
+/// One task's `meta.json` as the launch wrote it.
+fn meta_of(root: &std::path::Path, id: &str) -> serde_json::Value {
+    let task = id.split_once('/').unwrap().1;
+    serde_json::from_str(
+        &std::fs::read_to_string(root.join("tasks").join(task).join("meta.json")).unwrap(),
+    )
+    .unwrap()
 }
 
 async fn settle(backend: &HostBackend, id: &String) -> i32 {
@@ -186,6 +206,10 @@ async fn kill_stops_the_process_group() {
     let backend = backend(&root);
 
     let id = backend.launch(cfg("sleep 60")).await.unwrap();
+    assert!(
+        meta_of(&root, &id)["unit"].is_null(),
+        "a node whose mechanism is the process group records no unit, so kill signals no scope"
+    );
     backend.kill(&id).await.unwrap();
     assert_ne!(settle(&backend, &id).await, 0, "a killed task never passes");
     backend.remove(&id).await.unwrap();
@@ -300,6 +324,288 @@ async fn a_task_sees_the_composed_environment_and_not_the_daemons() {
     assert!(undeclared.is_empty(), "undeclared: {undeclared:?}");
 
     backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Whether this machine can create the transient scope design #440 D3 requires,
+/// announcing the skip when it cannot. A vacuous pass here would certify the one
+/// mechanism slices 3–8 of that design are built on.
+async fn scope_or_skip(test: &str) -> bool {
+    let announce = |reason: String| {
+        eprintln!(
+            "skipping {test}: {reason}, so design #440 D3's Linux assertion is NOT covered by this \
+             run — the macOS half is operator-verified, see \
+             docs/reference/runbooks/macos-host-supervision-proof.md"
+        );
+        false
+    };
+    match container::host::probe_supervision().await {
+        Ok(Supervision::Scope) => {
+            cgroup_of(std::process::id().into()).is_some()
+                || announce(
+                    "this machine reports no unified (cgroup v2) hierarchy, so a scope's cgroup \
+                     cannot be read back"
+                        .to_string(),
+                )
+        }
+        outcome => announce(format!(
+            "this machine cannot create a transient systemd scope ({outcome:?})"
+        )),
+    }
+}
+
+/// The cgroup one live pid sits in, read off the cgroup-v2 line of
+/// `/proc/<pid>/cgroup`. `None` on a machine with no unified hierarchy, which is
+/// a skip rather than a failed assertion.
+fn cgroup_of(pid: i64) -> Option<String> {
+    let raw = std::fs::read_to_string(format!("/proc/{pid}/cgroup")).ok()?;
+    raw.lines()
+        .find_map(|line| line.strip_prefix("0::"))
+        .map(str::to_string)
+}
+
+/// The cgroup of a pid the caller is holding alive, on a machine `scope_or_skip`
+/// has already confirmed has a unified hierarchy.
+fn live_cgroup(pid: i64) -> String {
+    cgroup_of(pid).unwrap_or_else(|| panic!("no cgroup v2 line for live pid {pid}"))
+}
+
+/// The process group of one live pid, out of field 5 of `/proc/<pid>/stat` —
+/// what makes "this process left the group" an observation rather than an
+/// assumption.
+fn pgid_of(pid: i64) -> Option<i64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = stat.get(stat.rfind(')')? + 1..)?;
+    rest.split_whitespace().nth(2)?.parse().ok()
+}
+
+/// Whether a pid is a **live** process, so a zombie awaiting its reaper is never
+/// read as one that survived.
+fn alive(pid: i64) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    let state = stat
+        .rfind(')')
+        .and_then(|end| stat.get(end + 1..))
+        .and_then(|rest| rest.split_whitespace().next());
+    !matches!(state, None | Some("Z"))
+}
+
+/// Whether this machine can stage a `setsid()` escapee at all, announcing the
+/// skip in `scope_or_skip`'s words when it cannot.
+fn setsid_or_skip(test: &str) -> bool {
+    let usable = std::process::Command::new("setsid")
+        .arg("true")
+        .status()
+        .is_ok_and(|s| s.success());
+    if !usable {
+        eprintln!(
+            "skipping {test}: this machine has no usable setsid, so design #440 D8's escapee \
+             assertion is NOT covered by this run"
+        );
+    }
+    usable
+}
+
+/// One `systemctl` verb, and whether it succeeded.
+fn systemctl(args: &[&str]) -> bool {
+    std::process::Command::new("systemctl")
+        .args(args)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+/// A pid a launched process recorded for itself, waited for rather than raced.
+fn wait_for_pid(path: &std::path::Path) -> i64 {
+    for _ in 0..400 {
+        let recorded = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| raw.trim().parse().ok());
+        if let Some(pid) = recorded {
+            return pid;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!(
+        "the stand-in daemon never recorded a task pid at {}",
+        path.display()
+    );
+}
+
+/// A stand-in for the daemon's own unit: a scope holding a shell that launches
+/// one task through the composition `HostBackend` ships, and records its pid.
+fn stand_in_daemon(
+    daemon_unit: &str,
+    task_unit: &str,
+    pidfile: &std::path::Path,
+) -> std::process::Child {
+    let inner = container::host::supervised_launch(
+        Supervision::Scope,
+        task_unit,
+        ["sleep", "120"].map(String::from).to_vec(),
+    )
+    .join(" ");
+    std::process::Command::new("systemd-run")
+        .args([
+            "--scope",
+            "--quiet",
+            "--collect",
+            &format!("--unit={daemon_unit}"),
+            "--",
+            "sh",
+            "-c",
+            &format!(
+                "{inner} & printf %s \"$!\" > {}; sleep 120",
+                pidfile.display()
+            ),
+        ])
+        .spawn()
+        .unwrap()
+}
+
+/// Half one of design #440 D3: the backend launches a task into a transient
+/// scope of its own, whose cgroup is **not** inside the launching process's — so
+/// a kill of the launcher's cgroup cannot reach it.
+#[tokio::test]
+async fn a_host_task_runs_in_its_own_supervision_unit() {
+    if !scope_or_skip("a_host_task_runs_in_its_own_supervision_unit").await {
+        return;
+    }
+    let root = temp_root("scope");
+    let backend = HostBackend::with_workspace(
+        "w1",
+        root.join("tasks"),
+        root.join("workspace"),
+        Supervision::Scope,
+    )
+    .unwrap();
+
+    let gate = root.join("release-scope");
+    let id = backend
+        .launch(cfg(&hold_until_released(&gate)))
+        .await
+        .unwrap();
+    let task = id.split_once('/').unwrap().1;
+    let meta = meta_of(&root, &id);
+    let unit = meta["unit"].as_str().unwrap().to_string();
+    assert_eq!(unit, format!("chug-task-{task}.scope"));
+
+    let task_cgroup = live_cgroup(meta["pid"].as_i64().unwrap());
+    let launcher_cgroup = live_cgroup(std::process::id().into());
+    assert!(
+        task_cgroup.ends_with(&unit),
+        "the task runs in its own unit: {task_cgroup}"
+    );
+    if launcher_cgroup != "/" {
+        assert!(
+            !task_cgroup.starts_with(&format!("{}/", launcher_cgroup.trim_end_matches('/'))),
+            "a task inside the launcher's cgroup dies with it: {task_cgroup} under {launcher_cgroup}"
+        );
+    }
+
+    release(&gate);
+    assert_eq!(settle(&backend, &id).await, 0);
+    backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Design #440 D8, the half that took code: a `setsid()` escapee leaves the
+/// task's process group and stays in its cgroup, so the group signal cannot
+/// reach it and `kill` ends it only by signalling the scope by name (#309 §2).
+#[tokio::test]
+async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
+    let test = "a_kill_reaches_a_setsid_escapee_through_the_scope";
+    if !scope_or_skip(test).await || !setsid_or_skip(test) {
+        return;
+    }
+    let root = temp_root("escapee");
+    let backend = HostBackend::with_workspace(
+        "w1",
+        root.join("tasks"),
+        root.join("workspace"),
+        Supervision::Scope,
+    )
+    .unwrap();
+
+    let pidfile = root.join("escapee.pid");
+    let id = backend
+        .launch(cfg(&format!(
+            "setsid sh -c 'printf %s \"$$\" > {}; sleep 120' & sleep 120",
+            pidfile.display()
+        )))
+        .await
+        .unwrap();
+    let meta = meta_of(&root, &id);
+    let unit = meta["unit"].as_str().unwrap().to_string();
+
+    let escapee = wait_for_pid(&pidfile);
+    assert_ne!(
+        pgid_of(escapee),
+        Some(meta["pgid"].as_i64().unwrap()),
+        "setsid left the escapee in the task's process group, so nothing was tested"
+    );
+    assert!(
+        live_cgroup(escapee).ends_with(&unit),
+        "leaving the process group does not leave the cgroup — that is what D8 rests on"
+    );
+
+    backend.kill(&id).await.unwrap();
+    for _ in 0..200 {
+        if !alive(escapee) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert!(
+        !alive(escapee),
+        "the escapee outlived a kill of its task: the scope signal is the only one that could \
+         reach it, and it did not (#440 D8)"
+    );
+
+    assert_ne!(settle(&backend, &id).await, 0, "a killed task never passes");
+    backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// **The crux of design #440** (D3), half two: tearing down the unit that
+/// launched a host task leaves the task running. This is the assertion slices
+/// 3–8 assume and spec §3.1's drain guarantee rests on in host mode.
+#[tokio::test]
+async fn a_host_task_survives_the_teardown_of_the_launching_unit() {
+    if !scope_or_skip("a_host_task_survives_the_teardown_of_the_launching_unit").await {
+        return;
+    }
+    let root = temp_root("teardown");
+    let daemon_unit = format!("chug-proof-daemon-{}.scope", std::process::id());
+    let task_unit = format!("chug-proof-task-{}.scope", std::process::id());
+    let pidfile = root.join("stand-in.pid");
+    let mut stand_in = stand_in_daemon(&daemon_unit, &task_unit, &pidfile);
+
+    let task_pid = wait_for_pid(&pidfile);
+    assert!(
+        live_cgroup(task_pid).ends_with(&task_unit),
+        "the stand-in's task is in its own scope"
+    );
+    assert!(
+        systemctl(&["kill", "--signal=SIGKILL", &daemon_unit]),
+        "the stand-in daemon's unit could not be torn down, so nothing was proven"
+    );
+    assert!(
+        !stand_in.wait().unwrap().success(),
+        "the stand-in daemon survived the teardown of its own unit"
+    );
+    assert!(
+        alive(task_pid),
+        "the task died with the unit that launched it — #440 D3 does NOT hold on this machine, \
+         and the whole native-daemon program rests on it"
+    );
+    assert!(
+        live_cgroup(task_pid).ends_with(&task_unit),
+        "and it is still the scope's, not reparented into the launcher's"
+    );
+
+    systemctl(&["kill", "--signal=SIGKILL", &task_unit]);
     std::fs::remove_dir_all(&root).unwrap();
 }
 

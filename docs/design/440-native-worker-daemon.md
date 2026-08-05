@@ -45,7 +45,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | # | Slice | Contract changed | Depends on | State |
 | --- | --- | --- | --- | --- |
 | 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | **Landed** (job #442), plus a two-name floor the slice line does not mention — see [the correction](#correction-2026-08-05--slice-1-as-landed) |
-| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | Proposed |
+| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447) — the macOS proof is a *procedure*, run by nobody yet; see [the correction](#correction-2026-08-05--slice-2-as-landed) |
 | 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | Proposed |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | Proposed |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
@@ -608,3 +608,94 @@ The docker backend was read and **not** changed.
 and stays exactly what [D8](#decisions) says it is. What changed is that the
 environment a reader finds there is the dispatcher's launch env and nothing
 else, rather than that plus everything the daemon was started with.
+
+---
+
+## Correction, 2026-08-05 — slice 2 as landed
+
+Appended by job #447, which implemented [slice 2](#slices). Nothing above is
+edited except that slice's State cell. This section records what the mechanism
+became, what was measured, and — most importantly — **what is still unproven**.
+
+### The mechanism, as built
+
+`HostBackend` carries a `Supervision` (`crates/container/src/host.rs`), named by
+its constructor rather than discovered per launch:
+
+| Variant | Launch becomes | Proven |
+| --- | --- | --- |
+| `Scope` | `systemd-run --scope --quiet --collect --unit=chug-task-{task}.scope -- {the task's argv}` | Asserted at tier 2, **skipped** wherever no scope can be created — see below |
+| `ProcessGroup` | the argv unchanged; the mechanism is the `process_group(0)` `spawn_task` already sets | **No.** The procedure is `docs/reference/runbooks/macos-host-supervision-proof.md` and nobody has run it |
+
+`--scope` runs the command from `systemd-run` itself rather than handing it to
+pid 1, so the composed environment [slice 1](#correction-2026-08-05--slice-1-as-landed)
+built, the cwd and the two log fds are inherited exactly as they were without
+it — the scope is a cgroup change and nothing else. `--collect` is what reclaims
+the unit when the task's last process exits, so a node that runs for months does
+not accumulate dead scopes. The unit name is recorded in `meta.json`, so it
+survives a daemon restart the way the pid and start time already do.
+
+**The refusal.** `probe_supervision()` asks the node to create one throwaway
+scope at daemon start; `enforce_host_supervision` in `crates/worker/src/daemon.rs`
+turns a refusal into a `Config` error beside `enforce_host_capacity`, so the boot
+fails naming the node and carrying the probe's own reason. Where #434's refusal
+is about a value the operator set, this one is about a capability the machine
+either has or does not — but the shape is the same, and it is the shape #309 §7
+demands: a node never advertises what it cannot serve.
+
+**Both `systemd` calls are bounded**, by `SYSTEMD_BOUND` (10s). `systemd-run`
+waits on the manager's own start job, so an unbounded wait would turn this
+slice's point — refuse loudly, by name — into a daemon that hangs at boot saying
+nothing, on nodes the risk list above notes cannot be reached from the Mini.
+Expiry is therefore a named refusal reason like any other, and in `kill` a
+`systemctl` that does not answer in time is a logged failure naming what was
+*not* reached (the escapee) rather than a blocked task.
+
+### D8 is confirmed on Linux, and it needed one line of code
+
+The `setsid()` escape (#309 §2) **does** close on Linux, and it is not free the
+way D8's "for free" suggests — the scope is what makes closing it *possible*, but
+`kill` has to actually address the cgroup. So `HostBackend::kill` now signals the
+process group **and** the scope (`systemctl kill --signal=… chug-task-{task}.scope`),
+in that order, at both SIGTERM and the SIGKILL escalation. The group signal alone
+misses an escapee by construction; the scope signal catches it, because leaving a
+process group does not leave a cgroup. Both are sent rather than one chosen, so a
+node whose `systemctl` is unusable still gets today's behavior instead of none —
+and the group goes **first** because that signal cannot block, so a slow bus
+delays only the half that reaches the escapee. On macOS this is unchanged and
+**still leaks**, exactly as D8 says.
+
+### The Linux proof runs, or announces that it did not
+
+Three tier-2 tests in `crates/container/tests/host_backend.rs`:
+`a_host_task_runs_in_its_own_supervision_unit` (the backend puts the task in a
+cgroup that is not inside the launcher's),
+`a_host_task_survives_the_teardown_of_the_launching_unit` (a stand-in daemon
+scope launches a task through the shipped composition; `systemctl kill --signal=SIGKILL`
+of the daemon's unit kills the daemon and leaves the task running), and
+`a_kill_reaches_a_setsid_escapee_through_the_scope` (the D8 claim itself: a
+`setsid()` child, verified to be out of the task's process group and inside its
+cgroup, dies with a `HostBackend::kill` — which only the scope signal can have
+done). The argv both scope signals become is asserted at tier 1 by
+`a_killed_task_is_signalled_through_its_scope_at_both_stages`, so the SIGTERM and
+SIGKILL spellings are covered on every machine even where the send is not.
+
+**Measured, on the evaluator this job ran in: it cannot.** There is no
+`systemd-run` on `PATH`, pid 1 is `sh`, and `/proc/self/cgroup` reads `0::/`.
+All three tests therefore self-skip, printing the reason and the words "is NOT
+covered by this run" — the `docker_available()` precedent. A systemd host still
+running cgroup v1 self-skips the same way rather than failing the crux assertion
+over a hierarchy it cannot read back, and so does a machine with no usable
+`setsid` to stage the escapee with. That is the honest state:
+**the Linux assertion is written and unexecuted in CI.** It runs the first time
+anyone points the suite at a systemd host, which is any prospective host-mode
+node, and that is where it is worth running.
+
+### What this does not do
+
+No node advertises `host`, no deploy path changed, and slice 3's `refresh`
+precondition is untouched — D3 covers a unit restart and D4 is still the backstop
+for everything else, unbuilt. `docs/spec.md` §3.1's drain guarantee is still
+written for a containerized daemon; narrowing it is slice 8's, and slice 8 should
+not be read as blocked on the macOS proof — it is blocked on the proof having an
+*answer*, which is one operator command away.
