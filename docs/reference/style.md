@@ -183,8 +183,11 @@ verify it in seconds and must name it when rejecting.
    The other half of the same rule is the **doc-update task**
    (`.chug/tasks/docs-update.md`, referenced from the `code` and `web` work
    prompts): a change updates the docs it makes stale, in the same commit.
-   Its evaluation-phase counterpart (`.chug/tasks/review-docs-updated.md`) is
-   wired but deliberately inert until the project decides how docs are managed.
+   Its evaluation-phase counterpart (`.chug/tasks/review-docs-updated.md`)
+   blocks `code` and `web` jobs on three classes a script cannot decide:
+   cross-doc state claims, behavioural claims about symbols the diff touched,
+   and a design slice landed without its design doc's head updated
+   ([#415](../design/415-knowledge-architecture.md) D9/D10).
 
    **A doc that says a gate, tier, fixture or command exists is making a factual
    claim about the tree — check it, or mark it as intent.** Present-tense prose

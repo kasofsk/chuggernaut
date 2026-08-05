@@ -30,10 +30,10 @@ eval:
     prompt: .chug/tasks/review-code.md
     stage: 0
   # The doc-update gate's evaluation half (its work half is
-  # .chug/tasks/docs-update.md, referenced from the work prompt). Wired now,
-  # inert on purpose: the prompt passes unconditionally without reading the
-  # diff, so the slot exists while the project decides how docs are managed.
-  # Give it teeth by rewriting the prompt — no config change needed.
+  # .chug/tasks/docs-update.md, referenced from the work prompt). Blocking
+  # since design #415 S7, and narrow by design: it judges the three classes the
+  # shell gates cannot decide and passes otherwise. The teeth live entirely in
+  # the prompt — this config has not changed since the slot was inert.
   - name: review-docs-updated
     type: agent
     prompt: .chug/tasks/review-docs-updated.md

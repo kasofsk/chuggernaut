@@ -25,9 +25,9 @@ eval:
     type: agent
     prompt: .chug/tasks/review-web.md
     stage: 0
-  # Same inert doc-update placeholder as .chug/jobs/code.yaml — a web change
-  # stales web/CLAUDE.md and the operator-facing wiki pages exactly as a Rust
-  # change stales docs/spec.md.
+  # Same doc-update evaluator as .chug/jobs/code.yaml — a web change stales
+  # web/CLAUDE.md and the operator-facing wiki pages exactly as a Rust change
+  # stales docs/spec.md.
   - name: review-docs-updated
     type: agent
     prompt: .chug/tasks/review-docs-updated.md

@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — S0, S1a, S1b, S1c, S2, S3, S5a, S5b, S6 and S8 landed; D1–D15 decided, S4, S7 and S9–S12 intent.
+Status: IMPLEMENTED IN PART — S0, S1a–c, S2, S3, S5a, S5b, S6, S7 and S8 landed; D1–D15 decided, S4 and S9–S12 intent.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
 [D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
@@ -35,6 +35,13 @@ only on a doc the current diff edits, and [D7](#d7-the-staleness-ledger)'s
 pre-commit half of that rule turned out to be unclearable and was not built —
 see the
 [S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear).
+S7 landed on 2026-08-05 (job #448): `.chug/tasks/docs-update.md` is rewritten
+around [D1](#d1-two-kinds-of-doc-and-only-two)/[D10](#d10-the-implementing-job-owns-the-update)
+and `.chug/tasks/review-docs-updated.md` is no longer a placeholder — it blocks
+on **three** classes rather than [D9](#d9-the-evaluator-judges-only-what-a-script-cannot)'s
+two, and the doc-table paths S7's brief said to fix were already correct —
+job #441 had fixed them. See the
+[S7 correction](#correction--2026-08-05-job-448-s7-the-instructions-and-the-evaluators-teeth).
 D13–D15 and S9–S12 were added on 2026-08-05
 by job #435, written against the tree at `810a91b`; their three measurements were
 read out of that commit and three claims in the ticket that proposed them did not
@@ -130,7 +137,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S5a** | Check 3 (slice ↔ merged job) — the detector for the drift this head suffered twice | **Landed** (job #444) — one shape, `**Landed** (job #N)` in a `docs/design/*.md` table row, resolved against the `job/N:` squash-merge subject; a doc with no slice table is silent. See the [S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split) |
 | **S5b** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1) | **Landed** (job #445) — 22 docs given a `Status:` line, nine given a lifted slice table, no table invented for a doc that had none. See the [S5b correction](#correction--2026-08-05-job-445-s5b-the-head-retrofit) |
 | **S6** | The staleness ledger (D7) | **Landed** (job #446) — `.chug/tasks/doc-staleness.sh`, sharing check 1's extractor through a new `--emit-paths` mode; **30 of 61** docs suspect, 7 of them by a day or more. Directory claims are out and the pre-commit block is not built, both on measurement. See the [S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear) |
-| **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | S5b |
+| **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | **Landed** (job #448) — `docs-update.md` now opens on the reference/design split and makes the D10 head update an author's step; `review-docs-updated.md` is blocking on **three** classes, not two — D10 compliance joined the two D9 names, because check 3 exempts the landing job. See the [S7 correction](#correction--2026-08-05-job-448-s7-the-instructions-and-the-evaluators-teeth) |
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `docs/reference/style.md` / `docs/README.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded  <!-- absent --> |
 | **S9** | `docs/reference/docs.md` <!-- intent --> — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | S3, S5b |
 | **S10** | `docs/README.md` <!-- intent --> gains a one-line catalogue row per tracked doc; **check 5** compares catalogue ↔ tree both ways, `check-modules.sh`'s shape ([D15](#d15-structural-health-index-completeness-and-orphans)) | S3 |
@@ -138,7 +145,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Ten rows are landed — S0, S1a, S1b, S1c, S2, S3, S5a, S5b, S6 and S8.** Every other row
+**Eleven rows are landed — S0, S1a, S1b, S1c, S2, S3, S5a, S5b, S6, S7 and S8.** Every other row
 above is intent, marked as such per docs/reference/style.md's doc-claim rule — which this
 document is partly written to make enforceable. This sentence read *six* and omitted
 S3 until job #444 corrected it, four jobs after S3 merged: a count in the head is
@@ -1905,3 +1912,70 @@ Debian container runs. That cost fits the hook's ~2s budget, so it is advisory
 
 It does not fix anything it finds. The 30 rows are a reading list and a later
 job's work — and [S12](#slices), the inbound-reference count, is still intent.
+
+## Correction — 2026-08-05, job #448 (S7: the instructions, and the evaluator's teeth)
+
+S7 changed **instructions and nothing else**. No gate's behaviour moved, no
+script was edited, no job-type config changed shape: `.chug/tasks/docs-update.md`
+was rewritten around [D1](#d1-two-kinds-of-doc-and-only-two) and
+[D10](#d10-the-implementing-job-owns-the-update), and
+`.chug/tasks/review-docs-updated.md` stopped being a placeholder. Both were
+already wired — the slot's own comment in `.chug/jobs/code.yaml` said to give it
+teeth by rewriting the prompt, no config change needed, and that is literally
+all it took. (This commit replaces that comment, so the sentence it quoted is
+now only here.)
+
+### The doc table was already fixed, so one of S7's stated tasks was empty
+
+S7's **brief** said the rewrite must fix a doc table still naming `spec.md`,
+`MODULES.md` and `crates.md` — [D10](#d10-the-implementing-job-owns-the-update)
+itself never mentions that table; it requires the rewrite for rule 4 alone.
+**There was nothing to fix.**
+Job #441 rewrote every row of that table in the same commit as
+[S3](#slices) — `15dccc6` shows the nine-line hunk — and
+`check-doc-facts.sh` reported both task files clean at this job's base. The
+instruction to fix them was itself the stale claim, written before S3 landed and
+never re-read; it is recorded here rather than quietly skipped, because "the
+brief said fix it and there was nothing to fix" is exactly the kind of finding
+that otherwise disappears. The table grew rows for `docs/reference/contracts.md`,
+`docs/reference/runbooks/` and `web/CLAUDE.md`, which is a different change.
+
+### The evaluator judges three classes, not D9's two
+
+D9 names two: cross-doc state claims, and behavioural claims about symbols the
+diff touched. The file as written adds a third — **D10 compliance**, a diff
+implementing a slice that leaves the design doc's head alone. This is not a
+widening of the gate's remit but a consequence of where
+[S5a](#slices) landed: check 3 **exempts the job doing the landing**, since
+`job/N` cannot exist while job N is writing the row. So D10 is a rule with no
+mechanical enforcement anywhere, and the only two failures on record
+(jobs #416 and #87, both on this head) are of exactly that shape. It is judged
+narrowly — only when the diff plainly implements a named slice — because "is
+this change that slice" is arguable, and an arguable finding on the critical
+path of every `code` job is how a gate gets ignored.
+
+The file is written to **pass by default** and says so in a rule of its own: a
+finding must name the file, the line, the sentence, what is untrue and what was
+read to show it, or it is not a finding. Everything mechanically decidable is
+listed by owner and explicitly disclaimed — `check-doc-facts.sh`,
+`check-modules.sh`, `doc-lint.sh`, the ledger's *suspicion*, and code review
+itself. So is the read-only `Review` profile (`docs/spec.md` §4.3): a claim that
+needs something executed to settle belongs in `.chug/tasks/ci.sh`, and the next
+author is told that in the file rather than discovering it.
+
+### Four assertions that this job's own diff had to clear, and they are class 1
+
+Giving the evaluator teeth makes every doc that describes it as inert false —
+which is the **cross-doc state claim** class the evaluator now judges, arriving
+on the job that created it. Four had to be fixed in the same commit:
+`CLAUDE.md`'s "(currently inert) evaluator", `docs/reference/style.md`'s "wired
+but deliberately inert until the project decides how docs are managed", and the
+`eval:` comments in `.chug/jobs/code.yaml` and `.chug/jobs/web.yaml`. None is
+machinery; all four are prose about a gate, in four files, none of which any
+mechanical check reads for meaning.
+
+D9's own paragraph above still opens *"is currently inert **by design**"*. That
+sentence is body, it was true when written, and it is corrected here rather
+than edited — which is [D2](#d2-every-design-doc-opens-with-a-mutable-current-state-head)
+working as specified, and the distinction the rewritten
+`.chug/tasks/docs-update.md` now teaches.
