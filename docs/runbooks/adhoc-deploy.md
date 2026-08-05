@@ -145,7 +145,7 @@ ssh "$WORKER_SSH" 'docker ps --filter name=chug-worker --format "{{.Image}} {{.S
 need to (re)start it standalone without a full image rebuild. This is the exact
 `docker run` `build-worker.sh` issues — reproduce it by hand:
 
-**Whatever you set here, declare it too**, in `deploy/prod/chuggernaut.env` on
+**Whatever you set here, declare it too**, in `deploy/prod/chuggernaut.env` on <!-- runtime -->
 the Mini (per node as `<VAR>_<node>`, `deploy/prod/README.md` §6). A value that
 exists only in this by-hand `docker run` survives by circulation — the self-
 refresh swap re-applies the daemon's own environment — until the first

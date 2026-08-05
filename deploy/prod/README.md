@@ -24,7 +24,7 @@ the Mini (§3). Chuggernaut is developed *on the platform* — create a `code` o
 
 - **State lives outside the checkout** at `~/chuggernaut-data/{keys,repos,backups}`
   (+ the `nats-data` Docker volume), so a `git checkout`/deploy never touches it.
-- **Config** is one gitignored file: `deploy/prod/chuggernaut.env` (from
+- **Config** is one gitignored file: `deploy/prod/chuggernaut.env` (from <!-- runtime -->
   `env.example`). The launchd wrappers and scripts source it.
 
 ## Automated install (`chug-install.sh` / `/chug-install`)
@@ -602,7 +602,7 @@ deploy/prod/build-worker.sh
 
 **The run spec is declared, not inherited.**
 
-The file a human edits is **`deploy/prod/chuggernaut.env` on the Mini**
+The file a human edits is **`deploy/prod/chuggernaut.env` on the Mini** <!-- runtime -->
 (`~/chuggernaut/deploy/prod/chuggernaut.env`). It is gitignored, so this repo
 holds only [`env.example`](env.example) — editing that changes nothing on any
 node. Everything a `chug-worker` daemon runs with is composed from that file by
@@ -942,7 +942,7 @@ No bind mount, no baked-in image copy, no container to restart: refresh the page
   and rsyncs it into `UI_ROOT` on every deploy, so a full deploy and a
   web-publish always land the same content.
 - **Fast path**: after a `web` job (.chug/jobs/web.yaml) merges, release a
-  `web-publish` job (.chug/jobs/web-publish.yaml). It builds `web/dist` at main and
+  `web-publish` job (.chug/jobs/web-publish.yaml). It builds `web/dist` at main and <!-- runtime -->
   tar-pipes it to the Mini, staging in `UI_ROOT.new` and rsyncing contents
   into place (~30s end to end). Same `MINI_DEPLOY_KEY` ssh path as deploy. The
   native api picks the new files up on the next request — no reload needed.

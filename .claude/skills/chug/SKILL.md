@@ -30,7 +30,7 @@ and GitHub is a **read-only mirror**. To ship a change, **create + release a
 `.claude/skills/chug-ops/SKILL.md`); GitHub is a read-only mirror.
 
 If the user explicitly says **dev** (the local stack from `deploy/dev`):
-`BASE=http://localhost:8081`, token at `deploy/dev/data/keys/claude.token`.
+`BASE=http://localhost:8081`, token at `deploy/dev/data/keys/claude.token`. <!-- runtime -->
 
 ## Auth — you act as a user, not the platform
 

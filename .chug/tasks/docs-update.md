@@ -36,16 +36,24 @@ update, one job type (`docs`) that maintains them.
    | `docs/implementation-notes.md` | invalidates a note there, or gives one a better home — fold it into the real doc and delete the entry |
    | `design.md`, `docs/design/*.md` | supersedes a decision one of them argues |
 
-3. **Prefer editing a doc to adding one.** A new page that duplicates an
+3. **A path you name in a doc is a claim it exists.** `.chug/tasks/doc-lint.sh`
+   resolves every backticked path against `git ls-files`, so a path that moved
+   is reported wherever it is cited. If the path is *correctly* unresolvable,
+   mark the line rather than deleting the claim: `<!-- intent -->` for something
+   designed but not built, `<!-- runtime -->` for build output or an
+   operator-owned file that git will never hold. Both are defined in STYLE.md's
+   doc-claim rule; neither excuses a stale path.
+
+4. **Prefer editing a doc to adding one.** A new page that duplicates an
    existing one is the doc-shaped version of a copy-paste clone. Add a page only
    when the subject has no home; then link it from the index that should reach
    it, or it is an orphan.
 
-4. **Do not narrate the change in a doc.** Docs describe the system as it is
+5. **Do not narrate the change in a doc.** Docs describe the system as it is
    now, in the present tense. Why the change was made belongs in the commit
    message (STYLE.md Tier 2 rule 5); what it did belongs in the work summary.
 
-5. **Say what you did in your `submit_result` summary** — which docs you
+6. **Say what you did in your `submit_result` summary** — which docs you
    updated, or that you checked and none were stale. "No docs needed" is a fine
    answer when it is a considered one; it is not a default.
 

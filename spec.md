@@ -406,7 +406,7 @@ Semantics:
 
 #### Schedules
 
-A **schedule** is time-triggered job creation: one file per schedule under `.chug/schedules/`, resolved from default-branch HEAD like every other config directory (design [#310](docs/design/310-scheduled-jobs.md)). It is repo-versioned so a schedule change ships in the same commit as the job type it fires and clears the same gates.
+A **schedule** is time-triggered job creation: one file per schedule under `.chug/schedules/`, resolved from default-branch HEAD like every other config directory (design [#310](docs/design/310-scheduled-jobs.md)). It is repo-versioned so a schedule change ships in the same commit as the job type it fires and clears the same gates. <!-- intent -->
 
 ```yaml
 # .chug/schedules/nightly-integration.yaml
@@ -1522,7 +1522,7 @@ Knowledge Objects (KOs) follow a `(subject, predicate) → object` model. Each K
 
 **Runtime querying (MCP, all agent containers):** agents query further KOs at runtime via the `chuggernaut-ko` MCP server. Both work and eval containers receive NATS JWT credentials with read access to all three knowledge buckets (see §7.4); the MCP server uses these to resolve queries without dispatcher involvement.
 
-`CLAUDE.md` / `.claude/CLAUDE.md` in the repo is picked up automatically by `claude -p` and does not need to be in the KO store.
+`CLAUDE.md` / `.claude/CLAUDE.md` in the repo is picked up automatically by `claude -p` and does not need to be in the KO store. <!-- intent -->
 
 ---
 

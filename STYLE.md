@@ -192,7 +192,23 @@ verify it in seconds and must name it when rejecting.
    silence: it sends the next author to build against something that is not
    there, and lets a reviewer accept it as an answer. Write what the tree does,
    date the measurement, and mark anything unbuilt in the heading rather than
-   describing it as if it ran. *Why:* one week produced five — a `.github/`
+   describing it as if it ran.
+
+   **Marking is a syntax, and it is checked.** A backticked path in a `.md` is
+   resolved against `git ls-files` by `.chug/tasks/doc-lint.sh`'s referenced-path
+   check (a warning today; design [#415](docs/design/415-knowledge-architecture.md)
+   S1b promotes it). Two HTML comments suppress it, and they are not
+   interchangeable:
+
+   | Marker | Means | Use for |
+   | --- | --- | --- |
+   | `<!-- intent -->` | designed, not built | a path a decision proposes and no commit has created |
+   | `<!-- runtime -->` | correctly absent from git | build output, operator-owned files, anything a `.gitignore` excludes on purpose |
+
+   A marker covers **the line that carries it**, so put it at the end of the
+   line making the claim; a claim on the next line is judged on its own. Neither
+   marker is a way to silence a path that is simply stale — that is an edit, not
+   a marker. *Why:* one week produced five — a `.github/`
    workflow mirror that did not exist and a `tier-2 ENABLED` announcement over a
    tier that self-skipped (#375, #378/#382), 17 shell suites nothing executed
    (#385), a duplication gate analysing no `.nix` files (#383), `check-modules.sh`

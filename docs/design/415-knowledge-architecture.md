@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — decisions taken with the operator 2026-08-04; S0 and S8 landed (S8 reversing [D8](#decisions)), the rest is intent. See [Slices](#slices).
+Status: IMPLEMENTED IN PART — decisions taken with the operator 2026-08-04; S0, S1a and S8 landed (S8 reversing [D8](#decisions)), the rest is intent. See [Slices](#slices).
 
 Measured against the tree at `28e5aa1` (2026-08-04). Every number below was read
 out of that commit, not carried over from the brief; the commands are given so a
@@ -75,7 +75,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | Slice | What | Gate on |
 | --- | --- | --- |
 | **S0** | Triage `progress.md`: amend `spec.md` §5.1 (the artifact-store clause is false) and §10.2's single-age-key claim, repoint `.claude/skills/chug/SKILL.md`, then delete the file | **Landed** (job #432), in that order. §5.1 now states the NATS-internal store and keeps the S3/Minio deferral as its own claim; §10.2 names both age identities (§12.1 and the infrastructure appendix follow); the skill points at `spec.md` and the repo's docs |
-| **S1a** | Fix `doc-lint.sh` rule 4's four false-positive classes in place and resolve against git; the two markers. Still a warning, still `docs`/`design`-scoped | — |
+| **S1a** | Fix `doc-lint.sh` rule 4's four false-positive classes in place and resolve against git; the two markers. Still a warning, still `docs`/`design`-scoped | **Landed** (job #433) — the classes turned out to be five, and the whole-tree count fell 313 → 66. See [S1a as landed](#s1a-as-landed-re-measured) |
 | **S1b** | Move that logic into `check-doc-facts.sh` — pre-stage, every job, whole-tree, **error** — and delete rule 4 from `doc-lint.sh`. Once S2 has cleared the real findings | S1a, S2 |
 | **S1c** | Check 2 (constant values) + a `.test.sh` suite covering both | S1a |
 | **S2** | The one-time sweep: the ~6 real path findings, the `*_SCHEMA_EPOCH` restatements, `state.rs` in its seven files; delete `spec_original.md` and `wiki/Welcome.md` | S1a |
@@ -87,9 +87,9 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `STYLE.md` / `NORTH-STAR.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Two rows are landed — S0 and S8.** Every other row above is intent, marked as
-such per STYLE.md's doc-claim rule — which this document is partly written to
-make enforceable.
+**Three rows are landed — S0, S1a and S8.** Every other row above is intent,
+marked as such per STYLE.md's doc-claim rule — which this document is partly
+written to make enforceable.
 
 This head went stale **within a day of merging**: job #416 landed S8 on
 2026-08-04, appended its correction to the body per [D10](#d10-the-implementing-job-owns-the-update),
@@ -97,6 +97,37 @@ and left the table above still saying nothing was implemented and still naming
 job #87 as live work. That is the drift **check 3** (slice ↔ merged job,
 [S5](#slices)) exists to catch, and check 3 does not exist yet — so a human had
 to notice. Recorded as evidence for the ordering, not filed away.
+
+### S1a as landed, re-measured
+
+Measured on the base S1a landed on, both figures from the same command —
+`git ls-files '*.md' | xargs sh .chug/tasks/doc-lint.sh`, counting lines matching
+`referenced path not found`: **313 before, 66 after**, both re-measured on the
+merged base `6ec4891` after [S0](#slices) deleted `progress.md` (at the original
+S1a branch point they were 330 and 64). The
+verdict is now byte-identical in an unbuilt checkout and in one carrying
+`target/`, `web/dist`, `deploy/dev/data/`, `deploy/prod/chuggernaut.env` <!-- runtime -->
+— **66 either way**, where the old check reported 313 unbuilt against 301 built.
+That is the divergence [resolving against git](#resolve-against-git-not-the-filesystem)
+was for. Both markers work and are line-scoped; `.chug/tasks/doc-lint.test.sh` grew
+11 cases covering the classes, the two markers and the git-not-filesystem
+property.
+
+Three corrections to what is written below, all discovered by re-measuring:
+
+- **The classes are five, not four.** A token rooted somewhere other than this
+  checkout — `src/api.ts` from `web/CLAUDE.md`, `dispatcher/tests/execution.rs`
+  from `testing.md` — is neither a glob, an absolute path, a template nor a
+  citation, and it was the largest silent class. It is refused by requiring the
+  first segment to be a tracked top-level entry.
+- **`.chug/tags/` does not exist at all**, so `CLAUDE.md`'s "`tags/` … lives
+  under `.chug/`" and every `.chug/tags/*` citation are stale together. Add it
+  to [S2](#slices)'s sweep; it is not in the ten listed under
+  [two markers](#two-markers-not-one).
+- **41 of the 66 remaining warnings are in this document**, which names the
+  stale paths as its subject rather than claiming they exist. Neither marker
+  fits that — marking them `intent` would be false — so [S1b](#slices) cannot go
+  whole-tree-error until it decides how a doc cites a path it is arguing about.
 
 ---
 

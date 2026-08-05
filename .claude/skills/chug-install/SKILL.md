@@ -38,7 +38,7 @@ Before acting, probe state so a re-run is safe:
    (or the `/chug` skill's target). Reachable → skip `platform`, go to import.
 2. **Is this repo already a project?** Ask the running platform (via `/chug` or
    the API) whether `owner/name` exists. If so, skip project creation.
-3. **Is `deploy/prod/chuggernaut.env` present + filled?** If not, help the user
+3. **Is `deploy/prod/chuggernaut.env` present + filled?** If not, help the user <!-- runtime -->
    copy `deploy/prod/env.example` and fill the required vars before `platform`.
 
 ## Ask the model-choice question

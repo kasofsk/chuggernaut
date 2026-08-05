@@ -229,7 +229,7 @@ it is what keeps such a tier affordable:
    and a hard token budget.
 
 Neither mode has a schedule to inherit — nothing here runs nightly, and this repo
-has no `.chug/schedules/` at all. A built tier 3 would be released like the
+has no `.chug/schedules/` at all. A built tier 3 would be released like the <!-- intent -->
 on-demand [`coverage` job type](#coverage-on-demand-never-a-gate), or scheduled
 under [spec §1.1](spec.md) ([#310](docs/design/310-scheduled-jobs.md)) if someone
 writes the schedule.

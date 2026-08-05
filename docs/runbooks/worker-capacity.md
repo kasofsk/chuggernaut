@@ -330,7 +330,7 @@ curl -fsS https://<api-host>/api/v1/platform/fleet \
 
 ### Applying it
 
-The value lives in the gitignored `deploy/prod/chuggernaut.env` on the Mini, so
+The value lives in the gitignored `deploy/prod/chuggernaut.env` on the Mini, so <!-- runtime -->
 this is a by-hand operator step, not something a deploy carries. Keep the
 precondition next to the value so the next person cannot re-derive it wrong:
 

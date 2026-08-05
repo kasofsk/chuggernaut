@@ -7,7 +7,7 @@ Layout: NATS (operator mode) and the SSH front run in containers; the
 dispatcher and api run on the host; agent containers are launched by the
 dispatcher as siblings and reach NATS/SSH via `host.docker.internal`.
 
-All state lives under `deploy/dev/data/` (gitignored): `data/keys` (§12.1
+All state lives under `deploy/dev/data/` (gitignored): `data/keys` (§12.1 <!-- runtime -->
 keypairs) and `data/repos` (bare repos, bind-mounted into the ssh container).
 
 ## One-time bootstrap
@@ -99,7 +99,7 @@ Two operational notes when **updating an existing deploy**:
 - **Re-run `deploy/dev/build.sh`** after any change to the channel binary. It
   now posts `update_status`/`reply` over `req.channel.*` instead of writing KV
   directly, and the dispatcher no longer grants the old KV-write permission — a
-  stale `deploy/dev/out/chuggernaut-channel` will fail those calls at runtime.
+  stale `deploy/dev/out/chuggernaut-channel` will fail those calls at runtime. <!-- runtime -->
 
 ## Run
 
@@ -133,7 +133,7 @@ Browse http://localhost:8080 and log in with the admin user.
 
 ## Backups
 
-Everything on this box lives in `deploy/dev/data/` (repos, keys) plus the
+Everything on this box lives in `deploy/dev/data/` (repos, keys) plus the <!-- runtime -->
 `nats-data` volume (JetStream). One command snapshots all of it:
 
 ```sh

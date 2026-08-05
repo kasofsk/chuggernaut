@@ -89,7 +89,7 @@ will run and wait.
   Mini. Caveat #140: a saturated fleet at restart-adjacent times burned
   eval_retries pre-fix.
 - **Cluster drift banner reads "Deploy drift unavailable"?** `SELF_REPO` is
-  unset in the dispatcher's `deploy/prod/chuggernaut.env` (#276 — it was in no
+  unset in the dispatcher's `deploy/prod/chuggernaut.env` (#276 — it was in no <!-- runtime -->
   install template until then, so every install was born without it). Set
   `SELF_REPO=kasofsk/chuggernaut` (the platform's own project slug, not the
   GitHub mirror) and restart the dispatcher; `main_tip_sha`/`commits_behind` in

@@ -15,7 +15,7 @@ scripts are equally runnable by hand — the skill just narrates them.
 
 Everything is `deploy/prod/chug-install.sh` (idempotent; `--dry-run` previews
 any step without changing anything). Configuration lives in
-`deploy/prod/chuggernaut.env` (copy `deploy/prod/env.example`).
+`deploy/prod/chuggernaut.env` (copy `deploy/prod/env.example`). <!-- runtime -->
 
 ```sh
 # 0. Preflight — deps + config, non-destructive. Do this first.
