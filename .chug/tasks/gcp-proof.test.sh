@@ -26,8 +26,10 @@
 #      the token to the STS, rung 3b impersonates the SA the adc.json names, and
 #      a missing curl or jq is a NAMED NOT REACHED rather than a silent pass.
 #   7. RUNG 5B PASSES BY FINDING NOTHING, and fails on a credential, on a stray
-#      GOOGLE_APPLICATION_CREDENTIALS, and on a gcloud that mints from ambient
-#      credentials.
+#      GOOGLE_APPLICATION_CREDENTIALS, and on any ambient credential — a gcloud
+#      that mints, or a GCE metadata server that hands out the node's token.
+#   8. RUNG 5B SAYS WHICH PASS IT IS. A metadata server nobody could reach tested
+#      nothing, and its line must not read the same as one that refused to mint.
 #
 # Run:  .chug/tasks/gcp-proof.test.sh   (exits 0 iff all cases pass)
 set -eu
@@ -40,11 +42,15 @@ SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
 BIN="$SANDBOX/bin"
+# The gcloud stub sits APART from the curl stub so a case can offer one without
+# the other: rung 5b's ambient probe needs curl on a PATH carrying no SDK, which
+# is the shape of the real agent image.
+SDK="$SANDBOX/sdk"
 STATE="$SANDBOX/state"
 CLOUD="$SANDBOX/cloud"
 CMD_LOG="$SANDBOX/cmd.log"
 DIR="$CLOUD/gcp-proof"
-mkdir -p "$BIN" "$STATE" "$DIR"
+mkdir -p "$BIN" "$SDK" "$STATE" "$DIR"
 
 GRANTED=chug-wif-proof-granted
 DENIED=chug-wif-proof-denied
@@ -102,7 +108,7 @@ url=
 prev=
 for a in "\$@"; do
   case "\$prev" in --output) out="\$a" ;; esac
-  case "\$a" in https://*) [ -z "\$url" ] && url="\$a" ;; esac
+  case "\$a" in http://*|https://*) [ -z "\$url" ] && url="\$a" ;; esac
   prev="\$a"
 done
 answer() { printf '%s' "\$2" > "\$out"; printf '%s' "\$1"; exit 0; }
@@ -127,6 +133,10 @@ case "\$url" in
   [ -f "$STATE/denied_absent" ] && answer 404 '{"error":{"code":404,"message":"No such object"}}'
   [ -f "$STATE/denied_unauthorized" ] && answer 401 '{"error":{"code":401,"message":"Invalid Credentials"}}'
   answer 403 '{"error":{"code":403,"message":"does not have storage.objects.get access to the object"}}' ;;
+*metadata.google.internal*|*169.254.169.254*)
+  [ -f "$STATE/metadata_mints" ] && answer 200 '{"access_token":"ya29.stub-node-token","expires_in":3599,"token_type":"Bearer"}'
+  [ -f "$STATE/metadata_answers" ] && answer 404 'Not Found'
+  unreachable ;;
 esac
 echo "curl: stub reached no case for '\$url'" >&2
 exit 6
@@ -136,7 +146,7 @@ chmod +x "$BIN/curl"
 # The only gcloud left in this suite, and it belongs to rung 5b: the negative
 # evaluator still asks whether an SDK on the PATH can mint from AMBIENT
 # credentials. The ladder must never call it, which case 1 asserts.
-cat >"$BIN/gcloud" <<EOF
+cat >"$SDK/gcloud" <<EOF
 #!/bin/sh
 echo "gcloud \$*" >> "$CMD_LOG"
 case "\$1 \$2" in
@@ -144,7 +154,7 @@ case "\$1 \$2" in
 esac
 exit 1
 EOF
-chmod +x "$BIN/gcloud"
+chmod +x "$SDK/gcloud"
 
 # The document the dispatcher writes beside the token (crates/auth's
 # `adc_document`). Rung 3 reads its audience, endpoints and service account out
@@ -191,7 +201,7 @@ done
 run_ladder() { # run_ladder <outfile> [PATH override]
 	STATUS=0
 	env -i \
-		PATH="${2-$BIN:/usr/bin:/bin}" \
+		PATH="${2-$BIN:$SDK:/usr/bin:/bin}" \
 		HOME="$SANDBOX" \
 		CHUG_CLOUD_ROOT="$CLOUD" \
 		GOOGLE_APPLICATION_CREDENTIALS="$DIR/adc.json" \
@@ -488,6 +498,10 @@ verdict "says it is not skippable" "$(found "$SANDBOX/out13.txt" "not skippable"
 verdict "verdict is a FAIL" "$(found "$SANDBOX/out13.txt" "VERDICT FAIL")"
 
 # --- rung 5b: the evaluator that must find nothing ------------------------------------------------
+# The default PATH carries the stub curl and NO gcloud — the real agent image's
+# shape. It is a stub rather than the host's curl on purpose: the ambient probe
+# names a real address, and a suite that reached for it would be asking the
+# machine it runs on what the answer is.
 run_negative() { # run_negative <outfile> <cloud-root> [gac] [PATH]
 	NSTATUS=0
 	env -i \
@@ -498,17 +512,25 @@ run_negative() { # run_negative <outfile> <cloud-root> [gac] [PATH]
 		sh "$NEGATIVE" >"$1" 2>&1 || NSTATUS=$?
 }
 
-echo "case 14: rung 5b passes by finding nothing"
+echo "case 14: rung 5b passes by finding nothing, and says the ambient probe found no server"
 reset_case
-run_negative "$SANDBOX/out14.txt" "$SANDBOX/absent-root" "" "/usr/bin:/bin"
+run_negative "$SANDBOX/out14.txt" "$SANDBOX/absent-root"
 
 verdict "exits 0" "$(yes_no "$NSTATUS")"
 verdict "reports PASS" "$(found "$SANDBOX/out14.txt" "rung 5b a container declaring no identity gets nothing: PASS")"
 verdict "notes the absent root" "$(found "$SANDBOX/out14.txt" "no $SANDBOX/absent-root directory at all")"
+verdict "the ladder line says nothing was exercised" "$(found "$SANDBOX/out14.txt" "gets nothing: PASS — no metadata server was reachable, so ambient minting was NOT exercised")"
+verdict "does not claim the server refused" "$(missing "$SANDBOX/out14.txt" "minted nothing")"
+verdict "asked the metadata server by name" "$(found "$CMD_LOG" "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token")"
+verdict "also tried the link-local address" "$(found "$CMD_LOG" "http://169.254.169.254/computeMetadata/v1/")"
+verdict "sent the required header" "$(found "$CMD_LOG" "Metadata-Flavor: Google")"
+verdict "bounded the connect" "$(found "$CMD_LOG" "--connect-timeout 2")"
+verdict "bounded the whole request" "$(found "$CMD_LOG" "--max-time 4")"
+verdict "ran no gcloud" "$(missing "$CMD_LOG" "gcloud")"
 
 echo "case 15: a credential file in a container that declared none is the finding"
 reset_case
-run_negative "$SANDBOX/out15.txt" "$CLOUD" "" "/usr/bin:/bin"
+run_negative "$SANDBOX/out15.txt" "$CLOUD"
 
 verdict "exits non-zero" "$(non_zero "$NSTATUS")"
 verdict "names rung 5b" "$(found "$SANDBOX/out15.txt" "RUNG 5b FAILED")"
@@ -518,7 +540,7 @@ verdict "reports FAIL" "$(found "$SANDBOX/out15.txt" "gets nothing: FAIL")"
 
 echo "case 16: a stray GOOGLE_APPLICATION_CREDENTIALS is the finding"
 reset_case
-run_negative "$SANDBOX/out16.txt" "$SANDBOX/absent-root" "$DIR/adc.json" "/usr/bin:/bin"
+run_negative "$SANDBOX/out16.txt" "$SANDBOX/absent-root" "$DIR/adc.json"
 
 verdict "exits non-zero" "$(non_zero "$NSTATUS")"
 verdict "names the variable" "$(found "$SANDBOX/out16.txt" "GOOGLE_APPLICATION_CREDENTIALS is set to")"
@@ -526,11 +548,46 @@ verdict "reports FAIL" "$(found "$SANDBOX/out16.txt" "gets nothing: FAIL")"
 
 echo "case 17: a gcloud minting from ambient credentials is the finding"
 reset_case
-run_negative "$SANDBOX/out17.txt" "$SANDBOX/absent-root" ""
+run_negative "$SANDBOX/out17.txt" "$SANDBOX/absent-root" "" "$BIN:$SDK:/usr/bin:/bin"
 
 verdict "exits non-zero" "$(non_zero "$NSTATUS")"
 verdict "names ambient credentials" "$(found "$SANDBOX/out17.txt" "reaching ambient credentials")"
 verdict "reports FAIL" "$(found "$SANDBOX/out17.txt" "gets nothing: FAIL")"
+
+# --- case 18: THE RUNG THAT ONLY BITES ON GCE -----------------------------------------------------
+# The finding rung 5b exists for once a worker runs on GCE: no file, no env var,
+# and the node's own identity handed over by the metadata server anyway.
+echo "case 18: a metadata server that mints the node's token is the finding"
+reset_case
+: >"$STATE/metadata_mints"
+run_negative "$SANDBOX/out18.txt" "$SANDBOX/absent-root"
+
+verdict "exits non-zero" "$(non_zero "$NSTATUS")"
+verdict "names rung 5b" "$(found "$SANDBOX/out18.txt" "RUNG 5b FAILED")"
+verdict "says a token was minted" "$(found "$SANDBOX/out18.txt" "MINTED AN ACCESS TOKEN")"
+verdict "names the node's identity" "$(found "$SANDBOX/out18.txt" "NODE's own identity")"
+verdict "reports FAIL" "$(found "$SANDBOX/out18.txt" "gets nothing: FAIL")"
+verdict "does not report PASS" "$(missing "$SANDBOX/out18.txt" "gets nothing: PASS")"
+
+echo "case 19: a metadata server that answers but mints nothing is a PASS that says so"
+reset_case
+: >"$STATE/metadata_answers"
+run_negative "$SANDBOX/out19.txt" "$SANDBOX/absent-root"
+
+verdict "exits 0" "$(yes_no "$NSTATUS")"
+verdict "the ladder line says the server refused" "$(found "$SANDBOX/out19.txt" "gets nothing: PASS — a metadata server answered")"
+verdict "names the status it got" "$(found "$SANDBOX/out19.txt" "HTTP 404 and minted nothing")"
+verdict "does not claim it was unreachable" "$(missing "$SANDBOX/out19.txt" "NOT exercised")"
+verdict "stops at the first server that answered" "$(missing "$CMD_LOG" "169.254.169.254")"
+
+echo "case 20: with no curl the probe cannot run, and the ladder line says that, not PASS"
+reset_case
+run_negative "$SANDBOX/out20.txt" "$SANDBOX/absent-root" "" "$MINIMAL"
+
+verdict "exits 0" "$(yes_no "$NSTATUS")"
+verdict "names the missing tool" "$(found "$SANDBOX/out20.txt" "curl is absent, so the ambient probe did NOT run")"
+verdict "does not claim a server refused" "$(missing "$SANDBOX/out20.txt" "minted nothing")"
+verdict "spends no HTTP call" "$([ -f "$CMD_LOG" ] && echo no || echo ok)"
 
 echo
 if [ "$BAD" -eq 0 ]; then

@@ -75,9 +75,15 @@ locals {
   # Identity Federation guidance for GitHub Actions uses the same literal form
   # (`attribute.repository/octo-org/octo-repo`).
   #
-  # NOT YET PROVEN. Nothing here has been observed to pass; the operator re-applies
-  # and re-runs `gcp-proof` to settle it. infra/README.md, under "The `/` is
-  # literal", records the ordered next hypotheses if it is also refused.
+  # NOW PROVEN. Job #430 climbed the whole ladder against this applied member and
+  # reported `VERDICT PASS`, so rung 3b — the workloadIdentityUser binding on the
+  # member below — is observed, not argued.
+  #
+  # AND JOB #429 DID NOT DISPROVE IT. #429 ran between the apply and the binding
+  # taking effect and was refused at 3b, which reads exactly like a member that
+  # matches nothing; that refusal was IAM PROPAGATION, and reading it as evidence
+  # about the encoding was a mis-attribution. #430 changed no terraform. Do not
+  # re-run the %2F experiment on the strength of #429.
   principal_set = join("", [
     "principalSet://iam.googleapis.com/projects/",
     data.google_project.proof.number,
@@ -159,7 +165,18 @@ resource "google_iam_workload_identity_pool_provider" "chug" {
     # Uploaded, not discovered — which is what removes the requirement that this
     # platform be reachable from the internet. GCP does NOT validate this at
     # create time; see the trap in infra/README.md §5.
-    jwks_json = file(var.jwks_path)
+    #
+    # Decoded and re-encoded so BOTH SIDES AGREE ON THE BYTES. `file()` alone
+    # sends the fetched document's own whitespace, GCP returns its own
+    # normalisation of the same JSON, and terraform reported an eternal
+    # `~ jwks_json = jsonencode( # whitespace changes` — a root that is always
+    # dirty is a root where a REAL drift is invisible, and this is the
+    # security-critical resource to lose it on.
+    #
+    # NOT `ignore_changes`: a key rotation IS a jwks_json change (§5), so
+    # ignoring the field would silently break the one update this root must be
+    # able to perform. This normalises; it does not stop looking.
+    jwks_json = jsonencode(jsondecode(file(var.jwks_path)))
   }
 }
 

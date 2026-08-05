@@ -185,21 +185,26 @@ The evidence for the literal form:
 - Google's own Workload Identity Federation guidance for GitHub Actions uses the
   same literal form (`attribute.repository/octo-org/octo-repo`).
 
-**This is a hypothesis with strong circumstantial support, not a proven fix.**
-It has *not* been established by changing only this and observing a pass: the
-literal form has never been applied here. The operator re-applies and re-runs
-`gcp-proof` to settle it.
+**This is now settled by observation, not just argument.** Job #430 climbed every
+rung against the applied literal member and reported `VERDICT PASS` — rung 3b
+included, and 3b *is* the binding.
 
-If the literal form is **also** refused, the next hypotheses, in order:
+### #429 did not disprove it — that reading was a mis-attribution
 
-1. **IAM propagation delay.** A freshly written workload-identity binding can
-   take minutes to take effect; re-run before changing anything.
-2. **The role may not carry the permission.** If
-   `roles/iam.workloadIdentityUser` does not grant
-   `iam.serviceAccounts.getAccessToken`, the binding needs
-   `roles/iam.serviceAccountTokenCreator` instead.
+Between the apply and #430 there was **job #429**, which was refused at rung 3b
+with the literal member already in place. It was read at the time as the literal
+form failing too. It was not: a freshly written workload-identity binding takes
+minutes to take effect, and #429 ran inside that window. **#430 changed no
+terraform** and passed.
 
-One hypothesis at a time, or the next run tells us nothing.
+So a 3b refusal and a wrong member look identical from inside the ladder, and the
+first suspect for a *fresh* binding is time, not encoding. **Do not re-run the
+`%2F` experiment on the strength of #429.** The remaining hypothesis, if a 3b
+refusal ever outlives propagation, is that
+`roles/iam.workloadIdentityUser` does not carry
+`iam.serviceAccounts.getAccessToken` and the binding needs
+`roles/iam.serviceAccountTokenCreator` instead — one hypothesis at a time, or the
+next run tells you nothing.
 
 ---
 
@@ -357,6 +362,19 @@ being created, and nothing outside this root's own resources should show a
 change. A `data.google_project.proof` read that errors means the credential
 cannot see `daekon-ai`, not that the id is wrong.
 
+**An unchanged tree plans clean, and that is load-bearing.** Until job #431 every
+plan reported `google_iam_workload_identity_pool_provider.chug will be updated
+in-place` with one cosmetic diff — `~ jwks_json = jsonencode( # whitespace
+changes` — because the file's whitespace and GCP's normalisation of the same JSON
+never agreed. `mod.tf` now sends `jsonencode(jsondecode(file(var.jwks_path)))`, so
+both sides encode the same bytes. **The alternative,
+`ignore_changes = [oidc[0].jwks_json]`, is deliberately not taken: a key rotation
+*is* a `jwks_json` change (§5), so ignoring the field would silently break the one
+update this root must be able to perform.** It converges on the next `apply`,
+which is what writes the normalised bytes GCP then echoes back; a plan that is
+still dirty *after* that apply is not the diff this fixed — read what it names,
+and suspect a real change before reaching for `ignore_changes`.
+
 `terraform plan` is **not runnable from a job container** — it needs credentials
 the platform deliberately does not hold — and the acceptance bar for a change to
 this root is `terraform fmt -check` and `terraform validate`, both of which run
@@ -417,6 +435,10 @@ Re-uploading is `terraform apply` after replacing the file. Rotation is the same
 act — the provider allows up to 8 keys, so publish the new one, wait out the
 longest token TTL (≤1h, #313 A3), then retire the old.
 
+A rotation therefore **must** show up as a `jwks_json` diff in the plan. That is
+why §3's fix for the permanently-dirty plan normalises the encoding rather than
+ignoring the field.
+
 ---
 
 ## 6. Reading the ladder
@@ -434,7 +456,7 @@ the run stops at the first failure.
 | 3b | The federated token impersonates the SA | The member in the `workloadIdentityUser` binding — one that matches nothing applies cleanly and grants nothing; the `/` is literal, per the retraction above |
 | 4 | The granted read succeeds | The objectViewer binding on the granted bucket; 3b already proved the member |
 | 5 | The ungranted read is **refused** | A grant wider than the terraform declares — a real finding |
-| 5b | An evaluator declaring no identity gets **nothing** | Injection is not per-container; #313 A5 non-inheritance is broken |
+| 5b | An evaluator declaring no identity gets **nothing** — no credential file, no `GOOGLE_APPLICATION_CREDENTIALS`, and no token from **ambient** credentials | Injection is not per-container (#313 A5 non-inheritance is broken), or the container is wearing the node's own identity |
 
 Rungs 3–5 speak **REST over `curl` + `jq`**, not `gcloud`: no job type here
 pulls a public image and neither agent image carries the SDK (#313 gap 11), and
@@ -453,6 +475,24 @@ Rung 5b runs in the `no-identity` stage-0 evaluator, not in the work container:
 the property is non-inheritance, and only a container that declared no identity
 can test it. **A ladder that passes 1–4 and skips 5 has proved that a credential
 was wired, not that it is bounded.**
+
+Its third check — the **ambient** one — asks the GCE metadata server for the
+node's default token directly over HTTP (`metadata.google.internal`, then the
+link-local `169.254.169.254` for a container whose resolver does not know the
+name), with no `gcloud`, bounded at a 2s connect and a 4s request. **It has two
+different passes and its line says which.** Today's workers are on-prem, so it
+reads:
+
+```text
+gcp-proof: rung 5b … gets nothing: PASS — no metadata server was reachable, so ambient minting was NOT exercised
+```
+
+That is a pass of the two file/env assertions and **not** of the ambient one. A
+worker on GCE gets `PASS — a metadata server answered at … with HTTP 404 and
+minted nothing`, which is the real result; a token in the reply is a **FAIL**,
+and it is the finding nothing dispatcher-side would prevent — per-container
+scoping bounds what this platform *hands* a container, never what the node it
+runs on offers it.
 
 ---
 

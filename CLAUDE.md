@@ -195,4 +195,7 @@ the absence of a workflow file.
   never `gcloud`: no job type here pulls a public image and neither agent image carries
   the SDK, so a curl rung proves the STS accepts our token but leaves #313 A3's
   "every Google client library already reads this shape" claim unverified — A3 says so.
+  Rung 5b's **ambient** check is curl too, straight at the GCE metadata server and
+  bounded, and its line distinguishes "no metadata server reachable" (what an on-prem
+  worker reports, and it tested nothing) from "answered and minted nothing".
 - Don't run destructive commands (deploys, restarts, data resets) without asking first.
