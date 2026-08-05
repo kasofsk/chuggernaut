@@ -242,6 +242,16 @@ verify it in seconds and must name it when rejecting.
    D10](../design/415-knowledge-architecture.md#d10-the-implementing-job-owns-the-update)
    has it write the row in the same commit its merge creates.
 
+   **A claim that is true and unread is a fourth case, and nothing above
+   catches it.** `.chug/tasks/doc-staleness.sh` is the git-derived ledger
+   ([#415](../design/415-knowledge-architecture.md) D7, S6): a doc whose named
+   **files** carry commits newer than the doc itself is *suspect*, never wrong.
+   There is nothing to write and nothing to maintain — no `last-verified:` line,
+   no dates in prose — and it takes its path set from the same extractor as the
+   path check, so the markers above silence it too. It is advisory: read it with
+   `.chug/tasks/doc-staleness.sh`, and expect a doc you are editing to appear,
+   because a doc is suspect until the commit that re-reads it lands.
+
    A marker covers **the line that carries it**, so put it at the end of the
    line making the claim; a claim on the next line is judged on its own. No
    marker is a way to silence a path that is simply stale — that is an edit, not

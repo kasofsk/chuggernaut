@@ -111,6 +111,13 @@
 #   .chug/tasks/check-doc-facts.sh            # every tracked *.md (CI, the gate)
 #   .chug/tasks/check-doc-facts.sh --staged   # the staged *.md (.githooks/pre-commit)
 #   .chug/tasks/check-doc-facts.sh <file>...  # explicit, repo-relative (its test suite)
+#   .chug/tasks/check-doc-facts.sh --emit-paths [--staged|<file>...]
+#
+# `--emit-paths` judges nothing and prints `<file><tab><line><tab><path>` for
+# every path claim that RESOLVES, exit 0. It exists so the D7 staleness ledger
+# (.chug/tasks/doc-staleness.sh) asks check 1 "what paths does this doc name"
+# rather than answering it a second way; an unresolvable claim is omitted
+# because it is already check 1's finding.
 #
 # `--staged` is the hook's mode: scoped rather than whole-tree to keep the
 # hook's ~2s budget, with one honest gap — a commit that DELETES a path other
@@ -141,6 +148,17 @@ root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 	"    filesystem, so outside a checkout there is nothing to resolve against."
 cd "$root" || doc_facts_unrunnable "cannot enter the repo root $root"
 
+# `--emit-paths` is check 1's extractor with the verdict removed: it prints the
+# resolvable path claims and judges nothing, so .chug/tasks/doc-staleness.sh
+# reads one implementation of "what paths does this doc name" rather than
+# growing a second. Checks 2 and 3 are inert in that mode, so their indexes go
+# unbuilt.
+emit_paths=0
+if [ "${1:-}" = "--emit-paths" ]; then
+	emit_paths=1
+	shift
+fi
+
 # --- The tracked-path index check 1 resolves against -------------------------
 # `tracked_roots` is the `|`-delimited set of top-level entries a path claim may
 # start with; a token rooted anywhere else belongs to some other repo.
@@ -166,21 +184,23 @@ path_tracked() {
 # file. The literal must terminate the initializer, so an expression-valued
 # const (`16 * 1024 * 1024`) is absent rather than half-read, and a doc stating
 # its arithmetic result is not second-guessed.
-git grep -hE \
-	'^[[:space:]]*pub const [A-Z][A-Z0-9_]*[[:space:]]*:[^=]*=[[:space:]]*[0-9][0-9_]*(_?[ui](8|16|32|64|size))?[[:space:]]*;' \
-	-- '*.rs' 2>/dev/null \
-	| awk '
-		{
-			name = $0
-			sub(/^[[:space:]]*pub const /, "", name)
-			sub(/[[:space:]]*:.*$/, "", name)
-			value = $0
-			sub(/^[^=]*=[[:space:]]*/, "", value)
-			sub(/[^0-9_].*$/, "", value)
-			gsub(/_/, "", value)
-			if (name != "" && value != "") print name "\t" value
-		}
-	' | sort -u >"$const_index" || : >"$const_index"
+if [ "$emit_paths" -eq 0 ]; then
+	git grep -hE \
+		'^[[:space:]]*pub const [A-Z][A-Z0-9_]*[[:space:]]*:[^=]*=[[:space:]]*[0-9][0-9_]*(_?[ui](8|16|32|64|size))?[[:space:]]*;' \
+		-- '*.rs' 2>/dev/null \
+		| awk '
+			{
+				name = $0
+				sub(/^[[:space:]]*pub const /, "", name)
+				sub(/[[:space:]]*:.*$/, "", name)
+				value = $0
+				sub(/^[^=]*=[[:space:]]*/, "", value)
+				sub(/[^0-9_].*$/, "", value)
+				gsub(/_/, "", value)
+				if (name != "" && value != "") print name "\t" value
+			}
+		' | sort -u >"$const_index" || : >"$const_index"
+fi
 
 # The tree's value for a name, or nothing when it names no integer `pub const`
 # or names two that disagree — both are refusals to judge, never a guess.
@@ -197,27 +217,30 @@ const_value() {
 # claim is about what merged, and only git knows that offline. A shallow
 # checkout or a history with no such subject leaves check 3 with nothing to
 # resolve against, so it stands down rather than reporting every row.
-git log --format='%s' 2>/dev/null \
-	| awk '/^job\/[0-9]+:[ \t]/ { sub(/^job\//, ""); sub(/:.*$/, ""); print }' \
-	| sort -u >"$job_index" || : >"$job_index"
-job_index_usable=1
-[ -s "$job_index" ] || job_index_usable=0
-[ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo unknown)" = "false" ] \
-	|| job_index_usable=0
+job_index_usable=0
+if [ "$emit_paths" -eq 0 ]; then
+	git log --format='%s' 2>/dev/null \
+		| awk '/^job\/[0-9]+:[ \t]/ { sub(/^job\//, ""); sub(/:.*$/, ""); print }' \
+		| sort -u >"$job_index" || : >"$job_index"
+	job_index_usable=1
+	[ -s "$job_index" ] || job_index_usable=0
+	[ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo unknown)" = "false" ] \
+		|| job_index_usable=0
 
-# The job whose commit cannot exist yet: this one. It joins the index rather
-# than being compared beside it, so the lookup stays one `grep -qx` and cannot
-# be broken by the caller's `IFS`. `$JOB_ID` is set in every task container and
-# the branch name carries it in a local checkout.
-case "${JOB_ID:-}" in
-"" | *[!0123456789]*) : ;;
-*) echo "$JOB_ID" >>"$job_index" ;;
-esac
-_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
-case "${_branch#job/}" in
-"$_branch" | "" | *[!0123456789]*) : ;;
-*) echo "${_branch#job/}" >>"$job_index" ;;
-esac
+	# The job whose commit cannot exist yet: this one. It joins the index rather
+	# than being compared beside it, so the lookup stays one `grep -qx` and cannot
+	# be broken by the caller's `IFS`. `$JOB_ID` is set in every task container and
+	# the branch name carries it in a local checkout.
+	case "${JOB_ID:-}" in
+	"" | *[!0123456789]*) : ;;
+	*) echo "$JOB_ID" >>"$job_index" ;;
+	esac
+	_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+	case "${_branch#job/}" in
+	"$_branch" | "" | *[!0123456789]*) : ;;
+	*) echo "${_branch#job/}" >>"$job_index" ;;
+	esac
+fi
 
 job_merged() { # <seq>
 	grep -qx "$1" "$job_index"
@@ -243,7 +266,7 @@ fi
 
 files="$(printf '%s\n' "$files" | grep -v '^$' || true)"
 if [ -z "$files" ]; then
-	echo "check-doc-facts: no markdown to check ($mode) — nothing to do"
+	[ "$emit_paths" -eq 1 ] || echo "check-doc-facts: no markdown to check ($mode) — nothing to do"
 	exit 0
 fi
 
@@ -380,14 +403,19 @@ doc_facts_check_unlanded() { # <file> <line> <label>|<state>
 	return 0
 }
 
-# One `PATH` record: a finding, or silence when the token is not a claim this
-# checkout can judge.
-doc_facts_check_path() { # <file> <line> <token>
-	case "$3" in
+# The repo-relative path a backticked token claims, left in `path_claim`, or the
+# empty string when the token is not a claim this checkout can judge. Split out
+# of `doc_facts_check_path` so the staleness ledger (D7) resolves the same
+# population as check 1 instead of carrying a second answer to "what paths does
+# this doc name"; it sets a variable rather than printing so the caller pays no
+# subshell per token.
+doc_facts_path_claim() { # <token>
+	path_claim=""
+	case "$1" in
 	*/*) : ;;
 	*) return 0 ;; # symbol / no-slash token — not a path claim
 	esac
-	case "$3" in
+	case "$1" in
 	*" "* | *"://"*) return 0 ;;                       # not a bare path
 	*"*"* | *"?"*) return 0 ;;                         # glob
 	*"{"* | *"}"* | *"<"* | *">"*) return 0 ;;         # {placeholder} / <name>
@@ -397,7 +425,7 @@ doc_facts_check_path() { # <file> <line> <token>
 	/* | "~"*) return 0 ;;                             # container/node path, not this tree
 	esac
 	# `crates/x/y.rs:193` and `:42-79` cite a line; the file is still checked.
-	_p="$3"
+	_p="$1"
 	case "$_p" in
 	*:*)
 		_suffix="${_p##*:}"
@@ -412,9 +440,30 @@ doc_facts_check_path() { # <file> <line> <token>
 	*"|${_p%%/*}|"*) : ;;
 	*) return 0 ;; # rooted somewhere other than this checkout
 	esac
-	path_tracked "$_p" && return 0
+	path_claim="$_p"
+	return 0
+}
+
+# One `PATH` record: a finding, or silence when the token is not a claim this
+# checkout can judge.
+doc_facts_check_path() { # <file> <line> <token>
+	doc_facts_path_claim "$3"
+	[ -n "$path_claim" ] || return 0
+	path_tracked "$path_claim" && return 0
 	echo "!!! check-doc-facts: $1:$2: referenced path not found -> $3"
 	path_findings=$((path_findings + 1))
+	return 0
+}
+
+# One `PATH` record in `--emit-paths` mode: `<file><tab><line><tab><path>` for
+# each claim that RESOLVES, and nothing for one that does not — an unresolvable
+# path is check 1's finding, and reporting it again as suspect would double-count
+# it.
+doc_facts_emit_path() { # <file> <line> <token>
+	doc_facts_path_claim "$3"
+	[ -n "$path_claim" ] || return 0
+	path_tracked "$path_claim" || return 0
+	printf '%s\t%s\t%s\n' "$1" "$2" "$path_claim"
 	return 0
 }
 
@@ -443,8 +492,10 @@ for f in $files; do
 	checked=$((checked + 1))
 	out="$(doc_facts_scan "$f")"
 	case "$f" in
-	docs/design/*.md) out="$out
-$(doc_facts_scan_slices "$f")" ;;
+	docs/design/*.md)
+		[ "$emit_paths" -eq 1 ] || out="$out
+$(doc_facts_scan_slices "$f")"
+		;;
 	esac
 	while IFS= read -r rec; do
 		[ -n "$rec" ] || continue
@@ -452,6 +503,10 @@ $(doc_facts_scan_slices "$f")" ;;
 		rest="${rec#*:}"
 		ln="${rest%%:*}"
 		val="${rest#*:}"
+		if [ "$emit_paths" -eq 1 ]; then
+			if [ "$kind" = PATH ]; then doc_facts_emit_path "$f" "$ln" "$val"; fi
+			continue
+		fi
 		case "$kind" in
 		PATH) doc_facts_check_path "$f" "$ln" "$val" ;;
 		CONST) doc_facts_check_const "$f" "$ln" "$val" ;;
@@ -463,6 +518,8 @@ $(doc_facts_scan_slices "$f")" ;;
 	RECORDS
 done
 unset IFS
+
+[ "$emit_paths" -eq 0 ] || exit 0
 
 if [ "$path_findings" -gt 0 ]; then
 	echo "!!! check-doc-facts: $path_findings stale path claim(s)."

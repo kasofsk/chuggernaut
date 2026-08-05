@@ -323,6 +323,28 @@ hook_check_doc_facts() {
 	hook_ran doc-facts
 }
 
+# --- staleness ledger (advisory) ----------------------------------------------
+# Advisory here and nowhere near rejecting, and the reason is arithmetic rather
+# than taste: before the commit the staged doc still carries its OLD last commit,
+# so a doc being edited right now reads as suspect and NO edit made in this
+# commit can clear it. A rejection nobody can satisfy except with `--no-verify`
+# is worse than no ledger at all (design #415 D7). `--staged` also keeps it to
+# the docs in hand — ~0.2s against ~0.9s whole-tree, inside the hook's budget.
+hook_check_staleness() {
+	_md="$(hook_staged_matching '*.md')"
+	[ -n "$_md" ] || return 0
+	[ -x .chug/tasks/doc-staleness.sh ] || return 0
+	_out="$(.chug/tasks/doc-staleness.sh --staged 2>&1)"
+	_rc=$?
+	if [ "$_rc" -eq 2 ]; then
+		hook_warn "staleness ledger could not run — SKIPPED:"
+		printf '%s\n' "$_out" | tail -n 3
+	else
+		printf '%s\n' "$_out"
+	fi
+	hook_ran staleness
+}
+
 # --- doc lint (advisory) ------------------------------------------------------
 # CI runs this only for `docs`/`design` jobs, so blocking here would reject
 # commits CI accepts. Report and move on.
@@ -350,6 +372,7 @@ hook_check_comments
 hook_check_modules
 hook_check_duplication
 hook_check_doc_facts
+hook_check_staleness
 hook_check_docs
 
 ended_ms="$(hook_now_ms)"

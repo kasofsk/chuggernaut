@@ -293,7 +293,7 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-20 of them, driving the real script inside a throwaway repo against stubbed
+21 of them, driving the real script inside a throwaway repo against stubbed
 `cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
 
@@ -313,10 +313,14 @@ these suites cover.
   `agent-rust` container: **36.8s for the 17 that existed then**, of which
   `deploy/prod/update-refresh.test.sh` alone is 27.1s (stub polling sleeps);
   `android-proof.test.sh` (#367 A2) adds ~9s, most of it three deliberately short
-  emulator bounds it waits out. `check-doc-facts.test.sh` (#415 S1b, S5a) adds
-  0.45s for 63 cases — it stubs nothing, because all three checks it pins read a
+  emulator bounds it waits out. `check-doc-facts.test.sh` (#415 S1b, S5a, S6) adds
+  0.45s for 68 cases — it stubs nothing, because all three checks it pins read a
   throwaway `git init` fixture rather than the tree: check 3 gets its own, whose
   two `job/N:` commits *are* the history it resolves against.
+  `doc-staleness.test.sh` (#415 S6) adds 0.14s for 19, and its fixture is a
+  *history* rather than a tree — three commits written with an explicit
+  `GIT_COMMITTER_DATE`, because "the file moved after the doc did" cannot be
+  expressed in a repo that committed everything at once.
   The total is checked **between** suites, not after the loop — otherwise the
   real ceiling would be suite-count × per-suite cap — and the failure names the
   suites it therefore never ran. The per-suite cap is applied with `timeout`,

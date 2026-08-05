@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — S0, S1a, S1b, S1c, S2, S3, S5a, S5b and S8 landed; D1–D15 decided, S4 and S6–S12 intent.
+Status: IMPLEMENTED IN PART — S0, S1a, S1b, S1c, S2, S3, S5a, S5b, S6 and S8 landed; D1–D15 decided, S4, S7 and S9–S12 intent.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
 [D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
@@ -27,6 +27,14 @@ table in check 3's shape (nine retrofitted, plus this doc and
 demoted plans say what they are. What it
 deliberately did *not* do is invent a slice table for a doc that had none — see
 the [S5b correction](#correction--2026-08-05-job-445-s5b-the-head-retrofit).
+S6 landed on 2026-08-05 (job #446): `.chug/tasks/doc-staleness.sh` is the
+git-derived ledger, advisory in CI and in the hook, and at that job's base
+**30 of the 61 docs that make a file claim** came back suspect — 7 of them by a
+day or more. That number moves with every commit and is meant to. It blocks
+only on a doc the current diff edits, and [D7](#d7-the-staleness-ledger)'s
+pre-commit half of that rule turned out to be unclearable and was not built —
+see the
+[S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear).
 D13–D15 and S9–S12 were added on 2026-08-05
 by job #435, written against the tree at `810a91b`; their three measurements were
 read out of that commit and three claims in the ticket that proposed them did not
@@ -121,7 +129,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S4** | `docs/concepts.md` + the seed concept set + check 4 (definitional shape) | S3  <!-- intent --> |
 | **S5a** | Check 3 (slice ↔ merged job) — the detector for the drift this head suffered twice | **Landed** (job #444) — one shape, `**Landed** (job #N)` in a `docs/design/*.md` table row, resolved against the `job/N:` squash-merge subject; a doc with no slice table is silent. See the [S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split) |
 | **S5b** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1) | **Landed** (job #445) — 22 docs given a `Status:` line, nine given a lifted slice table, no table invented for a doc that had none. See the [S5b correction](#correction--2026-08-05-job-445-s5b-the-head-retrofit) |
-| **S6** | The staleness ledger (D7) | S3 |
+| **S6** | The staleness ledger (D7) | **Landed** (job #446) — `.chug/tasks/doc-staleness.sh`, sharing check 1's extractor through a new `--emit-paths` mode; **30 of 61** docs suspect, 7 of them by a day or more. Directory claims are out and the pre-commit block is not built, both on measurement. See the [S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear) |
 | **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | S5b |
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `docs/reference/style.md` / `docs/README.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded  <!-- absent --> |
 | **S9** | `docs/reference/docs.md` <!-- intent --> — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | S3, S5b |
@@ -130,7 +138,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Nine rows are landed — S0, S1a, S1b, S1c, S2, S3, S5a, S5b and S8.** Every other row
+**Ten rows are landed — S0, S1a, S1b, S1c, S2, S3, S5a, S5b, S6 and S8.** Every other row
 above is intent, marked as such per docs/reference/style.md's doc-claim rule — which this
 document is partly written to make enforceable. This sentence read *six* and omitted
 S3 until job #444 corrected it, four jobs after S3 merged: a count in the head is
@@ -1790,3 +1798,110 @@ whole-tree over 69 markdown files. This document's own S5b row is the second
 user of [D10](#d10-the-implementing-job-owns-the-update)'s same-commit
 exemption — the S5a row was the first, and it was written to make this one
 possible.
+
+## Correction — 2026-08-05, job #446 (S6: the ledger, and the block that could not clear)
+
+[S6](#slices) landed as `.chug/tasks/doc-staleness.sh`. What
+[D7](#d7-the-staleness-ledger) decided survives intact: the ledger is derived
+from git and nothing else, it says **suspect** rather than wrong, and no author
+maintains anything. Three things it decided in the abstract did not survive
+contact with the measurement, and this section records all three rather than
+quietly widening or narrowing the rule.
+
+### It is a second script, not a fourth check
+
+`check-doc-facts.sh` has one contract — a non-zero exit means a doc states
+something **false**. Suspicion is not falsity, and folding a maybe into a gate
+whose every other finding is a certainty devalues the certainties. So the ledger
+is its own script with its own exit meaning, and the two share the one thing
+that must not fork: the answer to *what paths does this doc name*.
+
+That answer is check 1's, reached through a new `check-doc-facts.sh
+--emit-paths` — the extractor with the verdict removed, printing
+`<file><tab><line><tab><path>` for every claim that resolves. Same backticked
+tokens, same refused false-positive classes, same `<!-- intent -->` /
+`<!-- runtime -->` / `<!-- absent -->` suppression, same resolution against
+`git ls-files`. A claim that does **not** resolve is omitted, so it is reported
+once as check 1's error and never again as a suspicion.
+
+### Only file claims are judged, and the numbers are why
+
+Measured whole-tree at this commit's base, 69 tracked `*.md`, of which **61**
+make at least one resolvable path claim (1,967 claim sites, 316 distinct paths):
+
+| Path set | Suspect docs | Suspect claims |
+| --- | --- | --- |
+| Every resolvable claim, directories included | **35 of 61** | 177 of 1,967 |
+| File claims only | **30 of 61** | 104 of 1,718 |
+
+The first row is not a signal. A directory's "last commit" is the newest commit
+under an open set, so `docs/`, `.chug/` and `web/` are newer than nearly every
+doc nearly always — the top of that list read `docs/design moved`, which is true
+of any commit that edits any design doc. Check 1 keeps directory claims because
+*existence* is a fact about a directory; movement is not. So the ledger reads
+only claims that name a tracked **file**, which is the narrowing
+[what would refute this](#what-would-refute-this) called for, applied before
+shipping rather than after.
+
+**30 of 61 is a usable signal, but only because of how it is ordered.** Ranked
+by the date of the newest mover, the list is worthless: this repo lands ~15 jobs
+a day, so everything touched today floats to the top and the doc nobody has
+opened in a fortnight sinks. Ranked by the **gap** — how long the newest mover
+has sat unread — the same 30 rows separate cleanly: **7 sit a day or more
+behind**, led by `.claude/skills/claim/SKILL.md` and
+`.claude/skills/local-web-tweak/SKILL.md` at 12 days, and the remaining 23 are
+same-day churn. Nothing is filtered by that: the gap is printed on every row and
+the counts are printed in the header, so a reader draws the line rather than
+inheriting a constant from the script. A threshold would have been the easy
+version and the wrong one — it would hide a doc and a file that genuinely
+diverged inside one day.
+
+**The count is a flow, not a stock, and the landing commit proves it.** This
+job's own commit touches `.chug/tasks/ci.sh`, `check-doc-facts.sh` and
+`.githooks/pre-commit`, which between them are named by a great many docs — so
+the moment it landed the ledger read **46 of 61** rather than 30, with the same
+7 at a day or more. That is the correct answer and not a regression: the docs
+naming those gates genuinely have not been re-read against them. A reader
+comparing two runs is comparing two trees, which is why the *gap* column and the
+day-or-more split matter more than the headline.
+
+### The pre-commit block of D7 cannot clear, so it was not built
+
+[D7](#d7-the-staleness-ledger) says *"advisory in the pre-commit hook; a
+blocking finding only when the current diff touches a doc the ledger already
+marks suspect."* The second half does not work at the commit, and the reason is
+arithmetic rather than taste:
+
+- At the hook, the staged doc still carries its **old** last commit. So every
+  doc being edited is suspect, and **no edit made in this commit can clear it** —
+  the thing that clears it is the commit the hook is refusing. The only escape
+  is `git commit --no-verify`, which also disables the comment lint, the
+  doc-fact check and the formatting. That is strictly worse than no ledger.
+
+So the hook **reports and never rejects**. In CI the same rule is
+non-vacuous and clearable, and it is wired: `--gate <docs the diff touches>`
+exits 1 when one of them is still suspect, which requires the branch to have
+edited the doc and *then* changed a file it names. Re-reading the doc and
+committing it again clears the row, which is the fix anyway.
+
+One wider rule was considered and rejected: block when the diff touches a
+**file** that some doc names, making that doc newly suspect. It is
+non-circular and clearable, but it fires on nearly every code change — which is
+precisely the "fails for history nobody caused" failure D7 named, arriving by a
+different door.
+
+### Cost, and where it runs
+
+0.85s whole-tree, the same order as the doc-fact gate beside it, and ~0.2s in
+`--staged`. Both halves of the comparison are one `git log` invocation: the
+whole history walked once with `--name-only` is 0.05s, against ~0.5s for one
+`git log -1` per distinct path, so the loop the brief warned about never had to
+exist. `%cs` rides along on the same pass so the report can name the date
+without a second call — mawk has no `strftime`, and mawk is what the gate's
+Debian container runs. That cost fits the hook's ~2s budget, so it is advisory
+**there as well as in CI**, not CI-only.
+
+### What it does not do
+
+It does not fix anything it finds. The 30 rows are a reading list and a later
+job's work — and [S12](#slices), the inbound-reference count, is still intent.

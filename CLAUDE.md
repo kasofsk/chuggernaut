@@ -78,15 +78,16 @@ the absence of a workflow file.
   stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
   diff touching Rust paths runs the cargo gate, and a doc/config-only diff runs
   neither and gates in seconds.
-- `.chug/tasks/ci.sh` also runs six pure-shell gates **before** those diff-aware
+- `.chug/tasks/ci.sh` also runs seven pure-shell gates **before** those diff-aware
   stages, so a web-only or docs-only change is still gated: the `.chug/jobs/*.yaml`
   version-skew check (spec §14.3 — **advisory and early**, see below), the
   `docs/reference/modules.md` registry check (`.chug/tasks/check-modules.sh`),
   `.chug/tasks/check-duplication.sh` — copy-paste
   detection via a pinned `jscpd@5.0.5` at `threshold: 0` (docs/reference/style.md Tier 1;
   ~30ms for the whole repo, so it is unconditional) — `.chug/tasks/check-comments.sh`,
-  the comment lint, `.chug/tasks/check-doc-facts.sh`, the doc-fact gate, and
-  since #385 **the repo's 20 `*.test.sh` shell suites**.
+  the comment lint, `.chug/tasks/check-doc-facts.sh`, the doc-fact gate,
+  `.chug/tasks/doc-staleness.sh`, the staleness ledger, and
+  since #385 **the repo's 21 `*.test.sh` shell suites**.
   Any clone fails the gate.
 - **A doc's claims about the tree are gated on every job, whole-tree, as an
   error.** `.chug/tasks/check-doc-facts.sh` resolves every backticked path claim
@@ -101,6 +102,21 @@ the absence of a workflow file.
   rule). An unparseable token is skipped silently, and a check that cannot run
   exits **2** as a `LINTER ERROR`, never as a clean tree. `doc-lint.sh` keeps
   markdown well-formedness, relative links and the design-filename shape.
+- **A doc whose subject moved after it did is *suspect*, and suspect is not
+  wrong.** `.chug/tasks/doc-staleness.sh` (#415 D7, job #446) is the git-derived
+  ledger: for each doc, the tree **files** it names, and whether any of them has
+  a commit newer than the doc. Nothing is declared and nothing is maintained —
+  no `last-verified:` front matter, no dates in prose. It reads check 1's path
+  set through `check-doc-facts.sh --emit-paths` rather than answering "what paths
+  does this doc name" a second time, and it is **advisory**: the whole-tree
+  counts print on every job, the reading list itself is `.chug/tasks/doc-staleness.sh`,
+  and the pre-commit hook only reports. The one blocking case is `--gate` on a doc
+  **this diff edits** that is still suspect — which needs the branch to have
+  edited the doc and *then* changed a file it names. It blocks nowhere else on
+  purpose: failing a build for history nobody in the commit caused is how a
+  ledger gets disabled, and at the commit no edit could clear it anyway. Only
+  file claims are judged — a directory is newer than every doc the moment
+  anything under it changes, so it is a constant, not a signal.
 - **A slice table cannot claim a job that never merged.** Check 3 (#415 S5a,
   job #444) resolves `**Landed** (job #N)` in a `docs/design/*.md` table row
   against a `job/N: {type}` squash-merge commit, and refuses a head saying
@@ -154,7 +170,8 @@ the absence of a workflow file.
 - **The fast half of that gate also runs at the commit.** `.githooks/pre-commit`
   formats staged Rust/web files with `rustfmt`/`prettier` and re-stages them,
   then runs the comment lint (`--staged` mode), the registry check, the
-  duplication check and the doc-fact check (`--staged`, +0.16s) over the staged
+  duplication check, the doc-fact check (`--staged`, +0.16s) and the staleness
+  ledger (`--staged`, advisory) over the staged
   diff — ~2s, so an agent learns about
   a stray `//` before it exits instead of a rework cycle later. `prettier` runs
   from `web/` so `web/.prettierignore` applies: the Rust-emitted

@@ -623,6 +623,46 @@ doc_facts_gate() {
 	.chug/tasks/check-doc-facts.sh
 }
 
+# --- staleness ledger (design #415 D7) ---------------------------------------
+# Delegates to .chug/tasks/doc-staleness.sh: for each doc, the tree files it
+# names, and whether any of them has a commit newer than the doc. That is
+# SUSPICION, not falsity — the doc-fact gate above answers "is this claim false
+# now" and cannot answer "has anyone re-read this since the code moved", which
+# is the class M1 and M3 both were. So the ledger prints its whole-tree counts
+# and blocks on nothing except the docs THIS diff edits: failing a build for
+# history nobody in the commit caused is how a ledger gets disabled.
+#
+# Its path set is check 1's, read through `check-doc-facts.sh --emit-paths`, so
+# there is exactly one answer in the tree to "what paths does this doc name".
+# ~0.9s whole-tree, the same order as the gate above and for the same reason —
+# one `git log` pass over the history rather than one per path.
+doc_staleness_ledger() {
+	[ -x .chug/tasks/doc-staleness.sh ] || {
+		echo "!!! ci: .chug/tasks/doc-staleness.sh is missing or not executable"
+		exit 1
+	}
+	# With no usable diff there is nothing to gate ON, and gating the whole tree
+	# instead would be exactly the "fails for history nobody caused" the design
+	# rules out. Report and move on — unlike a falsity check, an unread ledger
+	# costs nothing that this job introduced.
+	[ "$diff_ok" -eq 1 ] || {
+		.chug/tasks/doc-staleness.sh
+		return 0
+	}
+	_md=""
+	IFS='
+'
+	for f in $changed; do
+		case "$f" in
+		*.md) _md="$_md$f
+" ;;
+		esac
+	done
+	set -- $_md
+	unset IFS
+	.chug/tasks/doc-staleness.sh --gate "$@"
+}
+
 # --- shell test suites (job #385) ---------------------------------------------
 # The tests OF THE GATES. Until #385 nothing executed a single `*.test.sh` —
 # not this gate, not .githooks/pre-commit — so a regression in check-comments.sh,
@@ -826,6 +866,10 @@ comments_gate
 # diff that lands a stale path or a stale constant, and it never reaches cargo.
 # ~0.6s for the whole tree.
 doc_facts_gate
+# The staleness ledger straight after, on the same population: the gate says
+# which claims are false, the ledger says which docs nobody has re-read since
+# their subject moved. Advisory except on the docs this diff edits.
+doc_staleness_ledger
 # The shell suites last among the pure-shell gates: they are the slowest of them
 # (~37s against ~2s), so the cheap lints report first, and check-duplication.test.sh
 # reuses the npx cache duplication_gate has just warmed.

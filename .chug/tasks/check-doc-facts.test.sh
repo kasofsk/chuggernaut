@@ -36,6 +36,18 @@ check() { # <name> <expected-rc> <actual-rc> <output-file> <must-contain>
 	fi
 }
 
+check_absent() { # <name> <expected-rc> <actual-rc> <output-file> <must-NOT-contain>
+	name="$1"; want="$2"; got="$3"; out="$4"; needle="$5"
+	if [ "$got" = "$want" ] && ! grep -qF "$needle" "$out"; then
+		echo "ok   - $name (rc=$got)"
+		pass=$((pass + 1))
+	else
+		echo "FAIL - $name: rc want=$want got=$got; expected output NOT to contain: $needle"
+		echo "----- output -----"; cat "$out"; echo "------------------"
+		fail=$((fail + 1))
+	fi
+}
+
 if ! command -v git >/dev/null 2>&1; then
 	echo "skip - every case (git unavailable)"
 	echo
@@ -393,6 +405,38 @@ git -C "$REPO" add docs/design >/dev/null 2>&1 || true
 run_sut_repo docs/design/909-no-history.md
 check "no job/N commit in the history stands check 3 down" 0 "$RC" "$OUT" \
 	"check-doc-facts: clean"
+
+# --- `--emit-paths`: check 1's extractor with the verdict removed -------------
+# The mode the staleness ledger (design #415 D7, S6) reads, so there is one
+# answer in the tree to "what paths does this doc name". It must agree with
+# check 1 on every classification and disagree with it on every verdict.
+
+# 17. It prints `<file><tab><line><tab><path>` for a claim that resolves, and
+#     exits 0 rather than judging.
+write_doc emit-ok.md 'See `crates/pkg/src/lib.rs` for it.'
+run_sut_repo --emit-paths docs/emit-ok.md
+check "--emit-paths emits a resolving claim with its line" 0 "$RC" "$OUT" \
+	"docs/emit-ok.md	3	crates/pkg/src/lib.rs"
+
+# 18. An UNRESOLVABLE claim is omitted, not emitted: it is already check 1's
+#     finding, and the ledger reporting it again would double-count it.
+run_sut_repo --emit-paths docs/untracked.md
+check_absent "--emit-paths omits what check 1 already fails on" 0 "$RC" "$OUT" \
+	"crates/pkg/target/built.rs"
+
+# 19. The classification is check 1's, not a looser one — a glob is no more a
+#     path claim here than it is there.
+run_sut_repo --emit-paths docs/globs.md
+check_absent "--emit-paths refuses the same false-positive classes" 0 "$RC" "$OUT" \
+	"crates"
+
+# 20. It judges nothing: a file check 1 FAILS on emits at exit 0 beside a clean
+#     one, and prints no finding.
+run_sut_repo --emit-paths docs/untracked.md docs/emit-ok.md
+check "--emit-paths never reports a verdict" 0 "$RC" "$OUT" \
+	"docs/emit-ok.md	3	crates/pkg/src/lib.rs"
+check_absent "--emit-paths prints no finding line" 0 "$RC" "$OUT" \
+	"!!! check-doc-facts:"
 
 # --- A prerequisite that is missing is loud, and is not a pass ----------------
 # 16. Outside a git checkout the check refuses to judge rather than falling back
