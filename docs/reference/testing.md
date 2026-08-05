@@ -293,7 +293,8 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-21 of them, driving the real script inside a throwaway repo against stubbed
+21 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
+a throwaway repo against stubbed
 `cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
 
@@ -314,13 +315,13 @@ these suites cover.
   `deploy/prod/update-refresh.test.sh` alone is 27.1s (stub polling sleeps);
   `android-proof.test.sh` (#367 A2) adds ~9s, most of it three deliberately short
   emulator bounds it waits out. `check-doc-facts.test.sh` (#415 S1b, S4, S5a, S6)
-  adds 0.65s for 82 cases (re-measured 2026-08-05 on the same container, with
-  check 4's fourteen) — it stubs nothing, because all four checks it pins read a
+  adds 0.65s (re-measured 2026-08-05 on the same container, after check 4's cases
+  landed) — it stubs nothing, because all four checks it pins read a
   throwaway `git init` fixture rather than the tree: check 3 gets its own, whose
   two `job/N:` commits *are* the history it resolves against, and check 4 a third
   holding the registry, the doc that owns its one registered term, and a second
   doc to write about it from.
-  `doc-staleness.test.sh` (#415 S6) adds 0.14s for 19, and its fixture is a
+  `doc-staleness.test.sh` (#415 S6) adds 0.14s, and its fixture is a
   *history* rather than a tree — three commits written with an explicit
   `GIT_COMMITTER_DATE`, because "the file moved after the doc did" cannot be
   expressed in a repo that committed everything at once.
@@ -330,6 +331,20 @@ these suites cover.
   which is *probed* before the stage announces the cap: no working `timeout`
   fails the stage rather than silently running the suites unbounded, so the
   announcement can never claim a bound that is not in force.
+- **How many cases a suite holds is not written down here — run it.** How the
+  answer arrives is a property of the suite, not of the tree: many end by
+  printing their own tally (`check-doc-facts.test.sh` prints `passed N, failed
+  N`), while older ones only announce `all cases pass` or `ALL PASS` and so
+  answer nothing at all. Either way the runtime is the cheaper oracle. Two
+  reviewers deriving this suite's total by reading its invocation sites got two
+  different answers on the same file, and the standing number they jointly
+  condemned turned out to be exactly what the suite printed at the base it
+  described — wrong only because the suite had grown since
+  ([#415](../design/415-knowledge-architecture.md)'s
+  [job #450 finding](../design/415-knowledge-architecture.md#finding--2026-08-05-job-450-a-case-count-two-reviewers-derived-differently));
+  a total that is cheap to ask the runtime for does not belong transcribed in
+  prose. Timings and budgets are different — they are measurements of a host and
+  a date, so they are stated with both.
 - Each suite runs with `CHUG_CI_SHELL_SUITES=0`, so the real `ci.sh` that
   `ci.test.sh` drives does not recurse into the suites again. Setting it to 0 by
   hand opts the stage out, announced.

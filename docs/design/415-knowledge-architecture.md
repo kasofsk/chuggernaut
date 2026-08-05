@@ -51,6 +51,16 @@ on **three** classes rather than [D9](#d9-the-evaluator-judges-only-what-a-scrip
 two, and the doc-table paths S7's brief said to fix were already correct —
 job #441 had fixed them. See the
 [S7 correction](#correction--2026-08-05-job-448-s7-the-instructions-and-the-evaluators-teeth).
+Job #450 landed no slice: it deleted every **suite case count** from this head
+and from `docs/reference/testing.md`. The `.chug/tasks/check-doc-facts.test.sh`
+total had drifted through three values, and two of job #449's reviewers derived
+it differently from each other — neither by running it. Running it at the base
+job #449 branched from reproduces the standing value the two were jointly
+correcting, so the number they condemned had been right for the tree it
+described and stale only because the suite had since grown. That is the count
+class [check 4 could not own](#what-check-4-cannot-do-and-what-took-its-slot),
+and its first real instance argues the reviewer-rule framing is too weak — see
+the [#450 finding](#finding--2026-08-05-job-450-a-case-count-two-reviewers-derived-differently).
 D13–D15 and S9–S12 were added on 2026-08-05
 by job #435, written against the tree at `810a91b`; their three measurements were
 read out of that commit and three claims in the ticket that proposed them did not
@@ -187,7 +197,7 @@ verdict is now byte-identical in an unbuilt checkout and in one carrying
 — **66 either way**, where the old check reported 313 unbuilt against 301 built.
 That is the divergence [resolving against git](#resolve-against-git-not-the-filesystem)
 was for. Both markers work and are line-scoped; `.chug/tasks/doc-lint.test.sh` grew
-11 cases covering the classes, the two markers and the git-not-filesystem
+cases covering the classes, the two markers and the git-not-filesystem
 property.
 
 Three corrections to what is written below, all discovered by re-measuring:
@@ -221,11 +231,16 @@ Three corrections to what is written below, all discovered by re-measuring:
 
 ### S1c as landed
 
-Check 2 is **rule 5 of `.chug/tasks/doc-lint.sh`**, beside check 1 rather than
-in a new script, because [S1b](#slices) moves both together. Still a warning,
-still `docs`/`design`-scoped. `.chug/tasks/doc-lint.test.sh` — which #433 created
-for check 1 — now covers both at 51 cases in **0.46s**, well inside CI's 60s
-per-suite cap.
+Check 2 landed as **rule 5 of `.chug/tasks/doc-lint.sh`**, beside check 1 rather
+than in a new script, because [S1b](#slices) moves both together — and it did:
+both checks and the cases covering them now live in `.chug/tasks/check-doc-facts.sh`
+and `.chug/tasks/check-doc-facts.test.sh` (job #438), whole-tree and blocking.
+`.chug/tasks/doc-lint.test.sh` — which #433 created for check 1 — covered both
+in well under CI's 60s per-suite cap. **No case count is stated here**:
+`.chug/tasks/check-doc-facts.test.sh` prints its own `passed N, failed N` total
+on every run, and transcribing it is the
+defect recorded in the
+[job #450 finding](#finding--2026-08-05-job-450-a-case-count-two-reviewers-derived-differently).
 
 Re-measured on this base rather than carried from [M3](#the-problem-measured):
 `*_SCHEMA_EPOCH` is mentioned **105 times across 16 markdown files**
@@ -2141,3 +2156,116 @@ is not a second definition, the answer is a **smaller registered set**, not a
 cleverer regex. One more, learned here: if authors start writing definitions in
 a third shape to stay under the gate, the rule has taught avoidance rather than
 ownership, and the registry — not the shape list — is what to shrink.
+
+## Finding — 2026-08-05, job #450 (a case count two reviewers derived differently)
+
+**The first real instance of the count class, and it is worse than
+[check 4's dropped rule](#what-check-4-cannot-do-and-what-took-its-slot)
+assumed.** The number of cases in `.chug/tasks/check-doc-facts.test.sh` — the
+suite for this design's own checks — was stated in two documents, in three
+successive values, none of them derived twice the same way. Job #449 spent its
+**fourth and final** evaluation cycle on it, and the two reviewers who blocked on
+it **did not agree with each other**:
+
+| Cycle | Derivation shown | Total | What the suite prints |
+| --- | --- | --- | --- |
+| 3 | 51 static invocations + 28 from loops | **79** | no base, before or after |
+| 4 | 50 + 9×2 + 10 + 4 | **82** | #449's branch, and this one |
+| — | the standing value both were correcting, which cycle 4 derived as three high | **68** | the base #449 branched from |
+
+Both reviewers showed their arithmetic. Both were reading the same file. Neither
+ran it. This job ran it, at both bases, and the fourth column is the result:
+`passed 68, failed 0` at `7bb86df` (the tip of `main` #449 branched from) and
+`passed 82, failed 0` here, #449 having added fourteen cases in between.
+
+So one of the two derivations was right — and **its supporting claim was not**.
+The standing 68 was not three high; it was exactly what the suite printed at the
+base it described, and it went wrong only because the suite grew underneath it.
+A count read out of the source was used to condemn a count that a thirty-second
+run would have vindicated.
+
+### Why reading it is genuinely hard, and this is the point
+
+The failure is not carelessness — it is that *"how many cases does this suite
+have"* has **no single answer in the source**. At this base the same file
+supports three defensible denominators, two of which are not what the suite
+reports:
+
+- **54** call sites of the two assertion helpers, `check` and `check_absent`
+  (`grep -cE '^[[:space:]]*check(_absent)?[[:space:]]'`);
+- **44** numbered `# N.` case headings, the file's own idea of a *case*, several
+  of which group more than one assertion (`grep -cE '^# [0-9]+\.'`);
+- **82** assertions actually executed, because some call sites sit inside `for`
+  loops over shape lists — the only one of the three the suite itself reports.
+
+A reviewer counting sites, a reviewer counting loop expansions and a reader
+taking the printed total are counting three different things while all believing
+they are checking the same claim. Two competent readers reaching two answers is
+the expected outcome of that, not an accident — and a number three successive
+authors derived three different ways is not a claim a reader can check.
+
+### What was done, and why it is (a) rather than (b)
+
+The present-tense counts are **deleted**, not marked:
+
+- `docs/reference/testing.md` states the suite's cost (`0.65s`, `0.14s`) and no
+  longer states its case totals; a bullet there now says the number is one
+  command away and names what makes timings different — a timing is a
+  measurement of a host and a date, so it is stated with both, while a total the
+  runtime prints on every run is not a measurement at all.
+- This document's head no longer states one either. The `S1c as landed` section
+  also claimed `.chug/tasks/doc-lint.test.sh` *"now covers both at 51 cases"*,
+  which had been false since [S1b](#slices) moved both checks and their cases
+  into `.chug/tasks/check-doc-facts.test.sh` (job #438) — the count outlived the
+  suite it counted.
+
+(b) — marking each count with the command that derives it — was rejected on this
+instance's own evidence. The marker convention assumes an author who can produce
+the number; here the derivation is the hard part, and **both reviewers who
+attempted it came unstuck on exactly that step**. A marker would have made two
+of three numbers re-runnable, not right. The suite prints `passed N, failed N`
+on every run, so the alternative to a transcribed count is not an unanswerable
+question — it is one command.
+
+**The body's counts stay, including the one immediately above.** `47 cases` in
+the [#438 correction](#correction--2026-08-05-job-438-s1b-landed-and-the-eleven),
+`63 cases in 0.45s` in the [#444
+correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split) and
+the **82** in the [#449
+correction](#correction--2026-08-05-job-449-s4-check-4-and-the-yield-it-does-not-have)
+are [D2](#d2-every-design-doc-opens-with-a-mutable-current-state-head) history:
+each was true at its own commit and is a record of what that slice cost, not a
+claim about today. #449's is verified correct here rather than edited out,
+which is what an append-only body means. That is also the trap — a reader
+comparing a dated body figure with a present-tense reference doc sees a
+contradiction that is not one. Only the **head** and the **reference docs**
+speak in the present tense, and only they are swept here.
+
+### What this says about D6
+
+[Check 4's substitution](#what-check-4-cannot-do-and-what-took-its-slot) argued
+that a script cannot decide whether a bare number is a count of something in the
+tree, so *"a count carries a marker"* stays a reviewer rule under
+[D9](#d9-the-evaluator-judges-only-what-a-script-cannot). **The first half still
+holds; no gate is proposed here and none should be.** What this instance refutes
+is the implicit second half — that a reviewer rule is *adequate*. Four reviewers
+across four cycles had this number in front of them; it survived, and the two
+who finally challenged it produced conflicting replacements, one of which
+condemned a figure that was true. The reviewer rule did not fail through
+inattention. It failed at its ceiling.
+
+So the rule is stated at full strength: **a count a reader cannot derive twice
+the same way does not belong in prose at all** — delete it and name the command,
+and reserve the marker for numbers whose derivation is a single unambiguous
+command (`21` suites is `git ls-files '*.test.sh' | wc -l`; a suite's case total
+is not anything you can grep). A count that is *correct* is not thereby safe:
+68 was correct, and fourteen new cases falsified it without touching the
+sentence that carried it. This is a strengthening of a reviewer rule, not a new
+mechanism, and it is deliberately not a gate: the reasoning above about what a
+script can decide has not changed.
+
+The self-referential part is worth stating plainly, because it is the argument.
+This is the document whose thesis is that prose making checkable claims about
+the tree must be checked — and the one uncheckable claim class it knowingly left
+to reviewers is the class that then drifted three times, inside its own
+documentation, under four reviews.
