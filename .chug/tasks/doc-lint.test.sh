@@ -7,10 +7,12 @@
 # fails, and a nonexistent code path only warns (still passes). A `.txt`
 # argument exercises the self-skip (no markdown to lint).
 #
-# The referenced-path cases (design #415 S1a) need git, because the check
-# resolves against `git ls-files` and not the filesystem. They run inside a
-# throwaway `git init` repo under $WORK/repo (`run_sut_repo`) so the fixture
-# owns what is tracked, and they are skipped whole if git is absent.
+# The referenced-path cases (design #415 S1a) and the constant-value cases
+# (S1c) need git, because both checks resolve against the index — `git ls-files`
+# and `git grep` — and not the filesystem. They run inside a throwaway
+# `git init` repo under $WORK/repo (`run_sut_repo`) so the fixture owns both
+# what is tracked and what the tree's constants are, and they are skipped whole
+# if git is absent.
 #
 # The design-filename rule (rule 4) matches on the *repo-relative* path, so its
 # cases run the script from inside $WORK with relative arguments (`run_sut_rel`)
@@ -225,7 +227,75 @@ else
 	check "a marker does not leak to the next line" 0 "$RC" "$OUT" \
 		"referenced path not found -> crates/dispatcher/src/state.rs"
 
-	# 17. Outside a git checkout the check refuses to judge rather than falling
+	# --- Constant values, design #415 D6 check 2 (S1c) ----------------------
+	# The fixture owns the tree's side: `CONFIG_SCHEMA_EPOCH` is 7 here, so
+	# every claim of 6 below is a mismatch and every claim of 7 agrees.
+	# `MAX_BLOB_BYTES` is expression-valued and `DUPLICATE_EPOCH` resolves to two
+	# disagreeing consts — both are refusals to judge, not findings.
+	printf 'pub const CONFIG_SCHEMA_EPOCH: u32 = 7;\npub const MAX_BLOB_BYTES: usize = 16 * 1024;\n' \
+		> "$REPO/crates/pkg/src/version.rs"
+	printf 'pub const DUPLICATE_EPOCH: u32 = 7;\n' > "$REPO/crates/pkg/src/one.rs"
+	printf 'pub const DUPLICATE_EPOCH: u32 = 8;\n' > "$REPO/crates/pkg/src/two.rs"
+	git -C "$REPO" add crates/pkg/src >/dev/null 2>&1 || true
+
+	# 17. Every recognised assertion shape, each disagreeing with the fixture:
+	#     one warning naming both values, and nothing else.
+	shape_n=0
+	for shape in \
+		'The epoch `CONFIG_SCHEMA_EPOCH` is `6` today.' \
+		'`CONFIG_SCHEMA_EPOCH` is currently 6.' \
+		'`CONFIG_SCHEMA_EPOCH` is already **6** in the tree.' \
+		'`CONFIG_SCHEMA_EPOCH` = **6** in the tree.' \
+		'`CONFIG_SCHEMA_EPOCH` == 6 in the tree.' \
+		'Bump `CONFIG_SCHEMA_EPOCH` (currently `6`) in the same commit.' \
+		'| `CONFIG_SCHEMA_EPOCH` | 6 | the job-type schema epoch |' \
+		'Version.rs holds `CONFIG_SCHEMA_EPOCH = 6` today.' \
+		'Version.rs holds `pub const CONFIG_SCHEMA_EPOCH: u32 = 6;` today.'; do
+		shape_n=$((shape_n + 1))
+		write_doc "shape-$shape_n.md" "$shape"
+		run_sut_repo "docs/shape-$shape_n.md"
+		check "mismatched value warns: $shape" 0 "$RC" "$OUT" \
+			"stale constant -> CONFIG_SCHEMA_EPOCH is 7 in the tree, not 6"
+		check "mismatched value warns exactly once: $shape" 0 "$RC" "$OUT" \
+			"0 error(s), 1 warning(s)"
+	done
+
+	# 18. A claim that agrees with the tree is silent, in both shapes.
+	write_doc agrees.md \
+		'The epoch `CONFIG_SCHEMA_EPOCH` is `7` today.' \
+		'Version.rs holds `CONFIG_SCHEMA_EPOCH = 7`.'
+	run_sut_repo docs/agrees.md
+	check "a matching value passes silently" 0 "$RC" "$OUT" "0 error(s), 0 warning(s)"
+
+	# 19. Everything that is not a value claim about today's tree stays silent.
+	#     A mention with no value is the class that must never warn (#415 M7);
+	#     the rest are shapes the check refuses to parse rather than guess.
+	quiet_n=0
+	for quiet in \
+		'The dispatcher compares `CONFIG_SCHEMA_EPOCH` before it merges.' \
+		'Bump `CONFIG_SCHEMA_EPOCH` 6 → 7 in the same commit.' \
+		'Bump `CONFIG_SCHEMA_EPOCH` to 9 when the parser changes.' \
+		'`CONFIG_SCHEMA_EPOCH` was 6 when job inputs landed.' \
+		'A config declaring `CONFIG_SCHEMA_EPOCH` >= 6 parks pre-Work.' \
+		'`CONFIG_SCHEMA_EPOCH` is 6th in the table.' \
+		'`PROJECT_IMAGE_SCHEMA_EPOCH` is 6 once the slice lands.' \
+		'`DUPLICATE_EPOCH` is 6 in one of the two files.' \
+		'`MAX_BLOB_BYTES` is 16384 bytes.' \
+		'`CONFIG_SCHEMA_EPOCH` is `6` <!-- intent -->'; do
+		quiet_n=$((quiet_n + 1))
+		write_doc "quiet-$quiet_n.md" "$quiet"
+		run_sut_repo "docs/quiet-$quiet_n.md"
+		check "not a value claim, stays silent: $quiet" 0 "$RC" "$OUT" \
+			"0 error(s), 0 warning(s)"
+	done
+
+	# 20. The claim must be on the line that names the constant.
+	write_doc next-line.md '`CONFIG_SCHEMA_EPOCH` is' '6 as of this writing.'
+	run_sut_repo docs/next-line.md
+	check "a value on the next line is not a claim" 0 "$RC" "$OUT" \
+		"0 error(s), 0 warning(s)"
+
+	# 21. Outside a git checkout the check refuses to judge rather than falling
 	#     back to the filesystem. $WORK is a plain temp dir, not a repo.
 	printf '# Plain\n\nCites `crates/pkg/src/lib.rs`.\n' > "$WORK/plain.md"
 	run_sut_rel plain.md

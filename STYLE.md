@@ -205,6 +205,12 @@ verify it in seconds and must name it when rejecting.
    | `<!-- intent -->` | designed, not built | a path a decision proposes and no commit has created |
    | `<!-- runtime -->` | correctly absent from git | build output, operator-owned files, anything a `.gitignore` excludes on purpose |
 
+   The same script checks a **restated constant**: a backticked
+   `SCREAMING_SNAKE_CASE` name that resolves to a `pub const` in the tree and is
+   asserted with a value on the same line must match it (also a warning today;
+   #415 S1b promotes it). A mention carrying no value is not a claim and is not
+   checked, and `<!-- intent -->` marks the value a slice will bump it *to*.
+
    A marker covers **the line that carries it**, so put it at the end of the
    line making the claim; a claim on the next line is judged on its own. Neither
    marker is a way to silence a path that is simply stale — that is an edit, not

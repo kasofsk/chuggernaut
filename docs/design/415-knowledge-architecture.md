@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — decisions taken with the operator 2026-08-04; S0, S1a and S8 landed (S8 reversing [D8](#decisions)), the rest is intent. See [Slices](#slices).
+Status: IMPLEMENTED IN PART — decisions taken with the operator 2026-08-04; S0, S1a, S1c and S8 landed (S8 reversing [D8](#decisions)), the rest is intent. See [Slices](#slices).
 
 Measured against the tree at `28e5aa1` (2026-08-04). Every number below was read
 out of that commit, not carried over from the brief; the commands are given so a
@@ -77,7 +77,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S0** | Triage `progress.md`: amend `spec.md` §5.1 (the artifact-store clause is false) and §10.2's single-age-key claim, repoint `.claude/skills/chug/SKILL.md`, then delete the file | **Landed** (job #432), in that order. §5.1 now states the NATS-internal store and keeps the S3/Minio deferral as its own claim; §10.2 names both age identities (§12.1 and the infrastructure appendix follow); the skill points at `spec.md` and the repo's docs |
 | **S1a** | Fix `doc-lint.sh` rule 4's four false-positive classes in place and resolve against git; the two markers. Still a warning, still `docs`/`design`-scoped | **Landed** (job #433) — the classes turned out to be five, and the whole-tree count fell 313 → 66. See [S1a as landed](#s1a-as-landed-re-measured) |
 | **S1b** | Move that logic into `check-doc-facts.sh` — pre-stage, every job, whole-tree, **error** — and delete rule 4 from `doc-lint.sh`. Once S2 has cleared the real findings | S1a, S2 |
-| **S1c** | Check 2 (constant values) + a `.test.sh` suite covering both | S1a |
+| **S1c** | Check 2 (constant values) + a `.test.sh` suite covering both | **Landed** (job #437) — check 2 is rule 5 of `doc-lint.sh`, a warning like check 1, and found **11** real mismatches across 5 design docs. See [S1c as landed](#s1c-as-landed) |
 | **S2** | The one-time sweep: the ~6 real path findings, the `*_SCHEMA_EPOCH` restatements, `state.rs` in its seven files; delete `spec_original.md` and `wiki/Welcome.md` | S1a |
 | **S3** | **The move** — every doc into `docs/`, per D12; updates the ~730 references (283 of them outside markdown, 134 for `STYLE.md` alone) and `check-modules.sh`'s own path | S1b, S2 |
 | **S4** | `docs/concepts.md` + the seed concept set + check 4 (definitional shape) | S3 |
@@ -87,7 +87,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `STYLE.md` / `NORTH-STAR.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Three rows are landed — S0, S1a and S8.** Every other row above is intent,
+**Four rows are landed — S0, S1a, S1c and S8.** Every other row above is intent,
 marked as such per STYLE.md's doc-claim rule — which this document is partly
 written to make enforceable.
 
@@ -128,6 +128,51 @@ Three corrections to what is written below, all discovered by re-measuring:
   stale paths as its subject rather than claiming they exist. Neither marker
   fits that — marking them `intent` would be false — so [S1b](#slices) cannot go
   whole-tree-error until it decides how a doc cites a path it is arguing about.
+
+### S1c as landed
+
+Check 2 is **rule 5 of `.chug/tasks/doc-lint.sh`**, beside check 1 rather than
+in a new script, because [S1b](#slices) moves both together. Still a warning,
+still `docs`/`design`-scoped. `.chug/tasks/doc-lint.test.sh` — which #433 created
+for check 1 — now covers both at 51 cases in **0.46s**, well inside CI's 60s
+per-suite cap.
+
+Re-measured on this base rather than carried from [M3](#the-problem-measured):
+`*_SCHEMA_EPOCH` is mentioned **105 times across 16 markdown files**
+(`git grep -o '_SCHEMA_EPOCH' -- '*.md'`), up from the 92/13 measured at
+`28e5aa1`. Of those, check 2 reports **11 real mismatches**, in five design docs
+— #308 (2), #311 (1), #313 (2), #321 (1), #322 (4), #355 (1) — and **no false
+positives** over all 70 tracked `.md`. They are left standing: [S2](#slices)
+owns the sweep and decides which are stale claims and which want
+`<!-- intent -->`. Two of the eleven are the ones this design was written
+about: #313's restatement of #311's Skew section, and #322's audit note.
+
+Three design decisions this slice owned, all resolved toward silence:
+
+- **A value assertion is one of two line-scoped shapes**, and nothing else: the
+  value inside the backticks (`` `NAME = 5` ``, `` `NAME: u32 = 5` ``, a quoted
+  `pub const` line), or the bare name in backticks followed immediately by
+  `= 5` / `== 5`, `is`/`is currently`/`is already`/`is now` `5`, a `(currently 5)`
+  that closes on the value, or `| 5 |` as the very next table cell. A **`2 → 3`
+  transition, a `bump … to 5`, a past tense, a bound and a value on the next
+  line are all skipped** — `bump … to 5` in particular names a *target*, so it
+  is right by construction until a later bump makes it wrong, and warning on it
+  would fire on correct intent. This is
+  [M7](#the-problem-measured)'s lesson applied before the first run rather than
+  after it.
+- **The tree's side is an index of every integer-literal `pub const` in a
+  tracked `.rs` file**, built with `git grep` for the same reason check 1 reads
+  `git ls-files`. A name resolving to **no** const is silent (a design doc's
+  proposed constant is not a claim about this tree); a name resolving to **two**
+  consts that disagree is silent (there is no way to pick); an
+  expression-valued const (`16 * 1024 * 1024`) never enters the index, so a doc
+  stating its arithmetic result is not second-guessed.
+- **A number written as a word is out of scope** and stays so. "epoch five" is
+  rare here and parsing it buys noise, not signal.
+
+Both markers suppress check 2 on the line that carries them, because they
+already suppress check 1 there — and `<!-- intent -->` is the right escape for a
+doc naming the epoch a slice will bump *to*.
 
 ---
 

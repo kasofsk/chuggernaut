@@ -44,6 +44,14 @@ update, one job type (`docs`) that maintains them.
    operator-owned file that git will never hold. Both are defined in STYLE.md's
    doc-claim rule; neither excuses a stale path.
 
+   **A constant's value you restate is a claim too.** The same script reads a
+   backticked `SCREAMING_SNAKE_CASE` name asserted with a value on the same line
+   (`` `CONFIG_SCHEMA_EPOCH` is 5 ``, `` `NAME = 5` ``, a `| 5 |` table cell)
+   against the `pub const` in the tree, so a restated epoch is checked wherever
+   it is cited. Link to the constant instead of copying it where you can; where
+   you must state it, `<!-- intent -->` is for the value a slice will bump it
+   to, never for one that has simply gone stale.
+
 4. **Prefer editing a doc to adding one.** A new page that duplicates an
    existing one is the doc-shaped version of a copy-paste clone. Add a page only
    when the subject has no home; then link it from the index that should reach
