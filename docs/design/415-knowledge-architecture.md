@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: PROPOSED — decisions taken with the operator 2026-08-04; no slice implemented.
+Status: IMPLEMENTED IN PART — decisions taken with the operator 2026-08-04; S0 and S8 landed (S8 reversing [D8](#decisions)), the rest is intent. See [Slices](#slices).
 
 Measured against the tree at `28e5aa1` (2026-08-04). Every number below was read
 out of that commit, not carried over from the brief; the commands are given so a
@@ -43,7 +43,7 @@ what can be checked mechanically is.**
 | **D5** | `CLAUDE.md` may **gloss and link**, never define | [D5](#d5-claudemd-may-gloss-never-define) |
 | **D6** | Four mechanical checks in one pure-shell `check-doc-facts.sh`, resolved against **git, not the filesystem** | [D6](#d6-four-mechanical-checks) |
 | **D7** | A **git-derived staleness ledger** marks docs *suspect*, not wrong | [D7](#d7-the-staleness-ledger) |
-| **D8** | Knowledge tags become **pointers, not payload** | [D8](#d8-tags-point-they-do-not-carry) |
+| **D8** | ~~Knowledge tags become **pointers, not payload**~~ — **reversed while landing** (job #416, [S8](#slices)): knowledge is delivered as **payload**, and `.chug/tags/` is empty | [D8](#d8-tags-point-they-do-not-carry), superseded by the [2026-08-04 correction](#correction--2026-08-04-job-416-d8-reversed-m1-and-m5-restated) |
 | **D9** | `review-docs-updated` gets **narrow, blocking** teeth | [D9](#d9-the-evaluator-judges-only-what-a-script-cannot) |
 | **D10** | The **implementing job** updates the design doc it implements | [D10](#d10-the-implementing-job-owns-the-update) |
 | **D11** | A **ratchet, not a flag day** | [D11](#d11-a-ratchet-not-a-flag-day) |
@@ -66,7 +66,7 @@ docs/
     NNN-*.md           mutable head + append-only body (D2)
   implementation-notes.md
 .chug/                 unchanged — a product interface, not a doc tree (D12)
-  prompts/  tags/  tasks/
+  prompts/  tasks/     (tags/ emptied by #416 when S8 reversed D8)
 wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 ```
 
@@ -74,7 +74,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 
 | Slice | What | Gate on |
 | --- | --- | --- |
-| **S0** | Triage `progress.md`: amend `spec.md` §5.1 (the artifact-store clause is false) and §10.2's single-age-key claim, repoint `.claude/skills/chug/SKILL.md`, then delete the file | — |
+| **S0** | Triage `progress.md`: amend `spec.md` §5.1 (the artifact-store clause is false) and §10.2's single-age-key claim, repoint `.claude/skills/chug/SKILL.md`, then delete the file | **Landed** (job #432), in that order. §5.1 now states the NATS-internal store and keeps the S3/Minio deferral as its own claim; §10.2 names both age identities (§12.1 and the infrastructure appendix follow); the skill points at `spec.md` and the repo's docs |
 | **S1a** | Fix `doc-lint.sh` rule 4's four false-positive classes in place and resolve against git; the two markers. Still a warning, still `docs`/`design`-scoped | — |
 | **S1b** | Move that logic into `check-doc-facts.sh` — pre-stage, every job, whole-tree, **error** — and delete rule 4 from `doc-lint.sh`. Once S2 has cleared the real findings | S1a, S2 |
 | **S1c** | Check 2 (constant values) + a `.test.sh` suite covering both | S1a |
@@ -84,12 +84,19 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S5** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1), check 3 (slice ↔ merged job) | S3 |
 | **S6** | The staleness ledger (D7) | S3 |
 | **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | S5 |
-| **S8** | Tags become pointers (D8). **This slice is job #87**, which stays its own job — see [D8](#d8-tags-point-they-do-not-carry) | S3 |
+| **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `STYLE.md` / `NORTH-STAR.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Nothing is implemented.** Every row above is intent, marked as such per
-STYLE.md's doc-claim rule — which this document is partly written to make
-enforceable.
+**Two rows are landed — S0 and S8.** Every other row above is intent, marked as
+such per STYLE.md's doc-claim rule — which this document is partly written to
+make enforceable.
+
+This head went stale **within a day of merging**: job #416 landed S8 on
+2026-08-04, appended its correction to the body per [D10](#d10-the-implementing-job-owns-the-update),
+and left the table above still saying nothing was implemented and still naming
+job #87 as live work. That is the drift **check 3** (slice ↔ merged job,
+[S5](#slices)) exists to catch, and check 3 does not exist yet — so a human had
+to notice. Recorded as evidence for the ordering, not filed away.
 
 ---
 

@@ -1569,7 +1569,9 @@ Git is a storage layer, not the center of gravity. The platform manages all bran
 
 **Branch cleanup:** `job/{seq}` branches are deleted by the dispatcher immediately after the squash-merge on Done and immediately after task cleanup on Revoked. Job branches are not retained after a terminal state is reached.
 
-No separate artifact store for v1. Binary artifact storage (S3/Minio) is deferred.
+**Artifact storage exists, and it is NATS-internal.** Per-task blobs (session transcripts, container logs), per-job attachments (§1.6) and work-container output archives (§3.1) live in the `artifacts` and `outputs` object stores (§1.5), gzip + age-encrypted at rest under the `age_artifacts` key. Those stores are for capture and observability, not for routing: they are written by harvest (and, for attachments, by an operator upload) and read back for display, never by a downstream job, so "Artifact passing" above remains the whole story for how one job's work reaches the next.
+
+**A separate binary artifact store (S3/Minio) is deferred** — see Appendix: Deferred. That is a distinct claim from the one above: work product still travels through VCS, and non-git output that must not go into VCS is bounded by the `outputs` ceiling (§1.5) rather than shipped to external storage.
 
 ---
 
@@ -1621,7 +1623,7 @@ The API layer is a bridge, not a service:
 1. **HTTP → NATS request-reply proxy**: translate authenticated HTTP requests into NATS requests, return responses. No orchestration logic in this layer.
 2. **NATS stream → SSE bridge**: subscribe to `job.events.*` streams, forward events to HTTP clients.
 3. **Authentication and authorization**: validate JWT cookies and enforce permission rules (see §7.1, §7.5).
-4. **Secret value encryption**: on `PUT /secrets/{name}`, encrypt the value with the age public key before forwarding. The API layer never sees the age private key or decrypted values.
+4. **Secret value encryption**: on `PUT /secrets/{name}`, encrypt the value with the age public key before forwarding. The API layer never sees the secrets age private key or decrypted values (§10.2).
 
 Implementation: axum. URL prefix: `/api/v1/`.
 
@@ -2248,7 +2250,7 @@ Image signing deferred.
 - Secrets exist in two places only: NATS KV (age-encrypted at rest) and container env vars (ephemeral, process-scoped)
 - Plaintext values never written to git, task records, logs, or event streams
 - Job definitions declare secret names only — never values
-- The age private key is dispatcher-only; containers never see it
+- There are **two** age identities, with different trust boundaries, and containers never see either. The **secrets** key (`age_private.key`, §12.1) is dispatcher-only — nothing else decrypts a secret. The **artifacts** key (`age_artifacts.key`) is deliberately a second keypair held by the dispatcher *and* the API, because the API must decrypt a transcript, log or attachment (§1.5, §1.6) to serve it, and proxying blobs through the dispatcher would reintroduce the `max_payload` cap the object store exists to dodge. It guards artifacts at rest against anyone holding NATS credentials or a disk backup — not against the API
 - `SecretStore.list` returns names only; `get` is called only by the dispatcher at launch
 - Eval prompts should instruct agents not to include secret values in findings or notes — the platform cannot enforce this mechanically
 
@@ -2306,7 +2308,8 @@ The SSE event stream (see §6.4) is the data backbone for the UI — the client 
    - JWT RS256 keypair — `jwt_private.pem`, `jwt_public.pem`
    - OIDC issuer RS256 keypair — `oidc_private.pem`, `oidc_public.pem` (workload tokens; separate from the session key so a session JWT and a workload token can never be confused)
    - SSH CA keypair — `ssh_ca`, `ssh_ca.pub`
-   - age encryption keypair — `age_private.key`, `age_public.key`
+   - age encryption keypair (secrets) — `age_private.key`, `age_public.key`
+   - age encryption keypair (artifacts) — `age_artifacts.key`, `age_artifacts_public.key` (a separate identity from the secrets one, and the only age key the API also holds; see §10.2)
    - VAPID keypair — `vapid_private.pem`, `vapid_public.pem`
    All keys are written to the path specified by the deployment config (bind-mounted into services at runtime).
 
@@ -2615,7 +2618,7 @@ downgraded below a config already on the default branch.
 | Version control | git CLI + bare repos on disk | — |
 | API | axum | — |
 
-Platform init generates: JWT RS256 keypair, OIDC issuer RS256 keypair, SSH CA keypair, age keypair, VAPID keypair. All private keys are mounted into services at runtime via the deployment's secret mechanism (k8s Secrets in k8s deployments, bind-mounted files in Docker deployments) — never stored in NATS KV. The JWT public key is also mounted into the API layer for token verification, and the OIDC issuer public key for JWKS publication; all other private keys are dispatcher-only. See §12.1 for the full bootstrap procedure.
+Platform init generates: JWT RS256 keypair, OIDC issuer RS256 keypair, SSH CA keypair, two age keypairs (secrets and artifacts, §10.2), VAPID keypair. All private keys are mounted into services at runtime via the deployment's secret mechanism (k8s Secrets in k8s deployments, bind-mounted files in Docker deployments) — never stored in NATS KV. The JWT public key is also mounted into the API layer for token verification, and the OIDC issuer public key for JWKS publication; the artifacts age private key is mounted into both the dispatcher and the API, and all other private keys are dispatcher-only. See §12.1 for the full bootstrap procedure.
 
 ---
 
@@ -2628,7 +2631,7 @@ Platform init generates: JWT RS256 keypair, OIDC issuer RS256 keypair, SSH CA ke
 - **Image signing**: cosign verification at dispatcher launch time. Deferred.
 - **Continuous security audit**: standard security evaluator prompts shipped with the platform. Deferred.
 - **Inter-service mTLS**: deferred; NATS scoped credentials are the primary security boundary within the cluster.
-- **Binary artifact store**: S3/Minio for non-git artifacts. Deferred; all work product in VCS for v1.
+- **Binary artifact store**: S3/Minio for non-git artifacts. Deferred. Not to be confused with the NATS-internal `artifacts` / `outputs` object stores (§1.5, §5.1), which ship: work product travels through VCS, and captured blobs stay inside NATS under their own retention and byte ceilings.
 - **macOS bare metal dispatchers**: required for Xcode builds. Execution model needs separate design.
 - **Commit signing**: GPG-signed squash-merges. Deferred.
 - **Schema registry**: available as a platform service for applications to use; not a platform primitive.
