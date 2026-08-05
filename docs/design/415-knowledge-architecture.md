@@ -1,6 +1,15 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — decisions taken with the operator 2026-08-04; S0, S1a, S1c and S8 landed (S8 reversing [D8](#decisions)), the rest is intent. See [Slices](#slices).
+Status: IMPLEMENTED IN PART — S0, S1a, S1c and S8 landed; D1–D15 decided, S1b–S12 intent.
+
+The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
+[D8](#d8-tags-point-they-do-not-carry) while landing (job #416), and S1c landed
+as `doc-lint.sh` rule 5 (job #437). D13–D15 and S9–S12 were added on 2026-08-05
+by job #435, written against the tree at `810a91b`; their three measurements were
+read out of that commit and three claims in the ticket that proposed them did not
+survive it — see the
+[2026-08-05 amendment](#amendment--2026-08-05-job-435-structural-health).
+Nothing in that amendment is implemented.
 
 Measured against the tree at `28e5aa1` (2026-08-04). Every number below was read
 out of that commit, not carried over from the brief; the commands are given so a
@@ -41,13 +50,16 @@ what can be checked mechanically is.**
 | **D3** | `docs/concepts.md` is an **index of pointers**, not a glossary — a concept keeps its natural home | [D3](#d3-the-concept-registry-routes-it-does-not-hold) |
 | **D4** | Ban duplicate **definitions**; allow duplicate **mentions** | [D4](#d4-ban-duplicate-definitions-allow-duplicate-mentions) |
 | **D5** | `CLAUDE.md` may **gloss and link**, never define | [D5](#d5-claudemd-may-gloss-never-define) |
-| **D6** | Four mechanical checks in one pure-shell `check-doc-facts.sh`, resolved against **git, not the filesystem** | [D6](#d6-four-mechanical-checks) |
+| **D6** | Four mechanical checks in one pure-shell `check-doc-facts.sh`, resolved against **git, not the filesystem** — [D15](#d15-structural-health-index-completeness-and-orphans) adds a fifth | [D6](#d6-four-mechanical-checks) |
 | **D7** | A **git-derived staleness ledger** marks docs *suspect*, not wrong | [D7](#d7-the-staleness-ledger) |
 | **D8** | ~~Knowledge tags become **pointers, not payload**~~ — **reversed while landing** (job #416, [S8](#slices)): knowledge is delivered as **payload**, and `.chug/tags/` is empty | [D8](#d8-tags-point-they-do-not-carry), superseded by the [2026-08-04 correction](#correction--2026-08-04-job-416-d8-reversed-m1-and-m5-restated) |
 | **D9** | `review-docs-updated` gets **narrow, blocking** teeth | [D9](#d9-the-evaluator-judges-only-what-a-script-cannot) |
 | **D10** | The **implementing job** updates the design doc it implements | [D10](#d10-the-implementing-job-owns-the-update) |
 | **D11** | A **ratchet, not a flag day** | [D11](#d11-a-ratchet-not-a-flag-day) |
 | **D12** | Every doc lives under `docs/`; the root keeps only `README.md`, `CLAUDE.md` and `wiki/`. `.chug/` prose stays put and every rule reaches it; `wiki/` is diagrams, not knowledge | [D12](#d12-where-everything-lives) |
+| **D13** | A **synthesis page** — a doc that states no new fact and decides nothing — is **reference**, bound by [D5](#d5-claudemd-may-gloss-never-define)'s gloss-and-link rule verbatim. It lives at `docs/overview.md` <!-- intent --> | [D13](#d13-the-synthesis-page-is-a-reference-doc) |
+| **D14** | The doc **policy** is a reference doc (`docs/reference/docs.md` <!-- intent -->, absorbing `docs/design-docs.md`); this document keeps the **argument** | [D14](#d14-the-policy-is-reference-415-is-the-argument) |
+| **D15** | **Structural health** is a second axis, and two mechanisms: **check 5** compares `docs/README.md` <!-- intent -->'s catalogue against the tree both ways (blocking); the ledger reports **inbound-reference count**, zero being a finding (advisory) | [D15](#d15-structural-health-index-completeness-and-orphans) |
 
 ### The target tree
 
@@ -56,9 +68,12 @@ README.md              project entry point (absorbs INSTALL.md)
 CLAUDE.md              agent working notes — gloss and link only (D5)
 docs/
   README.md            docs index (absorbs NORTH-STAR.md's routing role)
+                       + catalogue: one row per tracked doc (D15, check 5)
+  overview.md          the synthesis page — gloss and link only (D13)
   spec.md              normative
   concepts.md          the registry (D3)
   reference/           present tense, no history, no status
+    docs.md            the doc policy, present tense; absorbs design-docs.md (D14)
     style.md  testing.md  crates.md  contracts.md  modules.md
     design-lifecycle.md  structure-assessment.md
     runbooks/
@@ -85,6 +100,10 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S6** | The staleness ledger (D7) | S3 |
 | **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | S5 |
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `STYLE.md` / `NORTH-STAR.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded |
+| **S9** | `docs/reference/docs.md` <!-- intent --> — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | S3, S5 |
+| **S10** | `docs/README.md` <!-- intent --> gains a one-line catalogue row per tracked doc; **check 5** compares catalogue ↔ tree both ways, `check-modules.sh`'s shape ([D15](#d15-structural-health-index-completeness-and-orphans)) | S3 |
+| **S11** | `docs/overview.md` <!-- intent --> — the synthesis page ([D13](#d13-the-synthesis-page-is-a-reference-doc)); any `wiki/` prose note resolved into it and reduced to a link | S3, S4 |
+| **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
 **Four rows are landed — S0, S1a, S1c and S8.** Every other row above is intent,
@@ -899,3 +918,358 @@ That window is knowingly accepted rather than declared with a
 Recorded rather than left implicit, because §14 exists so that merging config
 can never *silently* become deploying config, and this is a change whose N-1
 behaviour is silent by construction.
+
+## Amendment — 2026-08-05, job #435 (structural health)
+
+Written against the tree at `810a91b`. Every number below was read out of that
+commit; three claims in the ticket that asked for this amendment did not survive
+the reading and are corrected in place rather than carried over. Nothing here is
+implemented — [S9](#slices) through [S12](#slices) are intent, and no script,
+catalogue or page named below exists yet.
+
+The branch was then merged onto `08473e3`, which landed [S1c](#s1c-as-landed).
+Every measurement below was re-run there: M9's line count and the orphan loop are
+unchanged, the `design-docs.md` reference count moved 7 → 8 exactly as the
+footnote below predicts, and one `path:line` citation moved again and is
+relabelled where it appears.
+
+### The second axis
+
+Everything above measures one property: whether a doc's claims about the tree
+are still **true**. [Check 1](#check-1-already-exists-precision-before-teeth)
+resolves its paths, check 2 its constants, check 3 its slice claims, and
+[D7](#d7-the-staleness-ledger) marks it suspect when the tree moves underneath
+it. All four ask the same question of a document the reader has already found.
+
+None of them asks whether the reader can find it. A doc can be perfectly true,
+perfectly current, cited by nothing, listed nowhere, and read by no one — and
+every gate in this document passes it. That is **structural health**, and it is
+a different axis from factual truth, not a corner of it.
+
+The prompt was reading this document against Karpathy's LLM-wiki pattern
+(<https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f>). Most of
+that pattern is rejected below, and for one structural reason: it is written for
+a wiki over **immutable** sources, where the corpus is the ground truth and the
+only question is retrieval. Here the ground truth is a tree that moves under the
+prose, so D6 and D7 remain the harder and more important half. What the pattern
+does contribute is the navigability axis and its two instruments — an index that
+must be complete, and orphans — and those are worth taking.
+
+### Three more measurements
+
+Continuing the [table above](#the-problem-measured), at `810a91b`:
+
+| # | Measurement | Value |
+| --- | --- | --- |
+| M8 | `docs/design/323-paste-a-prompt-onboarding.md`: lines / inbound references by filename / by `#323` / status / last touched | **1,330 / 0 / 0 / `PROPOSED` / 2026-07-30** |
+| M9 | `docs/design-docs.md`: lines / files that reference it / appearances in [D12](#d12-where-everything-lives)'s target tree | **147 / 7 / 0** |
+| M10 | Design docs in `docs/design/` with **zero** inbound references by either route | **1 of 18** |
+
+```sh
+git grep -l -- 323-paste-a-prompt-onboarding.md | grep -v '^docs/design/323-'
+git grep -nE '#323([^0-9a-fA-F]|$)'
+git grep -l 'design-docs\.md' | wc -l
+grep -c 'design-docs' docs/design/415-knowledge-architecture.md
+for f in $(git ls-files 'docs/design/*.md'); do b=$(basename "$f"); s=${b%%-*}
+  printf '%s %s %s\n' "$b" \
+    "$(git grep -l -- "$b" -- ":!$f" | wc -l)" \
+    "$(git grep -lE "#$s([^0-9a-fA-F]|\$)" -- ":!$f" | wc -l)"
+done
+```
+
+**Those commands stop reproducing the moment this amendment merges, and that is
+the point rather than a defect.** Every figure above is at `810a91b`, the base
+this section was written against. From the merge onward the M8 greps return this
+file, the `design-docs.md` count is 8 rather than 7, and the target tree in the
+head names `design-docs.md` once — because writing the two of them down is the
+smallest possible instance of the fix [S9](#slices) and [S10](#slices)
+generalize. The [2026-08-04 correction](#correction--2026-08-04-job-416-d8-reversed-m1-and-m5-restated)
+carries the same footnote for M1, which this document is "a fifth grep hit only
+because it quotes the string". And being cited is not the same as being
+reachable: #323's sole inbound reference is now a design doc arguing that
+nothing references it.
+
+**M8 is [M4](#the-problem-measured) recurring, and that is the finding.** M4 is
+`spec_original.md` — 1,251 lines, zero inbound, untouched — and it was found by
+a hand-written query while writing this document. #323 was found by re-running
+that same query four days later for an unrelated reason. Nothing between the two
+findings noticed; nothing would have. Under the plan as it stands
+[S3](#slices) moves the file, [check 1](#where-check-1-runs-and-over-what)
+verifies its paths and [D7](#d7-the-staleness-ledger) may mark it suspect — the
+whole apparatus operating correctly on a document no one can reach.
+
+The `#323` grep is worth stating precisely, because the naive form lies: bare
+`git grep '#323'` returns one hit, `web/src/styles.css:226`, which is the hex
+colour `#32302f`. Word-bounded, the count is zero.
+
+**Correction 1: M8's stated cause does not hold.** The ticket attributed the
+orphaning to #323's title line — `# Design — paste-a-prompt onboarding: …`, with
+no `#NNN` — described as unlike every sibling. The tree says otherwise. **Five**
+of the eighteen omit the number: #309, #322, #323, #361 and #362. The other four
+are cited **16, 7, 6 and 7** times by filename and **27, 13, 7 and 21** times by
+number. A missing `#NNN` in the title makes a doc marginally harder to cite; it
+demonstrably does not make it uncitable, and four counterexamples is not a
+mechanism. So M10 replaces the causal claim with the population it belongs
+to: #323 is the only orphan in the corpus, and the next-lowest is
+[#169](169-handoff-continuity.md) at 1 by name and 2 by number.
+
+That correction matters for the design rather than for the record. If the cause
+had been the title shape, the fix would be a naming rule — a cheap regex in
+[`doc-lint.sh`](../../.chug/tasks/doc-lint.sh) rule 4's neighbourhood. It is
+not. Nothing distinguishes #323 mechanically except that no document names it,
+which is a **set** property and needs a set comparison to see.
+
+**Correction 2: M9's omission has a sibling, deliberately not slice'd here.**
+`docs/design-docs.md` is the design-doc header contract, cited by
+`.chug/prompts/work/design.md`, `.chug/tasks/review-design.md`,
+`docs/implementation-notes.md`, `web/src/pages/Designs.tsx` and three design
+docs — seven files, one of them the prompt every design job reads. The target
+tree names it zero times. It is not decided against and not deferred; it was not
+seen. The same is true of `docs/runbooks/`, which the target tree relocates to
+`docs/reference/runbooks/` <!-- intent --> while [D12](#d12-where-everything-lives)'s
+move table has no row for it. One omission is an oversight; two in a
+fourteen-row table is the argument for check 5, and this document is the second
+instance of its own subject in four days.
+
+**Correction 3: the ticket's third measurement is not reproducible here, and the
+reason is load-bearing.** It described `wiki/Chuggernaut Structure Notes.md` <!-- runtime -->
+as a 179-line untracked note colliding with `STYLE.md`'s definition of *single
+writer*. That file is not in this checkout and has never been in this
+repository's history — `git log --all -- 'wiki/*Structure*'` is empty, and
+`git status --porcelain wiki/` is clean. Untracked work does not reach a job
+container. The figure is therefore recorded as **operator-reported and
+unverified**, not as a measurement.
+
+Two things the tree does confirm, both of which survive the correction:
+
+- The `STYLE.md:231` citation was `STYLE.md:247` at `810a91b` and is
+  `STYLE.md:253` at `08473e3` — the `- **Single writer.**` line moved twice, the
+  second time because job #437 added six lines above it while this amendment was
+  being written, so the number went stale between drafting the bullet and
+  merging it. That citation appears in
+  [D4](#d4-ban-duplicate-definitions-allow-duplicate-mentions) above, in the
+  append-only body, and stays as written; it is the third `path:line` citation
+  in this document to go stale during this document's own lifetime, after the
+  two the preamble at the top already names, and the only one to go stale twice.
+  It is also the third reason check 1 verifies the file and never the line.
+- A **tracked** definitional-shape collision for the same term exists today:
+  `docs/design/293-worker-capacity.md:116` opens a numbered list item
+  `**Single writer.** The dispatcher owns the fleet record` — D4's registered
+  shape, a paraphrase rather than a copy, inside `docs/`. Check 4 has a live
+  target without needing anyone's vault.
+
+And the correction sharpens D13 rather than weakening it. A note that exists
+only as an untracked file on an operator's machine is invisible to every gate
+here — including check 5, which resolves against `git ls-files` by
+[D6](#d6-four-mechanical-checks)'s rule. The demand for a synthesis page cannot
+be met by extending a check's reach, because the writing that evidences the
+demand is out of reach by construction. It is met by giving the prose somewhere
+in `docs/` to go.
+
+Finally, M10 answers one of the [refutation triggers](#what-would-refute-this-added)
+added below before it is asked: the orphan signal fires on **1 doc in 18** at
+this base, not on most of them. Sharp today, and re-measurable by the loop in the
+block above.
+
+### D13. The synthesis page is a reference doc
+
+[D1](#d1-two-kinds-of-doc-and-only-two)'s "two kinds and no third" stands, and
+nothing here adds a third. What the target tree lacks is anywhere to put a
+document that **states no new fact and decides nothing** — whose entire value is
+holding the system in one reading, so that someone arriving cold gets the shape
+before the detail. `docs/README.md` <!-- intent --> is an index: it routes, it
+does not narrate. `docs/spec.md` <!-- intent --> is normative and long. CLAUDE.md
+front-loads what bites you, which is a different job from explaining what the
+thing is.
+
+The evidence that the demand is real, and that having nowhere to put it does not
+suppress it, is the note of [Correction 3](#three-more-measurements) — operator-reported
+rather than measured, and the demand it evidences is not contingent on its line
+count. Someone wrote that prose into the **one directory
+[D12](#d12-where-everything-lives) exempts**. That is precisely the failure D12's
+own rule anticipates — *"if a note there ever states a fact about the system,
+that fact belongs in `docs/` and the note becomes a link."* A rule that is
+violated the first time the need arises is a rule with a missing destination,
+not a rule that needs enforcing harder.
+
+**Resolution: a synthesis page is reference.** Present tense, no history, no
+status line — [D1](#d1-two-kinds-of-doc-and-only-two)'s reference rule
+unmodified. And it is bound by
+[D5](#d5-claudemd-may-gloss-never-define)'s rule **verbatim**: one line of gloss
+plus a link to the owner, never a second definition.
+
+The argument is CLAUDE.md's, and stronger by construction. CLAUDE.md gets the
+rule rather than an exemption because [M1](#the-problem-measured)'s most damaging
+instance lives in it. A synthesis page has no other purpose than restating other
+docs, so it is the single document in the tree most likely to grow a competing
+definition. The doc whose whole job is restatement is the last one that should
+be trusted to restate freely.
+
+It lives at `docs/overview.md` <!-- intent -->.
+
+**[D12](#d12-where-everything-lives)'s `wiki/` exemption survives unweakened.**
+It was written for diagrams, and D12 argues correctly that a canvas is not a
+document. But that exemption only holds if prose has somewhere else to go —
+otherwise the exempt directory is the path of least resistance, which is exactly
+what [Correction 3](#three-more-measurements) reports happening. D13 supplies the
+destination; D12's rule keeps its teeth.
+
+### D14. The policy is reference; #415 is the argument
+
+After [S1](#slices) through [S8](#slices) land, there is still **no present-tense
+statement of what the doc rules are**. An agent asking "how do I update a design
+doc" has one place to look: this file. Which by then is 900-plus lines in which
+[D8](#d8-tags-point-they-do-not-carry) is reversed by a correction 300 lines
+below it, and its head — the thing
+[D2](#d2-every-design-doc-opens-with-a-mutable-current-state-head) built to bound
+exactly this reading cost — carries slice status, not rules.
+
+That is D2 unapplied to its own author's output. D2 bounds *knowing where things
+stand*. It does not bound *knowing what the rules are*, because a design doc is
+the wrong container for a rule: an append-only decision record is optimized for
+"why did we choose this", and a rule needs to be readable in the present tense
+without its history.
+
+So the split follows [D1](#d1-two-kinds-of-doc-and-only-two) rather than
+inventing anything:
+
+- **`docs/reference/docs.md` <!-- intent -->** holds the rules, present tense:
+  D1's two kinds, D2's head/body discipline, D4's mention-vs-definition line,
+  D5's gloss rule, [D13](#d13-the-synthesis-page-is-a-reference-doc), and what
+  each check rejects.
+- **This document keeps the argument** — the measurements, the rejected
+  alternatives, the record of why. Nothing is deleted from it.
+
+It **absorbs `docs/design-docs.md` as a section rather than deleting it**. That
+file is already reference-shaped and already correct; per M9 it is cited by seven
+files, one of which is the design work prompt. Deleting it would break the
+contract every design job is handed, and leaving it beside a policy doc would put
+the header contract in two places, which is [D4](#d4-ban-duplicate-definitions-allow-duplicate-mentions)
+against itself.
+
+Its seven inbound references are [S3](#slices)'s problem either way — S3 already
+rewrites ~730 of them. Folding the absorption into [S9](#slices) means the file
+moves once, with S3, rather than landing in `docs/reference/` <!-- intent -->
+and then being merged again.
+
+### D15. Structural health: index completeness, and orphans
+
+Two mechanisms, kept deliberately separate, because one is a **set comparison**
+with a right answer and the other is a **signal** with a judgement attached.
+
+**Check 5 — blocking, in `.chug/tasks/check-doc-facts.sh` <!-- intent -->.**
+`docs/README.md` <!-- intent --> gains a catalogue: every tracked doc, one row,
+link plus a one-line summary. Check 5 compares both directions — no tracked
+`docs/**/*.md` without a row, no row without a file — and names every offender.
+
+The design is already written and does not need re-deriving.
+`modules_registry_compare` (`.chug/tasks/check-modules.sh:57-75`) is the loop:
+both directions, and it sets `_gate_failed` rather than exiting, so one run
+reports every drift instead of the first. [D3](#d3-the-concept-registry-routes-it-does-not-hold)
+already names that script as the gate to copy for the concept registry. The docs
+catalogue is the *same instrument at a different target*, which is why
+[S4](#slices) and [S10](#slices) should be written together rather than
+reinvented apart — one comparison function, three callers.
+
+**Check 5 cannot catch M8 by itself, and that is stated rather than glossed.** A
+catalogued doc can still be cited by nothing; completeness of an index is not
+reachability. What check 5 makes impossible is M8's *cause* — writing the
+catalogue row is the moment a missing `#NNN`, a title that names no number, or a
+doc no one can summarize in one line becomes visible to a human. It converts a
+silent absence into a required act of authorship.
+
+**The orphan signal — advisory, in the ledger.** Per doc, the count of files
+elsewhere naming it; zero is a finding. Entirely git-derived, exactly like
+[D7](#d7-the-staleness-ledger): no new syntax, no front matter, nothing to keep
+in step, and the same verdict vocabulary — ***suspect*, not wrong**.
+
+It stays advisory for D7's own stated reason: *a ledger that fails builds for
+history nobody caused is a ledger people disable.* An orphan is often nobody's
+fault and sometimes correct — a `PROPOSED` design doc may be uncited by
+construction, because the jobs that would cite it have not run. Blocking on that
+would train the same scroll-past reflex the
+[2% true-positive gate](#the-problem-measured) already demonstrated in this repo.
+
+The two are not redundant, and the split is the point: check 5 answers *is it
+catalogued* — a question with a mechanical right answer, so it blocks. The
+ledger answers *is it read* — a question whose right answer depends on
+intent, so it reports.
+
+### The slices, and why they pair
+
+[S9](#slices) through [S12](#slices) are in the head's slice table. Two
+things about their ordering are decisions rather than bookkeeping:
+
+- **S9 gates on [S5](#slices), not just [S3](#slices).** The policy doc states
+  D2's head discipline as a present-tense rule, and S5 is what retrofits that
+  discipline onto the existing heads. Writing the rule before the corpus obeys it
+  would ship a reference doc that is false on arrival — this document's subject,
+  committed by the document that names it.
+- **[S10](#slices) and [S4](#slices) share an implementation.** Both are
+  `check-modules.sh`'s both-directions compare pointed at a different registry.
+  Written apart they become two loops that drift; written together they are one.
+
+[S11](#slices) gates on [S4](#slices) because a synthesis page bound by D5's rule
+needs the concept registry to link *into* — gloss-and-link requires an owner to
+link to, and D3's registry is what supplies the address.
+
+### Rejected alternatives, structural half
+
+**A `log.md` — an append-only chronological record of ingests, queries and lints,
+with a parseable prefix.** Rejected: this is `progress.md`, which
+[S0](#s0-progressmd-is-three-things-fused) deleted on the finding that git
+history already owns it. The `job/N` commit prefix is a better key than a
+hand-maintained one — it is written by the platform rather than by an agent that
+may forget — and check 3 already resolves slice claims against it. Adopting a
+log would recreate, under a new name, the file this plan removed three days ago.
+
+**A search index (`qmd` or equivalent).** Rejected on scale. At `810a91b` the
+corpus is **70 tracked `*.md` totalling 30,566 lines**, of which **24 files and
+20,022 lines** are under `docs/` — `git ls-files '*.md' | xargs wc -l`. Against an
+agent that already has `git grep` over a checkout it holds locally, an index at
+that size buys nothing. It also costs more than it looks: to be *relied on* it
+would have to exist in `.chug/tasks/ci.sh`, in `.githooks/pre-commit` and in
+every task container, which is a toolchain dependency in three places for a
+corpus one `grep` reads in milliseconds. Revisit if the catalogue itself grows
+past what a reader will read — a threshold check 5 makes observable, since the
+catalogue's length *is* the doc count.
+
+**YAML front matter — `kind:`, tags, Dataview-style queries.** Rejected as
+redundant. The path already encodes the kind: `docs/design/` is a design doc and
+`docs/reference/` <!-- intent --> is a reference doc, by
+[D12](#d12-where-everything-lives)'s tree, and `doc-lint.sh` rule 4 already
+enforces the design half's filename shape. A `kind:` field would be a second copy
+of a fact the filesystem holds — which is this document's subject, committed in
+the machinery meant to prevent it. Same argument that rejected
+[`last-verified:`](#rejected-alternatives), minus the broken promise.
+
+**Pointing the Obsidian vault at `docs/`** — graph view over the real corpus,
+which would render [D3](#d3-the-concept-registry-routes-it-does-not-hold)'s
+registry and D15's orphans directly and interactively. **Not rejected, and not a
+slice.** It is `.obsidian/` configuration, operator-owned, affecting no gate and
+no agent, so it needs no decision here. Recorded only because M8 is precisely the
+finding a graph view surfaces at a glance: an unconnected node, visible without
+running anything.
+
+### What would refute this, added
+
+Continuing [the triggers above](#what-would-refute-this).
+
+- **Check 5's catalogue is maintained by rote and its summaries decay.** Then the
+  row is bookkeeping without value, and the answer is to shrink check 5 to
+  presence only — dropping the summary column and keeping the set comparison.
+  [D7](#d7-the-staleness-ledger) covering `docs/README.md` <!-- intent --> is the
+  detector: a catalogue whose own file goes stale while the docs it lists move is
+  the exact shape the ledger reports.
+- **The orphan signal fires on most design docs.** Plausible by construction — a
+  `PROPOSED` doc may be uncited because the work has not started. Currently
+  refuted (M10: 1 of 18), and re-measurable. If it does happen, scope the signal
+  to docs whose last commit is older than the ledger's staleness window, so it
+  fires on the conjunction — old *and* uncited — rather than on either half.
+- **`docs/overview.md` <!-- intent --> grows definitions anyway.** Then
+  [D13](#d13-the-synthesis-page-is-a-reference-doc)'s borrowed
+  [D5](#d5-claudemd-may-gloss-never-define) rule is insufficient for a document
+  whose entire purpose is restatement, and the answer is that the synthesis page
+  is **generated from the catalogue** rather than written — not a looser rule. A
+  page assembled from `docs/README.md` <!-- intent -->'s rows cannot hold a
+  definition, because it holds nothing that was not already a link.
