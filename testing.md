@@ -293,7 +293,7 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-18 of them, driving the real script inside a throwaway repo against stubbed
+20 of them, driving the real script inside a throwaway repo against stubbed
 `cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
 
@@ -313,7 +313,9 @@ these suites cover.
   `agent-rust` container: **36.8s for the 17 that existed then**, of which
   `deploy/prod/update-refresh.test.sh` alone is 27.1s (stub polling sleeps);
   `android-proof.test.sh` (#367 A2) adds ~9s, most of it three deliberately short
-  emulator bounds it waits out.
+  emulator bounds it waits out. `check-doc-facts.test.sh` (#415 S1b) adds 0.27s
+  for 47 cases — it stubs nothing, because both checks it pins read a throwaway
+  `git init` fixture rather than the tree.
   The total is checked **between** suites, not after the loop — otherwise the
   real ceiling would be suite-count × per-suite cap — and the failure names the
   suites it therefore never ran. The per-suite cap is applied with `timeout`,

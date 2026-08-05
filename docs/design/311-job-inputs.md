@@ -819,7 +819,9 @@ its own.
 
 ## Skew: what a new field costs
 
-Current state: `CONFIG_SCHEMA_EPOCH = 1` (`crates/types/src/version.rs`).
+State when this section was written: `CONFIG_SCHEMA_EPOCH` was 1. Read
+`crates/types/src/version.rs` for the number today — [#313](313-workload-identity-image-builds.md)
+records what copying this line out of a sibling doc cost.
 
 **Surface 1 — the job type's `inputs:` block.** It is a new *top-level* field,
 so per §14.2 an N−1 dispatcher **tolerates** it: `JobType` drops

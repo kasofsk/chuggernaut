@@ -474,8 +474,8 @@ endpoint is not that.
 ## Decision 6: skew, and why no epoch moves
 
 Confirmed against `crates/types/src/version.rs` and spec §14.1/§14.2 rather than
-taken on trust. Current state: `CONFIG_SCHEMA_EPOCH = 2`,
-`INPUTS_SCHEMA_EPOCH = 2`.
+taken on trust. State when this design landed: `CONFIG_SCHEMA_EPOCH` was 2,
+with `INPUTS_SCHEMA_EPOCH = 2`.
 
 **No bump.** `CONFIG_SCHEMA_EPOCH` is documented in `version.rs` as "the
 job-type YAML schema epoch the running dispatcher understands", and the gate it

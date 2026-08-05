@@ -36,13 +36,16 @@ update, one job type (`docs`) that maintains them.
    | `docs/implementation-notes.md` | invalidates a note there, or gives one a better home — fold it into the real doc and delete the entry |
    | `design.md`, `docs/design/*.md` | supersedes a decision one of them argues |
 
-3. **A path you name in a doc is a claim it exists.** `.chug/tasks/doc-lint.sh`
-   resolves every backticked path against `git ls-files`, so a path that moved
-   is reported wherever it is cited. If the path is *correctly* unresolvable,
-   mark the line rather than deleting the claim: `<!-- intent -->` for something
-   designed but not built, `<!-- runtime -->` for build output or an
-   operator-owned file that git will never hold. Both are defined in STYLE.md's
-   doc-claim rule; neither excuses a stale path.
+3. **A path you name in a doc is a claim it exists.**
+   `.chug/tasks/check-doc-facts.sh` resolves every backticked path against
+   `git ls-files` — every tracked `*.md`, on **every** job, and a **failure**,
+   so a path that moved fails the job that moved it wherever it is cited. If the
+   path is *correctly* unresolvable, mark the line rather than deleting the
+   claim: `<!-- intent -->` for something designed but not built,
+   `<!-- runtime -->` for build output or an operator-owned file that git will
+   never hold, `<!-- absent -->` for a line whose point *is* that the path is
+   gone. All three are defined in STYLE.md's doc-claim rule; none excuses a
+   stale path.
 
    **A constant's value you restate is a claim too.** The same script reads a
    backticked `SCREAMING_SNAKE_CASE` name asserted with a value on the same line

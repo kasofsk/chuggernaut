@@ -219,6 +219,39 @@ commit "$repo" "comment gate broken"
 check "an aborted comment scan skips, commit lands" 0 "$RC" \
 	"comment lint could not run — SKIPPED"
 
+# --- case 6b: doc facts — a stale claim rejects, an unrunnable check skips --
+# The two guards design #415 S1b names: the gate can now fail every job, so a
+# check that cannot run must be loud and must not read as clean.
+repo="$(new_repo doc_facts)"
+mkdir -p "$repo/.chug/tasks" "$repo/crates/pkg/src" "$repo/docs"
+cp "$TASKS/check-doc-facts.sh" "$repo/.chug/tasks/check-doc-facts.sh"
+chmod +x "$repo/.chug/tasks/check-doc-facts.sh"
+printf 'x\n' >"$repo/crates/pkg/src/lib.rs"
+printf '# Doc\n\nState lives in `crates/pkg/src/gone.rs`.\n' >"$repo/docs/stale.md"
+git -C "$repo" add -A
+commit "$repo" "a stale path claim"
+check "a stale doc claim rejects the commit" 1 "$RC" "referenced path not found"
+check "the doc-fact rejection names the markers" 1 "$RC" "<!-- intent -->"
+
+printf '# Doc\n\nState lives in `crates/pkg/src/lib.rs`.\n' >"$repo/docs/stale.md"
+git -C "$repo" add -A
+commit "$repo" "a resolving path claim"
+check "a resolving doc claim commits" 0 "$RC"
+
+repo="$(new_repo doc_facts_unrunnable)"
+mkdir -p "$repo/.chug/tasks" "$repo/docs"
+{
+	echo '#!/bin/sh'
+	echo 'echo "!!! check-doc-facts: not a git checkout"'
+	echo 'exit 2'
+} >"$repo/.chug/tasks/check-doc-facts.sh"
+chmod +x "$repo/.chug/tasks/check-doc-facts.sh"
+printf '# Doc\n\nContent.\n' >"$repo/docs/note.md"
+git -C "$repo" add -A
+commit "$repo" "doc-fact gate broken"
+check "an unrunnable doc-fact check skips, commit lands" 0 "$RC" \
+	"doc-fact check could not run — SKIPPED"
+
 # --- case 7: prettier honours web/.prettierignore --------------------------
 # `web/src/api/wire-samples.json` is Rust-emitted and a cargo test asserts its
 # exact bytes; reformatting it here would fail CI after the agent has exited.

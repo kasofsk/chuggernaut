@@ -46,8 +46,10 @@ Then:
 3. Keep the change to the design at hand — do not edit code or unrelated docs.
 4. `.chug/tasks/doc-lint.sh` runs on your output: the filename must be
    `{seq}-{slug}.md`, relative links must resolve, and the markdown must be
-   well-formed (closed code fences, spaced headings). Backtick'd code paths are
-   checked best-effort — keep them accurate.
+   well-formed (closed code fences, spaced headings). Backtick'd code paths and
+   restated constants are gated harder still — `.chug/tasks/check-doc-facts.sh`
+   resolves them against git over the whole tree and **fails** the job, so keep
+   them accurate or mark the line (STYLE.md's doc-claim rule).
 5. Commit to the current branch (you are already on the job branch) with a clear
    message, and push. `.githooks/pre-commit` runs the doc lint on your staged
    markdown as an advisory pass — it prints what a `design` job's stage-1 gate

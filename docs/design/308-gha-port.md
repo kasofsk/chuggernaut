@@ -111,7 +111,7 @@ a configured cache ([A2](#a2-the-keyed-caching-gap-was-overstated)).
 | Outbound webhooks | `crates/webhooks/src/lib.rs` | Two-line `TODO` stub |
 | Binary artifact store | `spec.md` Appendix: Deferred | Deferred |
 | Cron / schedules | — | Absent from the tree and from `spec.md`; designed as [#310](./310-scheduled-jobs.md) |
-| Job inputs (`CHUG_INPUT_*`) | `spec.md` §1.1, §6.3, §14.2; `crates/types/src/inputs.rs`, `crates/domain/src/inputs.rs` | **Shipped and deployed** (amendment [A4](#a4-job-inputs-shipped-so-gap-1-is-retired)) — `CONFIG_SCHEMA_EPOCH` = 2 (`crates/types/src/version.rs`); first consumer `.chug/jobs/rollback.yaml` |
+| Job inputs (`CHUG_INPUT_*`) | `spec.md` §1.1, §6.3, §14.2; `crates/types/src/inputs.rs`, `crates/domain/src/inputs.rs` | **Shipped and deployed** (amendment [A4](#a4-job-inputs-shipped-so-gap-1-is-retired)) — `CONFIG_SCHEMA_EPOCH` was 2 when A4 landed (`crates/types/src/version.rs` is the authority today); first consumer `.chug/jobs/rollback.yaml` |
 | Matrix / fan-out over inputs | — | Absent **by decision** ([#311](./311-job-inputs.md) Decision 7), not by omission |
 | Per-run placement (a runner chosen at launch) | — | Absent, and forbidden in the obvious shape — see [A3](#a3-beacon-already-parameterizes-placement-per-run) |
 | Linked-origin projects (external host owns `main`) | `spec.md` §5.3; `crates/dispatcher/src/handlers/origin.rs`, `crates/dispatcher/tests/origin.rs` | Shipped — the mode beacon needs ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)) |
@@ -345,8 +345,9 @@ work gap 10 generated is the contract recorded above.
 
 ### A4. Job inputs shipped, so gap 1 is retired
 
-Job inputs are in the tree and deployed. `CONFIG_SCHEMA_EPOCH` is **2**
-(`crates/types/src/version.rs`, with `INPUTS_SCHEMA_EPOCH` as its own constant);
+Job inputs are in the tree and deployed. `CONFIG_SCHEMA_EPOCH` was **2** when
+this amendment landed (`crates/types/src/version.rs` is the authority today,
+with `INPUTS_SCHEMA_EPOCH` as its own constant);
 the declaration is a typed schema on the job type (`spec.md` §1.1 `inputs:`); the
 effective set lives on the job record and is immutable once `base_ref` is pinned
 (§1.1 `Job.inputs`); delivery is one reserved env namespace, `CHUG_INPUT_*`

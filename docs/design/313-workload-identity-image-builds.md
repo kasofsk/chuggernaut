@@ -871,17 +871,25 @@ discipline #309 and #311 both land on:
 This paragraph previously said "currently `1`" and cited #309 §3 and #311 as
 both proposing `1 → 2`. All three claims are stale. #309 §3 has since been
 corrected (it names `3 → 4` after job #401) and so has #311's opening (it names
-`4`), but **#311's own Skew section still reads `CONFIG_SCHEMA_EPOCH = 1` and
-its phasing table still carries `1 → 2` cells** — so a slice author who reads
-that section rather than this one will inherit the same stale number.
-Correcting #311 is a separate docs job; the tree is the authority, and it holds
-`CONFIG_SCHEMA_EPOCH = 4`, with
+`4`), but **#311's own Skew section still carried a bare 1 for
+`CONFIG_SCHEMA_EPOCH` and its phasing table still carries `1 → 2` cells** — so a
+slice author who reads that section rather than this one will inherit the same
+stale number.
+Correcting #311 was left to a separate docs job; the tree is the authority, and
+on that date `CONFIG_SCHEMA_EPOCH` was 4, with
 `INPUTS_SCHEMA_EPOCH = 2` (#311 slice A), `SCHEDULE_INPUTS_SCHEMA_EPOCH = 3`
 (#311 slice C, job #376) and `RUNTIME_SCHEMA_EPOCH = 4` (#309 §3 / #373,
 job #401) frozen behind it. A5's own instruction was that whichever of the three
 docs lands last re-derives the number; this is that re-derivation, and the rule
 it followed is the one this section always stated — **read the constant, do not
 copy a number out of a brief or a sibling doc.**
+
+**Corrected 2026-08-05 by job #438 (#415 S1b):** the separate docs job that
+paragraph left outstanding is this one. #311's Skew section now dates its number
+and points at [`crates/types/src/version.rs`](../../crates/types/src/version.rs)
+rather than restating one, so the inheritance path described above is closed.
+Its phasing table still shows `1 → 2`, and that stays: there the arrow
+illustrates the shape of a bump under each ordering, not the epoch of the day.
 
 The frozen per-feature constant is not optional decoration. §14.2 says
 explicitly that those constants, "not `CONFIG_SCHEMA_EPOCH`, are where a reader

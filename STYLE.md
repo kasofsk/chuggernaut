@@ -195,10 +195,12 @@ verify it in seconds and must name it when rejecting.
    describing it as if it ran.
 
    **Marking is a syntax, and it is checked.** A backticked path in a `.md` is
-   resolved against `git ls-files` by `.chug/tasks/doc-lint.sh`'s referenced-path
-   check (a warning today; design [#415](docs/design/415-knowledge-architecture.md)
-   S1b promotes it). Three HTML comments suppress it, and they are not
-   interchangeable:
+   resolved against `git ls-files` by `.chug/tasks/check-doc-facts.sh` — every
+   job, every tracked `*.md`, and an **error** since design
+   [#415](docs/design/415-knowledge-architecture.md) S1b. The same script checks
+   a backticked constant asserted with a value against the tree's `pub const`.
+   Three HTML comments suppress both on the line that carries them, and they are
+   not interchangeable:
 
    | Marker | Means | Use for |
    | --- | --- | --- |
@@ -220,11 +222,13 @@ verify it in seconds and must name it when rejecting.
    tree, so the rewrite fixes the prose for a human reader and not just for the
    checker.
 
-   The same script checks a **restated constant**: a backticked
+   The **restated constant** is judged the same way: a backticked
    `SCREAMING_SNAKE_CASE` name that resolves to a `pub const` in the tree and is
-   asserted with a value on the same line must match it (also a warning today;
-   #415 S1b promotes it). A mention carrying no value is not a claim and is not
-   checked, and `<!-- intent -->` marks the value a slice will bump it *to*.
+   asserted with a value on the same line must match it. A mention carrying no
+   value is not a claim and is not checked, and `<!-- intent -->` marks the value
+   a slice will bump it *to*. Inside an append-only body the cheapest honest fix
+   is the tense — a past-tense or dated statement (`was 2 when this landed`) is
+   not a claim about today's tree and is not checked.
 
    A marker covers **the line that carries it**, so put it at the end of the
    line making the claim; a claim on the next line is judged on its own. No

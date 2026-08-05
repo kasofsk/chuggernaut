@@ -20,13 +20,16 @@
 #                                     a LINTER ERROR is a skip, not a rejection)
 #   check-modules.sh                  REJECTS (MODULES.md registry drift)
 #   check-duplication.sh              REJECTS (jscpd clones, threshold 0)
+#   check-doc-facts.sh --staged       REJECTS (stale path / constant claims;
+#                                     a LINTER ERROR is a skip, not a rejection)
 #   doc-lint.sh                       ADVISORY (reports, never rejects)
 #
 # The rejection rule: a check may block a commit only when .chug/tasks/ci.sh
 # runs it UNCONDITIONALLY — then blocking here can never stop a commit CI would
 # have accepted, and the fix is in-loop. doc-lint is a `docs`/`design` stage-1
-# evaluator only, so it is advisory here. Formatting is never a rejection: it is
-# a thing to fix, not to report.
+# evaluator only, so it is advisory here; check-doc-facts is unconditional in
+# CI, so it rejects. Formatting is never a rejection: it is a thing to fix, not
+# to report.
 #
 # What it deliberately does NOT run: `cargo clippy`, the test suite, `tsc -b` /
 # `vite build` (they need an `npm ci` on a fresh clone). Those are CI's job — a
@@ -291,6 +294,35 @@ hook_check_duplication() {
 	hook_ran duplication
 }
 
+# --- doc facts (rejects) ------------------------------------------------------
+# `--staged` mode, not the whole tree: CI runs it whole-tree, but the hook has a
+# ~2s budget and the index build is most of the cost. The honest gap is that a
+# commit which DELETES a path other docs name passes here and fails CI (design
+# #415 D6). Exit 1 is a claim the agent just wrote (actionable now); exit 2 is
+# the check unable to run at all, which degrades to a loud skip — a doc-fact
+# check that cannot run must not read as clean.
+hook_check_doc_facts() {
+	_docs="$(hook_staged_matching '*.md')"
+	[ -n "$_docs" ] || return 0
+	[ -x .chug/tasks/check-doc-facts.sh ] || return 0
+	_out="$(.chug/tasks/check-doc-facts.sh --staged 2>&1)"
+	case "$?" in
+	0) ;;
+	1)
+		printf '%s\n' "$_out"
+		hook_reject "stale doc claims (design #415 D6, STYLE.md's doc-claim rule)." \
+			"    Fix the path or the value, or mark the line <!-- intent -->," \
+			"    <!-- runtime --> or <!-- absent --> if it is correctly unresolvable." \
+			"    Re-run with: .chug/tasks/check-doc-facts.sh --staged"
+		;;
+	*)
+		hook_warn "doc-fact check could not run — SKIPPED (CI still gates it):"
+		printf '%s\n' "$_out" | tail -n 3
+		;;
+	esac
+	hook_ran doc-facts
+}
+
 # --- doc lint (advisory) ------------------------------------------------------
 # CI runs this only for `docs`/`design` jobs, so blocking here would reject
 # commits CI accepts. Report and move on.
@@ -317,6 +349,7 @@ hook_format_web
 hook_check_comments
 hook_check_modules
 hook_check_duplication
+hook_check_doc_facts
 hook_check_docs
 
 ended_ms="$(hook_now_ms)"

@@ -5,9 +5,11 @@
 #             the current code, and judges placement/navigation and whether the
 #             page fits its audience.
 #   stage 1 — the shared doc lint (.chug/tasks/doc-lint.sh: markdown well-formedness,
-#             intra-repo link resolution, best-effort code-path existence, and the
-#             docs/design/{seq}-{slug}.md filename shape) runs
-#             alongside the appended project `ci` default (.chug/jobs/_defaults.yaml).
+#             intra-repo link resolution, and the docs/design/{seq}-{slug}.md
+#             filename shape) runs alongside the appended project `ci` default
+#             (.chug/jobs/_defaults.yaml). The path and constant claims a doc makes
+#             are not lint's job: .chug/tasks/check-doc-facts.sh gates those in that
+#             default's pure-shell pre-stage, whole-tree and on every job type.
 #             `ci` self-skips a doc-only diff in seconds via its .chug/tasks/ci.sh glob
 #             matcher (no crates/** change → no cargo build), so stage 1 is cheap.
 # No cargo build is ever needed here, so resources are modest.

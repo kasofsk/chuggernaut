@@ -60,7 +60,7 @@ PRIVATE_FILE="crates/worker/tests/nats_backend.rs"
 mkdir -p "$REPO/.chug/tasks" "$REPO/crates/store/tests" "$REPO/crates/worker/tests" "$REPO/web"
 printf 'fn t() { require_nats!(); }\n' >"$REPO/crates/store/tests/nats_store.rs"
 printf 'fn t() { NatsTestServer::spawn().await; }\n' >"$REPO/$PRIVATE_FILE"
-for g in check-modules check-duplication check-comments; do
+for g in check-modules check-duplication check-comments check-doc-facts; do
 	printf '#!/bin/sh\nexit 0\n' >"$REPO/.chug/tasks/$g.sh"
 	chmod +x "$REPO/.chug/tasks/$g.sh"
 done

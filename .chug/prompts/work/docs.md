@@ -29,8 +29,10 @@ Then:
 2. Keep the change to the page(s) at hand — do not edit code or unrelated docs.
 3. `.chug/tasks/doc-lint.sh` runs on your output: relative links must resolve and the
    markdown must be well-formed (closed code fences, spaced headings).
-   Backtick'd code paths (e.g. `crates/api/src/routes.rs`) are checked
-   best-effort — keep them accurate.
+   Backtick'd code paths (e.g. `crates/api/src/routes.rs`) and restated
+   constants are gated harder still — `.chug/tasks/check-doc-facts.sh` resolves
+   them against git over the whole tree and **fails** the job, so keep them
+   accurate or mark the line (STYLE.md's doc-claim rule).
 4. Commit to the current branch (you are already on the job branch) with a clear
    message, and push. `.githooks/pre-commit` runs the same doc lint on your
    staged markdown as an advisory pass — it prints what a `docs` job's stage-1

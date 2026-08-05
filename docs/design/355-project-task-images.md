@@ -94,7 +94,8 @@ driven by a deploy job.
    last of which deleted the `agent-rust` warm-target seed specifically to bring
    the peak down.
 
-9. **`CONFIG_SCHEMA_EPOCH` is `2`** (`crates/types/src/version.rs`), bumped for
+9. **`CONFIG_SCHEMA_EPOCH` was `2`** when this was written
+   (`crates/types/src/version.rs` is the authority today), bumped for
    job `inputs:` (#311), with `INPUTS_SCHEMA_EPOCH = 2` frozen beside it.
 
 10. **The spec's own examples already assume registry-qualified images.**

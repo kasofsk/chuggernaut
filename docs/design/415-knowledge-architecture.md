@@ -1,12 +1,15 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — S0, S1a, S1c, S2 and S8 landed; D1–D15 decided, S1b and S3–S12 intent.
+Status: IMPLEMENTED IN PART — S0, S1a, S1b, S1c, S2 and S8 landed; D1–D15 decided, S3–S12 intent.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
 [D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
 as `doc-lint.sh` rule 5 (job #437), and job #436 landed S2, emptying the
 path-warning list — see the
 [2026-08-05 correction](#correction--2026-08-05-job-436-s2-swept-and-a-third-marker).
+S1b landed on 2026-08-05 (job #438): both checks are
+`.chug/tasks/check-doc-facts.sh`, whole-tree and blocking on every job — see the
+[S1b correction](#correction--2026-08-05-job-438-s1b-landed-and-the-eleven).
 D13–D15 and S9–S12 were added on 2026-08-05
 by job #435, written against the tree at `810a91b`; their three measurements were
 read out of that commit and three claims in the ticket that proposed them did not
@@ -94,7 +97,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | --- | --- | --- |
 | **S0** | Triage `progress.md`: amend `spec.md` §5.1 (the artifact-store clause is false) and §10.2's single-age-key claim, repoint `.claude/skills/chug/SKILL.md`, then delete the file | **Landed** (job #432), in that order. §5.1 now states the NATS-internal store and keeps the S3/Minio deferral as its own claim; §10.2 names both age identities (§12.1 and the infrastructure appendix follow); the skill points at `spec.md` and the repo's docs |
 | **S1a** | Fix `doc-lint.sh` rule 4's four false-positive classes in place and resolve against git; the two markers. Still a warning, still `docs`/`design`-scoped | **Landed** (job #433) — the classes turned out to be five, and the whole-tree count fell 313 → 66. See [S1a as landed](#s1a-as-landed-re-measured) |
-| **S1b** | Move that logic into `check-doc-facts.sh` — pre-stage, every job, whole-tree, **error** — and delete rule 4 from `doc-lint.sh`. Once S2 has cleared the real findings | S1a, S2 |
+| **S1b** | Move that logic into `check-doc-facts.sh` — pre-stage, every job, whole-tree, **error** — and delete rule 4 from `doc-lint.sh`. Once S2 has cleared the real findings | **Landed** (job #438) — both checks moved, ~0.6s whole-tree; the eleven constant mismatches S2 left standing had to be dated first. See the [S1b correction](#correction--2026-08-05-job-438-s1b-landed-and-the-eleven) |
 | **S1c** | Check 2 (constant values) + a `.test.sh` suite covering both | **Landed** (job #437) — check 2 is rule 5 of `doc-lint.sh`, a warning like check 1, and found **11** real mismatches across 6 design docs. See [S1c as landed](#s1c-as-landed) |
 | **S2** | The one-time sweep: the ~6 real path findings, the `*_SCHEMA_EPOCH` restatements, `state.rs` in its seven files; delete `spec_original.md` and `wiki/Welcome.md` | **Landed** (job #436) — 66 → **0** path warnings whole-tree; added the third marker `absent`; both files deleted. See the [2026-08-05 correction](#correction--2026-08-05-job-436-s2-swept-and-a-third-marker)  <!-- absent --> |
 | **S3** | **The move** — every doc into `docs/`, per D12; updates the ~730 references (283 of them outside markdown, 134 for `STYLE.md` alone) and `check-modules.sh`'s own path | S1b, S2 |
@@ -109,7 +112,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Five rows are landed — S0, S1a, S1c, S2 and S8.** Every other row above is intent,
+**Six rows are landed — S0, S1a, S1b, S1c, S2 and S8.** Every other row above is intent,
 marked as such per STYLE.md's doc-claim rule — which this document is partly
 written to make enforceable.
 
@@ -1389,3 +1392,62 @@ after D10 did. The rule existed and was not followed, which is evidence for
 [S1b](#slices)'s teeth rather than against them: D10 is a rule an agent can mean
 to follow and still miss, and rule 4 at whole-tree-error would have caught all
 ten at the gate.
+
+## Correction — 2026-08-05, job #438 (S1b landed, and the eleven)
+
+Both checks are `.chug/tasks/check-doc-facts.sh` now — whole tree, every job's
+pre-stage, exit non-zero on any finding — and `doc-lint.sh` carries neither.
+What they *decide* is byte-identical to what rules 3 and 5 decided the moment
+before the move: the same 0 path findings and the same 11 constant findings over
+the same 68 files. The suite followed the code into
+`.chug/tasks/check-doc-facts.test.sh` (47 cases, 0.27s), `doc-lint.test.sh`
+keeps the 9 for the three checks it still owns, and the repo's shell-suite count
+is 20.
+
+### The gate was met for check 1 and not for check 2
+
+The brief for this job read [S2](#slices)'s "66 → **0**" as clearing the way for
+both checks. It cleared check 1. Check 2 still reported the **eleven**
+[S1c](#s1c-as-landed) found and S2 deliberately left standing, and eleven
+findings in the tree is a promotion that fails every job in the fleet on its
+first run — the exact outcome [D6](#d6-four-mechanical-checks)'s "fix precision
+first, then promote" was written to prevent.
+
+So the eleven were dated before the promotion landed, by the remedy the
+[#436 correction](#correction--2026-08-05-job-436-s2-swept-and-a-third-marker)
+already established for an append-only body: not a marker, and not a rewrite of
+the argument, but **the tense**. A present-tense `CONFIG_SCHEMA_EPOCH` assertion
+became a dated one — `is 2` became `was 2 when this landed`; a past-tense or
+dated statement is not a claim about today's tree, so the check is silent on it
+and a reader is no longer misinformed. Two lines in
+[#322](322-macos-native-runtime.md) were proposals rather than history — the
+`RUNTIME_SCHEMA_EPOCH` it proposed at 3 landed as `4` in job #401 — and now say
+so, which is the same annotation move applied to a value instead of a path.
+
+That the eleven were left for a later slice is not a criticism of S2: S2's own
+conclusion was that none of them was a *stale claim* in a reference doc, and it
+was right. What it missed is that "correct as history" and "safe under a
+whole-tree error gate" are different properties, and only the second one is what
+[S1b](#slices) needed. A finding a gate cannot afford to leave standing is a
+finding, whatever the tense of the sentence carrying it.
+
+### The hook, measured
+
+`--staged` and rejecting, per [D6](#d6-four-mechanical-checks): **0.16s** for the
+six markdown files this job staged, against the hook's ~2s budget. D6's gap
+stands — a commit that only *deletes* a path other docs name passes the hook and
+fails CI. It is now a smaller price than D6 assumed: the whole-tree run is
+**0.62s**, so closing the gap is affordable if it ever bites, and the reason to
+leave it scoped is D6's decision rather than the cost.
+
+### Two guards, both pinned
+
+A tree the check cannot judge exits **2** — a `LINTER ERROR`, distinct from both
+verdicts, following `check-comments.sh`'s precedent. That matters more here than
+there: this gate is now fatal fleet-wide, so "the check did not run" must never
+render as "the docs are clean". The pre-commit hook translates that 2 into a
+loud skip rather than a blocked commit, and both halves have cases
+(`check-doc-facts.test.sh`, `.githooks/pre-commit.test.sh`). The other guard is
+[M7](#the-problem-measured)'s: an unparseable or unclassifiable token is skipped
+**silently**. Ten cases pin the classes that must stay quiet, because a noisy
+gate is an off gate and the noise is now fatal.

@@ -78,15 +78,29 @@ the absence of a workflow file.
   stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
   diff touching Rust paths runs the cargo gate, and a doc/config-only diff runs
   neither and gates in seconds.
-- `.chug/tasks/ci.sh` also runs five pure-shell gates **before** those diff-aware
+- `.chug/tasks/ci.sh` also runs six pure-shell gates **before** those diff-aware
   stages, so a web-only or docs-only change is still gated: the `.chug/jobs/*.yaml`
   version-skew check (spec §14.3 — **advisory and early**, see below), the
   `MODULES.md` registry check (`.chug/tasks/check-modules.sh`),
   `.chug/tasks/check-duplication.sh` — copy-paste
   detection via a pinned `jscpd@5.0.5` at `threshold: 0` (STYLE.md Tier 1;
   ~30ms for the whole repo, so it is unconditional) — `.chug/tasks/check-comments.sh`,
-  the comment lint, and since #385 **the repo's 19 `*.test.sh` shell suites**.
+  the comment lint, `.chug/tasks/check-doc-facts.sh`, the doc-fact gate, and
+  since #385 **the repo's 20 `*.test.sh` shell suites**.
   Any clone fails the gate.
+- **A doc's claims about the tree are gated on every job, whole-tree, as an
+  error.** `.chug/tasks/check-doc-facts.sh` resolves every backticked path claim
+  in every tracked `*.md` against `git ls-files`, and every backticked constant
+  asserted with a value against the `pub const` in the tree — the two checks of
+  design [#415](docs/design/415-knowledge-architecture.md) D6, which lived in
+  `doc-lint.sh` as warnings until S1b moved them here (~0.6s whole-tree).
+  Whole-tree and every job because the claims are made by every job type: a
+  `code` job orphaned ten tag-file references (#416) that a `docs`-scoped
+  gate never saw. A claim that is correctly unresolvable is marked on its line —
+  `<!-- intent -->`, `<!-- runtime -->`, `<!-- absent -->` (STYLE.md's doc-claim
+  rule). An unparseable token is skipped silently, and a check that cannot run
+  exits **2** as a `LINTER ERROR`, never as a clean tree. `doc-lint.sh` keeps
+  markdown well-formedness, relative links and the design-filename shape.
 - **Version skew is gated twice, and only the dispatcher's half is authoritative.**
   The **dispatcher** refuses to merge a branch whose `.chug/jobs/*.yaml` or
   `.chug/schedules/*.yaml` declares a `min_dispatcher` above the running
@@ -129,8 +143,9 @@ the absence of a workflow file.
   finish exits **2** as a `LINTER ERROR`, never as a comment violation.
 - **The fast half of that gate also runs at the commit.** `.githooks/pre-commit`
   formats staged Rust/web files with `rustfmt`/`prettier` and re-stages them,
-  then runs the comment lint (`--staged` mode), the registry check and the
-  duplication check over the staged diff — ~2s, so an agent learns about
+  then runs the comment lint (`--staged` mode), the registry check, the
+  duplication check and the doc-fact check (`--staged`, +0.16s) over the staged
+  diff — ~2s, so an agent learns about
   a stray `//` before it exits instead of a rework cycle later. `prettier` runs
   from `web/` so `web/.prettierignore` applies: the Rust-emitted
   `web/src/api/wire-samples.json`, whose exact bytes a cargo test asserts, is

@@ -606,6 +606,23 @@ comments_gate() {
 	.chug/tasks/check-comments.sh
 }
 
+# --- doc-fact gate (design #415 D6 checks 1 and 2) ---------------------------
+# Delegates to .chug/tasks/check-doc-facts.sh: a backticked path claim resolves
+# against `git ls-files`, and a backticked constant asserted with a value agrees
+# with the tree. Pure shell and unconditional, over EVERY tracked `*.md`, for
+# the reason S1b moved it out of doc-lint.sh: the claims are made by every job
+# type, and a check that runs only when a `docs` job touches a file misses most
+# of the drift (job #416 was a `code` job and it orphaned ten references). Its
+# own exit code is the gate — 1 = stale claims, 2 = the check could not run,
+# and neither is a pass.
+doc_facts_gate() {
+	[ -x .chug/tasks/check-doc-facts.sh ] || {
+		echo "!!! ci: .chug/tasks/check-doc-facts.sh is missing or not executable"
+		exit 1
+	}
+	.chug/tasks/check-doc-facts.sh
+}
+
 # --- shell test suites (job #385) ---------------------------------------------
 # The tests OF THE GATES. Until #385 nothing executed a single `*.test.sh` —
 # not this gate, not .githooks/pre-commit — so a regression in check-comments.sh,
@@ -626,7 +643,7 @@ comments_gate() {
 # matched NOTHING fails rather than passing quietly — that is the shape of every
 # gate this repo has caught covering less than it claimed.
 #
-# UNCONDITIONAL, like the four gates above: a nix-only or docs-only diff runs no
+# UNCONDITIONAL, like the five gates above: a nix-only or docs-only diff runs no
 # other stage at all, and these suites are exactly what such a diff can break.
 # Measured 2026-08-04 on the agent-rust container: 18 suites, 45s total, 18/18
 # green on each of two consecutive runs. deploy/prod/update-refresh.test.sh alone
@@ -805,6 +822,10 @@ duplication_gate
 # Comment lint, same placement and for the same reason: a web-only diff never
 # reaches the cargo section, and TSX is as able to carry banned prose as Rust.
 comments_gate
+# Doc facts, same placement and unconditional: a doc-only diff is exactly the
+# diff that lands a stale path or a stale constant, and it never reaches cargo.
+# ~0.6s for the whole tree.
+doc_facts_gate
 # The shell suites last among the pure-shell gates: they are the slowest of them
 # (~37s against ~2s), so the cheap lints report first, and check-duplication.test.sh
 # reuses the npx cache duplication_gate has just warmed.

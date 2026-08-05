@@ -50,8 +50,8 @@ since #309 was written); [STYLE.md](../../STYLE.md);
 The brief's findings are accurate on every point that carries its argument. Four
 things have moved or need adjusting, and each one moves work.
 
-1. **`CONFIG_SCHEMA_EPOCH` is already `2`, not `1`.** `crates/types/src/version.rs`
-   holds `pub const CONFIG_SCHEMA_EPOCH: u32 = 2` — bumped for job `inputs:`
+1. **`CONFIG_SCHEMA_EPOCH` was already 2 when this was written, not `1`.**
+   `crates/types/src/version.rs` held it at 2 then — bumped for job `inputs:`
    (#311), with a frozen `INPUTS_SCHEMA_EPOCH = 2` beside it so a later
    unrelated bump does not retroactively raise what an existing `inputs:`
    config must declare. So #309's "bump 1 → 2" is stale: the host selector is a
@@ -694,7 +694,8 @@ Two macOS-specific notes on top of #309:
 ### Migration and skew, spelled out
 
 1. **Bump `CONFIG_SCHEMA_EPOCH` 2 → 3 in the same commit as the parser
-   change**, and add a frozen `RUNTIME_SCHEMA_EPOCH = 3` beside
+   change**, and add a frozen `RUNTIME_SCHEMA_EPOCH` — proposed here as 3, it
+   landed as 4 in job #401 after two unrelated bumps moved the base — beside
    `INPUTS_SCHEMA_EPOCH` (`crates/types/src/version.rs`), so a later unrelated
    bump does not retroactively raise what an existing `runtime:` config must
    declare. This is the precedent `inputs:` set, and it exists because
@@ -1043,7 +1044,7 @@ Per STYLE.md's contract-first rule, each slice names the contract it changes:
 | W2 | New backend implementation; `ContainerId` shape unchanged (`{node}/{task_id}`); **`list_managed_exited`/`list_managed_running` postcondition strengthened: never a partial `Ok`**; new invariant — a task dir never transitions out of having an `exit_code`, and the daemon is its only writer; `bootstrap_cmd` output (clone destination becomes `${CHUG_WORKSPACE:-/workspace}` — unchanged when unset); a new **total** wire-path mapping contract with no fall-through, over paths *and* env values; credential lifetime — secrets deleted at process exit, not at `remove`; host launches refuse agent shape |
 | W3 | Mapping containment strengthened to post-normalization (symlink escape); `kill`/`remove` postcondition gains bounded device-set teardown |
 | N1 | `spec.md` §1.1 field-rules matrix, §3.1 node kinds and trait listing, §4.1 workspace bootstrap |
-| N2 | Job-type schema epoch (§14.1): `CONFIG_SCHEMA_EPOCH` 2 → 3, `RUNTIME_SCHEMA_EPOCH` = 3, `JobType::validate` rules, per-level `image`/`runtime` precedence |
+| N2 | Job-type schema epoch (§14.1): `CONFIG_SCHEMA_EPOCH` 2 → 3, a frozen `RUNTIME_SCHEMA_EPOCH` (proposed 3, landed 4 in job #401), `JobType::validate` rules, per-level `image`/`runtime` precedence |
 | W4 | `runtime.env` scheme registry (`xcode:<version>`); launch fails hard on an unresolvable ref |
 | W5 | `refresh` precondition (declines while host tasks run) — a narrowing of §3.1's refresh contract |
 | P1 | Two wire records, additively (`PingOk`, `WorkerAnnounce`); `choose_placement` postcondition |
