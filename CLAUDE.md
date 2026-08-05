@@ -189,7 +189,10 @@ the absence of a workflow file.
   names what is excluded and why.
 - **`gcp-proof` is the only job type that may declare `workload_identities:`.** Half A of
   design #313 is being *proven*, not adopted: `.chug/jobs/gcp-proof.yaml` climbs a
-  five-rung ladder against chuggernaut's own project, and its stage-0 `no-identity`
+  six-rung ladder against chuggernaut's own project, and its stage-0 `no-identity`
   evaluator asserts rung 5b by declaring **no** identity — that absence is the assertion,
-  so don't add one there or anywhere else.
+  so don't add one there or anywhere else. Rungs 3–5 speak **REST over `curl` + `jq`**,
+  never `gcloud`: no job type here pulls a public image and neither agent image carries
+  the SDK, so a curl rung proves the STS accepts our token but leaves #313 A3's
+  "every Google client library already reads this shape" claim unverified — A3 says so.
 - Don't run destructive commands (deploys, restarts, data resets) without asking first.

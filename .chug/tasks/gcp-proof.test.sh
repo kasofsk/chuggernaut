@@ -2,7 +2,7 @@
 # Shell test for gcp-proof.sh and gcp-proof-negative.sh — no GCP, no token, no
 # federation, no network.
 #
-# It drives the real ladders against a stubbed `gcloud` on a controlled PATH and
+# It drives the real ladders against a stubbed `curl` on a controlled PATH and
 # a sandbox `/chuggernaut/cloud` tree holding a hand-built JWT. What it pins is
 # the class of bug a proof script is uniquely bad at revealing — THE ONE THAT
 # REPORTS PASS:
@@ -10,19 +10,22 @@
 #   1. THE VERDICT DEFAULTS TO FAIL. Any exit that does not run off the end of
 #      the script reports FAIL, so a `set -eu` abort, a missing `base64` or a
 #      future edit that adds a bare command cannot be read as a passing proof.
-#   2. A FAILING READ IS A FAILING RUNG. Rung 4's status must come from gcloud,
-#      not from the last command of a pipeline — `head -1` exits 0 on empty
-#      input, and `pipefail` is not POSIX.
+#   2. A FAILING READ IS A FAILING RUNG. Rung 4's status must come from the HTTP
+#      status, not from the last command of a pipeline — `head -1` exits 0 on
+#      empty input, and `pipefail` is not POSIX.
 #   3. THE NEGATIVE RUNG IS REAL. A read of the denied bucket that SUCCEEDS is a
-#      finding, and a refusal that is a NOT FOUND rather than a permission
-#      denial is inconclusive — an absent object refuses everyone, so it must not
-#      be allowed to look like a bounded credential.
+#      finding; a 404 rather than a 403 is inconclusive — an absent object
+#      refuses everyone — and a request that never got an answer refuses nobody.
+#      Neither may look like a bounded credential.
 #   4. A FAILURE NAMES ITS RUNG EXACTLY ONCE, and the rungs after it — never the
 #      failing one — read NOT REACHED. The ladder is the deliverable, so it
 #      prints on every path, last.
 #   5. THE LADDER STOPS AT THE FIRST FAILURE. A rung that failed spends no
 #      network call on the rungs above it.
-#   6. RUNG 5B PASSES BY FINDING NOTHING, and fails on a credential, on a stray
+#   6. THE EXCHANGE IS DRIVEN OVER REST, with no gcloud anywhere: rung 3 posts
+#      the token to the STS, rung 3b impersonates the SA the adc.json names, and
+#      a missing curl or jq is a NAMED NOT REACHED rather than a silent pass.
+#   7. RUNG 5B PASSES BY FINDING NOTHING, and fails on a credential, on a stray
 #      GOOGLE_APPLICATION_CREDENTIALS, and on a gcloud that mints from ambient
 #      credentials.
 #
@@ -80,48 +83,110 @@ write_token() { # write_token <project> <job_type> <container> [project_claim]
 		"c2lnbmF0dXJl" >"$DIR/token"
 }
 
-# --- the gcloud stub ----------------------------------------------------------
+# --- the curl stub ------------------------------------------------------------
 # Every call appends its argv to one log, so the ORDER of the rungs and what a
-# stopped ladder never reached are both readable from a single file. Outcomes
-# are steered by marker files under $STATE, which is what lets one stub serve
-# every case.
+# stopped ladder never reached are both readable from a single file. It honours
+# the two flags the ladder relies on — the body goes to `--output`, the status
+# to stdout for `--write-out` — and steers outcomes off marker files under
+# $STATE, which is what lets one stub serve every case. A transport failure is
+# an exit 6 with nothing on stdout, exactly as a real curl reports one.
+SA=proof-granted@daekon-ai.iam.gserviceaccount.com
+STS_URL=https://sts.googleapis.com/v1/token
+IMPERSONATION_URL="https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/$SA:generateAccessToken"
+
+cat >"$BIN/curl" <<EOF
+#!/bin/sh
+echo "curl \$*" >> "$CMD_LOG"
+out=/dev/null
+url=
+prev=
+for a in "\$@"; do
+  case "\$prev" in --output) out="\$a" ;; esac
+  case "\$a" in https://*) [ -z "\$url" ] && url="\$a" ;; esac
+  prev="\$a"
+done
+answer() { printf '%s' "\$2" > "\$out"; printf '%s' "\$1"; exit 0; }
+unreachable() { echo "curl: (6) Could not resolve host" >&2; exit 6; }
+case "\$url" in
+*sts.googleapis.com*)
+  [ -f "$STATE/sts_unreachable" ] && unreachable
+  [ -f "$STATE/login_fails" ] && answer 400 '{"error":"invalid_grant","error_description":"Error connecting to the given credential'"'"'s issuer"}'
+  [ -f "$STATE/sts_fails" ] && answer 403 '{"error":"permission_denied","error_description":"the attribute condition denied this token"}'
+  [ -f "$STATE/sts_empty" ] && answer 200 '{"token_type":"Bearer","expires_in":3600}'
+  answer 200 "{\"access_token\":\"\$(cat "$STATE/federated_token")\",\"token_type\":\"Bearer\",\"expires_in\":3600}" ;;
+*iamcredentials.googleapis.com*)
+  [ -f "$STATE/impersonation_fails" ] && answer 403 '{"error":{"code":403,"message":"caller does not have permission to impersonate"}}'
+  answer 200 "{\"accessToken\":\"\$(cat "$STATE/access_token")\",\"expireTime\":\"2026-08-05T12:00:00Z\"}" ;;
+*storage.googleapis.com*$GRANTED*)
+  [ -f "$STATE/granted_denied" ] && answer 403 '{"error":{"code":403,"message":"does not have storage.objects.get access"}}'
+  [ -f "$STATE/granted_empty" ] && answer 200 ''
+  answer 200 'chuggernaut gcp-proof canary (granted bucket)' ;;
+*storage.googleapis.com*$DENIED*)
+  [ -f "$STATE/denied_unreachable" ] && unreachable
+  [ -f "$STATE/denied_readable" ] && answer 200 'chuggernaut gcp-proof canary (denied bucket)'
+  [ -f "$STATE/denied_absent" ] && answer 404 '{"error":{"code":404,"message":"No such object"}}'
+  [ -f "$STATE/denied_unauthorized" ] && answer 401 '{"error":{"code":401,"message":"Invalid Credentials"}}'
+  answer 403 '{"error":{"code":403,"message":"does not have storage.objects.get access to the object"}}' ;;
+esac
+echo "curl: stub reached no case for '\$url'" >&2
+exit 6
+EOF
+chmod +x "$BIN/curl"
+
+# The only gcloud left in this suite, and it belongs to rung 5b: the negative
+# evaluator still asks whether an SDK on the PATH can mint from AMBIENT
+# credentials. The ladder must never call it, which case 1 asserts.
 cat >"$BIN/gcloud" <<EOF
 #!/bin/sh
 echo "gcloud \$*" >> "$CMD_LOG"
 case "\$1 \$2" in
-"auth login")
-  [ -f "$STATE/login_fails" ] && { echo "ERROR: Error connecting to the given credential's issuer"; exit 1; }
-  exit 0 ;;
-"auth print-access-token")
-  [ -f "$STATE/sts_fails" ] && { echo "ERROR: unable to acquire impersonated credentials"; exit 1; }
-  cat "$STATE/access_token"; exit 0 ;;
-"storage cat")
-  case "\$3" in
-  *$GRANTED*)
-    [ -f "$STATE/granted_denied" ] && { echo "ERROR: 403 does not have storage.objects.get access"; exit 1; }
-    [ -f "$STATE/granted_empty" ] && exit 0
-    echo "chuggernaut gcp-proof canary (granted bucket)"; exit 0 ;;
-  *$DENIED*)
-    [ -f "$STATE/denied_readable" ] && { echo "chuggernaut gcp-proof canary (denied bucket)"; exit 0; }
-    [ -f "$STATE/denied_absent" ] && { echo "ERROR: 404 The following URLs matched no objects or files"; exit 1; }
-    echo "ERROR: 403 does not have storage.objects.get access to the object"; exit 1 ;;
-  esac
-  exit 1 ;;
+"auth print-access-token") echo "ya29.stub-ambient-token"; exit 0 ;;
 esac
 exit 1
 EOF
 chmod +x "$BIN/gcloud"
 
+# The document the dispatcher writes beside the token (crates/auth's
+# `adc_document`). Rung 3 reads its audience, endpoints and service account out
+# of this file rather than off constants, so the stub ships the real shape.
+write_adc() { # write_adc [credential_source_file]
+	cat >"$DIR/adc.json" <<JSON
+{
+  "type": "external_account",
+  "audience": "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/chug/providers/chuggernaut",
+  "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+  "token_url": "$STS_URL",
+  "service_account_impersonation_url": "$IMPERSONATION_URL",
+  "credential_source": {
+    "file": "${1-$DIR/token}"
+  }
+}
+JSON
+}
+
 reset_case() {
 	rm -f "$STATE"/* "$CMD_LOG"
 	rm -rf "$CLOUD"
 	mkdir -p "$DIR"
-	printf 'ya29.stub-access-token\n' >"$STATE/access_token"
+	printf 'ya29.stub-federated-token' >"$STATE/federated_token"
+	printf 'ya29.stub-access-token' >"$STATE/access_token"
 	write_token kasofsk/chuggernaut gcp-proof work
-	printf '{"type":"external_account"}\n' >"$DIR/adc.json"
+	write_adc
 	chmod 600 "$DIR/token"
 	chmod 644 "$DIR/adc.json"
 }
+
+# A PATH carrying everything rungs 1-2 and the summary need and NOTHING ELSE, so
+# a case can withhold `curl` or `jq` without withdrawing `base64` with them. The
+# real /usr/bin holds a curl, which is exactly why "no curl" cannot be spelled by
+# dropping $BIN from the PATH.
+MINIMAL="$SANDBOX/minimal"
+mkdir -p "$MINIMAL"
+for tool in sh stat cut tr base64 sed head cat mktemp rm; do
+	if real=$(command -v "$tool" 2>/dev/null); then
+		ln -sf "$real" "$MINIMAL/$tool"
+	fi
+done
 
 run_ladder() { # run_ladder <outfile> [PATH override]
 	STATUS=0
@@ -138,7 +203,7 @@ run_ladder() { # run_ladder <outfile> [PATH override]
 echo "gcp-proof.test.sh: driving the real ladder against stubs"
 
 # --- case 1: everything works --------------------------------------------------
-echo "case 1: a wired, bounded credential climbs all five rungs"
+echo "case 1: a wired, bounded credential climbs every rung, over curl alone"
 reset_case
 run_ladder "$SANDBOX/out1.txt"
 
@@ -147,12 +212,22 @@ verdict "verdict is PASS" "$(found "$SANDBOX/out1.txt" "VERDICT PASS")"
 verdict "rung 1 PASS" "$(found "$SANDBOX/out1.txt" "rung 1 the credential is injected: PASS")"
 verdict "rung 2 PASS" "$(found "$SANDBOX/out1.txt" "rung 2 the claims are what we minted: PASS")"
 verdict "rung 3 PASS" "$(found "$SANDBOX/out1.txt" "rung 3 the STS accepts the exchange: PASS")"
+verdict "rung 3b PASS" "$(found "$SANDBOX/out1.txt" "rung 3b the federated token impersonates the service account: PASS")"
 verdict "rung 4 PASS" "$(found "$SANDBOX/out1.txt" "rung 4 the granted read succeeds: PASS")"
 verdict "rung 5 PASS" "$(found "$SANDBOX/out1.txt" "rung 5 the UNGRANTED read is refused: PASS")"
 verdict "nothing reads NOT REACHED" "$(missing "$SANDBOX/out1.txt" ": NOT REACHED")"
 verdict "names the evaluator as 5b's owner" "$(found "$SANDBOX/out1.txt" "rung 5b")"
-verdict "read the granted bucket" "$(found "$CMD_LOG" "gs://$GRANTED/canary.txt")"
-verdict "read the denied bucket" "$(found "$CMD_LOG" "gs://$DENIED/canary.txt")"
+verdict "posted the exchange to the STS" "$(found "$CMD_LOG" "$STS_URL")"
+verdict "asked for a token exchange" "$(found "$CMD_LOG" "grant_type=urn:ietf:params:oauth:grant-type:token-exchange")"
+verdict "declared the subject token type" "$(found "$CMD_LOG" "subject_token_type=urn:ietf:params:oauth:token-type:jwt")"
+verdict "sent the audience the adc.json names" "$(found "$CMD_LOG" "audience=//iam.googleapis.com/projects/1/")"
+verdict "sent the subject token from a file, not argv" "$(found "$CMD_LOG" "subject_token@")"
+verdict "kept the JWT off the command line" "$(missing "$CMD_LOG" "subject_token=eyJ")"
+verdict "impersonated the SA the adc.json names" "$(found "$CMD_LOG" "$IMPERSONATION_URL")"
+verdict "read the granted bucket" "$(found "$CMD_LOG" "https://storage.googleapis.com/storage/v1/b/$GRANTED/o/canary.txt?alt=media")"
+verdict "read the denied bucket" "$(found "$CMD_LOG" "https://storage.googleapis.com/storage/v1/b/$DENIED/o/canary.txt?alt=media")"
+verdict "bore the SA token, not the federated one" "$(found "$CMD_LOG" "Authorization: Bearer ya29.stub-access-token")"
+verdict "ran no gcloud" "$(missing "$CMD_LOG" "gcloud")"
 
 # --- case 2: the modes drift ----------------------------------------------------
 echo "case 2: a token at 0644 fails rung 1, and spends no network call"
@@ -165,9 +240,10 @@ verdict "names rung 1" "$(found "$SANDBOX/out2.txt" "RUNG 1 FAILED")"
 verdict "names the promised mode" "$(found "$SANDBOX/out2.txt" "the dispatcher promised 600")"
 verdict "rung 1 reads FAIL" "$(found "$SANDBOX/out2.txt" "rung 1 the credential is injected: FAIL")"
 verdict "rung 2 reads NOT REACHED" "$(found "$SANDBOX/out2.txt" "rung 2 the claims are what we minted: NOT REACHED")"
+verdict "rung 3b reads NOT REACHED" "$(found "$SANDBOX/out2.txt" "rung 3b the federated token impersonates the service account: NOT REACHED")"
 verdict "rung 5 reads NOT REACHED" "$(found "$SANDBOX/out2.txt" "rung 5 the UNGRANTED read is refused: NOT REACHED")"
 verdict "the failed rung is not ALSO NOT REACHED" "$(missing "$SANDBOX/out2.txt" "rung 1 the credential is injected: NOT REACHED")"
-verdict "runs no gcloud at all" "$([ -f "$CMD_LOG" ] && echo no || echo ok)"
+verdict "spends no HTTP call at all" "$([ -f "$CMD_LOG" ] && echo no || echo ok)"
 
 # --- case 3: no credential at all -------------------------------------------------
 echo "case 3: with injection undeployed, rung 1 fails and names the sequence"
@@ -224,7 +300,9 @@ verdict "names rung 3" "$(found "$SANDBOX/out6.txt" "RUNG 3 FAILED")"
 verdict "names the misleading error" "$(found "$SANDBOX/out6.txt" "Error connecting to the given credential's issuer")"
 verdict "redirects to the JWK set" "$(found "$SANDBOX/out6.txt" "suspect")"
 verdict "points at the runbook" "$(found "$SANDBOX/out6.txt" "infra/README.md §5")"
-verdict "reads no bucket" "$(missing "$CMD_LOG" "storage cat")"
+verdict "names the HTTP status" "$(found "$SANDBOX/out6.txt" "HTTP 400")"
+verdict "reads no bucket" "$(missing "$CMD_LOG" "storage.googleapis.com")"
+verdict "impersonates nothing" "$(missing "$CMD_LOG" "iamcredentials")"
 
 # --- case 7: the STS refuses ----------------------------------------------------------
 echo "case 7: an STS refusal stops the ladder at rung 3"
@@ -234,12 +312,76 @@ run_ladder "$SANDBOX/out7.txt"
 
 verdict "exits non-zero" "$(non_zero "$STATUS")"
 verdict "names rung 3" "$(found "$SANDBOX/out7.txt" "RUNG 3 FAILED")"
+verdict "quotes the STS body" "$(found "$SANDBOX/out7.txt" "the attribute condition denied this token")"
+verdict "rung 3b reads NOT REACHED" "$(found "$SANDBOX/out7.txt" "rung 3b the federated token impersonates the service account: NOT REACHED")"
 verdict "rung 4 reads NOT REACHED" "$(found "$SANDBOX/out7.txt" "rung 4 the granted read succeeds: NOT REACHED")"
-verdict "reads no bucket" "$(missing "$CMD_LOG" "storage cat")"
+verdict "reads no bucket" "$(missing "$CMD_LOG" "storage.googleapis.com")"
+
+# --- case 7b: a 200 that carries no token ------------------------------------------------
+echo "case 7b: an STS 200 with no access_token is a rung-3 FAILURE, not a pass"
+reset_case
+: >"$STATE/sts_empty"
+run_ladder "$SANDBOX/out7b.txt"
+
+verdict "exits non-zero" "$(non_zero "$STATUS")"
+verdict "names rung 3" "$(found "$SANDBOX/out7b.txt" "RUNG 3 FAILED")"
+verdict "names the missing field" "$(found "$SANDBOX/out7b.txt" "no access_token")"
+verdict "impersonates nothing" "$(missing "$CMD_LOG" "iamcredentials")"
+
+# --- case 7c: the STS is unreachable -------------------------------------------------------
+echo "case 7c: a call that never got an answer is a rung-3 FAILURE, and says so"
+reset_case
+: >"$STATE/sts_unreachable"
+run_ladder "$SANDBOX/out7c.txt"
+
+verdict "exits non-zero" "$(non_zero "$STATUS")"
+verdict "names rung 3" "$(found "$SANDBOX/out7c.txt" "RUNG 3 FAILED")"
+verdict "says no response arrived" "$(found "$SANDBOX/out7c.txt" "no HTTP response")"
+verdict "quotes the transport error" "$(found "$SANDBOX/out7c.txt" "Could not resolve host")"
+
+# --- case 7d: impersonation is refused -------------------------------------------------------
+# Split from rung 3 on purpose: the STS accepting the token and the SA refusing
+# the impersonation are different findings, and only 3b's is about the member.
+echo "case 7d: a refused impersonation fails rung 3b, and names the %2F member"
+reset_case
+: >"$STATE/impersonation_fails"
+run_ladder "$SANDBOX/out7d.txt"
+
+verdict "exits non-zero" "$(non_zero "$STATUS")"
+verdict "names rung 3b" "$(found "$SANDBOX/out7d.txt" "RUNG 3b FAILED")"
+verdict "rung 3 still reads PASS" "$(found "$SANDBOX/out7d.txt" "rung 3 the STS accepts the exchange: PASS")"
+verdict "rung 3b reads FAIL" "$(found "$SANDBOX/out7d.txt" "rung 3b the federated token impersonates the service account: FAIL")"
+verdict "names the %2F member as the first suspect" "$(found "$SANDBOX/out7d.txt" "%2F")"
+verdict "names the service account" "$(found "$SANDBOX/out7d.txt" "$SA")"
+verdict "rung 4 reads NOT REACHED" "$(found "$SANDBOX/out7d.txt" "rung 4 the granted read succeeds: NOT REACHED")"
+verdict "reads no bucket" "$(missing "$CMD_LOG" "storage.googleapis.com")"
+
+# --- case 7e: the adc.json is not the document the dispatcher writes ---------------------------
+echo "case 7e: an adc.json with no audience fails rung 3 before any HTTP call"
+reset_case
+printf '{"type":"external_account"}\n' >"$DIR/adc.json"
+chmod 644 "$DIR/adc.json"
+run_ladder "$SANDBOX/out7e.txt"
+
+verdict "exits non-zero" "$(non_zero "$STATUS")"
+verdict "names rung 3" "$(found "$SANDBOX/out7e.txt" "RUNG 3 FAILED")"
+verdict "names the missing field" "$(found "$SANDBOX/out7e.txt" "names no audience")"
+verdict "spends no HTTP call" "$([ -f "$CMD_LOG" ] && echo no || echo ok)"
+
+echo "case 7f: an adc.json sourcing a different token file fails rung 3"
+reset_case
+write_adc /chuggernaut/cloud/somewhere-else/token
+chmod 644 "$DIR/adc.json"
+run_ladder "$SANDBOX/out7f.txt"
+
+verdict "exits non-zero" "$(non_zero "$STATUS")"
+verdict "names rung 3" "$(found "$SANDBOX/out7f.txt" "RUNG 3 FAILED")"
+verdict "names the file it would have read" "$(found "$SANDBOX/out7f.txt" "/chuggernaut/cloud/somewhere-else/token")"
+verdict "spends no HTTP call" "$([ -f "$CMD_LOG" ] && echo no || echo ok)"
 
 # --- case 8: the granted read is refused ------------------------------------------------
 # The regression that matters most: a pipeline's status is its LAST command's, so
-# `gcloud ... | head -1` would take the `if` branch and report PASS here.
+# `curl ... | head -1` would take the `if` branch and report PASS here.
 echo "case 8: a 403 on the granted bucket is a rung-4 FAILURE, never a pass"
 reset_case
 : >"$STATE/granted_denied"
@@ -249,8 +391,8 @@ verdict "exits non-zero" "$(non_zero "$STATUS")"
 verdict "names rung 4" "$(found "$SANDBOX/out8.txt" "RUNG 4 FAILED")"
 verdict "rung 4 reads FAIL, not PASS" "$(found "$SANDBOX/out8.txt" "rung 4 the granted read succeeds: FAIL")"
 verdict "verdict is not PASS" "$(missing "$SANDBOX/out8.txt" "VERDICT PASS")"
-verdict "names the %2F member as the first suspect" "$(found "$SANDBOX/out8.txt" "%2F")"
-verdict "never reaches the denied bucket" "$(missing "$CMD_LOG" "gs://$DENIED")"
+verdict "names the objectViewer binding, the member being proved" "$(found "$SANDBOX/out8.txt" "objectViewer binding")"
+verdict "never reaches the denied bucket" "$(missing "$CMD_LOG" "/b/$DENIED/")"
 
 # --- case 9: the granted read succeeds and returns nothing --------------------------------
 echo "case 9: an empty canary is a rung-4 failure — the read is evidence, not a verdict"
@@ -283,18 +425,51 @@ run_ladder "$SANDBOX/out11.txt"
 verdict "exits non-zero" "$(non_zero "$STATUS")"
 verdict "names rung 5" "$(found "$SANDBOX/out11.txt" "RUNG 5 FAILED")"
 verdict "says it is inconclusive" "$(found "$SANDBOX/out11.txt" "inconclusive")"
+verdict "names the status it got" "$(found "$SANDBOX/out11.txt" "404 NOT FOUND")"
 verdict "does not claim a bounded credential" "$(missing "$SANDBOX/out11.txt" "VERDICT PASS")"
 
-# --- case 12: no gcloud ----------------------------------------------------------------------
-echo "case 12: an image with no gcloud reports NOT REACHED, and still fails"
+echo "case 11b: a denied read that never got an answer refuses nobody"
 reset_case
-run_ladder "$SANDBOX/out12.txt" "/usr/bin:/bin"
+: >"$STATE/denied_unreachable"
+run_ladder "$SANDBOX/out11b.txt"
+
+verdict "exits non-zero" "$(non_zero "$STATUS")"
+verdict "names rung 5" "$(found "$SANDBOX/out11b.txt" "RUNG 5 FAILED")"
+verdict "says it is inconclusive" "$(found "$SANDBOX/out11b.txt" "inconclusive")"
+verdict "does not claim a bounded credential" "$(missing "$SANDBOX/out11b.txt" "VERDICT PASS")"
+
+echo "case 11c: a 401 is not a permission denial, so rung 5 stays unproved"
+reset_case
+: >"$STATE/denied_unauthorized"
+run_ladder "$SANDBOX/out11c.txt"
+
+verdict "exits non-zero" "$(non_zero "$STATUS")"
+verdict "names rung 5" "$(found "$SANDBOX/out11c.txt" "RUNG 5 FAILED")"
+verdict "says only a 403 proves it" "$(found "$SANDBOX/out11c.txt" "only a 403")"
+verdict "does not claim a bounded credential" "$(missing "$SANDBOX/out11c.txt" "VERDICT PASS")"
+
+# --- case 12: no HTTP client, no JSON parser -------------------------------------------------
+echo "case 12: an image with no curl reports NOT REACHED, and still fails"
+reset_case
+run_ladder "$SANDBOX/out12.txt" "$MINIMAL"
 
 verdict "exits non-zero" "$(non_zero "$STATUS")"
 verdict "rung 3 reads NOT REACHED" "$(found "$SANDBOX/out12.txt" "rung 3 the STS accepts the exchange: NOT REACHED")"
 verdict "rung 3 does not read PASS" "$(missing "$SANDBOX/out12.txt" "rung 3 the STS accepts the exchange: PASS")"
+verdict "names curl" "$(found "$SANDBOX/out12.txt" "curl is not on this image's PATH")"
+verdict "rung 3b reads NOT REACHED" "$(found "$SANDBOX/out12.txt" "rung 3b the federated token impersonates the service account: NOT REACHED")"
 verdict "verdict is a FAIL" "$(found "$SANDBOX/out12.txt" "VERDICT FAIL")"
 verdict "rungs 1 and 2 still judged" "$(found "$SANDBOX/out12.txt" "rung 2 the claims are what we minted: PASS")"
+
+echo "case 12b: an image with curl but no jq is a NAMED NOT REACHED, not a sed parser"
+reset_case
+run_ladder "$SANDBOX/out12b.txt" "$BIN:$MINIMAL"
+
+verdict "exits non-zero" "$(non_zero "$STATUS")"
+verdict "rung 3 reads NOT REACHED" "$(found "$SANDBOX/out12b.txt" "rung 3 the STS accepts the exchange: NOT REACHED")"
+verdict "names jq" "$(found "$SANDBOX/out12b.txt" "jq is not on this image's PATH")"
+verdict "spends no HTTP call" "$([ -f "$CMD_LOG" ] && echo no || echo ok)"
+verdict "verdict is a FAIL" "$(found "$SANDBOX/out12b.txt" "VERDICT FAIL")"
 
 # --- case 13: a bucket input that was never supplied -------------------------------------------
 echo "case 13: a missing denied_bucket cannot silently skip the negative rung"
@@ -323,7 +498,6 @@ run_negative() { # run_negative <outfile> <cloud-root> [gac] [PATH]
 
 echo "case 14: rung 5b passes by finding nothing"
 reset_case
-: >"$STATE/no_ambient"
 run_negative "$SANDBOX/out14.txt" "$SANDBOX/absent-root" "" "/usr/bin:/bin"
 
 verdict "exits 0" "$(yes_no "$NSTATUS")"

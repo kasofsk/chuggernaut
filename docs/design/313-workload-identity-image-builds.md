@@ -529,6 +529,19 @@ Three reasons this beats an env var, in order of weight:
    external-account/ADC flow is `credential_source: { file: … }`; `gcloud`,
    `google-auth`, and `docker-credential-gcr` all consume it with no glue. An
    env-delivered raw JWT would need a shim in every build script.
+
+   > **Reason 1 is still UNVERIFIED, and the proof job cannot verify it.**
+   > `.chug/tasks/gcp-proof.sh` climbs rungs 3–5 over `curl` + `jq`, because
+   > neither agent image carries the gcloud SDK and no job type here pulls a
+   > public image ([correction 2](#corrections-verified-against-the-tree), half
+   > B). What that proves is that **the STS accepts
+   > our token and the ADC document describes the exchange correctly** — the
+   > script reads the audience, the endpoints and the service account out of
+   > `adc.json` rather than off constants, so a document that named the wrong
+   > thing fails rung 3. What it does **not** prove is the claim this reason
+   > rests on: that an *unmodified Google client* picks the file up and does the
+   > same exchange with no glue. Verifying that needs a container with a real
+   > client in it, which is the image/registry story of half B, not this job.
 2. **`/proc/{pid}/environ` is readable by any process of the same uid.** That is
    already noted as the sharp edge of #309 §8 for host mode; it is also true of
    any sibling process inside a container. A file at 0600 is not a boundary
@@ -1254,7 +1267,7 @@ Slice labels below are `S{n}` deliberately — the `A`/`B` labels above name
 | **S3d** | ***Deploy:* a dispatcher carrying epoch 5 reaches prod.** Not a code slice and not optional — see the ordering note below | S3 |
 | **S4** | Injection at launch (two `InjectedFile`s + `GOOGLE_APPLICATION_CREDENTIALS`), audit fields, the empty-declaration assert. **Shipped** as [`crates/dispatcher/src/workload.rs`](../../crates/dispatcher/src/workload.rs), wired into every declaration-resolving launch path (spec §8.3) | S3 |
 | **S5** | Discovery + JWKS routes on the api (unexposed). **Shipped** as [`crates/api/src/oidc.rs`](../../crates/api/src/oidc.rs) (spec §6.7); the bind is untouched | S1 |
-| **S6** | *Operator:* register the provider with the uploaded JWK set (`--issuer-uri https://chug.kasofsk.xyz`, [D1](#decisions-taken-2026-08-04)); attribute condition; one IAM binding to the impersonated SA ([D4](#decisions-taken-2026-08-04)); prove it in a work container. The terraform and the proof are **authored** — [`infra/gcp-proof/`](../../infra/gcp-proof) declares the pool, the provider, and a two-SA/two-bucket fixture whose second half is deliberately out of reach, and [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml) climbs a five-rung ladder over it against **`kasofsk/chuggernaut`**, not a consumer project. The `apply` is the operator's ([`infra/README.md`](../../infra/README.md)) | S4, **S3d** |
+| **S6** | *Operator:* register the provider with the uploaded JWK set (`--issuer-uri https://chug.kasofsk.xyz`, [D1](#decisions-taken-2026-08-04)); attribute condition; one IAM binding to the impersonated SA ([D4](#decisions-taken-2026-08-04)); prove it in a work container. The terraform and the proof are **authored** — [`infra/gcp-proof/`](../../infra/gcp-proof) declares the pool, the provider, and a two-SA/two-bucket fixture whose second half is deliberately out of reach, and [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml) climbs a six-rung ladder over it against **`kasofsk/chuggernaut`**, not a consumer project. Rungs 3-5 speak REST over `curl` + `jq` rather than `gcloud`, which neither agent image carries ([correction 2](#corrections-verified-against-the-tree): no registry, no public image). The `apply` is the operator's ([`infra/README.md`](../../infra/README.md)) | S4, **S3d** |
 | **S7** | *Operator:* a registry **confirmed** — plausibly already satisfied by beacon's Artifact Registry ([correction 2](#corrections-verified-against-the-tree)); what is left is confirming the repository, its GCP project, and IAM for a second writer | — (runs in parallel with S1–S6) |
 | **S8** | *Node config:* proxy + allow-list + `placement.node` pin on one builder node | [Decision 0](#decision-0-the-308-vs-309-contradiction-resolved) only |
 | **S9** | A real `build-image` job type: SHA tag, digest recorded, digest-resolves evaluator | S6, S7, S8 |

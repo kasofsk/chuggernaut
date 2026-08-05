@@ -391,9 +391,23 @@ the run stops at the first failure.
 | 1 | The credential is injected, at the promised modes | (a) has not merged, or the job type lost its `workload_identities:` |
 | 2 | The claims are what was minted — decoded **locally**, no network | The issuer's claim assembly changed; the cloud would refuse this too, and this names the field |
 | 3 | The STS accepts the exchange | The JWKS upload (§5), or (c)/(d) not done |
-| 4 | The granted read succeeds | The `%2F` member, or the objectViewer binding |
+| 3b | The federated token impersonates the SA | The `%2F` member in the `workloadIdentityUser` binding — a literal `/` applies cleanly and grants nothing |
+| 4 | The granted read succeeds | The objectViewer binding on the granted bucket; 3b already proved the member |
 | 5 | The ungranted read is **refused** | A grant wider than the terraform declares — a real finding |
 | 5b | An evaluator declaring no identity gets **nothing** | Injection is not per-container; #313 A5 non-inheritance is broken |
+
+Rungs 3–5 speak **REST over `curl` + `jq`**, not `gcloud`: no job type here
+pulls a public image and neither agent image carries the SDK (#313 gap 11), and
+a missing `curl` or `jq` is a named `NOT REACHED` rather than a silent pass. The
+audience, the endpoints and the service account are read out of the injected
+`adc.json`, so this proves the STS accepts our token and that the ADC document
+describes the exchange correctly — it does **not** prove #313 A3's claim that an
+unmodified Google client reads the same file with no glue, which A3 now records
+as still open.
+
+Rung 5 accepts only a **403**. A 404 is inconclusive (an absent object refuses
+everyone, which is why the terraform writes a canary into both buckets), and a
+request that never got an answer refuses nobody.
 
 Rung 5b runs in the `no-identity` stage-0 evaluator, not in the work container:
 the property is non-inheritance, and only a container that declared no identity

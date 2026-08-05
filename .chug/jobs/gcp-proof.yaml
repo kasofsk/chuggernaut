@@ -1,5 +1,5 @@
 # The workload-identity proof — design #313 half A, slice S6, on demand.
-# Releasing it climbs .chug/tasks/gcp-proof.sh's five-rung ladder against
+# Releasing it climbs .chug/tasks/gcp-proof.sh's six-rung ladder against
 # chuggernaut's OWN GCP project (infra/gcp-proof), and reports. It is a report,
 # not a change: nothing merges.
 #
@@ -26,8 +26,10 @@ description: Climb the #313 half-A ladder against chuggernaut's own GCP project.
 # pre-epoch-5 dispatcher parks the job `config_schema_skew` and launches
 # nothing. A deploy carrying epoch 5 is the real prerequisite — infra/README.md §2.
 min_dispatcher: 5
-# gcloud is what rungs 3-5 drive. Rung 3 reports NOT REACHED rather than a false
-# PASS if the image has no gcloud, so a wrong image here is legible.
+# Rungs 3-5 drive the STS, iamcredentials and GCS over `curl` + `jq`, both of
+# which this image carries — no job type here pulls a public image and neither
+# agent image has the gcloud SDK (#313 gap 11). Rung 3 reports NOT REACHED
+# rather than a false PASS if either tool is absent, so a wrong image is legible.
 image: chuggernaut/agent:prod
 work:
   # A command, not an agent: there is nothing to author, only something to
