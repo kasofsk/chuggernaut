@@ -534,6 +534,31 @@ if grep -qF "WORKER_SLOTS" "$LOG"; then
 fi
 echo "ok: swap carries WORKER_SLOTS forward, and passes none when unset"
 
+# ── Case 3e2: swap carries the node's runtimes forward (WORKER_MODES) ─────────
+# Same silent-revert class, with the longest fuse in it: prod's nodes only ever
+# self-refresh (WORKER_SSH is unset for both, so build-worker.sh no-ops on every
+# deploy), so a knob this phase does not re-compose is gone at the next deploy
+# and only a hand-run build-worker.sh can put it back. Quoted so the spelling the
+# daemon accepts (`container, host` — it trims each entry) stays one argument;
+# unset ⇒ nothing passed, and the node keeps the container-only default.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=air NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_MODES="container, host" \
+  sh "$SUT" swap prod
+
+grep_log "-e WORKER_MODES='container, host'"
+
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  sh "$SUT" swap prod
+
+if grep -qF "WORKER_MODES" "$LOG"; then
+  fail "swap must not pass WORKER_MODES when unset (daemon default applies)"
+fi
+echo "ok: swap carries WORKER_MODES forward, and passes none when unset"
+
 # ── Case 3f: KVM off ⇒ the swap carries neither the settings nor a device ─────
 # Every node in the fleet is here until an operator turns KVM on, so the
 # replacement daemon's run spec must be untouched by #367 existing.

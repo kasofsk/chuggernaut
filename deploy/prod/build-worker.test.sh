@@ -149,6 +149,13 @@ fi
 if grep -qF "WORKER_SLOTS" "$LOG"; then
   fail "WORKER_SLOTS must not be passed when unset (daemon default applies)"
 fi
+# And the runtimes the node offers: unset must stay UNSET, never an explicit
+# `container`. The daemon already defaults to container-only, so forwarding that
+# default would have every node advertise a value it never declared and make a
+# future change of the default a silent no-op.
+if grep -qF "WORKER_MODES" "$LOG"; then
+  fail "WORKER_MODES must not be passed when unset (daemon default applies)"
+fi
 # Caching off ⇒ nothing to provision: a node that asked for no cache must not
 # acquire a directory (nor a `sudo` call) from a deploy.
 if grep -qF "mkdir" "$LOG"; then
@@ -201,6 +208,126 @@ PATH="$BIN:$PATH" \
 grep_log "WORKER_SLOTS=2"
 grep_log "WORKER_NODE=air"
 echo "ok: daemon run carries WORKER_SLOTS when set"
+
+# ── Case 2c1: the runtimes the node offers reach the daemon (WORKER_MODES) ─────
+# #434 gave the daemon the knob and nothing in the deploy path could set it, so
+# host mode could not be turned on at all — a node property whose only declared
+# home is this file has to arrive at the `docker run` to exist. A bare value
+# applies to a node with no override of its own, exactly like WORKER_SLOTS.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_MODES="container, host" \
+  WORKER_SLOTS=1 \
+  sh "$SUT"
+
+grep_log "-e WORKER_MODES='container, host'"
+# Quoted, because the daemon trims each entry (crates/worker/src/config.rs
+# `parse_modes`) and so `container, host` is a list an operator will write.
+# Unquoted it word-splits and the tail lands after the image name, as the
+# container's COMMAND.
+case "$(daemon_run)" in
+  *"chuggernaut/worker:prod >/dev/null"*) ;;
+  *) fail "the image must stay the LAST argument of the run (a split mode list would follow it as a command)" ;;
+esac
+echo "ok: daemon run carries WORKER_MODES when set, as one argument"
+
+# ── Case 2c2: WORKER_MODES is a per-node property like every other one ─────────
+# The whole point of declaring modes per node: a fleet enables host execution on
+# the node that can serve it, not on all of them. It rides the same derived
+# <VAR>_<node> resolution as WORKER_SLOTS and WORKER_CACHE_DIR — no second path.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_MODES=container \
+  WORKER_MODES_air=container,host \
+  WORKER_SLOTS_air=1 \
+  sh "$SUT"
+
+grep_log "-e WORKER_MODES='container,host'"
+if grep -qF "WORKER_MODES='container'" "$LOG"; then
+  fail "a per-node WORKER_MODES_air must win over the bare WORKER_MODES"
+fi
+echo "ok: WORKER_MODES_<node> wins over the bare WORKER_MODES"
+
+# ── Case 2c2b: host without the capacity it needs REFUSES, before the restart ──
+# `host` is not additive — #309 P0 has no per-request selector, so a node naming
+# it runs EVERY launch as a host process, and the daemon refuses to start unless
+# WORKER_SLOTS and WORKER_SLOTS_MAX are both 1 (two host tasks cannot both own
+# /workspace, #309 §2 option (iii)). Prod's nodes run at 2, so a `host` line
+# added to chuggernaut.env without the capacity beside it would `docker rm -f` a
+# working daemon and boot-loop its replacement out of the fleet.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_MODES=container,host \
+  WORKER_SLOTS=2 \
+  sh "$SUT" >"$WORK/modes-slots.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "host mode without WORKER_SLOTS=1 must fail the deploy (got rc=0)"
+grep -qF "WORKER_SLOTS_air=1" "$WORK/modes-slots.out" || fail "the refusal must name the fix, per node"
+# The half this script cannot forward has to be said out loud too, or the next
+# attempt destroys the daemon and the replacement still refuses to boot.
+grep -qF "WORKER_SLOTS_MAX=1" "$WORK/modes-slots.out" \
+  || fail "the refusal must name the WORKER_SLOTS_MAX half no script forwards"
+if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+  fail "host mode without the capacity it needs must not reach the daemon restart"
+fi
+echo "ok: host mode without WORKER_SLOTS=1 refuses before the daemon is replaced"
+
+# ── Case 2c3: a mode the daemon cannot parse is refused BEFORE the restart ────
+# An unknown name is a hard config error (crates/worker/src/config.rs), so
+# passing it through would `docker rm -f` a working daemon and replace it with
+# one that cannot boot, looped by --restart=always until the node leaves the
+# fleet — the WORKER_KVM hazard, one knob over.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_MODES="container,hostt" \
+  sh "$SUT" >"$WORK/modes.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unparseable WORKER_MODES must fail the deploy (got rc=0)"
+grep -qF "expected container | host" "$WORK/modes.out" || fail "the refusal must name what is wrong"
+if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+  fail "an unparseable WORKER_MODES must not reach the daemon restart (live daemon untouched)"
+fi
+echo "ok: an unparseable WORKER_MODES refuses before the daemon is replaced"
+
+# ── Case 2c4: the guard refuses everything `parse_modes` refuses ──────────────
+# A guard that is only ALMOST the daemon's parser is worse than none: it passes
+# the `docker rm -f`, and the operator learns the value was bad from a node that
+# has left the fleet. `container,` splits to a trailing empty entry no name
+# parses, and a repeat is its own hard config error — both daemon-fatal, so both
+# must die here, with the live daemon untouched.
+for bad_modes in "container," "container,container"; do
+  : > "$LOG"
+  set +e
+  PATH="$BIN:$PATH" \
+    WORKER_SSH=worksalot@nuc \
+    WORKER_NATS_URL=nats://10.0.0.1:4222 \
+    CHUG_WORKER_NODE=nuc \
+    WORKER_MODES="$bad_modes" \
+    sh "$SUT" >"$WORK/modes-bad.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "WORKER_MODES='$bad_modes' is a daemon config error and must fail the deploy (got rc=0)"
+  if grep -qF "docker run -d --restart=always --name chug-worker" "$LOG"; then
+    fail "WORKER_MODES='$bad_modes' must not reach the daemon restart (live daemon untouched)"
+  fi
+done
+echo "ok: an empty entry and a repeated mode both refuse before the daemon is replaced"
 
 # ── Case 2d: KVM unset ⇒ the daemon run is exactly the one it was before ──────
 # The three #367 settings and the device must be INERT until an operator turns
@@ -848,5 +975,34 @@ set -e
 grep -qF "build-worker.sh does not forward WORKER_SLOTS_MAX" "$WORK/unforwarded.out" \
   || fail "the refusal must say the value is declared but never forwarded"
 echo "ok: a declared-but-unforwarded setting is reported as the drop it is"
+
+# ── Case 7e: WORKER_MODES is forwarded, so the drift guard must NOT fire ──────
+# The regression test for the bug this closes: before the forwarding, a node
+# whose live daemon carried WORKER_MODES would have had it silently DROPPED on
+# every recreation, and the guard would have said so only after the operator had
+# already set it. A declared value the run now carries is a clean spec, not a
+# drop — and a CHANGED one reports, exactly as WORKER_SLOTS does.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_MODES=container,host \
+  WORKER_SLOTS=1 \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY=/data/keys/worker_git \
+  FAKE_LIVE_ENV="WORKER_NODE=air
+WORKER_MODES=container
+WORKER_REFRESH_GIT_URL=ssh://git@front:2222/acme/chug.git
+WORKER_GIT_KEY=/data/keys/worker_git" \
+  sh "$SUT" >"$WORK/modes-drift.out" 2>&1
+
+grep -qF "does not forward WORKER_MODES" "$WORK/modes-drift.out" \
+  && fail "WORKER_MODES is forwarded now — the drift guard must not call it a drop"
+grep -qF "REFUSING" "$WORK/modes-drift.out" && fail "a declared, forwarded WORKER_MODES must not refuse"
+grep -qF "WORKER_MODES: live 'container' -> declared 'container,host'" "$WORK/modes-drift.out" \
+  || fail "a changed WORKER_MODES must be reported before it is applied"
+grep_log "-e WORKER_MODES='container,host'"
+echo "ok: the run-spec drift guard does not fire for WORKER_MODES once it is forwarded"
 
 echo "ALL PASS"

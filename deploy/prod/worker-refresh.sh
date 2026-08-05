@@ -21,6 +21,8 @@
 #   WORKER_NODE, NATS_URL, NATS_CREDS   passed through to the replacement daemon
 #   WORKER_CACHE_DIR        optional node-local build cache (re-applied on swap;
 #     the host dir is provisioned at node creation by build-worker.sh, never here)
+#   WORKER_MODES            optional runtimes the node offers (design #309 P0/#322 W1),
+#     re-applied on swap; unset ⇒ the daemon's container-only default
 #   WORKER_SWAP_IMAGE       docker-cli image for the detached swapper (default docker:cli)
 #   WORKER_REFRESH_DISK_FREE_GB_MIN / _DISK_PATH   disk pre-flight (see below)
 #   WORKER_KVM / WORKER_KVM_PROJECTS / WORKER_ANDROID_SDK_DIR / WORKER_FLUTTER_DIR /
@@ -451,6 +453,24 @@ swap)
     SLOTS_ARGS="-e WORKER_SLOTS=$WORKER_SLOTS"
   fi
 
+  # The runtimes the node offers (`WORKER_MODES`, design #309 P0 / #322 W1). The
+  # swap re-composes `docker run` from a named list of knobs rather than copying
+  # the live container's environment, so a knob missing HERE is dropped on the
+  # first self-refresh — and prod's nodes only ever self-refresh (WORKER_SSH is
+  # unset for both, so build-worker.sh no-ops on every deploy), which would make
+  # this the #55/#82 silent revert with a longer fuse. Carried as the daemon set
+  # it, quoted like the KVM allow-list so a `container, host` spelling stays one
+  # argument; nothing is validated, because a value the daemon cannot parse could
+  # never have booted the live daemon this shell's environment comes from. Unset
+  # adds nothing, so a node that declared no modes keeps the daemon's default.
+  MODES_ARGS=""
+  MODES="${WORKER_MODES:-}"
+  MODES="${MODES#"${MODES%%[![:space:]]*}"}"
+  MODES="${MODES%"${MODES##*[![:space:]]}"}"
+  if [ -n "$MODES" ]; then
+    MODES_ARGS="-e WORKER_MODES='$MODES'"
+  fi
+
   # KVM passthrough (design #367, daemon side shipped by #374). The three
   # SETTINGS are carried the same pass-from-env way as every knob above: this
   # phase runs INSIDE chug-worker, so whatever `docker run -e WORKER_KVM=…` put
@@ -654,7 +674,7 @@ swap)
     -e RUST_LOG=$RUST_LOG_NEW \
     -e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} \
     -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git} \
-    $CACHE_ARGS $DISK_ARGS $SLOTS_ARGS $KVM_ARGS $KVM_DEVICE_ARGS \
+    $CACHE_ARGS $DISK_ARGS $SLOTS_ARGS $MODES_ARGS $KVM_ARGS $KVM_DEVICE_ARGS \
     $NIX_ARGS $NIX_MOUNT_ARGS chuggernaut/worker:$TAG"
 
   # Keep the swapper's transcript (ticket #270). This sibling container holds the

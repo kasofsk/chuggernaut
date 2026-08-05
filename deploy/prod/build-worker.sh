@@ -203,6 +203,77 @@ SLOTS_ENV=""
 if [ -n "${WORKER_SLOTS:-}" ]; then
   SLOTS_ENV="-e WORKER_SLOTS=$WORKER_SLOTS"
 fi
+# The runtimes the node OFFERS (`WORKER_MODES`, design #309 P0 / #322 W1, daemon
+# side shipped by #434). A node property exactly like WORKER_CACHE_DIR: the node
+# DECLARES it and nothing verifies it — no probe for a toolchain, an interpreter,
+# a nix daemon or anything else, here or in the daemon — and nothing on the wire
+# reads it yet (#309 P2 owns NodeCapabilities). Declaring `host` therefore makes
+# host jobs runnable on exactly no node: #401 refuses `runtime.mode: host` as
+# unsupported.
+#
+# What it DOES do is the reason the guard below exists. P0 has no per-request
+# selector (crates/worker/src/daemon.rs `backend_kind`), so a node naming `host`
+# at all runs EVERY launch as a host process and ignores the declared image, and
+# the daemon refuses to start unless WORKER_SLOTS and WORKER_SLOTS_MAX are both 1
+# — #309 §2's /workspace collision, taken as option (iii). Only the first of
+# those is forwardable from here (WORKER_SLOTS_MAX is the one knob no script
+# passes, env.example says so), so this refuses the half it can see and names the
+# half it cannot, rather than replacing a working daemon with one that boot-loops
+# on --restart=always.
+#
+# Unset stays UNSET rather than becoming the daemon's `container` default: a node
+# that declared nothing must produce the run it produced before this knob existed,
+# and an explicit default would make every node advertise a value it never chose
+# and turn a future change of that default into a silent no-op. Trimmed and
+# whitespace-only-reads-as-unset because that is the daemon's own reading
+# (crates/worker/src/config.rs `parse_modes`), and single-quoted so the
+# `container, host` spelling the daemon accepts cannot word-split into a stray
+# `docker run` argument.
+#
+# Anything `parse_modes` rejects is refused HERE, for WORKER_KVM's reason: each
+# of its rejections is a hard config error, so a replacement daemon would refuse
+# to start, --restart=always would loop the refusal, and the node would leave the
+# fleet. crates/worker/src/config.rs is the source of truth, and this mirrors all
+# three of its rejections — an unknown name, an empty entry (`container,` splits
+# to a trailing "" that no name parses) and a repeat — so the deploy fails fast
+# with the live daemon untouched. The scan runs over a comma-TERMINATED copy so
+# the final entry is examined like every other one; a bare split would consume
+# `container,` as one entry and never see the empty one behind it.
+MODES_ENV=""
+MODES="${WORKER_MODES:-}"
+MODES="${MODES#"${MODES%%[![:space:]]*}"}"
+MODES="${MODES%"${MODES##*[![:space:]]}"}"
+if [ -n "$MODES" ]; then
+  MODES_HOST=""
+  MODES_SEEN=""
+  _rest="$MODES,"
+  while [ -n "$_rest" ]; do
+    _mode="${_rest%%,*}"
+    _rest="${_rest#*,}"
+    _mode="${_mode#"${_mode%%[![:space:]]*}"}"
+    _mode="${_mode%"${_mode##*[![:space:]]}"}"
+    case "$_mode" in
+      host) MODES_HOST=1 ;;
+      container) ;;
+      *)
+        echo "build-worker: WORKER_MODES='$MODES' names '$_mode', which is not a runtime (expected container | host) — the daemon would refuse to start on it (crates/worker/src/config.rs); REFUSING (live daemon untouched)" >&2
+        exit 1
+        ;;
+    esac
+    case "$MODES_SEEN," in
+      *",$_mode,"*)
+        echo "build-worker: WORKER_MODES='$MODES' lists '$_mode' more than once, which the daemon refuses as a hard config error (crates/worker/src/config.rs \`parse_modes\`); REFUSING (live daemon untouched)" >&2
+        exit 1
+        ;;
+    esac
+    MODES_SEEN="$MODES_SEEN,$_mode"
+  done
+  if [ -n "$MODES_HOST" ] && [ "${WORKER_SLOTS:-}" != "1" ]; then
+    echo "build-worker: WORKER_MODES='$MODES' names host, which the daemon serves only at WORKER_SLOTS=1 (one host task per node — design #309 §2 option (iii)), but WORKER_SLOTS is '${WORKER_SLOTS:-<unset: daemon default 4>}' on $NODE; REFUSING daemon restart (live daemon untouched). Declare WORKER_SLOTS_$NODE=1 too — and note the daemon also demands WORKER_SLOTS_MAX=1, which NO script forwards (env.example), so a host node needs that flag added to its \`docker run\` by hand." >&2
+    exit 1
+  fi
+  MODES_ENV="-e WORKER_MODES='$MODES'"
+fi
 # KVM passthrough for Android emulator work (design #367 §2.3/§3.5, daemon side
 # shipped by #374): the node settings AND the device node itself. The
 # device is not optional decoration — `chug-worker` is itself a container, so the
@@ -461,6 +532,7 @@ docker run -d --restart=always --name chug-worker \
   $CACHE_ENV \
   $DISK_ENV \
   $SLOTS_ENV \
+  $MODES_ENV \
   $KVM_ENV \
   $KVM_DEVICE_ARG \
   $NIX_ENV \

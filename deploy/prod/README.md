@@ -734,6 +734,17 @@ Notes:
   without the device refuses to start and `--restart=always` loops the refusal.
   The self-refresh swap carries the device forward from the live container and
   refuses the swap rather than replace a KVM daemon with one that cannot boot.
+- **`WORKER_MODES` declares the runtimes a node offers** (design #309 P0, #322
+  W1) — `container` (the default, and what the whole fleet runs) and/or `host`.
+  It rides the same `<VAR>_<node>` resolution as `WORKER_SLOTS`, and the swap
+  carries it forward. Declaring `host` does **not** make host jobs runnable:
+  #401 refuses `runtime.mode: host` as unsupported, and #309 P2 — which would
+  put a node's modes on the wire — has not landed, so the dispatcher never sees
+  them. It is also **not additive**: P0 has no per-request selector, so a node
+  naming `host` runs *every* launch as a host process, ignoring the image, and
+  refuses to boot below `WORKER_SLOTS=1` + `WORKER_SLOTS_MAX=1` (one host task
+  per node). `build-worker.sh` refuses the capacity half it can see and names
+  the `WORKER_SLOTS_MAX` half no script forwards.
 - **Per-task nix GC roots are the same shape of per-node opt-in** (spec §3.1,
   [the runbook §7](../../docs/runbooks/worker-kvm.md)). `WORKER_NIX_GCROOTS_DIR`
   turns them on; `build-worker.sh` provisions the directory and mounts four

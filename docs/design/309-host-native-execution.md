@@ -1217,10 +1217,12 @@ predictions:
    container's `/workspace` and its own root filesystem. That is not
    host-native execution; it is a second, worse container runtime. So P0's
    proof requires a daemon run **natively** on the node, which nothing in the
-   deploy path does today, and `build-worker.sh` deliberately carries **no
-   `WORKER_MODES` passthrough** — the mode is unreachable in the shipped
-   deployment by construction, which is the "off everywhere by default" the
-   phase asks for and is also the gap the proof has to close. Deciding what a
+   deploy path does today. `build-worker.sh` and `worker-refresh.sh` do forward
+   `WORKER_MODES` since #439 — per node, unset staying unset — so the knob is
+   settable rather than unreachable; what it cannot make host-native is the
+   daemon, so a declared `host` on a deployed node still buys the second
+   container runtime above and not the thing P0 wants proved. Off everywhere by
+   default is now the *default*, not the construction. Deciding what a
    natively-run daemon looks like (its supervision, its credentials, its
    relationship to the containerized one on a mixed-mode node) is not P0's and
    is not currently anybody's.
