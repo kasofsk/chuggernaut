@@ -22,6 +22,8 @@ Don't re-derive these — read them:
   audit), `docs/reference/contracts.md` (extracting the dispatcher's interfaces), and
   `docs/design/210-ts-rewrite-plan.md` (the TypeScript dispatcher rewrite). Read before
   module-scoped restructuring work.
+- `docs/concepts.md` — the concept registry: which doc owns each term's definition.
+  A routing table, not a glossary — follow the row rather than restating the term.
 - `docs/implementation-notes.md` — per-module rationale, hoisted out of the comments
   job #342 deleted. Notes, not norms: `docs/spec.md` and the design docs still win.
 - Each `crates/*/src/lib.rs` opens with a `//!` doc comment pointing at its spec section.
@@ -127,6 +129,16 @@ the absence of a workflow file.
   `$JOB_ID` or a `job/N` branch name. Everything else is skipped in silence: a
   doc with no slice table, a row it cannot parse, markdown outside
   `docs/design/`, and the whole check when the history holds no `job/N:` commit.
+- **A concept is defined once, and `docs/concepts.md` says where.** Check 4
+  (#415 D3/D4, job #449) fails a job that writes a **registered** term in
+  definitional shape — `**Term.**` opening a list item, or `**Term** is|are|
+  means|refers to` opening a sentence — anywhere but the doc that registry names
+  as its owner. **A mention is free**, as often as an argument needs it; a term
+  with no row is invisible however it is written; inline code, fences, table
+  cells and headings are skipped in silence. This file is **not** exempt, and
+  needs no exemption: it glosses and links by design (#415 D5), and a gloss is a
+  mention. Registering a term commits every other doc, so the registry is about a
+  dozen rows and names its own criterion for the next one.
 - **Version skew is gated twice, and only the dispatcher's half is authoritative.**
   The **dispatcher** refuses to merge a branch whose `.chug/jobs/*.yaml` or
   `.chug/schedules/*.yaml` declares a `min_dispatcher` above the running

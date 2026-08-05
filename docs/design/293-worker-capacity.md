@@ -22,6 +22,12 @@ and the fleet-level startup gate is narrowed so that worker capacity never
 vetoes a boot (§5a — otherwise a drain to zero would be unrecoverable from the
 UI that caused it).
 
+Revised again on 2026-08-05 (job #449): principle 5's bold label restated the
+*single writer* principle, which [docs/reference/style.md](../reference/style.md#tier-3--principles)
+owns and design [#415](415-knowledge-architecture.md) D4 lets only one doc write
+in definitional shape. The principle this design is held to is unchanged; the
+label now names what it asserts about the fleet record and links the owner.
+
 Related: [spec §3.1](../spec.md) (dispatcher backends, dynamic worker
 registration), [docs/reference/style.md](../reference/style.md) (contract-first change rule),
 [deploy/prod/README.md](../../deploy/prod/README.md) §6.
@@ -135,8 +141,10 @@ Facts the design leans on, each checked in the tree:
 4. **Worker nodes hold no platform state.** They hold images and a read-only
    key mount. Adding a writable state dir on the node is a new class of thing
    to back up, drift, and reconcile.
-5. **Single writer.** The dispatcher owns the fleet record; every mutation
-   goes through the actor mailbox, like `Msg::WorkerAnnounce` does today.
+5. **The fleet record has one writer too.** The *single writer* principle
+   ([docs/reference/style.md](../reference/style.md#tier-3--principles)) reaches
+   it: the dispatcher owns the fleet record, and every mutation goes through the
+   actor mailbox, like `Msg::WorkerAnnounce` does today.
 
 ## Options weighed
 

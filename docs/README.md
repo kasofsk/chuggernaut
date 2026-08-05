@@ -4,7 +4,8 @@ Companion to `docs/reference/crates.md` (the map as it exists), `docs/reference/
 (the audit that motivated this), `docs/reference/contracts.md` (how the dispatcher's
 interfaces get extracted and formalized on the way here), `docs/design/215-refactor-plan.md`
 (the sequenced, ticketed path that executes this factoring incrementally in
-Rust), and `docs/reference/style.md` (the tiered blessed practices every touch is held to).
+Rust), `docs/reference/style.md` (the tiered blessed practices every touch is held to),
+and `docs/concepts.md` (which doc owns each term's definition).
 This is the **target** factoring: where the
 boundaries should sit if migration cost were no object. We are not migrating
 all at once — this document guides incremental refactoring as changes land, so

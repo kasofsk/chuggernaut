@@ -606,10 +606,12 @@ comments_gate() {
 	.chug/tasks/check-comments.sh
 }
 
-# --- doc-fact gate (design #415 D6 checks 1 and 2) ---------------------------
+# --- doc-fact gate (design #415 D6 checks 1-4) -------------------------------
 # Delegates to .chug/tasks/check-doc-facts.sh: a backticked path claim resolves
-# against `git ls-files`, and a backticked constant asserted with a value agrees
-# with the tree. Pure shell and unconditional, over EVERY tracked `*.md`, for
+# against `git ls-files`, a backticked constant asserted with a value agrees
+# with the tree, a slice row claiming a landed job matches the history, and a
+# concept registered in `docs/concepts.md` is defined only in the doc that owns
+# it. Pure shell and unconditional, over EVERY tracked `*.md`, for
 # the reason S1b moved it out of doc-lint.sh: the claims are made by every job
 # type, and a check that runs only when a `docs` job touches a file misses most
 # of the drift (job #416 was a `code` job and it orphaned ten references). Its

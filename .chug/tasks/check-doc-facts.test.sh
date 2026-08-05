@@ -11,7 +11,9 @@
 # the filesystem — so the cases run inside throwaway `git init` repos that own
 # both what is tracked and what the tree's constants are, and are skipped whole
 # if git is absent. $REPO drives explicit-file mode; $TREE has a HEAD commit, so
-# it can tell the whole-tree default from the hook's `--staged` scoping.
+# it can tell the whole-tree default from the hook's `--staged` scoping; $DESIGN
+# owns the merge history check 3 resolves against, and $CONCEPTS owns a registry
+# and the two docs check 4 needs to tell an owner from everyone else.
 #
 # Run:  .chug/tasks/check-doc-facts.test.sh   (exits 0 if all cases pass)
 set -eu
@@ -405,6 +407,136 @@ git -C "$REPO" add docs/design >/dev/null 2>&1 || true
 run_sut_repo docs/design/909-no-history.md
 check "no job/N commit in the history stands check 3 down" 0 "$RC" "$OUT" \
 	"check-doc-facts: clean"
+
+# --- Check 4: one definition per registered concept ---------------------------
+# $CONCEPTS owns a registry (`docs/concepts.md`), the doc that owns the one
+# registered term, and a second doc to write about it from. The registry is read
+# whatever files are passed, so a case names only the doc it is judging.
+CONCEPTS="$WORK/concepts"
+mkdir -p "$CONCEPTS/docs/reference"
+git -C "$CONCEPTS" -c init.defaultBranch=main init -q
+write_concept_doc() { # <path-under-docs> <line>...
+	name="$1"; shift
+	{ for l in "$@"; do printf '%s\n' "$l"; done; } > "$CONCEPTS/docs/$name"
+	git -C "$CONCEPTS" add "docs/$name" >/dev/null 2>&1 || true
+}
+run_concepts() { run_in "$CONCEPTS" "$@"; }
+write_registry() { # <row>...
+	write_concept_doc concepts.md '# Concepts' '' '## The registry' '' \
+		'| Concept | Defined in | What the row settles |' \
+		'| --- | --- | --- |' "$@"
+}
+# The owner's heading carries an em dash, so the slug the row must name is the
+# double-hyphen one GitHub produces — the shape the real registry uses.
+write_concept_doc reference/owner.md '# Owner' '' '## Tier 3 — principles' '' \
+	'- **Single writer.** The dispatcher is the only writer of job records.'
+write_registry '| `single writer` | [`docs/reference/owner.md`](reference/owner.md#tier-3--principles) | The one writer |'
+
+# 28. The registry resolves, and the owner writing its own definition is what
+#     the row is FOR — the exemption falls out of the row, not a file list.
+run_concepts docs/concepts.md docs/reference/owner.md
+check "a resolving registry and the owner's own definition pass" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 29. D4's first shape, `**Term.**` opening a list item, in a doc that does not
+#     own the term. The finding names the doc, the line and the owner.
+write_concept_doc other.md '# Other' '' \
+	'- **Single writer.** The dispatcher owns the fleet record as well.'
+run_concepts docs/other.md
+check "a list-item definition outside the owner fails" 1 "$RC" "$OUT" \
+	'docs/other.md:3: second definition of "single writer" — owned by docs/reference/owner.md'
+
+# 30. D4's second shape, `**Term** is`, with the term opening a sentence.
+write_concept_doc other.md '# Other' '' \
+	'A **single writer** is the shape every state record is held to.'
+run_concepts docs/other.md
+check "a sentence-opening definition outside the owner fails" 1 "$RC" "$OUT" \
+	'docs/other.md:3: second definition of "single writer"'
+
+# 31. A mention is free, however many times an argument needs it. The narrowing
+#     that buys this is the sentence-opening rule: `and **X** is what failed`
+#     (docs/spec.md's escalation table) is a mention, not a definition.
+write_concept_doc other.md '# Other' '' \
+	'The dispatcher is the **single writer** of job records, and every' \
+	'caller goes through it; on Retry, **single writer** is what failed.' '' \
+	'- A **single writer** keeps the state machine single-threaded.'
+run_concepts docs/other.md
+check "mentions of a registered term are silent" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 32. A doc QUOTING a definition states none — #415 quotes this exact line three
+#     times — and neither does a fenced sample.
+write_concept_doc other.md '# Other' '' \
+	'The owner opens `- **Single writer.** The dispatcher is the only writer`.' '' \
+	'```' '- **Single writer.** The dispatcher is the only writer of job records.' '```'
+run_concepts docs/other.md
+check "a quoted or fenced definition is not a second one" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 33. An UNREGISTERED term in definitional shape is invisible, however it is
+#     written. Adding a row is what turns the gate on for a concept.
+write_concept_doc other.md '# Other' '' \
+	'- **Merge queue.** The queue is FIFO and the dispatcher drains it.' '' \
+	'A **merge queue** is what serialises the landings.'
+run_concepts docs/other.md
+check "an unregistered term in definitional shape is invisible" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 34. A row whose anchor names no heading routes a reader into a doc that does
+#     not say it, which is worse than no row.
+write_registry '| `single writer` | [`docs/reference/owner.md`](reference/owner.md#tier-9-principles) | The one writer |'
+run_concepts docs/concepts.md
+check "a registry row whose anchor does not resolve fails" 1 "$RC" "$OUT" \
+	'"single writer" names no heading in docs/reference/owner.md -> #tier-9-principles'
+
+# 35. Same for a row whose owning doc is not tracked, resolved against the index
+#     like every other claim here.
+write_registry '| `single writer` | [`docs/reference/gone.md`](reference/gone.md#tier-3--principles) | The one writer |'
+run_concepts docs/concepts.md
+check "a registry row owned by an untracked doc fails" 1 "$RC" "$OUT" \
+	'"single writer" is owned by an untracked doc -> docs/reference/gone.md'
+
+# 36. One row per concept: two owners for one term is the ambiguity the registry
+#     exists to remove.
+write_registry \
+	'| `single writer` | [`docs/reference/owner.md`](reference/owner.md#tier-3--principles) | The one writer |' \
+	'| `single writer` | [`docs/reference/owner.md`](reference/owner.md#owner) | Again |'
+run_concepts docs/concepts.md
+check "two rows claiming one concept fail" 1 "$RC" "$OUT" \
+	'two rows claim the concept "single writer"'
+
+# 37. A broken row is wrong whatever the diff touched, so the hook's `--staged`
+#     run reports it even with nothing staged rather than exiting 0.
+run_concepts --staged
+check "a broken registry fails a --staged run with nothing staged" 1 "$RC" "$OUT" \
+	"unresolvable row(s) in docs/concepts.md"
+
+# 38. With no registry in the tree, check 4 stands down whole: $REPO holds a
+#     definitional line and no `docs/concepts.md`.
+write_doc no-registry.md '- **Single writer.** The dispatcher owns every record.'
+run_sut_repo docs/no-registry.md
+check "no registry stands check 4 down" 0 "$RC" "$OUT" "check-doc-facts: clean"
+
+# 39. Every list marker the shape-1 matcher accepts is one the term extractor
+#     reads, so a `*` bullet is judged exactly as a `-` one is.
+write_registry '| `single writer` | [`docs/reference/owner.md`](reference/owner.md#tier-3--principles) | The one writer |'
+write_concept_doc other.md '# Other' '' \
+	'* **Single writer.** The dispatcher owns the fleet record as well.' '' \
+	'1. **Single writer.** And the release record.'
+run_concepts docs/other.md
+check "a *-bulleted definition outside the owner fails" 1 "$RC" "$OUT" \
+	'docs/other.md:3: second definition of "single writer" — owned by docs/reference/owner.md'
+check "a numbered definition outside the owner fails" 1 "$RC" "$OUT" \
+	'docs/other.md:5: second definition of "single writer"'
+
+# 40. A registry in the tree whose table the parser cannot find would stand
+#     check 4 down in silence, so it is a LINTER ERROR rather than a clean tree.
+write_concept_doc concepts.md '# Concepts' '' '## Concept routing' '' \
+	'| Concept | Defined in |' '| --- | --- |' \
+	'| `single writer` | [`docs/reference/owner.md`](reference/owner.md#tier-3--principles) |'
+run_concepts docs/other.md
+check "a registry whose table does not parse is a LINTER ERROR" 2 "$RC" "$OUT" \
+	"no row parsed under"
 
 # --- `--emit-paths`: check 1's extractor with the verdict removed -------------
 # The mode the staleness ledger (design #415 D7, S6) reads, so there is one

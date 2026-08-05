@@ -313,10 +313,13 @@ these suites cover.
   `agent-rust` container: **36.8s for the 17 that existed then**, of which
   `deploy/prod/update-refresh.test.sh` alone is 27.1s (stub polling sleeps);
   `android-proof.test.sh` (#367 A2) adds ~9s, most of it three deliberately short
-  emulator bounds it waits out. `check-doc-facts.test.sh` (#415 S1b, S5a, S6) adds
-  0.45s for 68 cases — it stubs nothing, because all three checks it pins read a
+  emulator bounds it waits out. `check-doc-facts.test.sh` (#415 S1b, S4, S5a, S6)
+  adds 0.65s for 82 cases (re-measured 2026-08-05 on the same container, with
+  check 4's fourteen) — it stubs nothing, because all four checks it pins read a
   throwaway `git init` fixture rather than the tree: check 3 gets its own, whose
-  two `job/N:` commits *are* the history it resolves against.
+  two `job/N:` commits *are* the history it resolves against, and check 4 a third
+  holding the registry, the doc that owns its one registered term, and a second
+  doc to write about it from.
   `doc-staleness.test.sh` (#415 S6) adds 0.14s for 19, and its fixture is a
   *history* rather than a tree — three commits written with an explicit
   `GIT_COMMITTER_DATE`, because "the file moved after the doc did" cannot be

@@ -245,7 +245,24 @@ verify it in seconds and must name it when rejecting.
    D10](../design/415-knowledge-architecture.md#d10-the-implementing-job-owns-the-update)
    has it write the row in the same commit its merge creates.
 
-   **A claim that is true and unread is a fourth case, and nothing above
+   The **owned definition** is the fourth, and it is the only one of the four
+   that is about other docs rather than about the tree. `docs/concepts.md` routes
+   each registered concept to the doc that defines it; a *definitional shape* for
+   a registered term anywhere else is an error
+   ([#415](../design/415-knowledge-architecture.md) D3/D4, S4). Two shapes are
+   read — `**Term.**` opening a list item, and `**Term** is|are|means|refers to`
+   where the term opens a sentence — and only for a term the registry names, so
+   an unregistered term is invisible however it is written. **A mention is free**,
+   in any doc, as often as an argument needs one: what is banned is a second
+   *definition*, because a concept explained in two places drifts in one of them
+   and a reader cannot tell which. `CLAUDE.md` and `.chug/prompts/` are held to
+   the rule rather than exempted — one line of gloss plus a link to the owner is
+   already a mention ([#415](../design/415-knowledge-architecture.md) D5), and
+   the file exemption would have covered the worst instance the tree ever
+   carried. Registering a term is a commitment, so the registry stays about a
+   dozen rows and states its own criterion.
+
+   **A claim that is true and unread is a case of its own, and nothing above
    catches it.** `.chug/tasks/doc-staleness.sh` is the git-derived ledger
    ([#415](../design/415-knowledge-architecture.md) D7, S6): a doc whose named
    **files** carry commits newer than the doc itself is *suspect*, never wrong.

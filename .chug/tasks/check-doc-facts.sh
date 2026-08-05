@@ -1,5 +1,5 @@
 #!/bin/sh
-# Doc-fact gate — design #415 D6 checks 1, 2 and 3. Three mechanical claims a
+# Doc-fact gate — design #415 D6 checks 1, 2, 3 and 4. Four mechanical claims a
 # markdown file makes about THIS tree, all resolved against git and never the
 # filesystem, so the verdict cannot depend on whether the caller ran
 # `cargo build` (the reason .chug/tasks/check-modules.sh's header gives for its
@@ -15,6 +15,9 @@
 #      in `docs/design/*.md` saying `**Landed** (job #N)` must correspond to a
 #      `job/N: {type}` squash-merge commit, and a doc whose head says
 #      `Status: IMPLEMENTED` must have no slice row still in an unlanded state.
+#   4. A concept registered in `docs/concepts.md` is defined only in the doc
+#      that owns it — a definitional SHAPE outside the owner is a violation,
+#      while a passing mention is free anywhere, as often as an argument needs.
 #
 # Both were rules 3 and 5 of .chug/tasks/doc-lint.sh and MOVED here whole (slice
 # S1b). What they DECIDE is unchanged — S1a fixed check 1's precision, S1c
@@ -87,11 +90,42 @@
 # checkout is shallow: with no index to resolve against, refusing is the only
 # safe verdict.
 #
+# Check 4 (slice S4) reads the concept registry `docs/concepts.md` — concept ->
+# owning `doc#anchor`, docs/reference/modules.md's shape — and enforces D4: ban duplicate
+# DEFINITIONS, allow duplicate MENTIONS. Only a REGISTERED term is looked at, so
+# an unregistered bolded term is invisible however it is written; the owner is
+# exempt because the row names it, not because a file list says so. Two shapes
+# are read, both D4's: `**Term.**` opening a list item, and `**Term** is|are|
+# means|refers to` where the term OPENS a sentence — at the start of the line,
+# after a list or quote marker, after `.`/`:`/`!`/`?`, and in either case
+# optionally behind `a`/`an`/`the`. That last narrowing is what keeps the rule
+# on definitions: `and **Work** is what failed` (docs/spec.md's escalation table)
+# and `whose **job** is non-terminal` are mentions, and a gate that stops the
+# fleet over them is a gate someone turns off (#415 M7). Inline code spans are
+# stripped before either shape is read, so a doc QUOTING a definition — which
+# #415 does three times — states no second one. A table cell, a heading and a
+# second line of the same sentence are all skipped: this is a line-scoped
+# syntactic rule and the corpus's definitions are not written there.
+#
+# CLAUDE.md is held to the rule rather than exempted from it, which is
+# D5 (gloss and link, never define) enforced rather than restated. #415 argues
+# the exemption directly and rejects it: the M1 defect — a normative directive
+# to protect a module that no longer existed — was IN CLAUDE.md, so a file-level
+# exemption would exempt the most damaging instance in the tree. A gloss is
+# already free here, because a gloss is a mention.
+#
+# A registry row is judged too: its owner must be a tracked file, its `#anchor`
+# must slugify to a real heading in that file, and no two rows may claim one
+# concept. A row that resolves to nothing is worse than no row — it routes a
+# reader into a doc that no longer says it.
+#
 # Three markers suppress BOTH the path and the constant check on the line that
 # carries them, for the three ways a claim is correct rather than stale. They do
-# not reach check 3: a slice row is a claim about a job, not about a path, and
-# `<!-- intent -->` on a row asserting `**Landed**` would be a contradiction
-# rather than an escape. `<!-- intent -->` is for what is designed but not
+# not reach checks 3 and 4: a slice row is a claim about a job and a definition
+# is a claim about nothing in the tree at all, so `<!-- intent -->` on a row
+# asserting `**Landed**` would be a contradiction rather than an escape, and a
+# marker on a second definition would be the weakening D4 exists to refuse — the
+# remedy there is to link the owner or to move the row. `<!-- intent -->` is for what is designed but not
 # built (and for the value a slice will bump a constant to),
 # `<!-- runtime -->` for what is correctly absent from git (build output,
 # operator-owned files), and `<!-- absent -->` for a line that names a path
@@ -125,7 +159,8 @@
 # CI would accept, because CI runs this unconditionally.
 #
 # Exit: 0 = clean. 1 = findings, each named with its file and line. 2 = the
-# check could not run (no git, no awk, nothing tracked) — a LINTER ERROR, never
+# check could not run (no git, no awk, nothing tracked, an unparseable tracked
+# registry) — a LINTER ERROR, never
 # a verdict, because a doc-fact check that cannot run must not read as clean.
 #
 # Test: .chug/tasks/check-doc-facts.test.sh
@@ -165,7 +200,8 @@ fi
 tracked_index="$(mktemp)"
 const_index="$(mktemp)"
 job_index="$(mktemp)"
-trap 'rm -f "$tracked_index" "$const_index" "$job_index"' EXIT
+term_index="$(mktemp)"
+trap 'rm -f "$tracked_index" "$const_index" "$job_index" "$term_index"' EXIT
 git ls-files >"$tracked_index" 2>/dev/null || : >"$tracked_index"
 [ -s "$tracked_index" ] || doc_facts_unrunnable \
 	"\`git ls-files\` listed nothing — check 1 has no index to resolve against."
@@ -246,6 +282,113 @@ job_merged() { # <seq>
 	grep -qx "$1" "$job_index"
 }
 
+# --- The concept registry check 4 resolves against ---------------------------
+# `docs/concepts.md` routes concept -> owning `doc#anchor` and holds no
+# definitions itself (#415 D3), so the index built here is `term<tab>owner` and
+# a term absent from it is invisible to the scanner. The registry is small by
+# design — the criterion for a row is stated in the doc — so it is read and
+# validated once per run rather than cached.
+concepts_registry="docs/concepts.md"
+registry_findings=0
+
+# The GitHub heading slug, so a row's `#anchor` is resolved the way a reader's
+# click resolves it: lowercased, everything but `[a-z0-9 _-]` dropped (which is
+# what removes an em dash under LC_ALL=C), spaces to hyphens. A heading inside a
+# fence is a code sample and anchors nothing.
+doc_facts_anchor_resolves() { # <file> <anchor>
+	awk -v want="$2" '
+		/^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+		fence { next }
+		/^#+[ \t]/ {
+			s = tolower($0)
+			sub(/^#+[ \t]+/, "", s)
+			gsub(/[^a-z0-9 _-]/, "", s)
+			gsub(/ /, "-", s)
+			if (s == want) { hit = 1; exit }
+		}
+		END { exit(hit ? 0 : 1) }
+	' "$1"
+}
+
+# One registry row: `<concept>` in the first cell, the owner as a relative
+# markdown link in the second. A row that resolves goes into the index; one that
+# does not is a finding, because a row is a promise that the definition is over
+# there.
+doc_facts_registry_row() { # <concept> <target>
+	case "${2%%#*}" in
+	../*) _owner="${2%%#*}"; _owner="${_owner#../}" ;;
+	*) _owner="docs/${2%%#*}" ;;
+	esac
+	_anchor=""
+	case "$2" in
+	*"#"*) _anchor="${2#*#}" ;;
+	esac
+	if awk -F'\t' -v t="$1" '$1 == t { found = 1 } END { exit(found ? 0 : 1) }' "$term_index"; then
+		echo "!!! check-doc-facts: $concepts_registry: two rows claim the concept \"$1\""
+		registry_findings=$((registry_findings + 1))
+		return 0
+	fi
+	if ! grep -qxF "$_owner" "$tracked_index"; then
+		echo "!!! check-doc-facts: $concepts_registry: \"$1\" is owned by an untracked doc -> $_owner"
+		registry_findings=$((registry_findings + 1))
+		return 0
+	fi
+	if [ -z "$_anchor" ] || ! doc_facts_anchor_resolves "$_owner" "$_anchor"; then
+		echo "!!! check-doc-facts: $concepts_registry: \"$1\" names no heading in $_owner -> #$_anchor"
+		registry_findings=$((registry_findings + 1))
+		return 0
+	fi
+	printf '%s\t%s\n' "$1" "$_owner" >>"$term_index"
+	return 0
+}
+
+# A broken registry is reported wherever the run ends, including the `--staged`
+# run that has no markdown to check: the rows are wrong whatever this diff
+# touched, and a row that routes nowhere must not exit 0.
+doc_facts_registry_summary() {
+	echo "!!! check-doc-facts: $registry_findings unresolvable row(s) in $concepts_registry."
+	echo "!!!     Every row routes: \`concept\` in the first cell, a relative link to the owning"
+	echo "!!!     doc and a heading anchor that exists in it, and one row per concept."
+}
+
+# Rows are read only under the `## The registry` heading and only in the shape
+# `| `concept` | [...](owner#anchor) | …`, so the prose around the table — which
+# states the criterion for adding a row — cannot be parsed as one. A tracked
+# registry that yields no row is a LINTER ERROR rather than an empty term index:
+# renaming that heading would otherwise stand check 4 down in silence.
+doc_facts_load_registry() {
+	_rows="$(awk '
+		/^## / { in_registry = ($0 ~ /^## The registry/); next }
+		!in_registry { next }
+		/^[ \t]*\|[ \t]*`/ {
+			match($0, /`[^`]+`/)
+			concept = substr($0, RSTART + 1, RLENGTH - 2)
+			rest = substr($0, RSTART + RLENGTH)
+			target = ""
+			if (match(rest, /\]\([^)]+\)/)) target = substr(rest, RSTART + 2, RLENGTH - 3)
+			print tolower(concept) "\t" target
+		}
+	' "$concepts_registry")"
+	[ -n "$_rows" ] || doc_facts_unrunnable \
+		"$concepts_registry is tracked but no row parsed under \`## The registry\` — check 4 would be inert"
+	IFS='
+'
+	for _row in $_rows; do
+		_target="${_row#*	}"
+		if [ -z "$_target" ]; then
+			echo "!!! check-doc-facts: $concepts_registry: \"${_row%%	*}\" names no owning doc#anchor"
+			registry_findings=$((registry_findings + 1))
+			continue
+		fi
+		doc_facts_registry_row "${_row%%	*}" "$_target"
+	done
+	unset IFS
+}
+
+if [ "$emit_paths" -eq 0 ] && grep -qxF "$concepts_registry" "$tracked_index"; then
+	doc_facts_load_registry
+fi
+
 # --- Select the markdown to check -------------------------------------------
 mode="tree"
 if [ "${1:-}" = "--staged" ]; then
@@ -266,6 +409,10 @@ fi
 
 files="$(printf '%s\n' "$files" | grep -v '^$' || true)"
 if [ -z "$files" ]; then
+	if [ "$registry_findings" -gt 0 ]; then
+		doc_facts_registry_summary
+		exit 1
+	fi
 	[ "$emit_paths" -eq 1 ] || echo "check-doc-facts: no markdown to check ($mode) — nothing to do"
 	exit 0
 fi
@@ -384,6 +531,53 @@ doc_facts_scan_slices() {
 	' "$1"
 }
 
+# Check 4's scanner. Emits `DEFN:<line>:<term>` for each registered term written
+# in one of D4's two definitional shapes; the owner is sorted out by the caller,
+# which is where the registry already lives.
+doc_facts_scan_defs() { # <file>
+	awk -v termfile="$term_index" '
+	# Whether the term opens a sentence, which is what separates a definition
+	# from a mention the two shapes cannot otherwise tell apart.
+	function opens_sentence(pre,   p) {
+		p = pre
+		sub(/(^|[ \t])([Aa]n?|[Tt]he)[ \t]+$/, "", p)
+		sub(/^[ \t]*([-*+]|[0-9]+[.)])[ \t]+/, "", p)
+		sub(/^[ \t]*>[ \t]*/, "", p)
+		sub(/[ \t]+$/, "", p)
+		return (p == "" || p ~ /[.:!?]$/)
+	}
+	BEGIN {
+		while ((getline t < termfile) > 0) {
+			sub(/\t.*$/, "", t)
+			if (t != "") terms[t] = 1
+		}
+	}
+	{
+		if ($0 ~ /^[[:space:]]*(```|~~~)/) { fence = !fence; next }
+		if (fence) next
+		line = $0
+		while (match(line, /`[^`]*`/))
+			line = substr(line, 1, RSTART - 1) substr(line, RSTART + RLENGTH)
+		line = line " "
+		if (match(line, /^[ \t]*([-*+]|[0-9]+[.)])[ \t]+\*\*[^*]+\.\*\*/)) {
+			head = substr(line, RSTART, RLENGTH)
+			sub(/^[ \t]*([-*+]|[0-9]+[.)])[ \t]+\*\*/, "", head)
+			sub(/\.\*\*$/, "", head)
+			if (tolower(head) in terms) print "DEFN:" NR ":" tolower(head)
+		}
+		rest = line
+		while (match(rest, /\*\*[^*]+\*\*[ \t]+(is|are|means|refers to)[ \t]/)) {
+			pre = substr(rest, 1, RSTART - 1)
+			hit = substr(rest, RSTART, RLENGTH)
+			rest = substr(rest, RSTART + RLENGTH)
+			sub(/^\*\*/, "", hit)
+			sub(/\*\*[ \t]+(is|are|means|refers to)[ \t]$/, "", hit)
+			if (tolower(hit) in terms && opens_sentence(pre)) print "DEFN:" NR ":" tolower(hit)
+		}
+	}
+	' "$1"
+}
+
 # One `SLICE` record: silent unless the history holds no such merge.
 doc_facts_check_slice() { # <file> <line> <seq>
 	[ "$job_index_usable" = 1 ] || return 0
@@ -480,9 +674,21 @@ doc_facts_check_const() { # <file> <line> <name>=<claimed>
 	return 0
 }
 
+# One `DEFN` record: silent in the doc the registry names as the term's owner,
+# a finding anywhere else.
+doc_facts_check_defn() { # <file> <line> <term>
+	_owner="$(awk -F'\t' -v t="$3" '$1 == t { print $2; exit }' "$term_index")"
+	[ -n "$_owner" ] || return 0
+	[ "$_owner" = "$1" ] && return 0
+	echo "!!! check-doc-facts: $1:$2: second definition of \"$3\" — owned by $_owner"
+	term_findings=$((term_findings + 1))
+	return 0
+}
+
 path_findings=0
 const_findings=0
 slice_findings=0
+term_findings=0
 checked=0
 
 IFS='
@@ -497,6 +703,10 @@ for f in $files; do
 $(doc_facts_scan_slices "$f")"
 		;;
 	esac
+	if [ -s "$term_index" ]; then
+		out="$out
+$(doc_facts_scan_defs "$f")"
+	fi
 	while IFS= read -r rec; do
 		[ -n "$rec" ] || continue
 		kind="${rec%%:*}"
@@ -512,6 +722,7 @@ $(doc_facts_scan_slices "$f")"
 		CONST) doc_facts_check_const "$f" "$ln" "$val" ;;
 		SLICE) doc_facts_check_slice "$f" "$ln" "$val" ;;
 		UNLANDED) doc_facts_check_unlanded "$f" "$ln" "$val" ;;
+		DEFN) doc_facts_check_defn "$f" "$ln" "$val" ;;
 		esac
 	done <<-RECORDS
 		$out
@@ -549,7 +760,17 @@ if [ "$slice_findings" -gt 0 ]; then
 	echo "!!!     commit (design #415 D10)."
 fi
 
-_findings=$((path_findings + const_findings + slice_findings))
+if [ "$term_findings" -gt 0 ]; then
+	echo "!!! check-doc-facts: $term_findings duplicate definition(s) of a registered concept."
+	echo "!!!     A concept is defined once, in the doc $concepts_registry names as its owner;"
+	echo "!!!     everywhere else mentions it and links there (design #415 D3/D4/D5). Rewrite"
+	echo "!!!     the line as a mention, or move the row if this doc is now the right owner."
+	echo "!!!     A mention is free — only \`**Term.**\` opening a list item and \`**Term** is\`"
+	echo "!!!     opening a sentence are read as definitions, and only for a registered term."
+fi
+[ "$registry_findings" -eq 0 ] || doc_facts_registry_summary
+
+_findings=$((path_findings + const_findings + slice_findings + term_findings + registry_findings))
 if [ "$_findings" -ne 0 ]; then
 	echo "!!!     Reproduce locally with: .chug/tasks/check-doc-facts.sh"
 	exit 1

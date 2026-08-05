@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — S0, S1a–c, S2, S3, S5a, S5b, S6, S7 and S8 landed; D1–D15 decided, S4 and S9–S12 intent.
+Status: IMPLEMENTED IN PART — every slice of the design as decided (S0–S8) has landed; D1–D15 decided, and S9–S12 — appended later by the D13–D15 amendment — are intent.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
 [D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
@@ -35,6 +35,15 @@ only on a doc the current diff edits, and [D7](#d7-the-staleness-ledger)'s
 pre-commit half of that rule turned out to be unclearable and was not built —
 see the
 [S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear).
+S4 landed on 2026-08-05 (job #449), last of the original programme:
+`docs/concepts.md` holds **12** rows and check 4 is live. Its measured yield is
+**one** duplicate in the whole tree *under the two shapes D4 gates* — the value
+is preventive, and the head says so rather than claiming a sweep it did not
+make. A third shape the corpus uses more than either gated one is
+[measured and deliberately unmodelled](#the-shape-d4-did-not-name). `Status:` is still
+`IMPLEMENTED IN PART` for a reason the ticket did not have: S9–S12 were appended
+after the slice list was written, and none of them is built. See the
+[S4 correction](#correction--2026-08-05-job-449-s4-check-4-and-the-yield-it-does-not-have).
 S7 landed on 2026-08-05 (job #448): `.chug/tasks/docs-update.md` is rewritten
 around [D1](#d1-two-kinds-of-doc-and-only-two)/[D10](#d10-the-implementing-job-owns-the-update)
 and `.chug/tasks/review-docs-updated.md` is no longer a placeholder — it blocks
@@ -133,7 +142,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S1c** | Check 2 (constant values) + a `.test.sh` suite covering both | **Landed** (job #437) — check 2 is rule 5 of `doc-lint.sh`, a warning like check 1, and found **11** real mismatches across 6 design docs. See [S1c as landed](#s1c-as-landed) |
 | **S2** | The one-time sweep: the ~6 real path findings, the `*_SCHEMA_EPOCH` restatements, `state.rs` in its seven files; delete `spec_original.md` and `wiki/Welcome.md` | **Landed** (job #436) — 66 → **0** path warnings whole-tree; added the third marker `absent`; both files deleted. See the [2026-08-05 correction](#correction--2026-08-05-job-436-s2-swept-and-a-third-marker)  <!-- absent --> |
 | **S3** | **The move** — every doc into `docs/`, per D12; updates the ~730 references (283 of them outside markdown, 134 for `docs/reference/style.md` alone) and `check-modules.sh`'s own path | **Landed** (job #441) — fourteen `git mv`s in one commit, the runbooks folded into `docs/reference/runbooks/` with them. See the [S3 correction](#correction--2026-08-05-job-441-s3-the-move) |
-| **S4** | `docs/concepts.md` + the seed concept set + check 4 (definitional shape) | S3  <!-- intent --> |
+| **S4** | `docs/concepts.md` + the seed concept set + check 4 (definitional shape) | **Landed** (job #449) — 12 rows, one owner each; check 4 reads D4's two shapes, narrowed so a term must OPEN a sentence, and found exactly **one** duplicate under them. See the [S4 correction](#correction--2026-08-05-job-449-s4-check-4-and-the-yield-it-does-not-have) |
 | **S5a** | Check 3 (slice ↔ merged job) — the detector for the drift this head suffered twice | **Landed** (job #444) — one shape, `**Landed** (job #N)` in a `docs/design/*.md` table row, resolved against the `job/N:` squash-merge subject; a doc with no slice table is silent. See the [S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split) |
 | **S5b** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1) | **Landed** (job #445) — 22 docs given a `Status:` line, nine given a lifted slice table, no table invented for a doc that had none. See the [S5b correction](#correction--2026-08-05-job-445-s5b-the-head-retrofit) |
 | **S6** | The staleness ledger (D7) | **Landed** (job #446) — `.chug/tasks/doc-staleness.sh`, sharing check 1's extractor through a new `--emit-paths` mode; **30 of 61** docs suspect, 7 of them by a day or more. Directory claims are out and the pre-commit block is not built, both on measurement. See the [S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear) |
@@ -145,8 +154,8 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Eleven rows are landed — S0, S1a, S1b, S1c, S2, S3, S5a, S5b, S6, S7 and S8.** Every other row
-above is intent, marked as such per docs/reference/style.md's doc-claim rule — which this
+**Twelve rows are landed — S0, S1a, S1b, S1c, S2, S3, S4, S5a, S5b, S6, S7 and S8.** The four
+that remain (S9–S12) are intent, marked as such per docs/reference/style.md's doc-claim rule — which this
 document is partly written to make enforceable. This sentence read *six* and omitted
 S3 until job #444 corrected it, four jobs after S3 merged: a count in the head is
 exactly the class of claim [check 4 cannot own](#what-check-4-cannot-do-and-what-took-its-slot),
@@ -1979,3 +1988,156 @@ sentence is body, it was true when written, and it is corrected here rather
 than edited — which is [D2](#d2-every-design-doc-opens-with-a-mutable-current-state-head)
 working as specified, and the distinction the rewritten
 `.chug/tasks/docs-update.md` now teaches.
+
+## Correction — 2026-08-05, job #449 (S4: check 4, and the yield it does not have)
+
+[S4](#slices) landed: `docs/concepts.md` is the registry, check 4 is the gate,
+and it is the last slice of the design as decided.
+
+**The yield is one, and it was known in advance.** Whole-tree, across all 71
+tracked `*.md`, check 4 found exactly **one** duplicate definition: the
+`**Single writer.**` in `docs/design/293-worker-capacity.md`, which the
+[2026-08-05 amendment](#three-more-measurements) had already identified as its
+one live target. [M5](#the-problem-measured)'s original instance was gone before
+this slice started — job #416 deleted the tag that carried it. So this check
+removes almost nothing. **It stops the next one**, and a gate justified by a
+yield it does not have is the overstatement this whole document exists to
+remove.
+
+Re-measured on this base, which is what the seed set was chosen from:
+
+```sh
+git ls-files '*.md' | xargs grep -hE \
+  '^[[:space:]]*([-*+]|[0-9]+\.)[[:space:]]+\*\*[A-Za-z][A-Za-z0-9_ /-]{0,30}\.\*\*'
+```
+
+**150 occurrences of the first shape, 146 distinct labels.** Four repeat, and
+three of them (`the env`, `opt-in per node`, `disk`) are section labels rather
+than concepts. The corpus does not have a duplication problem in this shape; it
+has one instance, in a tree of 71 documents. That is the honest scale.
+
+### Twelve rows, three owners, and a criterion
+
+`job`, `task`, `job type`, `job branch`, `merge gate` and `epoch` route to
+`docs/spec.md`; `work`, `evaluation`, `wrap-up`, `triage` and `evaluator` to
+`docs/reference/design-lifecycle.md`; `single writer` to `docs/reference/style.md`.
+Every one was checked for a second definition **before** it was registered,
+because a row over two definitions fails the gate on merge and the temptation
+then is to weaken the rule.
+
+Three of the terms [D3](#d3-the-concept-registry-routes-it-does-not-hold)
+proposed are **deliberately not registered**, and the reason is the same for
+all three: the word names two things. A `tier` is a test tier or a rule tier; a
+`claim` is a human's claim on a work attempt or a doc's claim about the tree; a
+`slice` has no doc that defines it at all. One row per concept is the registry's
+rule, so an ambiguous word waits for a doc to own each sense rather than being
+forced into one.
+
+`linked-origin` is a fourth, and it is a **finding rather than a scoping
+decision**: it is defined twice today, in `README.md` and in
+`.claude/skills/chug-install/SKILL.md`, in the same words. Registering it would
+fail the gate; resolving it is a decision about how self-contained a skill must
+be for an agent that has no checkout, which is not this slice's to make. It is
+recorded in `docs/concepts.md` so the next author inherits the measurement
+rather than re-deriving it.
+
+### The shape D4 did not name
+
+The corpus's commonest definitional form is neither of D4's two. It is the
+em-dash label — `- **Job** — the node in the graph: the unit of delivery`
+(`docs/reference/design-lifecycle.md`), `- **Work** — the fallible action` in the
+same file, `**Job** = graph node` in `.claude/skills/chug/SKILL.md`. Check 4
+does not see it, because D4 named two shapes and widening a gate that errors in
+every job's pre-stage is not a thing to do on a hunch about the corpus.
+
+The consequence is worth stating rather than leaving for a reader to find, and
+it is narrower than the shape's frequency suggests. Most of those em-dash lines
+are the owner's own: `work`, `evaluation` and `wrap-up` are registered to
+`docs/reference/design-lifecycle.md`'s `## The lifecycle model`, the section
+holding all three em-dash lines — a doc explaining its own term is what the row
+is for. What is left is three terms: `job`, `task` and `job type` are registered
+to `docs/spec.md`, and the lifecycle doc's *other* section — `## Vocabulary` —
+explains all three in em-dash form. Whether that is a second definition or a
+routing summary is a
+judgement about those two documents, not a regex; making it a rule would mean
+deciding it for every future pair at once. So it is a measurement here, next to
+the `linked-origin` finding, for whoever decides it.
+
+### The narrowing D4 did not specify, and why it is not a weakening
+
+D4's second shape is `**Term** is|are|means|refers to`. Applied literally to the
+tree it fires on two lines that are plainly mentions:
+
+- `docs/spec.md`'s escalation table — *"…with `action: Retry` and **Work** is
+  what failed"*, twice, for `Work` and for `Evaluation`;
+- `docs/design/361-per-run-placement.md` — *"whose **job** is non-terminal"*.
+
+Both would be false positives, and check 4 runs in the pre-stage of **every**
+job as an error, so a false positive does not annoy anyone — it stops the fleet.
+The check therefore requires the term to **open a sentence**: at the start of
+the line, after a list or quote marker, or after `.`/`:`/`!`/`?`, in each case
+optionally behind `a`/`an`/`the`. `A **job** is a node in a DAG` (`docs/spec.md`
+§1.1, the actual definition) passes that test; `and **Work** is what failed`
+does not. It is a narrowing in the direction
+[M7](#the-problem-measured) argues for — refuse rather than guess — and it is
+what makes the phase vocabulary registrable at all.
+
+Inline code spans are stripped before either shape is read, which is why this
+document can quote `- **Single writer.** The dispatcher is the only writer` in
+three places without stating a second definition. Table cells, headings and
+sentences continued onto a second line are skipped in silence.
+
+### CLAUDE.md is held to the rule, and needed no exemption
+
+[D5](#d5-claudemd-may-gloss-never-define) already decided this and the
+implementation only had to not undo it: the file that carried
+[M1](#the-problem-measured)'s normative directive to protect a deleted module is
+the last file to exempt. Nothing had to change there — a gloss plus a link is a
+**mention**, and mentions are free, so `CLAUDE.md` passes the gate as written.
+The same reasoning covers `.chug/prompts/`. The registry's own file passes for
+the same structural reason rather than by exception: it routes in table cells
+and defines nothing.
+
+### The one duplicate, fixed rather than exempted
+
+`docs/design/293-worker-capacity.md`'s principle 5 opened
+`**Single writer.** The dispatcher owns the fleet record`. It was never a
+competing definition in substance — it *applies* the principle
+`docs/reference/style.md` owns to a second record — but it is written in the
+shape that says "here is what this term means", and a reader who lands there
+learns the term from a doc that does not argue it. The label now names what it
+asserts about the fleet record and links the owner; the principle it holds the
+design to is unchanged, and a dated line in that doc's head says an append-only
+body was edited and why. Fixing the instance rather than adding a marker is the
+rule the gate is worth having: three markers exist for a claim that is
+*correct* and unresolvable, and a second definition is neither.
+
+### Why `Status:` is still IMPLEMENTED IN PART
+
+The ticket for this slice expected the head to move to `IMPLEMENTED`, on the
+reasoning that S4 was the last row. It was the last row **of the design as
+decided** — S0–S8, D1–D12. It is not the last row of the table: job #435
+appended [S9–S12](#slices) with the D13–D15 amendment, and its own line says
+*"Nothing in that amendment is implemented"*. `docs/reference/docs.md`, <!-- intent -->
+check 5, `docs/overview.md` <!-- intent --> and the inbound-reference signal do
+not exist. Writing `IMPLEMENTED` over them would be a false present-tense claim
+in the head of the document whose one-sentence rule is that a doc asserting
+something about the tree is making a checkable claim — and check 3 would not
+have caught it, because those rows carry dependency cells rather than state
+words. The head says which set is complete instead.
+
+### What it costs, and what would refute it
+
+Whole-tree, the doc-fact gate goes from ~0.92s to ~0.98s — check 4 is ~0.06s
+over 71 files, one extra `awk` pass each. `.chug/tasks/check-doc-facts.test.sh`
+is at **82** cases, fourteen of them check 4's, still well inside CI's 60s
+per-suite cap. Read that total off the suite's own closing line rather than
+counting call sites: `check_absent` scores a case too, so a hand-count that
+greps for `check ` alone comes out three low.
+
+The refutation trigger stated [above](#what-would-refute-this) stands unchanged
+and is now testable: if registered terms in definitional shape flag prose that
+is not a second definition, the answer is a **smaller registered set**, not a
+cleverer regex. One more, learned here: if authors start writing definitions in
+a third shape to stay under the gate, the rule has taught avoidance rather than
+ownership, and the registry — not the shape list — is what to shrink.
