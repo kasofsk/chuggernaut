@@ -1,18 +1,26 @@
 # Runbook — proving host-task supervision on macOS
 
-**Status: UNVERIFIED.** Nobody has run this yet, and nothing in the platform may
-assume its answer until someone has. Design
-[#440](../../design/440-native-worker-daemon.md) D3 says a host task on macOS is
-kept out of the daemon's teardown set by the process group `spawn_task` already
-creates — and marks `launchd`'s process-group teardown semantics **secondhand**,
-because no file in this repo states them. This is the procedure that settles it.
+**Status: PASSED on macOS 26.5.1** — run on `gumbo-air-0` on 2026-08-06 against
+the tree at `c8a8354`. The result and what it does and does not settle are
+recorded in
+[#440's proof section](../../design/440-native-worker-daemon.md#proofs-2026-08-06--d3-on-macos-and-on-linux);
+read that before relying on the answer. The answer is a property of the host's
+OS version, so **re-run this on any macOS node before it is considered for
+`host` mode** rather than inheriting `gumbo-air-0`'s verdict.
+
+Design [#440](../../design/440-native-worker-daemon.md) D3 says a host task on
+macOS is kept out of the daemon's teardown set by the process group `spawn_task`
+already creates. #440 marked `launchd`'s process-group teardown semantics
+**secondhand** because no file in this repo stated them; this procedure is what
+settled it, and the proof section is what retired the marking.
 
 It cannot run in CI. The evaluation gate is a Debian container with no `launchd`,
 so this is operator-verified in the shape of `.chug/jobs/android-proof.yaml` and
 `.chug/jobs/gcp-proof.yaml`: the operator runs one thing and reads one answer.
 The Linux half of D3 is a transient systemd scope and is asserted in
 `crates/container/tests/host_backend.rs`, which self-skips where no scope can be
-created.
+created — those assertions have still never executed, so D3's Linux half is
+confirmed only by the hand run #440's proof section records.
 
 ## Run it
 
@@ -48,7 +56,7 @@ on the Mini.
 
 | Last line | Meaning |
 | --- | --- |
-| `PASS: the task survived …` | D3's macOS mechanism holds. Record it in `docs/design/440-native-worker-daemon.md` and only then rely on it. |
+| `PASS: the task survived …` | D3's macOS mechanism holds on that host's OS version. Record the host and the version beside the 2026-08-06 run in `docs/design/440-native-worker-daemon.md`, and only then rely on it. |
 | `FAIL: the task died with the agent that launched it` | D3's macOS mechanism does **not** hold. The fallback is [#322](../../design/322-macos-native-runtime.md) §6's second mitigation — one `launchd` job per task — which #440 deliberately does not pre-commit to. |
 | any other `FAIL:` | The proof could not be set up; the line says which step. Nothing was proven either way. |
 

@@ -1,6 +1,11 @@
 # Design — the natively-supervised worker daemon
 
-Status: PROPOSED — the prerequisite #309 P0 named and left unowned.
+Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1 and
+2 have landed; 3–8 have not started. [D3](#decisions) is no longer an untested
+assumption: its **macOS** mechanism was proven firsthand on 2026-08-06 against
+the mechanism itself, and its **Linux** mechanism was confirmed by hand the same
+day but **not through the shipped code path** — see
+[the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux).
 
 Written against the tree at `1030704`. Every claim about current behavior below
 was read out of the source or out of [`docs/spec.md`](../spec.md) in this tree, not
@@ -33,7 +38,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | --- | --- | --- |
 | **D1** | **One daemon per node, run natively, serving both modes.** There is never a second daemon process on a node. | A native daemon reaches the host's docker socket directly, so container mode is unchanged and the container-vs-native question becomes a deployment detail; two daemons would split one machine into two fleet rows with no one summing their slots. |
 | **D2** | **Linux: a systemd unit declared by `chug.node`**, amending that module's "owns no lifecycle" charter. **macOS: a `launchd` agent in the login user's GUI domain**, the same shape `deploy/prod/install-launchd.sh` already installs for the dispatcher and api. | #372 §8's four reasons for refusing to declare the container are artifacts of the container swap; three dissolve when the daemon is native — R4 because a unit over a binary has no tag to be missing — and R3, the strongest, is answered by splitting lifecycle (nix) from run spec (the platform's env file). |
-| **D3** | **Host tasks run in their own supervision unit, not the daemon's** — Linux: a transient systemd scope per task; macOS: the process group `spawn_task` already creates, once proven. | It is the same mechanism #309 §6, §7 and §2 each independently need, and it is the only way `systemctl restart chug-worker` can stop killing in-flight work. |
+| **D3** | **Host tasks run in their own supervision unit, not the daemon's** — Linux: a transient systemd scope per task; macOS: the process group `spawn_task` already creates — **proven on macOS 26.5.1, 2026-08-06** ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)); the Linux half is confirmed by hand there and not yet through the shipped path. | It is the same mechanism #309 §6, §7 and §2 each independently need, and it is the only way `systemctl restart chug-worker` can stop killing in-flight work. |
 | **D4** | **And the daemon declines a `refresh` while any host task is live**, naming the task — evaluated **twice: at accept, and again at the swap boundary** beside `RefreshGate::drained`. | D3 covers a unit restart; it does not cover a reboot or a rebuild that restarts more than the unit, and the self-refresh is the only restart the platform performs *automatically* — a loud refusal there is cheap and unconditional. The accept check is the fast, informative one; the swap-boundary check is the one that is actually load-bearing, because the build phase runs between them. |
 | **D5** | **Credentials move to a root-owned `0700` directory named by the unit, not the login user's home.** `chuggernaut admin worker-creds` is unchanged; the install step in `deploy/prod/README.md` §6 changes. | The login user is in the `docker` group and is who `build-worker.sh` ssh's in as, so a creds file under that user's home is readable by anything that user runs — a strictly worse boundary than the one the mount was pretending to give. |
 | **D6** | **`build-worker.sh` renders and installs a unit + environment file; `worker-refresh.sh`'s swap collapses to "install the binary, ask the supervisor to restart".** The daemon binary is extracted from the worker image the build phase already produces. | Every mount, device and `docker inspect` carry-forward in the swap phase exists only because the daemon is a container that must be re-composed; extracting the binary keeps its build environment byte-identical to today's and needs no host Rust toolchain. |
@@ -45,7 +50,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | # | Slice | Contract changed | Depends on | State |
 | --- | --- | --- | --- | --- |
 | 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | **Landed** (job #442), plus a two-name floor the slice line does not mention — see [the correction](#correction-2026-08-05--slice-1-as-landed) |
-| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447) — the macOS proof is a *procedure*, run by nobody yet; see [the correction](#correction-2026-08-05--slice-2-as-landed) |
+| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **half proven**: the macOS proof was run and PASSED on 2026-08-06, the Linux assertion is still unexecuted and confirmed only by hand — see [the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux) and [the correction](#correction-2026-08-05--slice-2-as-landed) |
 | 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | Proposed |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | Proposed |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
@@ -699,3 +704,120 @@ for everything else, unbuilt. `docs/spec.md` §3.1's drain guarantee is still
 written for a containerized daemon; narrowing it is slice 8's, and slice 8 should
 not be read as blocked on the macOS proof — it is blocked on the proof having an
 *answer*, which is one operator command away.
+
+---
+
+## Proofs, 2026-08-06 — D3 on macOS and on Linux
+
+Appended by job #452, a `docs` job that changed no code and no gate. The
+operator ran both proofs on 2026-08-06 against the tree at `c8a8354`. Nothing
+above is edited except the head: the `Status:` line, [D3](#decisions)'s cell and
+[slice 2](#slices)'s State cell.
+
+**This section is what retires the `launchd` half of the preamble's
+secondhand marking.** The preamble stands as written, because a design doc's body
+is append-only ([#415](./415-knowledge-architecture.md) D2); what changed is that
+the process-group teardown semantics it says "no file in this repo states" are
+now stated *here*, from a run on a named OS version rather than from
+documentation nobody in this repo has read. The other secondhand item — the
+operator's `macos-runner` host configuration — is untouched and still secondhand.
+
+The two results are not equal, and the asymmetry is the finding:
+
+| Platform | Node | What was exercised | Verdict |
+| --- | --- | --- | --- |
+| macOS 26.5.1 (Darwin) | `gumbo-air-0` | the shipped proof script, restarting a real `launchd` agent with the same `launchctl kickstart -k` a native `worker-refresh.sh` would use | **PASS** — firsthand, against the real mechanism |
+| NixOS (systemd, cgroup v2) | `gumbo-nuc-0` | a hand-built transient **`--user`** scope whose parent process was `SIGKILL`ed — not `HostBackend`, not `probe_supervision`, not the test suite | the *mechanism* holds; the *shipped path* is still unexercised |
+
+### macOS — PASSED, against the mechanism itself
+
+On `gumbo-air-0` (Darwin 26.5.1), in a checkout of this repo:
+
+```sh
+sh deploy/prod/macos-host-supervision-proof.sh
+```
+
+```text
+task pid=89504 pgid=89504 ; stand-in daemon pid=89502 pgid=89502
+kicking: launchctl kickstart -k gui/501/com.chuggernaut.host-supervision-proof
+PASS: the task survived 'launchctl kickstart -k' of the agent that launched it and landed exit code 7
+      => design #440 D3's macOS mechanism (the process group) holds on 26.5.1
+```
+
+- **Both halves of the assertion landed, and both are load-bearing.** The task
+  survived the restart *and* wrote its own exit code afterwards. A survivor that
+  loses its status would still be a broken drain guarantee, because the exit
+  status is what `supervised_cmd`'s wrapper exists to deliver and what the
+  daemon reads back on `inspect`.
+- **It restarted the agent, not a stand-in for the restart.** Step 3 of the
+  procedure is `launchctl kickstart -k` of the agent that launched the task —
+  the same command a native `worker-refresh.sh` would issue at the swap. The
+  daemon is stood in for; the teardown event is not.
+- **What it settles.** The `Proven` cell for `ProcessGroup` in
+  [the slice-2 correction](#correction-2026-08-05--slice-2-as-landed) read
+  "**No.** … nobody has run it". For macOS 26.5.1 that is now yes, and #322 §6's
+  per-task `launchd` job stays the fallback it was — unadopted, and now with one
+  fewer reason to be adopted.
+- **What it does not settle.** [D8](#decisions)'s `setsid()` leak on macOS is
+  untouched: a process that leaves its group leaves the only mechanism macOS
+  has. Nothing here survives a reboot. And no node runs a native daemon, so what
+  is proven is the mechanism such a daemon would rely on, not a deployment. The
+  answer is also a property of *that host's OS version* — re-run the script on
+  any macOS node before it is considered for `host` mode.
+
+### Linux — confirmed by hand only, and it is the weaker of the two
+
+Job #451 is why it was by hand: on `gumbo-nuc-0` the three tier-2 tests in
+`crates/container/tests/host_backend.rs` could not run, so D3's Linux half was
+tested outside the suite. The run, in three steps:
+
+1. A parent shell created a transient user scope around a task built to outlive
+   it: `systemd-run --user --scope -- sh -c 'sleep 45; echo done > /tmp/d3-exit'`.
+2. At t+3 the parent process was killed with `SIGKILL`.
+3. `/tmp/d3-exit` was written at **t+45**.
+
+So the task outlived its launcher and landed its result, which is the shape D3
+claims. **Three limits, and every one of them has to be carried with the
+result:**
+
+1. **It killed a parent process, not a unit.** What `worker-refresh.sh` does —
+   and what the macOS proof actually did — is restart a *supervision unit*.
+   Killing the shell that ran `systemd-run` is the weaker event, and the scope
+   surviving it is the weaker claim.
+2. **It used a `--user` scope; the shipped code asks for a system one.**
+   `scope_args` in `crates/container/src/host.rs` passes
+   `--scope --quiet --collect --unit=…` and no `--user`, so `probe_supervision`
+   asks for a system scope — which polkit denies an unprivileged caller. That is
+   the defect job #451 owns. This run therefore proves the *mechanism*, not the
+   code path that would use it.
+3. **`XDG_RUNTIME_DIR` was unset** in the ssh session where the `--user` scope
+   worked. Whether that holds for a daemon running under a supervisor is #451's
+   question, not this one's.
+
+**So D3 is not proven on Linux, and nothing should be written as if it were.**
+The mechanism is confirmed; the shipped path is unexercised. What closes it is
+the three assertions running on `gumbo-nuc-0` after #451 —
+`a_host_task_runs_in_its_own_supervision_unit`,
+`a_host_task_survives_the_teardown_of_the_launching_unit` and
+`a_kill_reaches_a_setsid_escapee_through_the_scope` — which is exactly the "it
+runs the first time anyone points the suite at a systemd host" the slice-2
+correction named, still outstanding.
+
+### What this lifts, and what it does not
+
+- **Slice 2 is half proven, not proven.** Its macOS half is verified against the
+  real mechanism; its Linux half is code written, self-skipped in CI, and
+  corroborated only by the hand run above.
+- **Slices 3–8 were gated on D3 and that gate is only partly lifted.** Nothing
+  here starts them; when they start is the operator's call.
+- **Slice 8 gains its macOS answer.** [`docs/spec.md`](../spec.md) §3.1's drain
+  guarantee is still written for a containerized daemon, and the "what survives a
+  native daemon restart" half of the narrowing now has a measured answer on
+  macOS and an unexecuted one on Linux.
+- **The runbook is corrected.**
+  [`docs/reference/runbooks/macos-host-supervision-proof.md`](../reference/runbooks/macos-host-supervision-proof.md)
+  said nobody had run the proof; that is no longer true, and it now carries the
+  result and points here.
+- **No code, no gate, no test changed** in the job that recorded this. The
+  `--user`/system scope defect is #451's, and `probe_supervision`, `scope_or_skip`
+  and the suite were left exactly as job #447 shipped them.
