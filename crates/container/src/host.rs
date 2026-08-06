@@ -24,6 +24,9 @@
 //! polkit refuses an unprivileged process a system scope. A node that cannot
 //! create one must not advertise `host` at all — [`probe_supervision`] measures
 //! it, in the environment a launch actually gets, and [`host_refusal`] says why.
+//! The `systemd-run` invocation is a **client** of the manager's bus and is
+//! given the two variables that locate it (`BUS_VARS`); the task inside the
+//! scope sheds them, so its own environment stays exactly what #309 §10 says.
 
 use crate::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
@@ -81,6 +84,19 @@ const INHERITED: [&str; 2] = [PATH_VAR, HOME_VAR];
 
 const PATH_VAR: &str = "PATH";
 const HOME_VAR: &str = "HOME";
+
+/// The only names `sd-bus` reads to find a `systemd --user` manager's bus, and
+/// therefore what the `systemd-run` **client** needs to reach one. They address
+/// that invocation, never the task inside the scope (#309 §10).
+const BUS_VARS: [&str; 2] = [RUNTIME_DIR_VAR, BUS_ADDRESS_VAR];
+
+const RUNTIME_DIR_VAR: &str = "XDG_RUNTIME_DIR";
+const BUS_ADDRESS_VAR: &str = "DBUS_SESSION_BUS_ADDRESS";
+
+/// How `sd-bus` opens every failure to reach a bus at all, which is the one
+/// failure operator provisioning fixes. The phrase and not the errno it carries:
+/// `No such file or directory` is also how a missing `/bin/sh` fails to exec.
+const BUS_UNREACHABLE: &str = "failed to connect";
 
 /// `PATH` for a daemon that carries none — the value docker gives a container
 /// whose image declares none. Without it the task falls back to whatever
@@ -154,15 +170,21 @@ impl ScopeManager {
         }
     }
 
-    /// What an operator would have to provision for this manager to exist, empty
-    /// for the system one because a running systemd is the whole precondition.
-    fn precondition(self) -> &'static str {
-        match self {
-            Self::System => "",
-            Self::User => {
-                " — an unprivileged daemon puts each task's scope in its own systemd --user \
-                 manager, which needs one running for this uid (a live session, or `loginctl \
-                 enable-linger`); provisioning that is the operator's, #440 slice 7"
+    /// What an operator would have to provision, read out of the failure rather
+    /// than assumed from the manager: only a bus that answered nothing is the
+    /// missing user manager `loginctl enable-linger` creates.
+    fn precondition(self, stderr: &str) -> &'static str {
+        let unreachable = stderr.to_ascii_lowercase().contains(BUS_UNREACHABLE);
+        match (self, unreachable) {
+            (Self::System, _) => "",
+            (Self::User, true) => {
+                " — the user bus was addressed and nothing answered, so this uid has no running \
+                 systemd --user manager: a live session or `loginctl enable-linger` for it is the \
+                 operator's, #440 slice 7"
+            }
+            (Self::User, false) => {
+                " — the user bus was reached, so the failure above is the whole finding and not a \
+                 missing systemd --user manager: no linger and no session would change it"
             }
         }
     }
@@ -195,14 +217,19 @@ fn scope_manager() -> ScopeManager {
 }
 
 /// Ask this node to create one transient scope, in the environment a launch
-/// actually gets, so "this node can supervise a host task" is measured rather
-/// than assumed. The macOS answer is [`Supervision::ProcessGroup`] without a
-/// probe, because there is nothing to create.
+/// actually gets plus the bus variables the client itself needs, so "this node
+/// can supervise a host task" is measured rather than assumed. The macOS answer
+/// is [`Supervision::ProcessGroup`] without a probe, because there is nothing to
+/// create.
 pub async fn probe_supervision() -> Result<Supervision, String> {
     if !cfg!(target_os = "linux") {
         return Ok(Supervision::ProcessGroup);
     }
     let manager = scope_manager();
+    let bus = borrowed_bus(Supervision::Scope(manager), &daemon_bus(), &BTreeMap::new());
+    if let Some(reason) = bus_refusal(manager, &bus) {
+        return Err(reason);
+    }
     let unit = format!(
         "chug-probe-{}-{:x}.scope",
         std::process::id(),
@@ -216,7 +243,7 @@ pub async fn probe_supervision() -> Result<Supervision, String> {
         .args(scope_args(manager, &unit))
         .args(["/bin/sh", "-c", ":"])
         .env_clear()
-        .envs(floor_env(&daemon_floor()))
+        .envs(probe_env(&daemon_floor(), &bus))
         .kill_on_drop(true);
     scope_verdict(
         manager,
@@ -240,7 +267,7 @@ fn scope_verdict(
             "{asked} exited {}: {}{}",
             out.status.code().unwrap_or(-1),
             first_line(&out.stderr),
-            manager.precondition()
+            manager.precondition(&String::from_utf8_lossy(&out.stderr))
         )),
         Some(Err(e)) => Err(format!("{SYSTEMD_RUN} is unusable on this node: {e}")),
         None => Err(format!(
@@ -570,21 +597,26 @@ fn process_start_time(pid: i32) -> Option<String> {
     }
 }
 
-/// Wrap the launch command so the **task itself** records its exit status. The
+/// Wrap the launch command so the **task itself** records its exit status, and
+/// sheds whatever the `systemd-run` client borrowed to find its bus. The
 /// daemon's own supervisor is only a backstop: a task must survive the daemon
 /// being swapped under it (spec §3.1 drain guarantee), and a `wait` this
 /// process performed would not.
-fn supervised_cmd(cmd: &[String]) -> Result<Vec<String>, BackendError> {
+fn supervised_cmd(
+    cmd: &[String],
+    borrowed: &BTreeMap<String, OsString>,
+) -> Result<Vec<String>, BackendError> {
     if cmd.is_empty() {
         return Err(BackendError::Launch(
             "host launch has no command to run".into(),
         ));
     }
+    let shed = shed_borrowed(borrowed);
     let mut wrapped = vec![
         "sh".to_string(),
         "-c".to_string(),
         format!(
-            "\"$@\"; s=$?; printf %s \"$s\" > \"${EXIT_TMP_VAR}\" && mv \"${EXIT_TMP_VAR}\" \
+            "{shed}\"$@\"; s=$?; printf %s \"$s\" > \"${EXIT_TMP_VAR}\" && mv \"${EXIT_TMP_VAR}\" \
              \"${EXIT_VAR}\"; exit $s"
         ),
         "sh".to_string(),
@@ -607,8 +639,8 @@ fn daemon_floor() -> HashMap<String, String> {
 }
 
 /// The floor alone: the two names carried from the daemon, with `PATH` always
-/// holding a value. [`probe_supervision`] runs `systemd-run` in exactly this, so
-/// the probe measures the environment a launch gets rather than the daemon's.
+/// holding a value. It is the whole of what a launch inherits, and the base
+/// [`probe_env`] composes the client's bus variables onto.
 fn floor_env(daemon: &HashMap<String, String>) -> BTreeMap<String, OsString> {
     let mut env = BTreeMap::new();
     for name in INHERITED {
@@ -619,6 +651,72 @@ fn floor_env(daemon: &HashMap<String, String>) -> BTreeMap<String, OsString> {
     env.entry(PATH_VAR.to_string())
         .or_insert_with(|| OsString::from(PATH_FALLBACK));
     env
+}
+
+/// The bus variables as the daemon holds them, read **by name** the way the
+/// floor is so nothing else of the daemon's is copied. They are the client's,
+/// which is why they are read here and not in [`daemon_floor`].
+fn daemon_bus() -> HashMap<String, OsString> {
+    BUS_VARS
+        .iter()
+        .filter_map(|name| Some(((*name).to_string(), std::env::var_os(name)?)))
+        .collect()
+}
+
+/// What the `systemd-run` client borrows from the daemon to reach the manager it
+/// is addressed at, minus every name the task's own environment already defines.
+/// Only a **user** manager needs locating; the system bus is a fixed socket path.
+fn borrowed_bus(
+    supervision: Supervision,
+    daemon: &HashMap<String, OsString>,
+    task: &BTreeMap<String, OsString>,
+) -> BTreeMap<String, OsString> {
+    if supervision != Supervision::Scope(ScopeManager::User) {
+        return BTreeMap::new();
+    }
+    BUS_VARS
+        .iter()
+        .filter(|name| !task.contains_key(**name))
+        .filter_map(|name| Some(((*name).to_string(), daemon.get(*name)?.clone())))
+        .collect()
+}
+
+/// Why a `--user` scope is refused before it is attempted: the daemon holds
+/// neither bus variable, so nothing it spawns can locate a manager. `None`
+/// wherever the answer can be measured instead of predicted.
+fn bus_refusal(manager: ScopeManager, borrowed: &BTreeMap<String, OsString>) -> Option<String> {
+    (manager == ScopeManager::User && borrowed.is_empty()).then(|| {
+        format!(
+            "{} cannot address a bus: this daemon's environment holds neither {RUNTIME_DIR_VAR} \
+             nor {BUS_ADDRESS_VAR}, so no systemd --user manager can be located from it — a live \
+             session, or `loginctl enable-linger` for this uid and {RUNTIME_DIR_VAR}=/run/user/\
+             $UID in the daemon's environment, is the operator's, #440 slice 7",
+            manager.asked()
+        )
+    })
+}
+
+/// The environment [`probe_supervision`] runs `systemd-run` in: the floor a
+/// launch gets, plus exactly what the client borrows to find its bus. The task's
+/// own environment is [`task_env`] and is not this.
+fn probe_env(
+    floor: &HashMap<String, String>,
+    borrowed: &BTreeMap<String, OsString>,
+) -> BTreeMap<String, OsString> {
+    let mut env = floor_env(floor);
+    env.extend(borrowed.clone());
+    env
+}
+
+/// The `unset` a task's wrapper opens with, so a variable the client borrowed to
+/// find its bus does not survive into the task (#309 §10). Empty for every
+/// launch that borrowed nothing.
+fn shed_borrowed(borrowed: &BTreeMap<String, OsString>) -> String {
+    if borrowed.is_empty() {
+        return String::new();
+    }
+    let names: Vec<&str> = borrowed.keys().map(String::as_str).collect();
+    format!("unset {}; ", names.join(" "))
 }
 
 /// Everything a host task's environment holds: the floor carried from the
@@ -706,14 +804,17 @@ fn spawn_task(
         .try_clone()
         .map_err(|e| BackendError::Launch(format!("{OUTPUT_LOG}: {e}")))?;
 
-    let wrapped = supervised_launch(supervision, unit, supervised_cmd(&config.cmd)?);
+    let env = task_env(&daemon_floor(), &config.env, dir);
+    let borrowed = borrowed_bus(supervision, &daemon_bus(), &env);
+    let wrapped = supervised_launch(supervision, unit, supervised_cmd(&config.cmd, &borrowed)?);
     use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(&wrapped[0]);
     command
         .args(&wrapped[1..])
         .current_dir(dir)
         .env_clear()
-        .envs(task_env(&daemon_floor(), &config.env, dir))
+        .envs(&env)
+        .envs(&borrowed)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(errors))
@@ -1177,13 +1278,16 @@ mod tests {
     #[test]
     fn the_task_records_its_own_exit_status() {
         let cmd = vec!["sh".to_string(), "-c".to_string(), "exit 7".to_string()];
-        let wrapped = supervised_cmd(&cmd).unwrap();
+        let wrapped = supervised_cmd(&cmd, &BTreeMap::new()).unwrap();
         assert_eq!(wrapped[0], "sh");
         assert_eq!(wrapped[3], "sh", "$0 is consumed before the real argv");
         assert_eq!(&wrapped[4..], &cmd[..]);
         assert!(wrapped[2].contains(EXIT_VAR), "{}", wrapped[2]);
         assert!(wrapped[2].contains("exit $s"), "{}", wrapped[2]);
-        assert!(supervised_cmd(&[]).is_err(), "an empty command is refused");
+        assert!(
+            supervised_cmd(&[], &BTreeMap::new()).is_err(),
+            "an empty command is refused"
+        );
 
         let dir = std::env::temp_dir().join(format!("chug-host-wrap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1271,9 +1375,8 @@ mod tests {
         assert_eq!(
             floor_env(&daemon_env()).keys().collect::<Vec<_>>(),
             ["HOME", "PATH"],
-            "the probe's systemd-run runs in exactly this, so a user bus reachable only through \
-             XDG_RUNTIME_DIR is measured as unreachable at boot rather than found there and lost \
-             at the first launch"
+            "the launch's own environment is the floor and nothing else — the client's bus \
+             variables are composed beside it, never into it"
         );
 
         let bare = task_env(&HashMap::new(), &HashMap::new(), dir);
@@ -1469,10 +1572,205 @@ mod tests {
         let reason = scope_verdict(ScopeManager::User, Some(Ok(denied))).unwrap_err();
         assert!(reason.contains("systemd-run --user --scope"), "{reason}");
         assert!(
-            reason.contains("enable-linger"),
-            "a refusal names the provisioning it needs rather than leaving it to be guessed: \
-             {reason}"
+            !reason.contains("enable-linger"),
+            "a manager that answered and refused is not provisioning, and naming linger here \
+             costs an operator a node change for nothing: {reason}"
         );
+    }
+
+    /// The refusal distinguishes the three things that keep a `--user` scope
+    /// from existing, because they need three different actions: no bus to
+    /// address, a bus nobody answers, and a manager that answered and refused.
+    #[test]
+    fn a_refusal_names_the_bus_it_could_not_reach() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let none = bus_refusal(ScopeManager::User, &BTreeMap::new()).expect("no bus to address");
+        assert!(
+            none.contains(RUNTIME_DIR_VAR) && none.contains(BUS_ADDRESS_VAR),
+            "{none}"
+        );
+        assert!(
+            none.contains("slice 7"),
+            "the provisioning is named: {none}"
+        );
+        assert_eq!(
+            bus_refusal(ScopeManager::System, &BTreeMap::new()),
+            None,
+            "the system bus is a fixed socket path and needs no variable"
+        );
+        assert_eq!(
+            bus_refusal(
+                ScopeManager::User,
+                &BTreeMap::from([(
+                    RUNTIME_DIR_VAR.to_string(),
+                    OsString::from("/run/user/1000")
+                )])
+            ),
+            None,
+            "a bus that can be addressed is measured, not predicted"
+        );
+
+        let failed = |stderr: &str| {
+            scope_verdict(
+                ScopeManager::User,
+                Some(Ok(std::process::Output {
+                    status: std::process::ExitStatus::from_raw(1 << 8),
+                    stdout: Vec::new(),
+                    stderr: stderr.as_bytes().to_vec(),
+                })),
+            )
+            .unwrap_err()
+        };
+
+        let unreachable = failed(
+            "Failed to connect to user scope bus via local transport: No such file or directory\n",
+        );
+        assert!(
+            unreachable.contains("enable-linger") && unreachable.contains("nothing answered"),
+            "a bus that answered nothing is the uid's missing manager: {unreachable}"
+        );
+        let refused = failed("Failed to start transient scope unit: Access denied\n");
+        assert!(
+            !refused.contains("enable-linger") && refused.contains("was reached"),
+            "{refused}"
+        );
+
+        let exec = failed("Failed to execute /bin/sh: No such file or directory\n");
+        assert!(
+            !exec.contains("enable-linger") && exec.contains("was reached"),
+            "`--scope` execs the command from systemd-run itself, so a missing binary is a \
+             manager that answered: reading its errno as a missing manager is the wrong advice \
+             this classification exists to stop giving: {exec}"
+        );
+    }
+
+    /// The bus variables reach the `systemd-run` **client** and stop there: the
+    /// task's own environment is the floor, the launch config and the two exit
+    /// paths, exactly as #309 §10 and slice 1 leave it.
+    #[test]
+    fn the_client_gets_the_bus_and_the_task_never_sees_it() {
+        let dir = Path::new("/var/lib/chuggernaut/host-tasks/host-1-0");
+        let bus = HashMap::from([
+            (
+                RUNTIME_DIR_VAR.to_string(),
+                OsString::from("/run/user/1000"),
+            ),
+            (
+                BUS_ADDRESS_VAR.to_string(),
+                OsString::from("unix:path=/run/user/1000/bus"),
+            ),
+        ]);
+        let task = task_env(&daemon_env(), &HashMap::new(), dir);
+        for name in BUS_VARS {
+            assert!(
+                !task.contains_key(name),
+                "{name} is the client's, never the task's"
+            );
+        }
+
+        let user = borrowed_bus(Supervision::Scope(ScopeManager::User), &bus, &task);
+        assert_eq!(
+            user.keys().map(String::as_str).collect::<Vec<_>>(),
+            [BUS_ADDRESS_VAR, RUNTIME_DIR_VAR],
+            "a --user scope cannot be reached without them"
+        );
+        assert_eq!(
+            probe_env(&daemon_env(), &user).keys().collect::<Vec<_>>(),
+            [BUS_ADDRESS_VAR, "HOME", "PATH", RUNTIME_DIR_VAR],
+            "the probe measures the launch's floor plus what the client itself needs"
+        );
+
+        assert!(
+            borrowed_bus(
+                Supervision::Scope(ScopeManager::User),
+                &HashMap::new(),
+                &task
+            )
+            .is_empty(),
+            "a daemon holding neither carries neither"
+        );
+        assert_eq!(
+            probe_env(&daemon_env(), &BTreeMap::new())
+                .keys()
+                .collect::<Vec<_>>(),
+            ["HOME", "PATH"],
+            "and the probe is then exactly the launch floor"
+        );
+        assert!(
+            borrowed_bus(Supervision::Scope(ScopeManager::System), &bus, &task).is_empty(),
+            "the system bus is a fixed socket path"
+        );
+        assert!(
+            borrowed_bus(Supervision::ProcessGroup, &bus, &task).is_empty(),
+            "macOS creates no unit, so there is no client to address"
+        );
+
+        let declared = task_env(
+            &daemon_env(),
+            &HashMap::from([(RUNTIME_DIR_VAR.to_string(), "the dispatcher's".to_string())]),
+            dir,
+        );
+        assert_eq!(
+            borrowed_bus(Supervision::Scope(ScopeManager::User), &bus, &declared)
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            [BUS_ADDRESS_VAR],
+            "a declared name keeps the launch config's value, which the daemon's never overwrites \
+             and the shed never removes"
+        );
+    }
+
+    /// The shed runs **inside** the scope: `systemd-run` reads the bus variables
+    /// and the task started under it does not, which is the ordering the whole
+    /// fix turns on.
+    #[test]
+    fn the_task_sheds_what_the_client_borrowed() {
+        let dir = std::env::temp_dir().join(format!("chug-host-shed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let seen = dir.join("env");
+        let borrowed = BTreeMap::from([(
+            RUNTIME_DIR_VAR.to_string(),
+            OsString::from("/run/user/1000"),
+        )]);
+
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("printenv > {}", seen.display()),
+        ];
+        let wrapped = supervised_cmd(&cmd, &borrowed).unwrap();
+        assert!(
+            wrapped[2].starts_with(&format!("unset {RUNTIME_DIR_VAR}; ")),
+            "{}",
+            wrapped[2]
+        );
+        assert!(
+            !supervised_cmd(&cmd, &BTreeMap::new()).unwrap()[2].contains("unset"),
+            "a launch that borrowed nothing sheds nothing"
+        );
+
+        let status = std::process::Command::new(&wrapped[0])
+            .args(&wrapped[1..])
+            .env_clear()
+            .env("PATH", PATH_FALLBACK)
+            .env(EXIT_TMP_VAR, dir.join(EXIT_CODE_TMP))
+            .env(EXIT_VAR, dir.join(EXIT_CODE))
+            .envs(&borrowed)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let env = std::fs::read_to_string(&seen).unwrap();
+        assert!(
+            !env.contains(RUNTIME_DIR_VAR),
+            "the client had it and the task must not: {env}"
+        );
+        assert!(
+            env.contains(EXIT_VAR),
+            "the task's own environment is intact"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A `kill` after a daemon restart reads the manager out of `meta.json`, so

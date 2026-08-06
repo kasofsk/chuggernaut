@@ -20,7 +20,14 @@ so this is operator-verified in the shape of `.chug/jobs/android-proof.yaml` and
 The Linux half of D3 is a transient systemd scope and is asserted in
 `crates/container/tests/host_backend.rs`, which self-skips where no scope can be
 created — those assertions have still never executed, so D3's Linux half is
-confirmed only by the hand run #440's proof section records.
+confirmed only by the hand run #440's proof section records. Until job #453 they
+could not have executed under an **unprivileged** run — the shape every hand run
+has taken since job #451 moved them to a `--user` scope: the probe cleared the
+bus variables out of its own `systemd-run` call, so that skip was unconditional
+and blamed the node
+([the correction](../../design/440-native-worker-daemon.md#correction-2026-08-06--the-bus-the-client-needs-job-453)).
+A run as root takes the system scope, which is a fixed socket path and needed no
+bus variable to reach.
 
 ## Run it
 

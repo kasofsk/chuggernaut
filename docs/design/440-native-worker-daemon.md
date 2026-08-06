@@ -8,7 +8,10 @@ day but **not through the shipped code path** — see
 [the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux). Slice 2's Linux
 mechanism was corrected by job #451 to the scope an unprivileged daemon can
 actually create — see
-[the correction](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451).
+[the correction](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451) —
+and by job #453 to give that scope's `systemd-run` client the bus variables it
+needs, which is why the Linux assertion had still never run — see
+[the correction](#correction-2026-08-06--the-bus-the-client-needs-job-453).
 
 Written against the tree at `1030704`. Every claim about current behavior below
 was read out of the source or out of [`docs/spec.md`](../spec.md) in this tree, not
@@ -53,7 +56,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | # | Slice | Contract changed | Depends on | State |
 | --- | --- | --- | --- | --- |
 | 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | **Landed** (job #442), plus a two-name floor the slice line does not mention — see [the correction](#correction-2026-08-05--slice-1-as-landed) |
-| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **half proven**: the macOS proof was run and PASSED on 2026-08-06, the Linux assertion is still unexecuted and confirmed only by hand — see [the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux) and [the correction](#correction-2026-08-05--slice-2-as-landed), amended by job #451 for [the scope an unprivileged daemon can create](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451) |
+| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **half proven**: the macOS proof was run and PASSED on 2026-08-06, the Linux assertion is still unexecuted and confirmed only by hand — see [the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux) and [the correction](#correction-2026-08-05--slice-2-as-landed), amended by job #451 for [the scope an unprivileged daemon can create](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451) and by job #453 for [the bus that scope's client needs](#correction-2026-08-06--the-bus-the-client-needs-job-453) |
 | 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | Proposed |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | Proposed |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
@@ -979,3 +982,99 @@ D3 tests ran. On `gumbo-nuc-0` as `worksalot` the expected mode is
 [the proofs section](#linux--confirmed-by-hand-only-and-it-is-the-weaker-of-the-two)
 leaves outstanding, and it now asks for a mechanism that node has been measured
 to grant rather than one polkit denies it.
+
+---
+
+## Correction, 2026-08-06 — the bus the client needs (job #453)
+
+Appended by job #453, which fixes a defect in the interaction between
+[slice 1](#correction-2026-08-05--slice-1-as-landed) and
+[slice 2](#slices) as landed. Nothing above is edited except that slice's State
+cell. Slice 1 is **not** wrong and nothing here loosens it; what was wrong is
+that the same `env_clear()` was applied to a process that is not the task.
+
+### What was measured on `gumbo-nuc-0`
+
+Same host, same second, as `worksalot` (NixOS, systemd, cgroup v2) against the
+tree at `e7f7c0f`, with `XDG_RUNTIME_DIR=/run/user/1000` in the session:
+
+```
+systemd-run --user --scope --quiet /bin/sh -c ":"                   -> exit 0
+env -i PATH=… systemd-run --user --scope --quiet /bin/sh -c ":"     -> Failed to connect to user
+    scope bus via local transport: $DBUS_SESSION_BUS_ADDRESS and $XDG_RUNTIME_DIR not defined
+```
+
+The second form is what `probe_supervision` ran: `.env_clear()` plus the
+two-name floor, neither of which is a bus variable. So `--user` could not work in
+**any** environment, the probe reported a node incapability that was not one, and
+all three D3 tests self-skipped on a node whose mechanism the
+[proofs section](#linux--confirmed-by-hand-only-and-it-is-the-weaker-of-the-two)
+had already measured working.
+
+### `XDG_RUNTIME_DIR`, answered again — the earlier answer was wrong
+
+[The #451 section](#xdg_runtime_dir-answered) says `sd-bus` finds the user bus at
+`$DBUS_SESSION_BUS_ADDRESS`, else at `$XDG_RUNTIME_DIR/bus`, else at
+`/run/user/$UID/bus` computed from the uid, and that the last is what carried the
+hand measurement. **There is no such fallback**, as the error above says in its
+own words: what carried the hand measurement was the ssh session's own
+`XDG_RUNTIME_DIR`, which `sudo`-free interactive logins get from
+`pam_systemd`. The variable is not incidental to the user bus; it is one of the
+only two names that locate it.
+
+### Two environments, and only one of them is #309 §10's
+
+| | Composed of | Rule |
+| --- | --- | --- |
+| The **task's** environment | the two-name floor, the dispatcher's launch env, the two exit-status paths | #309 §10 / slice 1, exhaustive, unchanged by this job |
+| The **client's** — the `systemd-run` invocation that creates the scope | the same floor, plus `XDG_RUNTIME_DIR` and `DBUS_SESSION_BUS_ADDRESS` read from the daemon by name | it is a bus client; without them it cannot reach the manager |
+
+`--scope` execs the task from `systemd-run` itself, so the client's environment
+*is* the task's unless something removes the difference between them. That
+something is the task wrapper's `unset`, emitted only for names actually
+borrowed: bus variables before the exec, gone after it. Getting that ordering
+backwards silently re-opens §10, so it is asserted at tier 1 by running the
+wrapper and reading the environment the task actually got
+(`the_task_sheds_what_the_client_borrowed`), beside the composition assertions in
+`the_client_gets_the_bus_and_the_task_never_sees_it`.
+
+The floor is **not** widened to carry the bus names, and `task_env` is untouched.
+A name the launch config declares is never borrowed and never shed, so the
+dispatcher's value still wins over the daemon's.
+
+### The refusal, corrected
+
+`loginctl enable-linger` is the remedy for exactly **one** of the three ways a
+`--user` scope fails. The refusal now distinguishes them, because the wrong one
+costs an operator a node change that fixes nothing — which is what this defect
+did:
+
+| The failure | What the refusal says |
+| --- | --- |
+| The daemon holds neither bus variable | it cannot address a bus at all; a live session, or `loginctl enable-linger` **and** `XDG_RUNTIME_DIR` in the daemon's environment, is [slice 7](#slices)'s provisioning. Refused before the probe runs — there is nothing to measure |
+| A bus was addressed and nothing answered | this uid has no running user manager: a live session or `loginctl enable-linger` for it |
+| The manager answered and refused (polkit, a unit that would not start, a command that would not exec) | the failure itself, and **no** provisioning advice |
+
+Which of the last two a failure is gets read from `sd-bus`'s own opening phrase,
+`Failed to connect`, and never from the errno it carries. `No such file or
+directory` is how an unreachable bus reads *and* how a missing `/bin/sh` fails —
+and `--scope` execs the command from `systemd-run` itself, so that second one is
+a manager that answered. Keying on the errno would answer it with
+`enable-linger`, which is the wrong-advice class this section exists to close.
+
+The daemon-holds-neither case refuses honestly rather than falling back to a
+system scope polkit would deny or to the daemon's own cgroup, which is the silent
+lie #309 §7 rejects.
+
+### Verification — stated, and unverified from this workspace
+
+Unchanged from #451's, and still the outstanding one. On `gumbo-nuc-0` as
+`worksalot`:
+
+```sh
+cargo test -p container --test host_backend -- --nocapture 2>&1 | grep -i skipping
+```
+
+Silence is the pass: `probe_supervision` returned `Scope(User)` and all three D3
+tests ran. This job could not run it — the evaluator has no `systemd-run` — and
+claims only that the cause of the last skip is removed.
