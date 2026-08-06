@@ -85,6 +85,15 @@ export function createJobSubmitLabel(mode: JobMode, submitting: boolean): string
   return submitting ? 'Creating…' : `Create ${mode}`
 }
 
+/**
+ * The type a fresh create form opens on: `code`, the overwhelmingly common one,
+ * falling back to the first offered type for a project that declares no such
+ * type.
+ */
+export function defaultJobType(jobTypes: JobTypeSummary[]): JobTypeSummary | undefined {
+  return jobTypes.find((t) => t.name.toLowerCase() === 'code') ?? jobTypes[0]
+}
+
 function CreateJob({
   owner,
   project,
@@ -109,9 +118,8 @@ function CreateJob({
   const [type, setType] = useState(initialType)
   useEffect(() => {
     if (type || !jobTypes.length) return
-    const feature = jobTypes.find((t) => /feature/i.test(t.display_name) || /feature/i.test(t.name))
-    const pick = jobTypes.find((t) => t.name === initialType) ?? feature ?? jobTypes[0]
-    setType(pick.name)
+    const pick = jobTypes.find((t) => t.name === initialType) ?? defaultJobType(jobTypes)
+    if (pick) setType(pick.name)
   }, [jobTypes, type, initialType])
 
   const typeDetail = useJobTypeDetail(owner, project, type)

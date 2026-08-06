@@ -113,6 +113,31 @@ export function matchesFilters(j: Job, f: JobFilters, claimed: Set<number>): boo
   return true
 }
 
+/** The state dropdown's non-state positions: no constraint at all, and several states at once. */
+export const STATE_ALL = '__all'
+export const STATE_MULTI = '__multi'
+
+/**
+ * Which position the state dropdown sits at for a filter set: the one chosen
+ * state, several ({@link STATE_MULTI}), everything including finished
+ * ({@link STATE_ALL}), or the active-only default ('').
+ */
+export function stateSelectValue(f: JobFilters): string {
+  if (f.states.length === 1) return f.states[0]
+  if (f.states.length) return STATE_MULTI
+  return f.showFinished ? STATE_ALL : ''
+}
+
+/**
+ * The filters a state-dropdown choice selects. "All" drops the finished-hiding
+ * gate rather than naming states, so it survives new states being added.
+ */
+export function stateSelectFilters(f: JobFilters, value: string): JobFilters {
+  if (value === STATE_ALL) return { ...f, states: [], showFinished: true }
+  if (!value || value === STATE_MULTI) return { ...f, states: [], showFinished: false }
+  return { ...f, states: [value as JobState], showFinished: false }
+}
+
 /**
  * The group names the filter dropdown offers: every label the loaded rows carry,
  * deduped and sorted. Read off the list rather than fetched — the projection

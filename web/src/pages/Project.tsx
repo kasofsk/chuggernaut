@@ -19,6 +19,10 @@ import {
   filtersToParams,
   groupOptions,
   matchesFilters,
+  stateSelectFilters,
+  stateSelectValue,
+  STATE_ALL,
+  STATE_MULTI,
   type JobFilters,
 } from '../jobFilters'
 
@@ -286,8 +290,7 @@ export function ProjectPage() {
     }
   }
 
-  const stateDropdownValue =
-    filters.states.length === 1 ? filters.states[0] : filters.states.length ? '__multi' : ''
+  const stateDropdownValue = stateSelectValue(filters)
 
   const groupChoices = groupOptions(jobs)
   const groupSelectable =
@@ -366,14 +369,14 @@ export function ProjectPage() {
               <select
                 className="state-filter"
                 value={stateDropdownValue}
-                onChange={(e) => {
-                  const v = e.target.value
-                  setFilters({ ...filters, states: v && v !== '__multi' ? [v as JobState] : [] })
-                }}
+                onChange={(e) => setFilters(stateSelectFilters(filters, e.target.value))}
                 aria-label="Filter by state"
               >
                 <option value="">Active</option>
-                {stateDropdownValue === '__multi' && <option value="__multi">Filtered…</option>}
+                <option value={STATE_ALL}>All</option>
+                {stateDropdownValue === STATE_MULTI && (
+                  <option value={STATE_MULTI}>Filtered…</option>
+                )}
                 {FILTER_STATES.map((s) => (
                   <option key={s} value={s}>
                     {s}

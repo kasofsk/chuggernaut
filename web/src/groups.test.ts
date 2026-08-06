@@ -1,7 +1,17 @@
 import { describe, expect, it } from 'vitest'
 import type { Job } from './api'
 import { groupHref, groupNameError } from './groups'
-import { EMPTY_FILTERS, filtersFromParams, filtersToParams, groupOptions, matchesFilters } from './jobFilters'
+import {
+  EMPTY_FILTERS,
+  filtersFromParams,
+  filtersToParams,
+  groupOptions,
+  matchesFilters,
+  stateSelectFilters,
+  stateSelectValue,
+  STATE_ALL,
+  STATE_MULTI,
+} from './jobFilters'
 
 function job(over: Partial<Job>): Job {
   return {
@@ -54,6 +64,39 @@ describe('groupNameError', () => {
     expect(groupNameError('x'.repeat(129), [])).toMatch(/128/)
     expect(groupNameError('dup', ['dup'])).toBe('already on this job')
     expect(groupNameError('nine', ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'])).toMatch(/8 groups/)
+  })
+})
+
+describe('the state filter', () => {
+  const done = job({ id: 400, state: 'Done' })
+  const working = job({ id: 401, state: 'Work' })
+
+  it('shows every job under "All", finished included', () => {
+    const f = stateSelectFilters(EMPTY_FILTERS, STATE_ALL)
+    expect(matchesFilters(done, f, NO_CLAIMS)).toBe(true)
+    expect(matchesFilters(working, f, NO_CLAIMS)).toBe(true)
+    expect(matchesFilters(done, EMPTY_FILTERS, NO_CLAIMS)).toBe(false)
+  })
+
+  it('composes (AND) with search, so "All" is not an escape hatch', () => {
+    const f = { ...stateSelectFilters(EMPTY_FILTERS, STATE_ALL), q: '401' }
+    expect(matchesFilters(done, f, NO_CLAIMS)).toBe(false)
+    expect(matchesFilters(working, f, NO_CLAIMS)).toBe(true)
+  })
+
+  it('returns to the active-only default, and to one named state', () => {
+    const all = stateSelectFilters(EMPTY_FILTERS, STATE_ALL)
+    expect(stateSelectFilters(all, '')).toEqual(EMPTY_FILTERS)
+    expect(stateSelectFilters(all, 'Work')).toEqual({ ...EMPTY_FILTERS, states: ['Work'] })
+  })
+
+  it('rides the URL, and reads back as the dropdown position', () => {
+    const all = stateSelectFilters(EMPTY_FILTERS, STATE_ALL)
+    expect(filtersToParams(all).get('finished')).toBe('1')
+    expect(stateSelectValue(filtersFromParams(filtersToParams(all)))).toBe(STATE_ALL)
+    expect(stateSelectValue(EMPTY_FILTERS)).toBe('')
+    expect(stateSelectValue({ ...EMPTY_FILTERS, states: ['Work'] })).toBe('Work')
+    expect(stateSelectValue({ ...EMPTY_FILTERS, states: ['Work', 'Done'] })).toBe(STATE_MULTI)
   })
 })
 

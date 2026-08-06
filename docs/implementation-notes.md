@@ -961,6 +961,8 @@ stale.
 
 ### `web/src/jobFilters.ts`
 - **function quickPred** — A job is "mine/claimed" when a human has taken its next attempt. Without a per-job claimed-by field we treat any active claim as the operator's (noted in the redesign summary) — claim_next covers the pre-park window, a claimed pending Work task the in-flight one.
+- **function stateSelectValue** — The state dropdown holds two positions no single state names, so its value is derived from the whole filter set rather than stored: `__multi` for a URL naming several states (which only a link can produce), `__all` for the finished-hiding gate being off with no state chosen.
+- **function stateSelectFilters** — "All" is `showFinished`, not every state listed: naming states would freeze the option against a state added later, and the `finished=1` param it writes is the one the URL already carried. Picking any other position clears it, since with an explicit state the gate is inert anyway and a stale `finished=1` would only survive to confuse the next choice.
 
 ### `web/src/main.tsx`
 - Every page is code-split. Imported eagerly they were one 479 KB chunk on every load, and the markdown renderer — the biggest slice of it — is only needed by the three pages that render agent prose. Now the entry chunk is the shell, router and theme; a route's code (and whatever only it depends on) arrives when you navigate to it. Pages export named components, so each import maps its export onto `default` for lazy().
@@ -1064,6 +1066,7 @@ stale.
 - **const anchor** — Cards render after the fetch, so a #type anchor (e.g. the create form's peek links) must scroll once they exist.
 
 ### `web/src/pages/NewJob.tsx`
+- **function defaultJobType** — What an unparameterised create form opens on: `code`, because it is what the overwhelming majority of tickets are, so the common create is one field shorter. A project without that type falls back to its first offered type rather than an empty picker.
 - **const loading** — Initial pickers fetch: the form itself renders immediately; only the type/deps pickers skeleton while this is in flight.
 - **const declaredInputs** — Values for the type's declared inputs (spec §1.1), and the messages a rejected create keyed back onto their fields. Both are cleared when the type changes: a value for `sha` means nothing under a type that doesn't declare it, and the server would refuse it as undeclared at release.
 - **const groups** — What the job is part of (design #321): a creation field like any other, and one the picker suggests known names for — the project's groups plus its design documents.
@@ -1078,7 +1081,7 @@ stale.
 - **function CreateJob** — Frozen while a create is in flight: the release step reads `mode` after the POST resolves, so a mid-flight switch would change what happens to an already-created job.
 
 ### `web/src/pages/Project.tsx`
-- **const FILTER_STATES** — The states the state-filter dropdown offers, lifecycle-ordered. The default ("Active") is no filter at all — the finished-hiding gate in matchesFilters is what makes the unfiltered view active-only.
+- **const FILTER_STATES** — The states the state-filter dropdown offers, lifecycle-ordered. The default ("Active") is no filter at all — the finished-hiding gate in matchesFilters is what makes the unfiltered view active-only, and "All" is that same gate lifted.
 - **const sortDirDefault** — Which direction a freshly picked sort key opens in: the numeric/temporal keys read newest-first, the categorical ones A→Z.
 - **const SORT_OPTIONS** — The toolbar's sort-by control. It offers exactly the sortable columns, because on phones the table header — and with it the click-to-sort affordance — is not on screen: the rows render as two-line item widgets, not columns.
 - **function fmtStamp** — Compact local timestamp for the jobs table (reuses JobDetail's #57 conventions): time-only when the moment is today, date prepended otherwise. Callers pass the raw ISO string as the cell's `title` for the full tooltip.
