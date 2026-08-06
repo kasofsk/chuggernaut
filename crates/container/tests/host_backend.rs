@@ -5,7 +5,7 @@
 //! Every backend here is given its own root **and its own workspace path**, so
 //! the suite never touches the machine's real `/workspace`.
 //!
-//! Four tests are the exception and say so on the way past: design #440 D3's
+//! Five tests are the exception and say so on the way past: design #440 D3's
 //! transient scope needs a systemd with a cgroup-v2 hierarchy that this
 //! evaluator does not have, so they self-skip loudly through `scope_or_skip`
 //! rather than certifying the mechanism vacuously. They take the manager the
@@ -24,6 +24,12 @@
 //! scope. It stops at the staging: a red there says the defect reproduces in the
 //! simplest fixture and D8's test is only its first victim, a green there says
 //! the cause is something the D8 test does and this one does not.
+//!
+//! Job #462 read it as the first: `systemd-run --scope` expands the argv itself,
+//! so the fixture's `"$$"` reached the escapee as `"$"` and the pid it recorded
+//! was never a number.
+//! `a_scoped_task_is_handed_the_dollars_its_command_was_written_with` is that
+//! cause on its own, with no `setsid` in the way.
 //!
 //! The escapee redirects its own stderr into `escapee_trace` before it writes
 //! anything, because the one thing three attempts at D8 could not tell apart is
@@ -769,6 +775,49 @@ async fn a_host_task_runs_in_its_own_supervision_unit() {
 
     release(&gate);
     assert_eq!(settle(&backend, &id).await, 0);
+    backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// What actually broke every scoped escapee (job #462): `systemd-run --scope`
+/// substitutes `${VARIABLE}` and collapses `$$` in the argv **itself**, by
+/// default from systemd v258, so a task whose command said `$$` was handed a
+/// bare `$`.
+///
+/// It is the escapee fixture's own failure one level down — no `setsid`, no
+/// kill, no cgroup — so a red here says the scope prefix is rewriting the
+/// dispatcher's command and every scoped shell script on the node is suspect.
+#[tokio::test]
+async fn a_scoped_task_is_handed_the_dollars_its_command_was_written_with() {
+    let test = "a_scoped_task_is_handed_the_dollars_its_command_was_written_with";
+    let Some(supervision) = scope_or_skip(test).await else {
+        return;
+    };
+    let root = temp_root("verbatim");
+    let backend = HostBackend::with_workspace(
+        "w1",
+        root.join("tasks"),
+        root.join("workspace"),
+        supervision,
+    )
+    .unwrap();
+
+    let seen = root.join("shell.pid");
+    let id = backend
+        .launch(cfg(&format!("printf %s \"$$\" > {}", seen.display())))
+        .await
+        .unwrap();
+    assert_eq!(settle(&backend, &id).await, 0, "the task's own exit status");
+
+    let recorded = std::fs::read_to_string(&seen).unwrap_or_default();
+    assert!(
+        recorded.trim().parse::<i64>().is_ok_and(|pid| pid > 0),
+        "the task's shell wrote {recorded:?} where its command said \"$$\", so the client expanded \
+         the argv on its way through and the command a host task runs is not the one the \
+         dispatcher wrote (#440 D8): {}",
+        launch_diagnosis(&root, &id)
+    );
+
     backend.remove(&id).await.unwrap();
     std::fs::remove_dir_all(&root).unwrap();
 }

@@ -120,6 +120,13 @@ const SYSTEMD_BOUND: std::time::Duration = std::time::Duration::from_secs(10);
 /// creates is greppable and none can collide with a machine's own.
 const UNIT_PREFIX: &str = "chug-task-";
 
+/// What keeps the **client's** own `${VARIABLE}` substitution and `$$` collapse
+/// out of the task's command, which `systemd-run --scope` performs itself and
+/// turns on by default from systemd v258. Without it a shell command's `$$`
+/// reaches the task as a bare `$` and a `${VAR}` as the daemon's value (design
+/// #440 D8, job #462).
+const EXPAND_ENV_OFF: &str = "--expand-environment=no";
+
 /// Poll interval for [`ContainerBackend::wait`], which is trait-completeness
 /// only — §3.1 polls dispatcher-side and the daemon never calls it.
 const WAIT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -263,12 +270,15 @@ fn scope_verdict(
     let asked = manager.asked();
     match outcome {
         Some(Ok(out)) if out.status.success() => Ok(Supervision::Scope(manager)),
-        Some(Ok(out)) => Err(format!(
-            "{asked} exited {}: {}{}",
-            out.status.code().unwrap_or(-1),
-            first_line(&out.stderr),
-            manager.precondition(&String::from_utf8_lossy(&out.stderr))
-        )),
+        Some(Ok(out)) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(format!(
+                "{asked} exited {}: {}{}",
+                out.status.code().unwrap_or(-1),
+                first_line(&out.stderr),
+                expand_precondition(&stderr).unwrap_or_else(|| manager.precondition(&stderr))
+            ))
+        }
         Some(Err(e)) => Err(format!("{SYSTEMD_RUN} is unusable on this node: {e}")),
         None => Err(format!(
             "{asked} did not answer within {}s — this node's systemd cannot start a unit promptly \
@@ -276,6 +286,19 @@ fn scope_verdict(
             SYSTEMD_BOUND.as_secs()
         )),
     }
+}
+
+/// What an operator reads when the refusal is this node's `systemd-run` not
+/// knowing [`EXPAND_ENV_OFF`], which systemd added in v254. It takes precedence
+/// over the bus preconditions because the client refused the option and never
+/// addressed a manager at all.
+fn expand_precondition(stderr: &str) -> Option<&'static str> {
+    stderr.contains(EXPAND_ENV_OFF).then_some(
+        " — this node's systemd-run does not know --expand-environment=no, which systemd added in \
+         v254: without it a v258 client substitutes ${VARIABLE} and collapses $$ in the task's own \
+         command before exec'ing it, so a host task's shell would be handed a command the \
+         dispatcher never wrote (#440 D8)",
+    )
 }
 
 /// Why a node may not advertise `host` when [`probe_supervision`] refused. A
@@ -292,8 +315,8 @@ pub fn host_refusal(node: &str, reason: &str) -> String {
 }
 
 /// The flags every transient scope this backend creates carries. `--collect` is
-/// what reclaims the unit when the task's last process exits, so a node that
-/// runs for months does not accumulate dead scopes.
+/// what reclaims the unit when the task's last process exits, and
+/// [`EXPAND_ENV_OFF`] is what stops the client rewriting the task's own command.
 fn scope_args(manager: ScopeManager, unit: &str) -> Vec<String> {
     addressed(
         manager,
@@ -301,6 +324,7 @@ fn scope_args(manager: ScopeManager, unit: &str) -> Vec<String> {
             "--scope".to_string(),
             "--quiet".to_string(),
             "--collect".to_string(),
+            EXPAND_ENV_OFF.to_string(),
             format!("--unit={unit}"),
             "--".to_string(),
         ],
@@ -1440,24 +1464,58 @@ mod tests {
         let scoped =
             supervised_launch(Supervision::Scope(ScopeManager::System), &unit, cmd.clone());
         assert_eq!(
-            &scoped[..6],
+            &scoped[..7],
             &[
                 "systemd-run".to_string(),
                 "--scope".to_string(),
                 "--quiet".to_string(),
                 "--collect".to_string(),
+                EXPAND_ENV_OFF.to_string(),
                 format!("--unit={unit}"),
                 "--".to_string(),
             ],
             "the scope is transient, silent on the task's own log, and reclaimed"
         );
-        assert_eq!(&scoped[6..], &cmd[..], "the task's argv is passed through");
+        assert_eq!(&scoped[7..], &cmd[..], "the task's argv is passed through");
 
         assert_eq!(
             supervised_launch(Supervision::ProcessGroup, &unit, cmd.clone()),
             cmd,
             "macOS has no unit to create — the process group is the mechanism"
         );
+    }
+
+    /// The one line design #440 D8's escapee turned on (job #462): a scope
+    /// launch must hand the task the command the dispatcher wrote, and
+    /// `systemd-run --scope` substitutes `${VARIABLE}` and collapses `$$` in
+    /// that argv itself unless it is told not to.
+    #[test]
+    fn a_scope_hands_the_task_the_dollars_the_dispatcher_wrote() {
+        let unit = unit_name("host-1a2b-0");
+        let cmd: Vec<String> = ["sh", "-c", "printf %s \"$$\" > \"${HOME}/pid\""]
+            .map(String::from)
+            .to_vec();
+
+        for manager in [ScopeManager::System, ScopeManager::User] {
+            let scoped = supervised_launch(Supervision::Scope(manager), &unit, cmd.clone());
+            let flag = scoped.iter().position(|a| a == EXPAND_ENV_OFF);
+            let sep = scoped.iter().position(|a| a == "--");
+            assert!(
+                matches!((flag, sep), (Some(f), Some(s)) if f < s),
+                "without {EXPAND_ENV_OFF} ahead of the separator the client expands the task's \
+                 own command, and a client flag after it is argv: {scoped:?}"
+            );
+            assert_eq!(
+                &scoped[sep.unwrap() + 1..],
+                &cmd[..],
+                "the task's command is passed through byte for byte"
+            );
+            assert!(
+                scope_args(manager, &unit).contains(&EXPAND_ENV_OFF.to_string()),
+                "the probe creates its scope through this same argv, so a client too old to be \
+                 told it is refused at boot and not at the first launch"
+            );
+        }
     }
 
     /// A `setsid()` escapee leaves the process group and stays in the cgroup, so
@@ -1543,6 +1601,45 @@ mod tests {
         assert_eq!(
             scope_verdict(ScopeManager::System, Some(Ok(ok))),
             Ok(Supervision::Scope(ScopeManager::System))
+        );
+    }
+
+    /// A `systemd-run` predating [`EXPAND_ENV_OFF`] refuses the **option**, not
+    /// the scope, so the refusal names the version rather than sending the
+    /// operator after a bus that was never addressed (design #440 D8, job #462).
+    #[test]
+    fn a_client_too_old_to_leave_the_command_alone_is_named_as_such() {
+        use std::os::unix::process::ExitStatusExt;
+        let old = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: format!("systemd-run: unrecognized option '{EXPAND_ENV_OFF}'\n").into_bytes(),
+        };
+        let reason = scope_verdict(ScopeManager::User, Some(Ok(old))).unwrap_err();
+        assert!(reason.contains(EXPAND_ENV_OFF), "{reason}");
+        assert!(reason.contains("v254"), "{reason}");
+        assert!(
+            !reason.contains("enable-linger"),
+            "the client never addressed a bus, so linger is the wrong advice: {reason}"
+        );
+
+        let bus = "Failed to start transient scope unit: Access denied";
+        assert!(
+            expand_precondition(bus).is_none(),
+            "every other refusal keeps the bus preconditions"
+        );
+        assert!(
+            scope_verdict(
+                ScopeManager::User,
+                Some(Ok(std::process::Output {
+                    status: std::process::ExitStatus::from_raw(1 << 8),
+                    stdout: Vec::new(),
+                    stderr: bus.as_bytes().to_vec(),
+                }))
+            )
+            .unwrap_err()
+            .contains("the user bus was reached"),
+            "a manager that answered is still the finding it was"
         );
     }
 
