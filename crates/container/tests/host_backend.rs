@@ -17,6 +17,15 @@
 //! `a_setsid_escapee_is_staged_outside_the_task_process_group` asserts that half
 //! on every machine, and the scope test asserts it again alongside what only a
 //! scope adds — the escapee's cgroup, and the kill that reaches it.
+//!
+//! The escapee redirects its own stderr into `escapee_trace` before it writes
+//! anything, because the one thing three attempts at D8 could not tell apart is
+//! a pidfile write that failed from a child that never got that far — the task's
+//! own fds are redirected to its log and an error into them proved invisible.
+//! `a_failing_escapee_write_reports_into_the_escapees_own_trace` is that
+//! discrimination's own regression test, and it needs no systemd either.
+//! `setsid` is named absolutely throughout, so what the fixture stages never
+//! depends on the task resolving it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -434,6 +443,67 @@ fn launch_diagnosis(root: &std::path::Path, id: &str) -> String {
     )
 }
 
+/// What the **escapee** left behind, which is the one thing the task's own log
+/// cannot say (design #440 D8, job #458): [`escapee_trace`] exists only if the
+/// escapee's shell ran, so its absence and its presence are different findings
+/// and the second carries the failing write's own error.
+fn escapee_diagnosis(root: &std::path::Path, id: &str, pidfile: &std::path::Path) -> String {
+    let dir = root.join("tasks").join(id.split_once('/').unwrap().1);
+    let log = std::fs::read_to_string(dir.join("output.log")).unwrap_or_default();
+    let forked = marked_pid(&log, FORK_MARKER);
+    let trace = escapee_trace(pidfile);
+    format!(
+        "the escapee's trace at {} holds {:?} — absent is a shell that never ran, {CHILD_MARKER} \
+         alone is the pidfile write failing, and an error line after it is that failure; the \
+         pidfile itself holds {:?}; the forked pid {forked:?} is {}",
+        trace.display(),
+        std::fs::read_to_string(&trace).ok(),
+        std::fs::read_to_string(pidfile).ok(),
+        forked.map_or_else(
+            || "unreported, so the task's shell never announced a fork".to_string(),
+            process_facts
+        )
+    )
+}
+
+/// A pid one of this fixture's markers announced beside itself, read back out of
+/// whichever stream carried it. It is how a process that recorded nothing of its
+/// own is still identified.
+fn marked_pid(text: &str, marker: &str) -> Option<i64> {
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix(marker))
+        .find_map(|rest| rest.trim().parse().ok())
+}
+
+/// The escapee's trace once it holds `lines` lines, waited for rather than
+/// raced. What was there when the wait expired is returned as it stands, so the
+/// caller's assertion names it instead of a bare timeout.
+fn traced(trace: &std::path::Path, lines: usize) -> String {
+    let deadline = std::time::Instant::now() + STAGING;
+    loop {
+        let seen = std::fs::read_to_string(trace).unwrap_or_default();
+        if seen.lines().count() >= lines || std::time::Instant::now() >= deadline {
+            return seen;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+/// What one pid is doing now, for a pid that was expected to have written a file
+/// and did not. A pid that is gone, a pid still in its first exec and a pid that
+/// moved on to its `sleep` are three different findings.
+fn process_facts(pid: i64) -> String {
+    format!(
+        "alive {}, pgid {:?}, cgroup {:?}, cmdline {:?}",
+        alive(pid),
+        pgid_of(pid),
+        cgroup_of(pid),
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .ok()
+            .map(|raw| String::from_utf8_lossy(&raw).replace('\0', " "))
+    )
+}
+
 /// The process group of one live pid, out of field 5 of `/proc/<pid>/stat` —
 /// what makes "this process left the group" an observation rather than an
 /// assumption.
@@ -483,14 +553,23 @@ fn setsid_or_skip(test: &str) -> Option<String> {
 /// A task that stages a `setsid()` escapee: a child that leaves the task's
 /// process group, records its own pid and outlives the assertions, announcing
 /// each step on stderr — the task's own log — so a staging that never finishes
-/// says which step never ran. `setsid` is named absolutely, so what it stages
-/// never depends on the task resolving it.
+/// says which step never ran. Its **first** instruction redirects its own stderr
+/// to [`escapee_trace`], because an error into the fds it inherits from the task
+/// proved invisible (design #440 D8, job #458).
 fn escapee_script(setsid: &str, pidfile: &std::path::Path) -> String {
     format!(
-        "echo {SHELL_MARKER} >&2; {setsid} sh -c 'printf %s \"$$\" > {}; sleep 120' & echo \
-         {FORK_MARKER} \"$!\" >&2; sleep 120",
-        pidfile.display()
+        "echo {SHELL_MARKER} >&2; {setsid} sh -c 'exec 2>{trace}; echo {CHILD_MARKER} \"$$\" >&2; \
+         printf %s \"$$\" > {pid}; sleep 120' & echo {FORK_MARKER} \"$!\" >&2; sleep 120",
+        trace = escapee_trace(pidfile).display(),
+        pid = pidfile.display()
     )
+}
+
+/// Where the escapee sends its own stderr before it touches anything else. It is
+/// a path of the escapee's own, so the task's redirected fds cannot swallow what
+/// the escapee has to say.
+fn escapee_trace(pidfile: &std::path::Path) -> std::path::PathBuf {
+    pidfile.with_extension("trace")
 }
 
 /// The task's shell reached its first instruction, which under
@@ -501,6 +580,11 @@ const SHELL_MARKER: &str = "host-task-shell-running";
 /// The task's shell forked the escapee. Between this and no pidfile lies
 /// `setsid` itself, whose own failure goes to the same log.
 const FORK_MARKER: &str = "host-task-forked-escapee";
+
+/// The escapee's **own** shell ran, written to [`escapee_trace`] with its pid.
+/// Between this and no pidfile lies nothing but the redirect that same shell
+/// then performs, whose failure lands in that same trace.
+const CHILD_MARKER: &str = "host-escapee-shell-running";
 
 /// One `systemctl` verb against the manager the probed supervision's scopes live
 /// in, and whether it succeeded. A `--user` scope is not a unit the system
@@ -580,13 +664,10 @@ async fn staged_escapee(
         return pid;
     }
     let diagnosis = launch_diagnosis(root, id);
+    let escapee = escapee_diagnosis(root, id, pidfile);
     let _ = backend.kill(id).await;
     eprintln!("STAGING FAILED for {id}: {diagnosis}");
-    eprintln!(
-        "STAGING FAILED for {id}: the log above holds {SHELL_MARKER} if the task's shell ran at \
-         all, and {FORK_MARKER} if it forked the escapee — between the second and a written \
-         pidfile lies only setsid and the redirect, whose own errors are in that same log"
-    );
+    eprintln!("STAGING FAILED for {id}: {escapee}");
     panic!(
         "no escapee recorded a pid at {} within {}s, so the task never staged one and NOTHING \
          about design #440 D8 was exercised — this is the fixture's setup, not the claim: \
@@ -720,6 +801,61 @@ async fn a_setsid_escapee_is_staged_outside_the_task_process_group() {
     );
     signal_escapee(escapee);
 
+    backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// What design #440 D8's third attempt (job #458) rests on, asserted on every
+/// machine: with the pidfile unwritable, the escapee's trace still holds its own
+/// marker **and** the failing write's error, so a write that failed can never be
+/// read as a child that never ran.
+///
+/// It is the negative control for the two tests above — they show the trace
+/// written on the way to a staged escapee, this one shows it written when the
+/// staging fails — and it needs no systemd, so the discrimination is covered
+/// wherever `setsid` is.
+#[tokio::test]
+async fn a_failing_escapee_write_reports_into_the_escapees_own_trace() {
+    let test = "a_failing_escapee_write_reports_into_the_escapees_own_trace";
+    let Some(setsid) = setsid_or_skip(test) else {
+        return;
+    };
+    let root = temp_root("probe");
+    let backend = backend(&root);
+    let pidfile = root.join("escapee.pid");
+    std::fs::create_dir_all(&pidfile).unwrap();
+
+    let id = backend
+        .launch(cfg(&escapee_script(&setsid, &pidfile)))
+        .await
+        .unwrap();
+    let trace = escapee_trace(&pidfile);
+    let seen = traced(&trace, 2);
+
+    let escapee = marked_pid(&seen, CHILD_MARKER);
+    assert!(
+        escapee.is_some(),
+        "the escapee's shell ran but its trace at {} does not name its pid: {seen:?}",
+        trace.display()
+    );
+    assert!(
+        seen.lines()
+            .nth(1)
+            .is_some_and(|line| line.contains(&pidfile.display().to_string())
+                || line.to_ascii_lowercase().contains("directory")),
+        "the pidfile write failed and its error reached nothing — that is exactly the silence \
+         this trace exists to break: {seen:?}"
+    );
+    assert!(
+        std::fs::read_to_string(&pidfile).is_err(),
+        "the pidfile is a directory, so nothing can have recorded a pid in it"
+    );
+
+    if let Some(pid) = escapee {
+        signal_escapee(pid);
+    }
+    backend.kill(&id).await.unwrap();
+    assert_ne!(settle(&backend, &id).await, 0, "a killed task never passes");
     backend.remove(&id).await.unwrap();
     std::fs::remove_dir_all(&root).unwrap();
 }
