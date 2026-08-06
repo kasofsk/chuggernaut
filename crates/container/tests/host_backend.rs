@@ -8,11 +8,13 @@
 //! Three tests are the exception and say so on the way past: design #440 D3's
 //! transient scope needs a systemd with a cgroup-v2 hierarchy that this
 //! evaluator does not have, so they self-skip loudly through `scope_or_skip`
-//! rather than certifying the mechanism vacuously.
+//! rather than certifying the mechanism vacuously. They take the manager the
+//! probe chose rather than naming one, because an unprivileged run gets a
+//! `--user` scope and must signal and tear down that same manager's units.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use container::host::{HOST_ROOT_DEFAULT, HOST_WORKSPACE, HostBackend, Supervision};
+use container::host::{HOST_ROOT_DEFAULT, HOST_WORKSPACE, HostBackend, ScopeManager, Supervision};
 use container::{ContainerBackend, ContainerLaunchConfig, ContainerStatus, InjectedFile};
 use std::collections::HashMap;
 
@@ -327,26 +329,29 @@ async fn a_task_sees_the_composed_environment_and_not_the_daemons() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// Whether this machine can create the transient scope design #440 D3 requires,
-/// announcing the skip when it cannot. A vacuous pass here would certify the one
-/// mechanism slices 3–8 of that design are built on.
-async fn scope_or_skip(test: &str) -> bool {
-    let announce = |reason: String| {
+/// The supervision this machine can actually create, or `None` with the skip
+/// announced. A vacuous pass here would certify the one mechanism slices 3–8 of
+/// design #440 are built on.
+async fn scope_or_skip(test: &str) -> Option<Supervision> {
+    let announce = |reason: String| -> Option<Supervision> {
         eprintln!(
             "skipping {test}: {reason}, so design #440 D3's Linux assertion is NOT covered by this \
              run — the macOS half is operator-verified, see \
              docs/reference/runbooks/macos-host-supervision-proof.md"
         );
-        false
+        None
     };
     match container::host::probe_supervision().await {
-        Ok(Supervision::Scope) => {
-            cgroup_of(std::process::id().into()).is_some()
-                || announce(
+        Ok(supervision @ Supervision::Scope(_)) => {
+            if cgroup_of(std::process::id().into()).is_some() {
+                Some(supervision)
+            } else {
+                announce(
                     "this machine reports no unified (cgroup v2) hierarchy, so a scope's cgroup \
                      cannot be read back"
                         .to_string(),
                 )
+            }
         }
         outcome => announce(format!(
             "this machine cannot create a transient systemd scope ({outcome:?})"
@@ -408,10 +413,18 @@ fn setsid_or_skip(test: &str) -> bool {
     usable
 }
 
-/// One `systemctl` verb, and whether it succeeded.
-fn systemctl(args: &[&str]) -> bool {
+/// One `systemctl` verb against the manager the probed supervision's scopes live
+/// in, and whether it succeeded. A `--user` scope is not a unit the system
+/// manager can see at all, so the flag is the difference between a teardown and
+/// a no-op.
+fn systemctl(supervision: Supervision, args: &[&str]) -> bool {
+    let mut argv: Vec<String> = match supervision {
+        Supervision::Scope(ScopeManager::User) => vec!["--user".to_string()],
+        _ => Vec::new(),
+    };
+    argv.extend(args.iter().map(|a| (*a).to_string()));
     std::process::Command::new("systemctl")
-        .args(args)
+        .args(&argv)
         .status()
         .is_ok_and(|s| s.success())
 }
@@ -436,30 +449,31 @@ fn wait_for_pid(path: &std::path::Path) -> i64 {
 /// A stand-in for the daemon's own unit: a scope holding a shell that launches
 /// one task through the composition `HostBackend` ships, and records its pid.
 fn stand_in_daemon(
+    supervision: Supervision,
     daemon_unit: &str,
     task_unit: &str,
     pidfile: &std::path::Path,
 ) -> std::process::Child {
     let inner = container::host::supervised_launch(
-        Supervision::Scope,
+        supervision,
         task_unit,
         ["sleep", "120"].map(String::from).to_vec(),
     )
     .join(" ");
-    std::process::Command::new("systemd-run")
-        .args([
-            "--scope",
-            "--quiet",
-            "--collect",
-            &format!("--unit={daemon_unit}"),
-            "--",
-            "sh",
-            "-c",
-            &format!(
+    let outer = container::host::supervised_launch(
+        supervision,
+        daemon_unit,
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!(
                 "{inner} & printf %s \"$!\" > {}; sleep 120",
                 pidfile.display()
             ),
-        ])
+        ],
+    );
+    std::process::Command::new(&outer[0])
+        .args(&outer[1..])
         .spawn()
         .unwrap()
 }
@@ -469,15 +483,16 @@ fn stand_in_daemon(
 /// a kill of the launcher's cgroup cannot reach it.
 #[tokio::test]
 async fn a_host_task_runs_in_its_own_supervision_unit() {
-    if !scope_or_skip("a_host_task_runs_in_its_own_supervision_unit").await {
+    let Some(supervision) = scope_or_skip("a_host_task_runs_in_its_own_supervision_unit").await
+    else {
         return;
-    }
+    };
     let root = temp_root("scope");
     let backend = HostBackend::with_workspace(
         "w1",
         root.join("tasks"),
         root.join("workspace"),
-        Supervision::Scope,
+        supervision,
     )
     .unwrap();
 
@@ -490,6 +505,14 @@ async fn a_host_task_runs_in_its_own_supervision_unit() {
     let meta = meta_of(&root, &id);
     let unit = meta["unit"].as_str().unwrap().to_string();
     assert_eq!(unit, format!("chug-task-{task}.scope"));
+    assert_eq!(
+        meta["scope"].as_str(),
+        Some(match supervision {
+            Supervision::Scope(ScopeManager::User) => "user",
+            _ => "system",
+        }),
+        "the manager is recorded, so a kill after a daemon restart signals the one the scope is in"
+    );
 
     let task_cgroup = live_cgroup(meta["pid"].as_i64().unwrap());
     let launcher_cgroup = live_cgroup(std::process::id().into());
@@ -516,7 +539,10 @@ async fn a_host_task_runs_in_its_own_supervision_unit() {
 #[tokio::test]
 async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
     let test = "a_kill_reaches_a_setsid_escapee_through_the_scope";
-    if !scope_or_skip(test).await || !setsid_or_skip(test) {
+    let Some(supervision) = scope_or_skip(test).await else {
+        return;
+    };
+    if !setsid_or_skip(test) {
         return;
     }
     let root = temp_root("escapee");
@@ -524,7 +550,7 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
         "w1",
         root.join("tasks"),
         root.join("workspace"),
-        Supervision::Scope,
+        supervision,
     )
     .unwrap();
 
@@ -573,14 +599,16 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
 /// 3–8 assume and spec §3.1's drain guarantee rests on in host mode.
 #[tokio::test]
 async fn a_host_task_survives_the_teardown_of_the_launching_unit() {
-    if !scope_or_skip("a_host_task_survives_the_teardown_of_the_launching_unit").await {
+    let Some(supervision) =
+        scope_or_skip("a_host_task_survives_the_teardown_of_the_launching_unit").await
+    else {
         return;
-    }
+    };
     let root = temp_root("teardown");
     let daemon_unit = format!("chug-proof-daemon-{}.scope", std::process::id());
     let task_unit = format!("chug-proof-task-{}.scope", std::process::id());
     let pidfile = root.join("stand-in.pid");
-    let mut stand_in = stand_in_daemon(&daemon_unit, &task_unit, &pidfile);
+    let mut stand_in = stand_in_daemon(supervision, &daemon_unit, &task_unit, &pidfile);
 
     let task_pid = wait_for_pid(&pidfile);
     assert!(
@@ -588,7 +616,7 @@ async fn a_host_task_survives_the_teardown_of_the_launching_unit() {
         "the stand-in's task is in its own scope"
     );
     assert!(
-        systemctl(&["kill", "--signal=SIGKILL", &daemon_unit]),
+        systemctl(supervision, &["kill", "--signal=SIGKILL", &daemon_unit]),
         "the stand-in daemon's unit could not be torn down, so nothing was proven"
     );
     assert!(
@@ -605,7 +633,7 @@ async fn a_host_task_survives_the_teardown_of_the_launching_unit() {
         "and it is still the scope's, not reparented into the launcher's"
     );
 
-    systemctl(&["kill", "--signal=SIGKILL", &task_unit]);
+    systemctl(supervision, &["kill", "--signal=SIGKILL", &task_unit]);
     std::fs::remove_dir_all(&root).unwrap();
 }
 

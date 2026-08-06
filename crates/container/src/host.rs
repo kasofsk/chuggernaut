@@ -19,9 +19,11 @@
 //!
 //! Each task is launched into its own **supervision unit** ([`Supervision`],
 //! design #440 D3) rather than the daemon's, so the restart that swaps the
-//! daemon leaves in-flight work running (spec §3.1). A node that cannot create
-//! one must not advertise `host` at all — [`probe_supervision`] measures it and
-//! [`host_refusal`] says why.
+//! daemon leaves in-flight work running (spec §3.1). Which systemd manager that
+//! unit lives in is the daemon's privilege ([`ScopeManager`]), not a preference:
+//! polkit refuses an unprivileged process a system scope. A node that cannot
+//! create one must not advertise `host` at all — [`probe_supervision`] measures
+//! it, in the environment a launch actually gets, and [`host_refusal`] says why.
 
 use crate::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
@@ -111,24 +113,96 @@ const WAIT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
 /// work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Supervision {
-    /// A transient systemd scope per task. A scope is its own cgroup, so the
-    /// restart that swaps the daemon's unit reaches the daemon and not the task
-    /// (#309 §6), and a cgroup kill also reaches a `setsid()` escapee (#440 D8).
-    Scope,
+    /// A transient systemd scope per task, in the named manager. A scope is its
+    /// own cgroup, so the restart that swaps the daemon's unit reaches the
+    /// daemon and not the task (#309 §6), and a cgroup kill also reaches a
+    /// `setsid()` escapee (#440 D8).
+    Scope(ScopeManager),
     /// The process group [`spawn_task`] creates, which is the unit `launchd`
     /// tears down by. **Unproven** — the assertion is an operator procedure,
     /// `docs/reference/runbooks/macos-host-supervision-proof.md`.
     ProcessGroup,
 }
 
-/// Ask this node to create one transient scope, so "this node can supervise a
-/// host task" is measured rather than assumed. The macOS answer is
-/// [`Supervision::ProcessGroup`] without a probe, because there is nothing to
-/// create.
+/// Which systemd manager a node's transient scopes are created in (design #440
+/// D3). It follows the daemon's privilege rather than a preference, because
+/// polkit refuses an unprivileged process a **system** scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopeManager {
+    /// `systemd --system`, which is what the root daemon #440 D2 declares gets,
+    /// and whose scopes outlive every user session.
+    System,
+    /// The invoking user's own `systemd --user`, whose scopes outlive the daemon
+    /// unit but **not** that user's manager.
+    User,
+}
+
+impl ScopeManager {
+    /// The flag that addresses this manager, which both `systemd-run` and
+    /// `systemctl` take ahead of the verb.
+    fn flag(self) -> Option<&'static str> {
+        matches!(self, Self::User).then_some("--user")
+    }
+
+    /// How a refusal names what was asked for, so "polkit denied a system scope"
+    /// and "there is no user manager" are never the same line.
+    fn asked(self) -> String {
+        match self.flag() {
+            Some(flag) => format!("{SYSTEMD_RUN} {flag} --scope"),
+            None => format!("{SYSTEMD_RUN} --scope"),
+        }
+    }
+
+    /// What an operator would have to provision for this manager to exist, empty
+    /// for the system one because a running systemd is the whole precondition.
+    fn precondition(self) -> &'static str {
+        match self {
+            Self::System => "",
+            Self::User => {
+                " — an unprivileged daemon puts each task's scope in its own systemd --user \
+                 manager, which needs one running for this uid (a live session, or `loginctl \
+                 enable-linger`); provisioning that is the operator's, #440 slice 7"
+            }
+        }
+    }
+}
+
+/// One `systemd` invocation's argv, addressed at the manager the scope lives in.
+fn addressed(manager: ScopeManager, args: impl IntoIterator<Item = String>) -> Vec<String> {
+    manager
+        .flag()
+        .map(String::from)
+        .into_iter()
+        .chain(args)
+        .collect()
+}
+
+/// The manager this process can actually create a scope in. An unprivileged
+/// `systemd-run --scope` is answered by polkit with `Access denied … requires
+/// interactive authentication`, measured on `gumbo-nuc-0` (#440, job #451).
+fn manager_for(euid: u32) -> ScopeManager {
+    if euid == 0 {
+        ScopeManager::System
+    } else {
+        ScopeManager::User
+    }
+}
+
+fn scope_manager() -> ScopeManager {
+    // SAFETY: `geteuid` takes no arguments, cannot fail and returns a plain integer — it is unsafe only because it is a foreign function.
+    manager_for(unsafe { libc::geteuid() })
+}
+
+/// Ask this node to create one transient scope, in the environment a launch
+/// actually gets, so "this node can supervise a host task" is measured rather
+/// than assumed. The macOS answer is [`Supervision::ProcessGroup`] without a
+/// probe, because there is nothing to create.
 pub async fn probe_supervision() -> Result<Supervision, String> {
     if !cfg!(target_os = "linux") {
         return Ok(Supervision::ProcessGroup);
     }
+    let manager = scope_manager();
     let unit = format!(
         "chug-probe-{}-{:x}.scope",
         std::process::id(),
@@ -139,10 +213,13 @@ pub async fn probe_supervision() -> Result<Supervision, String> {
     );
     let mut probe = tokio::process::Command::new(SYSTEMD_RUN);
     probe
-        .args(scope_args(&unit))
+        .args(scope_args(manager, &unit))
         .args(["/bin/sh", "-c", ":"])
+        .env_clear()
+        .envs(floor_env(&daemon_floor()))
         .kill_on_drop(true);
     scope_verdict(
+        manager,
         tokio::time::timeout(SYSTEMD_BOUND, probe.output())
             .await
             .ok(),
@@ -153,19 +230,22 @@ pub async fn probe_supervision() -> Result<Supervision, String> {
 /// that has no systemd to fail against. `None` is the bound expiring, which is a
 /// refusal like any other rather than a boot that hangs.
 fn scope_verdict(
+    manager: ScopeManager,
     outcome: Option<std::io::Result<std::process::Output>>,
 ) -> Result<Supervision, String> {
+    let asked = manager.asked();
     match outcome {
-        Some(Ok(out)) if out.status.success() => Ok(Supervision::Scope),
+        Some(Ok(out)) if out.status.success() => Ok(Supervision::Scope(manager)),
         Some(Ok(out)) => Err(format!(
-            "{SYSTEMD_RUN} --scope exited {}: {}",
+            "{asked} exited {}: {}{}",
             out.status.code().unwrap_or(-1),
-            first_line(&out.stderr)
+            first_line(&out.stderr),
+            manager.precondition()
         )),
         Some(Err(e)) => Err(format!("{SYSTEMD_RUN} is unusable on this node: {e}")),
         None => Err(format!(
-            "{SYSTEMD_RUN} --scope did not answer within {}s — this node's systemd cannot start a \
-             unit promptly enough to supervise a task",
+            "{asked} did not answer within {}s — this node's systemd cannot start a unit promptly \
+             enough to supervise a task",
             SYSTEMD_BOUND.as_secs()
         )),
     }
@@ -187,14 +267,17 @@ pub fn host_refusal(node: &str, reason: &str) -> String {
 /// The flags every transient scope this backend creates carries. `--collect` is
 /// what reclaims the unit when the task's last process exits, so a node that
 /// runs for months does not accumulate dead scopes.
-fn scope_args(unit: &str) -> [String; 5] {
-    [
-        "--scope".to_string(),
-        "--quiet".to_string(),
-        "--collect".to_string(),
-        format!("--unit={unit}"),
-        "--".to_string(),
-    ]
+fn scope_args(manager: ScopeManager, unit: &str) -> Vec<String> {
+    addressed(
+        manager,
+        [
+            "--scope".to_string(),
+            "--quiet".to_string(),
+            "--collect".to_string(),
+            format!("--unit={unit}"),
+            "--".to_string(),
+        ],
+    )
 }
 
 /// The transient unit one task runs in.
@@ -209,9 +292,9 @@ fn unit_name(task: &str) -> String {
 pub fn supervised_launch(supervision: Supervision, unit: &str, cmd: Vec<String>) -> Vec<String> {
     match supervision {
         Supervision::ProcessGroup => cmd,
-        Supervision::Scope => {
+        Supervision::Scope(manager) => {
             let mut argv = vec![SYSTEMD_RUN.to_string()];
-            argv.extend(scope_args(unit));
+            argv.extend(scope_args(manager, unit));
             argv.extend(cmd);
             argv
         }
@@ -252,6 +335,11 @@ pub struct TaskMeta {
     /// escapee the group no longer holds.
     #[serde(default)]
     pub unit: Option<String>,
+    /// Which manager holds [`Self::unit`], so a `kill` after a daemon restart
+    /// signals the one the scope was created in. `None` is the process group,
+    /// and a `meta.json` written before the manager was selectable.
+    #[serde(default)]
+    pub scope: Option<ScopeManager>,
 }
 
 /// Host-process execution on one node (design #309 P0). Serves every launch
@@ -518,6 +606,21 @@ fn daemon_floor() -> HashMap<String, String> {
         .collect()
 }
 
+/// The floor alone: the two names carried from the daemon, with `PATH` always
+/// holding a value. [`probe_supervision`] runs `systemd-run` in exactly this, so
+/// the probe measures the environment a launch gets rather than the daemon's.
+fn floor_env(daemon: &HashMap<String, String>) -> BTreeMap<String, OsString> {
+    let mut env = BTreeMap::new();
+    for name in INHERITED {
+        if let Some(value) = daemon.get(name) {
+            env.insert(name.to_string(), OsString::from(value));
+        }
+    }
+    env.entry(PATH_VAR.to_string())
+        .or_insert_with(|| OsString::from(PATH_FALLBACK));
+    env
+}
+
 /// Everything a host task's environment holds: the floor carried from the
 /// daemon by name, the dispatcher's launch env, and the two exit-status paths
 /// the wrapper writes through. Composed rather than inherited, so it is
@@ -527,14 +630,7 @@ fn task_env(
     launch: &HashMap<String, String>,
     dir: &Path,
 ) -> BTreeMap<String, OsString> {
-    let mut env = BTreeMap::new();
-    for name in INHERITED {
-        if let Some(value) = daemon.get(name) {
-            env.insert(name.to_string(), OsString::from(value));
-        }
-    }
-    env.entry(PATH_VAR.to_string())
-        .or_insert_with(|| OsString::from(PATH_FALLBACK));
+    let mut env = floor_env(daemon);
     for (name, value) in launch {
         env.insert(name.clone(), OsString::from(value));
     }
@@ -627,6 +723,10 @@ fn spawn_task(
         .map_err(|e| BackendError::Launch(format!("spawning host task: {e}")))?;
 
     let pid = i32::try_from(child.id()).unwrap_or(-1);
+    let scope = match supervision {
+        Supervision::Scope(manager) => Some(manager),
+        Supervision::ProcessGroup => None,
+    };
     let meta = TaskMeta {
         pid,
         pgid: pid,
@@ -635,7 +735,8 @@ fn spawn_task(
         job: config.env.get("JOB_ID").and_then(|v| v.parse().ok()),
         task: config.env.get("CHUG_TASK_ID").and_then(|v| v.parse().ok()),
         files,
-        unit: matches!(supervision, Supervision::Scope).then(|| unit.to_string()),
+        unit: scope.map(|_| unit.to_string()),
+        scope,
     };
     Ok((child, meta))
 }
@@ -706,20 +807,24 @@ fn reclaim_failure(result: std::io::Result<()>, what: &str) -> Option<String> {
 /// The argv one signal to a task's scope becomes, factored out of
 /// [`signal_unit`] the way [`supervised_launch`] is, so the D8 half is asserted
 /// on a machine with no systemd to send it to.
-fn kill_unit_args(unit: &str, signal: &str) -> [String; 3] {
-    [
-        "kill".to_string(),
-        format!("--signal={signal}"),
-        unit.to_string(),
-    ]
+fn kill_unit_args(manager: ScopeManager, unit: &str, signal: &str) -> Vec<String> {
+    addressed(
+        manager,
+        [
+            "kill".to_string(),
+            format!("--signal={signal}"),
+            unit.to_string(),
+        ],
+    )
 }
 
 /// Signal every process in a task's transient scope, bounded by
 /// [`SYSTEMD_BOUND`]. This is the half that reaches a `setsid()` escapee (#309
 /// §2, #440 D8): the escapee leaves the process group and stays in the cgroup.
-async fn signal_unit(unit: &str, signal: &str) {
+async fn signal_unit(manager: ScopeManager, unit: &str, signal: &str) {
     let mut kill = tokio::process::Command::new(SYSTEMCTL);
-    kill.args(kill_unit_args(unit, signal)).kill_on_drop(true);
+    kill.args(kill_unit_args(manager, unit, signal))
+        .kill_on_drop(true);
     match tokio::time::timeout(SYSTEMD_BOUND, kill.output()).await {
         Ok(Ok(out)) if out.status.success() => (),
         Ok(Ok(out)) => tracing::info!(
@@ -808,10 +913,11 @@ impl ContainerBackend for HostBackend {
         if read_exit_code(&dir).is_some() {
             return Ok(());
         }
-        tracing::warn!(node = %self.node, id = %id, pgid = meta.pgid, unit = ?meta.unit, "host kill: SIGTERM to the process group and the scope");
+        let manager = meta.scope.unwrap_or(ScopeManager::System);
+        tracing::warn!(node = %self.node, id = %id, pgid = meta.pgid, unit = ?meta.unit, scope = ?manager, "host kill: SIGTERM to the process group and the scope");
         signal_group(meta.pgid, libc::SIGTERM);
         if let Some(unit) = meta.unit.as_deref() {
-            signal_unit(unit, "SIGTERM").await;
+            signal_unit(manager, unit, "SIGTERM").await;
         }
         let pgid = meta.pgid;
         let unit = meta.unit.clone();
@@ -822,7 +928,7 @@ impl ContainerBackend for HostBackend {
                 tracing::warn!(pgid, "host kill: group ignored SIGTERM — SIGKILL");
                 signal_group(pgid, libc::SIGKILL);
                 if let Some(unit) = unit.as_deref() {
-                    signal_unit(unit, "SIGKILL").await;
+                    signal_unit(manager, unit, "SIGKILL").await;
                 }
             }
         });
@@ -1018,6 +1124,7 @@ mod tests {
             task: None,
             files: Vec::new(),
             unit: None,
+            scope: None,
         };
         assert_eq!(
             status_after_restart(Some(&meta), Some("918273")),
@@ -1161,6 +1268,14 @@ mod tests {
             );
         }
 
+        assert_eq!(
+            floor_env(&daemon_env()).keys().collect::<Vec<_>>(),
+            ["HOME", "PATH"],
+            "the probe's systemd-run runs in exactly this, so a user bus reachable only through \
+             XDG_RUNTIME_DIR is measured as unreachable at boot rather than found there and lost \
+             at the first launch"
+        );
+
         let bare = task_env(&HashMap::new(), &HashMap::new(), dir);
         assert_eq!(bare["PATH"], PATH_FALLBACK);
         assert!(
@@ -1191,7 +1306,8 @@ mod tests {
             "a unit name systemd would refuse: {unit}"
         );
 
-        let scoped = supervised_launch(Supervision::Scope, &unit, cmd.clone());
+        let scoped =
+            supervised_launch(Supervision::Scope(ScopeManager::System), &unit, cmd.clone());
         assert_eq!(
             &scoped[..6],
             &[
@@ -1220,7 +1336,7 @@ mod tests {
     fn a_killed_task_is_signalled_through_its_scope_at_both_stages() {
         let unit = unit_name("host-1a2b-0");
         for signal in ["SIGTERM", "SIGKILL"] {
-            let args = kill_unit_args(&unit, signal);
+            let args = kill_unit_args(ScopeManager::System, &unit, signal);
             assert_eq!(
                 args,
                 [
@@ -1232,8 +1348,8 @@ mod tests {
             );
         }
         assert_ne!(
-            kill_unit_args(&unit, "SIGTERM"),
-            kill_unit_args(&unit, "SIGKILL"),
+            kill_unit_args(ScopeManager::System, &unit, "SIGTERM"),
+            kill_unit_args(ScopeManager::System, &unit, "SIGKILL"),
             "the escalation is a different signal to the same unit, not a repeat"
         );
         assert_eq!(
@@ -1255,7 +1371,7 @@ mod tests {
             stdout: Vec::new(),
             stderr: b"Failed to connect to bus: No such file or directory\nmore\n".to_vec(),
         };
-        let reason = scope_verdict(Some(Ok(failed))).unwrap_err();
+        let reason = scope_verdict(ScopeManager::System, Some(Ok(failed))).unwrap_err();
         assert!(reason.contains("systemd-run"), "{reason}");
         assert!(reason.contains("Failed to connect to bus"), "{reason}");
         assert!(
@@ -1263,13 +1379,14 @@ mod tests {
             "one line, not a paragraph: {reason}"
         );
 
-        let missing = scope_verdict(Some(Err(std::io::Error::from(
-            std::io::ErrorKind::NotFound,
-        ))))
+        let missing = scope_verdict(
+            ScopeManager::System,
+            Some(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+        )
         .unwrap_err();
         assert!(missing.contains("systemd-run"), "{missing}");
 
-        let expired = scope_verdict(None).unwrap_err();
+        let expired = scope_verdict(ScopeManager::System, None).unwrap_err();
         assert!(
             expired.contains(&format!("{}s", SYSTEMD_BOUND.as_secs())),
             "a wedged bus refuses the boot by name rather than hanging it: {expired}"
@@ -1292,7 +1409,103 @@ mod tests {
             stdout: Vec::new(),
             stderr: Vec::new(),
         };
-        assert_eq!(scope_verdict(Some(Ok(ok))), Ok(Supervision::Scope));
+        assert_eq!(
+            scope_verdict(ScopeManager::System, Some(Ok(ok))),
+            Ok(Supervision::Scope(ScopeManager::System))
+        );
+    }
+
+    /// The scope an **unprivileged** daemon asks for is the one polkit grants:
+    /// measured on `gumbo-nuc-0`, a system scope is `Access denied` to a normal
+    /// user and a `--user` scope is exit 0 (design #440 D3, job #451).
+    #[test]
+    fn an_unprivileged_daemon_asks_for_the_scope_it_can_create() {
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(
+            manager_for(0),
+            ScopeManager::System,
+            "root gets the machine"
+        );
+        for euid in [1u32, 1000, 65534] {
+            assert_eq!(
+                manager_for(euid),
+                ScopeManager::User,
+                "polkit denies uid {euid} a system scope without interactive authentication"
+            );
+        }
+
+        let unit = unit_name("host-1a2b-0");
+        let cmd = vec!["true".to_string()];
+        let user = supervised_launch(Supervision::Scope(ScopeManager::User), &unit, cmd.clone());
+        assert_eq!(
+            &user[..3],
+            &[
+                "systemd-run".to_string(),
+                "--user".to_string(),
+                "--scope".to_string()
+            ],
+            "the manager is addressed before the verb"
+        );
+        assert_eq!(&user[user.len() - 1..], &cmd[..]);
+        assert_ne!(
+            user,
+            supervised_launch(Supervision::Scope(ScopeManager::System), &unit, cmd),
+            "the two managers are different units, not one unit named twice"
+        );
+        assert_eq!(
+            kill_unit_args(ScopeManager::User, &unit, "SIGKILL")[0],
+            "--user",
+            "a scope in the user manager is invisible to a systemctl without it, so the escapee \
+             would outlive the kill"
+        );
+
+        let denied = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: b"Failed to start transient scope unit: Access denied\n".to_vec(),
+            stderr: b"Failed to start transient scope unit: Access denied\nas the requested \
+                      operation requires interactive authentication.\n"
+                .to_vec(),
+        };
+        let reason = scope_verdict(ScopeManager::User, Some(Ok(denied))).unwrap_err();
+        assert!(reason.contains("systemd-run --user --scope"), "{reason}");
+        assert!(
+            reason.contains("enable-linger"),
+            "a refusal names the provisioning it needs rather than leaving it to be guessed: \
+             {reason}"
+        );
+    }
+
+    /// A `kill` after a daemon restart reads the manager out of `meta.json`, so
+    /// the spelling is asserted here rather than only where a scope can be
+    /// created — and an older meta keeps the system manager's meaning.
+    #[test]
+    fn the_scopes_manager_survives_a_daemon_restart() {
+        let meta = TaskMeta {
+            pid: 7,
+            pgid: 7,
+            start_time: None,
+            project: None,
+            job: None,
+            task: None,
+            files: Vec::new(),
+            unit: Some(unit_name("host-1a2b-0")),
+            scope: Some(ScopeManager::User),
+        };
+        let encoded = serde_json::to_value(&meta).unwrap();
+        assert_eq!(encoded["scope"], "user");
+        let restored: TaskMeta = serde_json::from_value(encoded).unwrap();
+        assert_eq!(restored.scope, Some(ScopeManager::User));
+
+        let older: TaskMeta = serde_json::from_str(
+            r#"{"pid":7,"pgid":7,"start_time":null,"project":null,"job":null,"task":null,
+                "files":[],"unit":"chug-task-host-1a2b-0.scope"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            older.scope.unwrap_or(ScopeManager::System),
+            ScopeManager::System,
+            "a meta written before the manager was selectable is a system scope"
+        );
     }
 
     /// `remove` detaches the task tree before deleting it, so the reaper still

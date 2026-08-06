@@ -5,7 +5,10 @@ Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1 a
 assumption: its **macOS** mechanism was proven firsthand on 2026-08-06 against
 the mechanism itself, and its **Linux** mechanism was confirmed by hand the same
 day but **not through the shipped code path** — see
-[the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux).
+[the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux). Slice 2's Linux
+mechanism was corrected by job #451 to the scope an unprivileged daemon can
+actually create — see
+[the correction](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451).
 
 Written against the tree at `1030704`. Every claim about current behavior below
 was read out of the source or out of [`docs/spec.md`](../spec.md) in this tree, not
@@ -50,7 +53,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | # | Slice | Contract changed | Depends on | State |
 | --- | --- | --- | --- | --- |
 | 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | **Landed** (job #442), plus a two-name floor the slice line does not mention — see [the correction](#correction-2026-08-05--slice-1-as-landed) |
-| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **half proven**: the macOS proof was run and PASSED on 2026-08-06, the Linux assertion is still unexecuted and confirmed only by hand — see [the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux) and [the correction](#correction-2026-08-05--slice-2-as-landed) |
+| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **half proven**: the macOS proof was run and PASSED on 2026-08-06, the Linux assertion is still unexecuted and confirmed only by hand — see [the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux) and [the correction](#correction-2026-08-05--slice-2-as-landed), amended by job #451 for [the scope an unprivileged daemon can create](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451) |
 | 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | Proposed |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | Proposed |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
@@ -821,3 +824,158 @@ correction named, still outstanding.
 - **No code, no gate, no test changed** in the job that recorded this. The
   `--user`/system scope defect is #451's, and `probe_supervision`, `scope_or_skip`
   and the suite were left exactly as job #447 shipped them.
+
+---
+
+## Correction, 2026-08-06 — the scope an unprivileged daemon can create (job #451)
+
+Appended by job #451, which fixes a defect in [slice 2](#slices) as landed —
+the one [the proofs section](#proofs-2026-08-06--d3-on-macos-and-on-linux)
+records as its Linux limit 2. Nothing above is edited except that slice's State
+cell. Slice 2 asked for a **system** transient scope unconditionally. polkit
+denies that to an unprivileged user, so on the one real candidate node the
+mechanism refused itself. Both sections were written against the same tree and
+landed in the other order: #452 recorded the operator's two runs, and this one
+decides what the code asks for and reads the same Linux run for what it does and
+does not establish about [D3](#decisions).
+
+### What was measured on `gumbo-nuc-0`
+
+NixOS, systemd, cgroup v2, at `c8a8354`, as the unprivileged `worksalot` over a
+non-login ssh:
+
+| Asked | Answer |
+| --- | --- |
+| `systemd-run --scope --quiet true` | **exit 1** — `Failed to start transient scope unit: Access denied`, "as the requested operation requires interactive authentication" |
+| `systemd-run --user --scope --quiet true` | **exit 0** — `systemctl --user is-system-running` reports `running` |
+| `sudo -n systemd-run --scope --quiet true` | **exit 0** — passwordless sudo is available on that node |
+
+So all three of D3's Linux tests self-skipped on a node fully capable of running
+them. The guard behaved exactly as designed: it named the failure, printed "is
+NOT covered by this run", and refused to certify the mechanism vacuously. It is
+kept as it is. What was wrong is one flag in the thing it was measuring, and the
+consequence was not cosmetic — a real node would refuse to advertise `host` at
+all (job #447's `enforce_host_supervision`) for a defect rather than a missing
+capability.
+
+### D3's Linux claim is confirmed, by hand, outside the suite
+
+Run by the operator on the same node, and the first evidence D3's Linux half
+holds anywhere — the run
+[the proofs section](#linux--confirmed-by-hand-only-and-it-is-the-weaker-of-the-two)
+also records: a parent process created a `--user` scope running `sh -c "sleep
+45; echo done > /tmp/d3-exit"`, and was SIGKILLed at t+3. `/tmp/d3-exit` was
+written at **t+45**.
+
+**What it establishes.** A task in a transient scope survives the death of the
+process that launched it, keeps running to completion, and lands its exit
+status — the property slices 3–8 rest on and spec §3.1's drain guarantee needs
+in host mode. It also establishes it for a `--user` scope specifically, which is
+the mode this correction ships for an unprivileged daemon.
+
+**What it does not.** It killed a **process**, not a **unit**. The thing D3
+actually promises is that `systemctl restart chug-worker` — a *unit* teardown,
+which kills a cgroup rather than a pid — leaves the task running, and a pid kill
+does not exercise that at all: a scope's independence from its launcher's
+process tree is weaker than its independence from its launcher's cgroup. Only
+`a_host_task_survives_the_teardown_of_the_launching_unit` asserts the real
+thing, and it is still unexecuted. The hand proof raises D3 from *unproven* to
+*plausible with a mechanism demonstrated*; it does not close it.
+
+### The decision: the manager follows the daemon's privilege
+
+`manager_for(euid)` in `crates/container/src/host.rs` picks the **system**
+manager for a root daemon and the user's own `systemd --user` for anything else.
+There is no fallback between them. Three options were on the table:
+
+- **`--user` unconditionally** — rejected. [D2](#decisions) runs the Linux daemon
+  as **root**, and a root daemon's "user manager" is `user@0.service`, which a
+  NixOS node has no reason to be running. That would take the one configuration
+  this design actually ships and hand it the weaker of the two mechanisms, on the
+  strength of a measurement taken as a different user.
+- **system, then user on failure** — rejected. It works, but it makes the
+  mechanism's identity depend on which attempt won, and the two are **not**
+  equivalent (next section). A node must know which one it got and an operator
+  reading a log must not have to guess; and the fallback's first leg prints the
+  same `Access denied` on every boot of every unprivileged node, which is the
+  line this job exists because someone read.
+- **`sudo -n systemd-run --scope`** — rejected outright. It works on that node
+  and is the wrong shape: a daemon that escalates to create a scope has an
+  undeclared dependency on a sudoers rule, gets root-owned cgroups it cannot
+  clean up as itself, and buries a privilege boundary inside a launch path.
+  If a node wants system scopes it should run the daemon as root, which is what
+  D2 already says.
+
+Selection by euid gives prod (root, system unit) the stronger mechanism and a
+hand-run test suite the one that works, with one `systemd-run` call and a verdict
+that is explainable without reading the log of what was tried.
+
+### What a `--user` scope means for D3's lifecycle
+
+A `--user` scope is a unit in the invoking user's manager, so:
+
+- **A restart of the daemon's own unit does not touch it.** The scope is a
+  *sibling* unit, not a child — the same relationship a system scope has to a
+  system unit. This is the D3 property, and it holds in both managers.
+- **A teardown of the user *manager* does.** `systemctl stop user@$UID.service`,
+  the last session ending without lingering, or a logout takes the whole user
+  slice — scopes included. A system scope has no equivalent: only pid 1 is above
+  it. So the user mode's guarantee is conditional on a lifecycle the system mode
+  does not have, which is exactly why the two are not fallbacks for each other.
+- **Which the deployed node never depends on.** On a host-mode node the daemon is
+  D2's root `chug.node` system unit, so it takes the system manager and this
+  paragraph does not apply to it. The user mode is what a developer and the
+  proof-run get.
+
+`TaskMeta` records which manager the scope was created in, because `kill` has to
+signal the same one: a `--user` scope is not a unit the system `systemctl` can
+see, so an unaddressed kill reports "not loaded" and leaves the `setsid()`
+escapee running — [D8](#decisions)'s single failure mode wearing a success.
+
+### `XDG_RUNTIME_DIR`, answered
+
+It was **unset** in the ssh where `--user` worked, which is the interesting part.
+`sd-bus` finds the user bus at `$DBUS_SESSION_BUS_ADDRESS`, else at
+`$XDG_RUNTIME_DIR/bus`, else at `/run/user/$UID/bus` computed from the uid — the
+last is the path that carried the measurement. What actually has to exist is the
+**user manager for that uid**, not the variable.
+
+That matters because of how slice 1 composes a launch: `spawn_task` calls
+`env_clear()` and gives the child exactly `PATH`, `HOME` and the two exit-status
+paths — and with `--scope` the child *is* `systemd-run`, so the launcher gets that
+environment too. `XDG_RUNTIME_DIR` therefore cannot reach `systemd-run` on a
+launch, and cannot be made to without leaking it into the task and breaking slice
+1's "nothing the dispatcher did not declare".
+
+The probe used to inherit the daemon's whole environment, so it could have found
+a bus through a variable no launch would ever carry — a node that boots green and
+then fails every task. It now runs `systemd-run` under the same `env_clear` +
+`floor_env` the launch uses, so the probe measures the launch. If a node's user
+bus is reachable only through `XDG_RUNTIME_DIR`, that node is refused at boot,
+loudly, rather than at the first task.
+
+### What is operator provisioning, and stops here
+
+A daemon running as a non-root user with **no session and no lingering** has no
+user manager, so `/run/user/$UID` does not exist and the probe fails. The remedy
+is `loginctl enable-linger` for that user — or running the daemon as root, which
+is what D2 says. Both are node provisioning, which is [slice 7](#slices)'s and
+not this job's; the refusal names `enable-linger` so the operator is not left to
+derive it. No polkit rule, no NixOS module change and no node config was written
+here, deliberately.
+
+### Verification — stated, and unverified from this workspace
+
+The evaluator has no `systemd-run` at all, so the three tests skip here exactly
+as they did for job #447. On a systemd host:
+
+```sh
+cargo test -p container --test host_backend -- --nocapture 2>&1 | grep -i skipping
+```
+
+Silence is the pass: it means `probe_supervision` returned a scope and all three
+D3 tests ran. On `gumbo-nuc-0` as `worksalot` the expected mode is
+`Scope(User)`. **Nobody has run this** — it is the one command
+[the proofs section](#linux--confirmed-by-hand-only-and-it-is-the-weaker-of-the-two)
+leaves outstanding, and it now asks for a mechanism that node has been measured
+to grant rather than one polkit denies it.
