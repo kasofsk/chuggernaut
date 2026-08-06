@@ -81,11 +81,17 @@ commit_at 2026-01-01 sources
 { printf '# Dir\n\n'; printf 'Everything under `crates/pkg/src/`.\n'; } > "$REPO/docs/dir.md"
 { printf '# Bare\n\n'; printf 'No path claims here at all.\n'; } > "$REPO/docs/bare.md"
 { printf '# Marked\n\n'; printf 'Reads `crates/pkg/src/mover.rs`. <!-- intent -->\n'; } > "$REPO/docs/marked.md"
+# The doc<->doc cycle jobs #449 and #453 could only clear by squashing: two docs
+# that name each other, plus one doc naming both a doc and a source file.
+{ printf '# Pair A\n\n'; printf 'See `docs/pair-b.md`.\n'; } > "$REPO/docs/pair-a.md"
+{ printf '# Pair B\n\n'; printf 'See `docs/pair-a.md`.\n'; } > "$REPO/docs/pair-b.md"
+{ printf '# Mixed\n\n'; printf 'See `docs/pair-b.md` and `crates/pkg/src/mover.rs`.\n'; } > "$REPO/docs/mixed.md"
 git -C "$REPO" add . >/dev/null 2>&1
 commit_at 2026-01-02 docs
 
 printf 'pub const B: u32 = 2;\n' > "$REPO/crates/pkg/src/mover.rs"
 git -C "$REPO" rm -q crates/pkg/src/gone.rs >/dev/null 2>&1
+printf '# Pair B\n\nSee `docs/pair-a.md`. Reworked.\n' > "$REPO/docs/pair-b.md"
 git -C "$REPO" add . >/dev/null 2>&1
 commit_at 2026-01-03 mover-moves
 
@@ -166,9 +172,45 @@ run_sut --gate docs/quiet.md
 check_silent "an untouched suspect doc does not block" "$RC" "$OUT" \
 	"edited by this diff"
 
+# --- A `*.md` mover never blocks (job #454) -----------------------------------
+# The unsatisfiable class: the branch reworks one doc among several that name
+# each other, so every rework commit makes some doc strictly newer than the rest
+# and no further commit can reach a fixed point. Only a `*.md` makes claims, so
+# only a `*.md` can be both sides — dropping it from the blocking side is what
+# makes the block acyclic and therefore clearable.
+
+# 15. A doc suspect only because another doc it names was reworked: not blocking,
+#     and no squash is needed to land it.
+run_sut --gate docs/pair-a.md docs/pair-b.md
+check "--gate passes a doc suspect only through another doc" 0 "$RC" "$OUT" \
+	"suspect only through another"
+check_silent "a doc<->doc cycle is not a blocking finding" "$RC" "$OUT" \
+	"edited by this diff and still suspect"
+
+# 16. The genuine ordering still fires across separate commits — the branch
+#     edited the doc, THEN changed a non-doc file it names.
+run_sut --gate docs/pair-a.md docs/suspect.md
+check "--gate still fails on a non-doc file changed after the doc" 1 "$RC" "$OUT" \
+	"edited by this diff and still suspect"
+check "the blocking row names the non-doc mover" 1 "$RC" "$OUT" \
+	"crates/pkg/src/mover.rs"
+
+# 17. A doc suspect through BOTH blocks, and the cross-reference row is labelled
+#     rather than hidden — it is still on the reading list.
+run_sut --gate docs/mixed.md
+check "a doc/source mix still blocks" 1 "$RC" "$OUT" "docs/mixed.md"
+check "the cross-reference row is labelled, not dropped" 1 "$RC" "$OUT" \
+	"not blocking"
+
+# 18. The advisory ledger keeps doc->doc edges: the narrowing is the gate's, not
+#     the reading list's.
+run_sut docs/pair-a.md
+check "the advisory ledger still reports a doc->doc edge" 0 "$RC" "$OUT" \
+	"docs/pair-b.md"
+
 # --- A prerequisite that is missing is loud, and is not a pass ----------------
 
-# 15. Outside a git checkout there are no commit times to compare, so the ledger
+# 19. Outside a git checkout there are no commit times to compare, so the ledger
 #     refuses — exit 2, a LINTER ERROR, distinct from "nothing is suspect".
 NONGIT="$WORK/nongit"
 mkdir -p "$NONGIT"

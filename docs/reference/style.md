@@ -270,7 +270,10 @@ verify it in seconds and must name it when rejecting.
    no dates in prose — and it takes its path set from the same extractor as the
    path check, so the markers above silence it too. It is advisory: read it with
    `.chug/tasks/doc-staleness.sh`, and expect a doc you are editing to appear,
-   because a doc is suspect until the commit that re-reads it lands.
+   because a doc is suspect until the commit that re-reads it lands. Its one
+   blocking case never counts a `*.md` mover (job #454): a doc linking a doc is
+   a pointer rather than a claim about that content, and it is the only edge
+   that can form a cycle no rework commit can clear.
 
    A marker covers **the line that carries it**, so put it at the end of the
    line making the claim; a claim on the next line is judged on its own. No

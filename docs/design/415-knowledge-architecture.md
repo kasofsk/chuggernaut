@@ -35,6 +35,13 @@ only on a doc the current diff edits, and [D7](#d7-the-staleness-ledger)'s
 pre-commit half of that rule turned out to be unclearable and was not built —
 see the
 [S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear).
+The CI half then proved unclearable too, one level up: it escalated jobs #449
+and #453, both of which could only be landed by squashing the branch. Job #454
+took a `*.md` mover off the **blocking** side of the ledger — a cross-reference
+is a pointer, and doc-names-doc is the only edge that can form a cycle — which
+makes the gate satisfiable in one rework commit while the advisory reading list
+keeps the edge. See the
+[#454 correction](#correction--2026-08-06-job-454-d7-the-gate-that-a-rework-could-not-clear).
 S4 landed on 2026-08-05 (job #449), last of the original programme:
 `docs/concepts.md` holds **12** rows and check 4 is live. Its measured yield is
 **one** duplicate in the whole tree *under the two shapes D4 gates* — the value
@@ -2269,3 +2276,102 @@ This is the document whose thesis is that prose making checkable claims about
 the tree must be checked — and the one uncheckable claim class it knowingly left
 to reviewers is the class that then drifted three times, inside its own
 documentation, under four reviews.
+
+## Correction — 2026-08-06, job #454 (D7: the gate that a rework could not clear)
+
+[D7](#d7-the-staleness-ledger)'s one blocking case — `--gate` on a doc the diff
+edits that is still suspect — turned out to be **unsatisfiable on a multi-commit
+branch whose docs name each other**, and it escalated two jobs before anyone
+read it as a defect rather than as an author's oversight. Both were cleared by
+the same remedy, and it is a remedy no rework commit can reach:
+
+- **Job #449** (S4), cycle 2: two commits, the first's docs naming files the
+  second moved. The reviewer's advice was *"fold the branch's two commits into
+  one — the merge is a squash anyway"*.
+- **Job #453**, cycle 3: a rework that touched **one** doc,
+  `docs/reference/runbooks/macos-host-supervision-proof.md`, which made it newer
+  than `docs/design/440-native-worker-daemon.md`,
+  `docs/reference/testing.md` and `docs/implementation-notes.md` — all three of
+  which name it. Two of those were also in the diff, so `blocked = 2` and
+  `.chug/tasks/ci.sh` exited 1. 440 names the runbook twice, once in a table cell
+  and once in a link label; the runbook names 440. Substance passed both times.
+
+### Why it has no fixed point, and why that is arithmetic
+
+`--gate` blocks where `ts[path] > ts[doc]` — strictly newer, so **equal clears**.
+Editing the flagged doc is therefore the remedy, and it works whenever the mover
+stays put. It does not work when the mover is itself a doc the branch is also
+editing: touching A to clear it against B makes A newer than B, and if B names A
+the suspicion simply changes ends. Two docs that name each other admit exactly
+one solution — both in the same commit — which is a squash, and a squash is not
+something a rework cycle can produce. The unsatisfiability is not a bug in the
+implementation of D7; it is D7 asking a question that has no answer for that
+pair.
+
+The class is precisely delimited, and that is what makes the fix small. Only a
+`*.md` file makes claims, so a `*.md` file is the only thing that can appear on
+**both** sides of the relation. Every cycle therefore runs doc → doc, and no
+other edge can form one.
+
+### The fix: a `*.md` mover never blocks
+
+`.chug/tasks/doc-staleness.sh` still counts a doc → doc edge in the advisory
+ledger, labelled `[cross-reference — not blocking]` in a `--gate` report. It no
+longer lets one block. The blocking relation is doc → non-doc, which is acyclic
+by construction, and that buys a property the gate did not have before:
+
+> Re-touching exactly the flagged docs, in one commit, clears every blocking
+> row and can create none — because the docs it touches are `*.md` and a `*.md`
+> is never a blocking mover.
+
+The gate is now satisfiable in one commit, always, with no squash and no second
+rework cycle.
+
+The second argument is independent of the cycle and reaches the same place. The
+extractor emits a path record for **every** backticked token on a non-fenced
+line, so a table cell and a link label put a doc in the population exactly as a
+sentence about its content does — which is how job #453's two blocking rows
+arose. A doc *linking* a doc is a pointer, not an assertion about what is on the
+other end; #415's whole architecture is built on cross-links
+([D3](#d3-the-concept-registry-routes-it-does-not-hold),
+[D5](#d5-claudemd-may-gloss-never-define)), so making each link a staleness edge
+makes the predicate nearly constant-true. That is the same reason directory
+claims were dropped in the [S6
+correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear):
+*a predicate that is nearly constant-true is not a signal*. The difference is
+that it is dropped only from the **blocking** half here — on the reading list a
+constant-true row costs a line a reader skims, and the gate is already a
+narrowing of the ledger rather than a copy of it.
+
+### The three alternatives, and what each gives up
+
+The ticket named four options. Three of them fail the acceptance criterion that
+the genuine ordering must **still fire** — the branch edited a doc and *then*
+changed a file it names, across separate commits — because all three erase
+intra-branch ordering wholesale:
+
+| Option | Why not |
+| --- | --- |
+| Compare against the **merge-base**, treating every doc the branch touches as current at tip | Intra-branch ordering stops existing, so the genuine case is exactly what it deletes. It answers the cycle by answering nothing |
+| **Exclude docs the branch edits** | Same, arriving sooner: the doc in the genuine case is one the branch edited |
+| Gate against a **synthetic squash** | Every path in the branch gets one timestamp, so every intra-branch comparison is equal and clears. Also mutates or shadows a worktree inside a gate, for a result identical to the first row |
+| **Keep it, emit the remedy, make it self-clearing** | The remedy is emitted (it always was). Self-clearing is the thing that is *impossible* in the cycle — see the arithmetic above |
+
+What the chosen narrowing gives up is real and worth naming: **a doc that
+describes another doc's content, where that other doc changed and nobody
+re-read the first, no longer blocks.** `docs/concepts.md`'s routing rows and
+`docs/README.md`'s reading order are the shape of it. Two things make it
+acceptable — the advisory ledger still lists it on every job, so it is
+surfaced rather than lost, and
+`.chug/tasks/review-docs-updated.md` judges cross-doc state claims as its
+**first** class, which is the same failure reaching a reader who can tell a
+pointer from a claim.
+
+### What did not change
+
+Checks 1–4 are untouched, the extractor is untouched — the ledger still reads
+its path set through `check-doc-facts.sh --emit-paths` rather than carrying a
+second answer — and `.chug/tasks/ci.sh` keeps its stage order. Narrowing the
+gate on the mover side rather than in the extractor is deliberate: check 1
+*should* keep verifying that a link label and a table cell resolve, and that is
+the same records this reads.

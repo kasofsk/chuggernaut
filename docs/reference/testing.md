@@ -321,10 +321,14 @@ these suites cover.
   two `job/N:` commits *are* the history it resolves against, and check 4 a third
   holding the registry, the doc that owns its one registered term, and a second
   doc to write about it from.
-  `doc-staleness.test.sh` (#415 S6) adds 0.14s, and its fixture is a
+  `doc-staleness.test.sh` (#415 S6, job #454) adds ~0.2s, and its fixture is a
   *history* rather than a tree — three commits written with an explicit
   `GIT_COMMITTER_DATE`, because "the file moved after the doc did" cannot be
-  expressed in a repo that committed everything at once.
+  expressed in a repo that committed everything at once. The same three commits
+  carry a pair of docs that name **each other**, one of them reworked in the
+  last commit: that is the ordering `--gate` used to block on and no rework
+  commit could clear, and it is pinned beside the non-doc ordering that still
+  blocks.
   The total is checked **between** suites, not after the loop — otherwise the
   real ceiling would be suite-count × per-suite cap — and the failure names the
   suites it therefore never ran. The per-suite cap is applied with `timeout`,

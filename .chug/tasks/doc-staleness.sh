@@ -59,6 +59,19 @@
 # suspect and no edit could clear it inside that commit. A block nobody can
 # clear except with `--no-verify` is how a ledger gets turned off.
 #
+# A `*.md` MOVER NEVER BLOCKS, and that is what makes the block above always
+# clearable (job #454). Only a `*.md` file makes claims, so a doc is the only
+# thing that can be BOTH sides of the relation — and two docs that name each
+# other are a cycle with no fixed point except one commit holding both, which is
+# a squash and not something a rework can reach. Job #449 and job #453 both hit
+# it and both cleared it by squashing. Dropping `.md` from the blocking side
+# leaves the relation doc → non-doc, which is acyclic by construction: re-touching
+# a flagged doc clears its row and can flip no other, because the touched doc is
+# itself a `.md` and so never a blocking mover. A cross-reference is also the
+# weaker claim — one doc LINKING another is a pointer, not a statement about its
+# content — and it stays in the advisory ledger, where a near-constant-true
+# predicate costs a row a reader skims rather than a build.
+#
 # Usage:
 #   .chug/tasks/doc-staleness.sh                  # every tracked *.md, one line per suspect doc
 #   .chug/tasks/doc-staleness.sh --staged         # the staged *.md, every suspect path
@@ -170,13 +183,15 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v detail="$detail" -v gate=
 	# fortnight. Nothing is filtered by it: the gap is printed on every row so a
 	# reader draws their own line rather than inheriting a constant from here.
 	function days(sec) { return int(sec / 86400) }
-	function report(doc,   i, n, shown) {
+	function report(doc,   i, n, shown, mark) {
 		n = cnt[doc]
 		printf "  %s  (last commit %s, %d day(s) behind) — %d newer file(s):\n",
 			doc, ds[doc], days(gap[doc]), n
 		shown = detail ? n : 1
-		for (i = 1; i <= n && i <= shown; i++)
-			printf "      %s  %s  (%s:%s)\n", sdate[doc, i], spath[doc, i], doc, sline[doc, i]
+		for (i = 1; i <= n && i <= shown; i++) {
+			mark = (gate && spath[doc, i] ~ /\.md$/) ? "  [cross-reference — not blocking]" : ""
+			printf "      %s  %s%s  (%s:%s)\n", sdate[doc, i], spath[doc, i], mark, doc, sline[doc, i]
+		}
 		if (n > shown)
 			printf "      ... and %d more — .chug/tasks/doc-staleness.sh %s lists them\n", n - shown, doc
 	}
@@ -197,16 +212,21 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v detail="$detail" -v gate=
 			sdate[doc, i] = sdate[doc, i - 1]
 		}
 		spath[doc, i] = path; sline[doc, i] = line; sdate[doc, i] = ds[path]
+		# The blocking half of the relation excludes a `*.md` mover, so it is
+		# doc → non-doc and therefore acyclic. See the header.
+		if (path !~ /\.md$/) hard[doc] = 1
 		if (ts[path] - ts[doc] > gap[doc]) gap[doc] = ts[path] - ts[doc]
 	}
 	END {
-		total = 0; sus = 0; blocked = 0; aged = 0
+		total = 0; sus = 0; blocked = 0; aged = 0; crossref = 0
 		for (d in docs) {
 			total++
 			if (!(d in cnt)) continue
 			sus++
 			if (gap[d] >= 86400) aged++
-			if (d in gated) blocked++
+			if (!(d in gated)) continue
+			if (d in hard) blocked++
+			else crossref++
 		}
 		if (sus == 0) {
 			printf "doc-staleness: no doc is suspect (%d doc(s) with file claims read).\n", total
@@ -221,8 +241,14 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v detail="$detail" -v gate=
 		# stops being read. The whole list is one command away and named here.
 		if (gate) {
 			printf "doc-staleness:   .chug/tasks/doc-staleness.sh reads the whole ledger.\n"
+			if (crossref > 0) {
+				printf "doc-staleness:   %d doc(s) this diff edits are suspect only through another\n", crossref
+				printf "doc-staleness:   *.md* — a cross-reference is a pointer, not a claim about the\n"
+				printf "doc-staleness:   content it points at, and doc-names-doc is the one ordering no\n"
+				printf "doc-staleness:   rework commit can clear. Not blocking (design #415 D7, job #454).\n"
+			}
 			if (blocked == 0) exit 0
-			for (d in cnt) if (d in gated) order[d] = gap[d] + 1
+			for (d in cnt) if ((d in gated) && (d in hard)) order[d] = gap[d] + 1
 			sus = blocked
 		} else {
 			for (d in cnt) order[d] = gap[d] + 1
@@ -238,9 +264,10 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v detail="$detail" -v gate=
 		}
 		if (blocked > 0) {
 			printf "!!! doc-staleness: %d doc(s) above are edited by this diff and still suspect.\n", blocked
-			printf "!!!     The branch changed a file the doc names AFTER it last touched the doc,\n"
-			printf "!!!     so nothing in this change has re-read one against the other. Re-read it\n"
-			printf "!!!     and commit the doc again — that clears the row. (design #415 D7)\n"
+			printf "!!!     The branch changed a non-doc file the doc names AFTER it last touched\n"
+			printf "!!!     the doc, so nothing in this change has re-read one against the other.\n"
+			printf "!!!     Re-read it and commit the doc again — one commit clears it, and it can\n"
+			printf "!!!     flip no other row, because a *.md* never blocks. (design #415 D7)\n"
 			exit 1
 		}
 		exit 0

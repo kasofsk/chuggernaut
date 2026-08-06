@@ -114,11 +114,18 @@ the absence of a workflow file.
   counts print on every job, the reading list itself is `.chug/tasks/doc-staleness.sh`,
   and the pre-commit hook only reports. The one blocking case is `--gate` on a doc
   **this diff edits** that is still suspect — which needs the branch to have
-  edited the doc and *then* changed a file it names. It blocks nowhere else on
+  edited the doc and *then* changed a **non-doc** file it names. It blocks
+  nowhere else on
   purpose: failing a build for history nobody in the commit caused is how a
   ledger gets disabled, and at the commit no edit could clear it anyway. Only
   file claims are judged — a directory is newer than every doc the moment
-  anything under it changes, so it is a constant, not a signal.
+  anything under it changes, so it is a constant, not a signal. **A `*.md` mover
+  never blocks** (job #454): only a doc makes claims, so only a doc can sit on
+  both sides, and two docs naming each other is a cycle whose only fixed point
+  is a squash — which is exactly what jobs #449 and #453 were forced into. With
+  `.md` off the blocking side the relation is doc → non-doc and acyclic, so
+  re-touching a flagged doc always clears it and can flip nothing else. The
+  cross-reference stays on the advisory reading list, labelled.
 - **A slice table cannot claim a job that never merged.** Check 3 (#415 S5a,
   job #444) resolves `**Landed** (job #N)` in a `docs/design/*.md` table row
   against a `job/N: {type}` squash-merge commit, and refuses a head saying

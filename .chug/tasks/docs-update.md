@@ -164,7 +164,7 @@ here — which is why `.chug/tasks/review-docs-updated.md` judges it.
 | `.chug/tasks/check-modules.sh` | **error**, every job | `docs/reference/modules.md` lists every dispatcher/domain module and nothing else |
 | `.chug/tasks/doc-lint.sh` | **error**, `docs` and `design` jobs at stage 1 | markdown well-formedness, relative links resolve, `docs/design/` filename shape |
 | `.chug/tasks/review-docs-updated.md` | **error**, `code` and `web` jobs at stage 0 | the three judgement classes a script cannot reach — cross-doc state claims, behavioural claims about symbols you touched, and D10 above |
-| `.chug/tasks/doc-staleness.sh` | **advisory** | a doc is *suspect* when a file it names has a newer commit than the doc. Suspect is not wrong. It blocks in exactly one case: a doc **this diff edits** that is still suspect after your edit |
+| `.chug/tasks/doc-staleness.sh` | **advisory** | a doc is *suspect* when a file it names has a newer commit than the doc. Suspect is not wrong. It blocks in exactly one case: a doc **this diff edits** that is still suspect through a **non-doc** file after your edit — re-touch that doc and it clears. A doc your branch merely links is never the blocking mover, so reworking one doc among several that cross-reference never needs a squash (job #454) |
 
 `.githooks/pre-commit` runs the fast half of that list over your staged files in
 ~2s, so a stale path or a stray comment surfaces at the commit rather than a
