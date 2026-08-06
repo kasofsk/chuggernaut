@@ -67,7 +67,9 @@ that exists (§4).
 agent, its environment file, and the node's slot count — bringing the unit into
 `chug.node` is design [#440](../../design/440-native-worker-daemon.md) slice 7,
 still Proposed. Adopting the module changes no daemon and no capacity. `WORKER_*` still comes from
-`deploy/prod/build-worker.sh` and is carried by `worker-refresh.sh`; capacity
+`deploy/prod/build-worker.sh`, which writes it into the node's environment file
+the supervisor loads on every start (#440 D6/D7); a self-refresh copies nothing
+forward. Capacity
 still belongs to the Cluster page ([`worker-capacity.md`](worker-capacity.md)
 §1). Per-project tooling — Flutter, an Android SDK composition, a Rust
 toolchain — never enters this module in any form. The test, from

@@ -40,7 +40,7 @@ way.
 | Slice | What | State |
 | --- | --- | --- |
 | **1** | `flake.nix`, `nix/chug-node/{options,nixos,darwin}.nix`, and a skipping `nix flake check` stage in `.chug/tasks/ci.sh` | **Landed** (job #383) for the flake and the modules; the CI stage did **not** land and is still open |
-| **2** | Label the swapper container `chug.managed=true` in `worker-refresh.sh`, and lock it in `deploy/managed-label.test.sh` | Proposed — `deploy/prod/worker-refresh.sh` still applies no such label to the swapper |
+| **2** | Label the swapper container `chug.managed=true` in `worker-refresh.sh`, and lock it in `deploy/managed-label.test.sh` | **Moot** since [#440](./440-native-worker-daemon.md) slice 6 (job #473): the swap installs a binary and restarts a supervisor unit, so there is no swapper container to label and no `docker:cli` image behind it. The record it protected is the supervisor's log now. A5's argument that the label contract needs an owner on both sides is untouched |
 | **3** | `docs` — the drain-before-rebuild section, the §3.1 cache-ownership correction, and the host-repo adoption runbook | **Landed** (job #404); the §3.1 correction landed separately in jobs #379/#380 |
 | **4** | Adoption in the host repo | Done outside this platform's job graph — the 2026-08-03 adoption on both prod nodes, reported in [`docs/reference/runbooks/chug-node-adoption.md`](../reference/runbooks/chug-node-adoption.md) |
 

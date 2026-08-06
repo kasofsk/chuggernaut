@@ -121,12 +121,14 @@ will run and wait.
    nodes' interleaved live lines are readable per node. The deploy Work task's
    `stdout.log` artifact is harvested even when the deploy's own restart or a
    `task_timeout` kill ended the task.
-2. On the node, `docker logs chug-worker` now actually carries the refresh
-   phase lines — the daemon runs with `RUST_LOG=info,async_nats=warn`. A node
-   whose daemon vanished after a swap: the swapper container is retained, so
-   `docker logs chug-worker-swap` (or `journalctl
-   CONTAINER_NAME=chug-worker-swap` on a journald node) holds the reason the
-   replacement never started.
+2. On the node, the daemon's own log carries the refresh phase lines — it runs
+   with `RUST_LOG=info,async_nats=warn`. A node whose daemon vanished after a
+   swap: since #440 slice 6 the swap installs a binary and asks the supervisor
+   to restart, so the reason a replacement never started is the supervisor's own
+   record — `journalctl -u chug-worker` on Linux, the launchd agent's
+   `StandardOutPath` on macOS. An **un-converted** node (still the containerized
+   daemon) refuses its own swap and names `deploy/prod/build-worker.sh`; deploy
+   it over ssh with that script until you convert it.
 3. **Recurring cause on dev-air**: colima docker disk pressure (~80%+ full)
    kills the `cargo build` inside the image build. The script now owns this
    itself (#250): a **disk pre-flight** refuses in seconds with
@@ -141,7 +143,10 @@ will run and wait.
    free space moves while the build runs, as job-container overlays and the
    BuildKit cache grow and shrink. A node with a different disk shape overrides
    it with `WORKER_REFRESH_DISK_FREE_GB_MIN` (and `_DISK_PATH`) in the daemon's
-   env at node creation — a self-refresh carries the override forward.
+   env at node creation — `build-worker.sh` writes it into the node's
+   environment file, which the supervisor loads on every start, so the override
+   survives a self-refresh because it is declared, not because the swap copies
+   it forward (#440 D6/D7).
 4. Safe cleanup by hand (**ask first — it deletes**), same pair the script runs:
    `docker image prune -f` (dangling only, **never `-a`**) and
    `docker builder prune -f --keep-storage 15GB`.

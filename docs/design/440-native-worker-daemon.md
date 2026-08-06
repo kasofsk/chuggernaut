@@ -1,6 +1,6 @@
 # Design — the natively-supervised worker daemon
 
-Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1–5
+Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1–6
 and 8 have landed — 3 as
 [the refusal at both checks](#correction-2026-08-06--slice-3-as-landed-job-460),
 8 as
@@ -8,7 +8,9 @@ and 8 have landed — 3 as
 4 as [a unit, an agent and an environment file](#correction-2026-08-06--slice-4-as-landed-job-469)
 that **no node has yet been given**, 5 as
 [a root-owned directory and four refusals](#correction-2026-08-06--slice-5-as-landed-job-472)
-over it — and 6–7 have not started.
+over it, 6 as
+[install-and-restart, with the detached swapper and every carry-forward deleted](#correction-2026-08-06--slice-6-as-landed-job-473)
+— and 7 has not started.
 [D3](#decisions) and [D8](#decisions) are **both
 proven on Linux, through the shipped code path**: on `gumbo-nuc-0` (NixOS,
 **systemd 260 (260.2)**, cgroup v2) on 2026-08-06, all thirteen tests in
@@ -103,7 +105,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | **Landed** (job #460), with "live" decided against the exited-but-unremoved window and the tests placed at tier 1 for a reason the slice line does not mention — see [the correction](#correction-2026-08-06--slice-3-as-landed-job-460) |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | **Landed** (job #469), and **no node has been converted** — the script changes, nothing was applied. Three things the slice line does not mention: the guard keeps a `docker inspect` path *for the conversion itself*, the nix toolchain-shape guard was **ported rather than deleted**, and two knobs were added the design did not name — see [the correction](#correction-2026-08-06--slice-4-as-landed-job-469) |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | **Landed** (job #472), on **Linux only** and with the migration left to the operator's hands — two things the slice line does not mention, plus a third: the node-local *artifacts* had already moved in slice 4, so what this changed is the credentials and the guard over them — see [the correction](#correction-2026-08-06--slice-5-as-landed-job-472) |
-| 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | Proposed |
+| 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | **Landed** (job #473), and **no node has been converted**, so every un-converted node's self-refresh now REFUSES — the cost is named, not hidden. What the slice line does not mention: install is by rename (ETXTBSY, and this script truncating itself) and escalates to `sudo -n`, refusals guard against a second daemon on one node, and §3.1's host-task-across-a-unit-restart case becomes true for the first time — see [the correction](#correction-2026-08-06--slice-6-as-landed-job-473) |
 | 7 | `code` — `nix/chug-node/` gains the unit and the `chug.node` charter amendment; the macOS plist template and its opt-in installer | `chug.node` option surface | 4, 6 | Proposed |
 | 8 | `docs` — `docs/spec.md` §3.1's drain guarantee narrowed to say what survives a *native* daemon restart and what does not | spec §3.1 | 2, 3 | **Landed** (job #470) — four cases, the reboot residue explicit, and both live qualifiers stated; see [the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470) |
 
@@ -133,10 +135,10 @@ slice 7 does not change that.
 | So it is docker-out-of-docker: task containers are **siblings on the host**, and container mode is correct | same, plus `docs/spec.md` §3.1 | Shipped |
 | `HostBackend` spawns a task with `process_group(0)` and `.envs(&config.env)` — and **no `env_clear()`**, so the task inherits the daemon's whole environment | `crates/container/src/host.rs` (`spawn_task`) | **Superseded** by slice 1 (job #442): the environment is composed, not inherited |
 | A host task's exit status is written by the task's own wrapper, not by the daemon, so the daemon need not be alive when a task exits | `crates/container/src/host.rs` (`supervised_cmd`); #309 correction finding 2 | Shipped |
-| The swap runs a **detached `docker:cli` sibling** that removes `chug-worker` and re-composes `docker run` from mounts and devices recovered by `docker inspect` of the live container | `deploy/prod/worker-refresh.sh` (`swap`) | Shipped |
+| The swap runs a **detached `docker:cli` sibling** that removes `chug-worker` and re-composes `docker run` from mounts and devices recovered by `docker inspect` of the live container | `deploy/prod/worker-refresh.sh` (`swap`) | **Superseded** by slice 6 (job #473): the swap extracts the binary from the built image, installs it and asks the supervisor to restart; an un-converted node refuses |
 | `nix/chug-node/` prepares the host and deliberately declares **no** unit supervising the daemon | `nix/chug-node/options.nix` charter; #372 §8 | Shipped |
 | The Mini already runs the dispatcher and api **natively under launchd**, rendered from templates | `deploy/prod/install-launchd.sh`, `deploy/prod/launchd/` | Shipped |
-| `WORKER_CACHE_DIR` is env-only — a host path the daemon passes to sibling containers, never mounted into the daemon | `deploy/prod/worker-refresh.sh` swap comment; `crates/worker/src/config.rs` | Shipped |
+| `WORKER_CACHE_DIR` is env-only — a host path the daemon passes to sibling containers, never mounted into the daemon | `crates/worker/src/config.rs`; the node's environment file | Shipped, and since slice 6 it is declared in that file rather than carried by the swap |
 | `WORKER_CHANNEL_BINARY` and `WORKER_REFRESH_SCRIPT` default to `/usr/local/lib/chuggernaut/…` — paths that are *inside the image* today but are shaped like host paths | `crates/worker/src/config.rs` | Shipped |
 | `chuggernaut admin worker-creds` writes the `.creds` at mode `0600` on the dispatcher host; the operator `scp`s it into the node login user's `chuggernaut-worker/keys/` | `crates/cli/src/admin.rs`, `crates/cli/src/keygen.rs`, `deploy/prod/README.md` §6 | **The minting is unchanged** and stays exactly this. The *install* was superseded by slice 5 (job #472) on Linux: `scp` to a staging path, then `install -o root -m 0600` into a root-owned `0700` directory. Still true of macOS, and of every node until it is converted |
 | Prod's nodes only ever self-refresh — `WORKER_SSH` is unset for both, so `build-worker.sh` no-ops on every deploy | `deploy/prod/README.md` | Shipped |
@@ -2503,3 +2505,161 @@ credential directory nothing had checked. Not run, and it cannot be from here:
 the composed script has still never executed on a node, so `stat -c`, `sudo -n`
 and `install -d` are all faked. The first real execution is an operator
 converting a node they can reach.
+
+---
+
+## Correction, 2026-08-06 — slice 6 as landed (job #473)
+
+Appended by job #473, which implemented [slice 6](#slices). Nothing above is
+edited except that slice's State cell, the `Status:` line and the swap row of
+[what is true today](#what-is-true-today). This section records what the swap
+became, what each deleted carry-forward was for, what an **un-converted** node
+does now, and five things the slice line does not mention.
+
+### The swap, as built
+
+`deploy/prod/worker-refresh.sh`'s `swap` phase is now, in order: report the run
+spec, refuse if anything makes a restart unsafe, extract the three artifacts
+from `chuggernaut/worker:$TAG` (`docker create` + three `docker cp`, the same
+extraction [slice 4](#correction-2026-08-06--slice-4-as-landed-job-469) runs
+over ssh), install each, ask the supervisor to restart. 341 lines out, 234 in.
+
+The **build** phase is untouched — the node still runs container tasks, so it
+still builds all three images, verifies the label, retag-swaps and prunes.
+
+### What was deleted, and what each one was for
+
+| Deleted | What it was for | Why the native path does not need it |
+| --- | --- | --- |
+| the detached `docker:cli` swapper (`docker run -d --name chug-worker-swap`) | a container cannot `docker rm -f` itself mid-swap, so the replacement had to be composed by a *third* process with its own lifecycle | a supervisor restarting its own unit is one act by a process that is not being replaced — #372 §8's R1 dissolves, and `--no-block` / `kickstart -k` is the whole of it |
+| `KEYS_SRC` / `SOCK_SRC`, recovered by `docker inspect` | the replacement needed the **literal host** bind sources, because re-deriving `$HOME` inside a swapper running as root bound an empty directory and stranded the daemon without NATS creds | a native daemon opens `/var/run/docker.sock` and reads `/etc/chuggernaut/keys/worker.creds` off the node it is running on ([D5](#decisions)); there is no bind to get wrong |
+| the KVM `--device` carry-forward and its refusal | a device is a `docker run` flag, so it could not ride the environment; dropping it while keeping `WORKER_KVM` took the **node down** (the replacement refuses to boot, `--restart=always` loops it) | the daemon's own view *is* the node's, so `/dev/kvm` is there iff the node has one. The hazard the refusal guarded cannot arise from a refresh: nothing in the swap changes what the daemon will see |
+| the five nix mounts, carried by destination with their read-only bits | same shape one mount over, and #373's node-down hazard: no roots dir, client or socket in the replacement's own view and it refuses to start | same answer — the node's `/nix` is the daemon's `/nix`. The old refusal was checking that a **copy** was faithful; with no copy, the daemon that restarts reads the same filesystem the live one already booted against |
+| the `*_ARGS` environment carry-forwards — cache dir, the two disk knobs, `WORKER_SLOTS`, `WORKER_MODES`, the KVM leaves, the nix settings — plus the `-e` flags composed straight onto the `docker run` line (`WORKER_NODE`, `NATS_URL`, `NATS_CREDS`, `WORKER_REFRESH_GIT_URL`, `WORKER_GIT_KEY`, `RUST_LOG`) | inheritance was the only way a value survived a container recreate, and #265 reason 3 found four of them living **only** inside the container | every one of them is a `spec_line` in `build-worker.sh`'s environment file, which the unit's `EnvironmentFile=` (or the agent's `. $ENV_FILE`) loads on every start. A value survives because it is written down — the #55/#82 class deleted at its root ([D6](#decisions), [D7](#decisions)) |
+| the retained `chug-worker-swap` transcript (#270) | "the daemon that reports to the dispatcher is the very thing being replaced", so the only record of a failed replacement had to live on the node | the supervisor's own log is that record: `journalctl -u chug-worker`, or the agent's `StandardOutPath`. One fewer container to bound, name and force-remove |
+
+That environment set is derivable rather than tallied, from any `<base>`
+predating this slice, and the derivation names its own scope — `*_ARGS`
+variables (base `deploy/prod/worker-refresh.sh:424-601`) and the flags written
+directly on the `docker run` line (base 673-676) alike:
+
+```sh
+git show <base>:deploy/prod/worker-refresh.sh \
+  | grep -oE '\-e (WORKER_[A-Z_]+|RUST_LOG|NATS_[A-Z_]+)' | sort -u
+```
+
+**No carry-forward turned out to have a second purpose**, and that was checked
+rather than assumed: every `WORKER_*` and `NATS_*` value the swap composed is
+written by a `spec_line` call in `build-worker.sh` (`WORKER_SLOTS_MAX` is the
+one knob no script forwards, and it was never in the swap either).
+
+### An un-converted node refuses, and the cost is named
+
+The fleet is mixed until an operator converts each node, so the question is not
+rhetorical: **a node still running the `chug-worker` container refuses its own
+swap**, loudly, with the live daemon serving, the job containers untouched and
+the freshly built images already retag-swapped. The refusal names the conversion
+(`WORKER_SSH=<user>@<node> deploy/prod/build-worker.sh`). It is decided by
+docker's own `/.dockerenv`, which is overridable (`WORKER_SWAP_CONTAINER_MARKER`)
+because the shell test runs inside a container itself.
+
+The price is stated plainly, because it is real: **prod's two nodes only ever
+self-refresh** — `WORKER_SSH` is unset for both, so `build-worker.sh` no-ops on
+every deploy — so from this commit until an operator converts them, their
+`worker-refresh:{node}` legs **fail** and the deploy fails with them. That is
+the loud half of the trade the alternative loses: keeping the container swap
+beside the native one would leave the node updating itself under a design nobody
+is maintaining, which is the "stranded between two designs" failure #440 warns
+about. Converting a node is now the act that puts it *back* on the self-refresh
+path, and `build-worker.sh`'s closing NOTE says so at the moment it happens.
+
+### Five things the slice line does not mention
+
+- **Install is `install` + `mv`, never a write in place.** Writing over
+  `$DAEMON_BIN` while the daemon is executing it is `ETXTBSY`, and writing over
+  `worker-refresh.sh` truncates the file the running shell is reading by byte
+  offset — it would be fed the tail of a different script. Both are avoided by
+  installing to `<path>.chug-new` beside the target and renaming over it: a
+  rename swaps the directory entry and leaves the open inode alone. The design
+  did not anticipate this; it is the sharpest edge in the slice.
+- **Two refusals the design did not name, both about not making things worse.**
+  A supervisor that is not reachable (`command -v systemctl` / `launchctl`)
+  refuses before anything is installed, because a node with a new binary on disk
+  and an old daemon running says nothing about itself. And a unit that is **not
+  active** refuses, because restarting a unit this process does not belong to
+  would leave *two* daemons on one machine — the fleet-record split
+  [§1](#1-one-daemon-or-two) prices and #372 §8's R2. An extraction that yields
+  an empty file refuses on the same principle.
+- **Four knobs, all with correct defaults.** `WORKER_DAEMON_BIN`,
+  `WORKER_UNIT`, `WORKER_AGENT_LABEL` and `WORKER_SWAP_CONTAINER_MARKER` default
+  to exactly what `build-worker.sh` installs; `WORKER_CHANNEL_BINARY` and
+  `WORKER_REFRESH_SCRIPT` are the *existing* `crates/worker/src/config.rs`
+  defaults, read here rather than re-hardcoded, so a node that moved them
+  installs where it reads from.
+- **The install escalates, and refuses first if it cannot.** `/usr/local` is
+  root's on both platforms, and on macOS the daemon is a GUI-domain agent
+  running as the *login user* — so "the daemon cannot write where it must
+  install" is a real node. Each of the three writes is unprivileged-first with
+  `sudo -n` as the fallback, exactly `build-worker.sh`'s `chug_dir`/`chug_put`,
+  and a pre-flight in the validate-first block asks that same question of the
+  nearest existing ancestor of each target *before* the extraction. Without it
+  the operator got a bare `EACCES` from half-way through an install, on a node
+  whose images the build phase had already retag-swapped.
+- **The staging directory is removed before the restart, not by the `EXIT`
+  trap.** `systemctl restart` kills the cgroup this shell is in, and POSIX `sh`
+  runs no `EXIT` trap when it is killed by a signal — the same fact the build
+  phase's `TERM` handler exists for. Left to the trap, every *successful*
+  refresh stranded tens of MB of extracted binaries on a node whose docker-disk
+  headroom is what half this script defends. The trap stays as the failure-path
+  backstop.
+
+### Slice 3's gate and §3.1's four cases
+
+**Slice 3's refusal is untouched**, and it had to be: it lives in
+`crates/worker/src/daemon.rs`, not in this script. `run_refresh` still calls
+`host_work_check` after `quiesce` and beside the `drained` wait, still fails the
+refresh at its `drain` stage, and still does so *before* `begin_swap` — so the
+script this slice rewrote is never invoked on a node with live host work. This
+job changed no Rust.
+
+[`docs/spec.md`](../spec.md) §3.1's four cases all still hold, and one of them
+improves:
+
+| Case | Under the new swap |
+| --- | --- |
+| container tasks, any daemon restart | holds, and more simply: nothing removes a container at all now |
+| host tasks, a unit restart ([D3](#decisions)) | holds, and is **true for the first time**. The old swap's `docker rm -f chug-worker` killed a host task, because on a containerized node the task is a process *inside* the daemon. `systemctl restart` kills the unit's cgroup, and the task's transient scope is not in it |
+| host tasks, the self-refresh | holds — refused, by the check above, unchanged |
+| a reboot | unchanged, and still not covered |
+
+§3.1 step 3 is rewritten to describe install-and-restart, since it described the
+detached sibling in normative prose.
+
+### Verification
+
+`deploy/prod/worker-refresh.test.sh` — 29 cases, all passing; thirteen are this
+slice's, replacing the sixteen that asserted the carry-forwards. They cover: the
+extract-install-restart sequence; **no** `docker run`, no `chug-worker-swap` and
+no `docker rm -f chug-worker` anywhere; nothing carried forward and the live
+daemon never inspected, with every deleted knob set at once; install-by-rename;
+the un-converted refusal installing nothing and reaching no docker mutation; the
+inactive-unit refusal; an empty extraction; the launchd path;
+a node that cannot reach its supervisor; an install path this node cannot write,
+refused before any extraction; an install the daemon's own user cannot do,
+escalated to `sudo -n`; the staging dir reclaimed before a restart that kills
+the caller outright; and the three phase markers.
+`build-worker.test.sh` — 56 cases, all passing.
+
+The count is the suite's own `ok:` lines, as `build-worker.test.sh`'s 56 is.
+This section first said 24, which was wrong when written — the file held 26 —
+and is corrected here rather than merely bumped by the three cases the rework
+added.
+
+**Every new case was run against the un-fixed script and observed red**, except
+the "no detached process" one: the old script refuses earlier, on a fixture that
+no longer answers its `docker inspect` for `/data/keys`, so it passes there for
+the wrong reason. That case was verified instead against a **mutant** of the new
+script that re-adds a `docker run -d --name chug-worker-swap` line, which it
+catches. **Nothing was run against a node**: no refresh, no restart, no
+`chuggernaut.env` edit. The first real execution of this path is a deploy leg on
+a node an operator has converted, and no node has been.

@@ -239,17 +239,17 @@ WORKER_SSH=worksalot@gumbo-nuc-0 CHUG_WORKER_NODE=nuc \
 Set it to something the node can actually serve, then never touch it again —
 after the first observation the UI owns the number. **Declare it**, per node,
 rather than passing it on the command line: a value that only ever rode a
-`docker run` survives by circulation (the self-refresh swap re-applies the
-daemon's own environment) and disappears at the first recreation that forgets
-it. `build-worker.sh` refuses to replace a daemon whose `WORKER_SLOTS` the new
+`docker run` used to survive by circulating from one daemon generation to the
+next, and disappeared at the first recreation that forgot it. `build-worker.sh` refuses to replace a daemon whose `WORKER_SLOTS` the new
 run would drop.
 
 Two consequences worth knowing before they surprise you:
 
-- **`WORKER_SLOTS` survives every self-refresh, and that is deliberate.**
-  `deploy/prod/worker-refresh.sh` carries it forward across the daemon swap on
-  every deploy, so a node whose dispatcher is down still comes back at a sane
-  number rather than the default 4.
+- **`WORKER_SLOTS` survives every self-refresh, and that is deliberate.** It is
+  written into the node's environment file, which the supervisor hands the
+  daemon on every start (#440 D6/D7) — the swap copies nothing forward — so a
+  node whose dispatcher is down still comes back at a sane number rather than
+  the default 4.
 - **After a swap the node reports its boot value until the dispatcher
   reconciles.** A node you set to 2 in the UI but created with `WORKER_SLOTS=4`
   comes back from a deploy at 4 and is pushed back to 2 within one scan tick.
@@ -257,14 +257,15 @@ Two consequences worth knowing before they surprise you:
   to match the steady-state number, recreate the daemon with the new
   `WORKER_SLOTS`; nothing is broken if you don't.
 
-**The ceiling, `WORKER_SLOTS_MAX`, is a daemon-container env var that neither
-`deploy/prod/build-worker.sh` nor `deploy/prod/worker-refresh.sh` passes.** Unset
+**The ceiling, `WORKER_SLOTS_MAX`, is a daemon env var that neither
+`deploy/prod/build-worker.sh` nor `deploy/prod/worker-refresh.sh` writes.** Unset
 it defaults to the node's own CPU count, which is right unless the CPU count
 overstates what the node can serve — dev-air's colima VM has 6 CPUs but two
-concurrent Rust builds is what it actually sustains. To lower it you must add
-`-e WORKER_SLOTS_MAX=<n>` to the daemon's `docker run` by hand — and know that
-the self-refresh swap forwards only the vars it names, so **the next deploy drops
-it** and the ceiling reverts to the CPU count. Setting it in `chuggernaut.env`
+concurrent Rust builds is what it actually sustains. To lower it you must put
+`WORKER_SLOTS_MAX=<n>` into the daemon's environment by hand — and know that the
+swap forwards nothing at all, and no script writes this var into the node's
+environment file, so **the next deploy drops it** and the ceiling reverts to the
+CPU count. Setting it in `chuggernaut.env`
 does nothing at all. It is no longer silent, at least: `build-worker.sh` refuses
 to rebuild a daemon carrying one, naming it as a value nothing forwards
 (`WORKER_SPEC_DROP_OK=1` proceeds, and you re-add the flag by hand). Until that passthrough is added, treat a lowered ceiling as

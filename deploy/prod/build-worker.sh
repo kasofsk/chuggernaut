@@ -978,14 +978,15 @@ until ssh "$WORKER_SSH" "$PROBE_REMOTE" < /dev/null 2>/dev/null | grep -q HEALTH
 done
 echo "build-worker: verified chug-worker is running and NATS-subscribed (worker up) on $WORKER_SSH"
 
-# A natively supervised node cannot self-refresh yet, and it learns that HERE —
-# at the moment it is converted — rather than from a failed deploy leg later.
-# worker-refresh.sh's swap still recreates a CONTAINER: it reads the live
-# container's /data/keys mount first and, finding none, exits 1 with "no
-# /data/keys mount on chug-worker; refusing swap (would strand creds)" before
-# RUN_NEW is composed. So the refusal is loud and nothing starts beside the
-# native daemon — but refused is still refused until design #440 slice 6.
-echo "build-worker: NOTE: $NODE is supervised NATIVELY now, and worker-refresh.sh's swap still recreates a container — a self-refresh of this node REFUSES ('no /data/keys mount on chug-worker; refusing swap (would strand creds)') and the node does not update itself. Deploy it over ssh with this script until design #440 slice 6 lands." >&2
+# What this node's own self-refresh will do, said HERE — at the moment it is
+# converted — because the conversion is what switches it. Since design #440
+# slice 6 the swap installs the binary out of the image the build phase made and
+# asks the supervisor to restart; the node updates itself again, and the record
+# of a replacement that will not start is the supervisor's log rather than a
+# retained sibling container. The converse is the note this line used to carry:
+# a node NOBODY has converted refuses its own swap, so it is deployed with this
+# script until it is.
+echo "build-worker: NOTE: $NODE is supervised NATIVELY now, so its self-refresh installs the daemon binary out of the worker image and restarts $UNIT_PATH (design #440 D6) — read what follows a swap in the supervisor's own log, not in a swapper container. A node this script has NOT converted refuses its swap and is deployed over ssh with this script." >&2
 
 # Bound the node's docker disk (the 2026-07-23 air incident: 27G of BuildKit
 # cache + dangling image generations filled the colima partition and an image

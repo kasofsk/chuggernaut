@@ -7,33 +7,33 @@
 #
 # Two phases, so the daemon can quiesce launches only for the brief swap window:
 #   worker-refresh.sh build <sha> <tag>   # fetch context + build 3 images
-#   worker-refresh.sh swap  <tag>         # replace the daemon container
+#   worker-refresh.sh swap  <tag>         # install the new binary + restart the unit
 #
-# All external tools (git, ssh, docker) come from PATH so the shell test can
-# fake them (worker-refresh.test.sh). Config is env-driven, inherited from the
-# daemon's own environment — which is how a value SURVIVES a refresh, never how
-# it is DECLARED: the run spec is declared in deploy/prod/chuggernaut.env on the
-# dispatcher host and applied by build-worker.sh (deploy/prod/README.md §6).
-# Each phase reports the spec it is running so a node the Mini cannot ssh still
-# states its own configuration into the deploy's task output:
+# The daemon is NOT a container (design #440 D1/D2/D6): it is a binary under a
+# systemd unit or a launchd agent, over an environment file build-worker.sh
+# renders. So the swap installs and restarts, and every mount, device and
+# `docker inspect` carry-forward it used to compose is gone — see the swap arm.
+#
+# All external tools (git, ssh, docker, the supervisor) come from PATH so the
+# shell test can fake them (worker-refresh.test.sh). Config is env-driven,
+# inherited from the daemon's own environment, which the supervisor loads from
+# that environment file — so a value survives a refresh because it is WRITTEN
+# DOWN, not because this script copies it forward. The run spec is declared in
+# deploy/prod/chuggernaut.env on the dispatcher host and applied by
+# build-worker.sh (deploy/prod/README.md §6). Each phase reports the spec it is
+# running so a node the Mini cannot ssh still states its own configuration into
+# the deploy's task output:
 #   WORKER_REFRESH_GIT_URL  ssh://git@<ssh-front>:2222/<owner>/<repo>.git (required)
-#   WORKER_GIT_KEY          ssh private key for the node credential (default /data/keys/worker_git)
-#   WORKER_NODE, NATS_URL, NATS_CREDS   passed through to the replacement daemon
-#   WORKER_CACHE_DIR        optional node-local build cache (re-applied on swap;
-#     the host dir is provisioned at node creation by build-worker.sh, never here)
-#   WORKER_MODES            optional runtimes the node offers (design #309 P0/#322 W1),
-#     re-applied on swap; unset ⇒ the daemon's container-only default
-#   WORKER_SWAP_IMAGE       docker-cli image for the detached swapper (default docker:cli)
+#   WORKER_GIT_KEY          ssh private key for the node credential
+#   WORKER_NODE, WORKER_SLOTS, WORKER_CACHE_DIR   reported, never re-applied
 #   WORKER_REFRESH_DISK_FREE_GB_MIN / _DISK_PATH   disk pre-flight (see below)
-#   WORKER_KVM / WORKER_KVM_PROJECTS / WORKER_ANDROID_SDK_DIR / WORKER_FLUTTER_DIR /
-#     WORKER_JDK_DIR
-#     KVM passthrough (design #367), re-applied on swap; the DEVICE itself is carried forward
-#     from the live container, never from this env (docs/reference/runbooks/worker-kvm.md)
-#   WORKER_NIX_GCROOTS_DIR / WORKER_NIX_CLIENT / WORKER_NIX_DAEMON_SOCKET /
-#     WORKER_NIX_STORE_DIR / WORKER_NIX_PROJECTS / WORKER_NIX_FLAKE_CLIENT /
-#     WORKER_NIX_REALISE_TIMEOUT_SECS   per-task nix GC roots (design #373 P1)
-#     and project-declared toolchains (P2), re-applied on swap; the nix MOUNTS
-#     are carried forward from the live container, never re-derived here
+#   WORKER_DAEMON_BIN / WORKER_CHANNEL_BINARY / WORKER_REFRESH_SCRIPT
+#     where the swap installs the three artifacts it extracts from the new worker
+#     image; the defaults are the paths build-worker.sh installs to and the ones
+#     crates/worker/src/config.rs already defaults to
+#   WORKER_UNIT / WORKER_AGENT_LABEL   what the swap asks the supervisor to restart
+#   WORKER_SWAP_CONTAINER_MARKER   the file that says "this daemon is itself a
+#     container", i.e. a node nobody has converted yet (default /.dockerenv)
 set -eu
 
 PHASE="${1:?usage: worker-refresh.sh build <sha> <tag> | swap <tag>}"
@@ -56,12 +56,13 @@ refresh_phase() {
 
 # ── the run spec this node is actually running (ticket #390) ─────────────────
 # This script inherits its config from the daemon's own environment, which is
-# the only mechanism available to it: the swap runs INSIDE chug-worker, and the
-# dispatcher host cannot ssh a tagged worker, so nothing here can read
-# chuggernaut.env on the Mini. Inheritance is therefore how a value SURVIVES a
-# refresh — but it is not how a value is DECLARED, and the four settings below
-# were found (#265 reason 3) living only in the container, circulating from one
-# generation of the daemon to the next with nothing to compare them against.
+# the only mechanism available to it: the dispatcher host cannot ssh a tagged
+# worker, so nothing here can read chuggernaut.env on the Mini. Since design
+# #440 D6 that environment comes from the node's own environment file rather
+# than from a container recreated with a dozen `-e` flags, so a value no longer
+# survives by circulating from one generation of the daemon to the next — the
+# #265 reason 3 shape. What is unchanged is that the node is the only thing that
+# can say what it is running, and this report is where it says it.
 #
 # So the node reports what it is running, every refresh, on the daemon's stdout
 # — which the daemon relays line by line into the deploy's task output. That is
@@ -129,15 +130,16 @@ refresh_run_spec_report() {
 # guarantee that the space is still there ten minutes later.
 #
 # Revisit it if the image sizes change again. Env-overridable so a node with a
-# different disk shape can tune it: build-worker.sh puts the knob in the
-# daemon's environment at node creation and the swap phase below carries it
-# forward, so an override survives self-refreshes instead of reverting to this
-# default on the next one.
+# different disk shape can tune it: build-worker.sh writes the knob into the
+# node's environment file, which the supervisor hands the daemon on every start,
+# so an override survives a self-refresh because it is declared — the swap
+# carries nothing forward (design #440 D6).
 DISK_FREE_GB_MIN="${WORKER_REFRESH_DISK_FREE_GB_MIN:-30}"
-# Where the space is measured. The build runs inside the worker container, whose
-# root filesystem is an overlay on the filesystem that backs /var/lib/docker —
-# statfs on it reports exactly the pool images and the BuildKit cache compete
-# for.
+# Where the space is measured. The default is the daemon's own root filesystem,
+# which on a node whose docker lives under /var is the filesystem backing
+# /var/lib/docker — statfs on it reports exactly the pool images and the
+# BuildKit cache compete for. A node that splits them points _DISK_PATH at the
+# docker filesystem instead.
 DISK_PATH="${WORKER_REFRESH_DISK_PATH:-/}"
 # BuildKit cache cap for the prune pair. 15G was sized for the #115 cache mounts
 # when agent-rust compiled the whole workspace into one; #352 deleted that build,
@@ -391,319 +393,210 @@ build)
 
 swap)
   TAG="${2:?swap needs a tag}"
-  # The daemon runs INSIDE chug-worker, so it cannot `docker rm -f chug-worker`
-  # itself — that would kill this process mid-swap. Instead launch a DETACHED
-  # sibling container (its own lifecycle) that removes the old daemon and starts
-  # the new one. Job containers are untouched: `docker rm -f` only hits
-  # chug-worker, and the dispatcher's poll-based wait re-attaches (spec §3.1).
-  # The replacement carries the SAME env the daemon runs with (inherited here).
-  NODE="${WORKER_NODE:?WORKER_NODE must be set}"
-  NATS="${NATS_URL:?NATS_URL must be set}"
-  # Reported again here because THIS is the moment the spec is re-applied: what
-  # the swap carries forward is what the node runs until someone recreates it.
+  # ── install the binary, ask the supervisor to restart (design #440 D6) ───────
+  # The daemon is a BINARY UNDER A SUPERVISOR, not a container (#440 D1/D2), and
+  # that collapses this phase to two acts: put the new binary on the node, then
+  # ask the supervisor to restart the unit. What used to be here — a detached
+  # `docker:cli` sibling that removed `chug-worker` and re-composed `docker run`
+  # from a dozen carried-forward `-e` flags, the keys and socket mounts recovered
+  # by `docker inspect`, the KVM device, the nix mounts — existed for ONE reason:
+  # a container cannot replace itself, so the replacement had to be re-composed
+  # by something else and every value it needed had to be handed over. None of
+  # that is true of a unit:
+  #
+  #   * the DETACHED SWAPPER, because a supervisor restarting its own unit has no
+  #     self-replacement problem — the supervisor is the starter (#372 §8 R1);
+  #   * the KEYS and SOCKET mount recovery, because a native daemon reads the
+  #     node's filesystem and opens the node's docker socket directly (#440 D5);
+  #   * the KVM DEVICE and the NIX MOUNTS, because a process on the node already
+  #     has the node's devices and the node's /nix (#440 §5);
+  #   * every `*_ARGS` ENVIRONMENT carry-forward (cache dir, disk knobs, slots,
+  #     modes, KVM settings, nix settings, RUST_LOG), because the run spec is a
+  #     file on the node that the supervisor loads on every start — a value
+  #     survives because it is WRITTEN DOWN, which deletes the #55/#82
+  #     silent-revert class at its root instead of defending against it eleven
+  #     times (#440 D6/D7);
+  #   * the RETAINED `chug-worker-swap` TRANSCRIPT (#270), because the record of
+  #     a replacement that would not start is now the supervisor's own —
+  #     `journalctl -u chug-worker` on Linux, the agent's log path on macOS —
+  #     which is the thing the sibling container was standing in for.
+  #
+  # Job containers are untouched, as before and for a stronger reason: nothing
+  # here removes a container at all, and the dispatcher's poll-based wait
+  # re-attaches over the new daemon (spec §3.1). A HOST task is untouched too,
+  # for the first time: `systemctl restart` kills the unit's cgroup, and #440 D3
+  # puts each host task in its own transient scope outside it.
+  #
+  # Reported here because this is the last thing the node says before it goes
+  # away: what the daemon was running, read off the environment the supervisor
+  # gave it.
   refresh_run_spec_report swap
-  CREDS="${NATS_CREDS:-/data/keys/worker.creds}"
-  SWAP_IMAGE="${WORKER_SWAP_IMAGE:-docker:cli}"
 
-  # Optional node-local build cache, re-applied so caching survives the swap.
-  # ENV ONLY, exactly like build-worker.sh's daemon run: the daemon adds the
-  # cache bind to each sibling job container via the docker socket (host path),
-  # so the DAEMON container needs no cache mount of its own. Carrying this
-  # forward is what stops a refresh from silently dropping caching (#55/#82).
-  #
-  # Carried forward, never CREATED — deliberately, on two counts. This phase
-  # runs INSIDE chug-worker, which mounts only the docker socket and the keys
-  # dir, so a `mkdir -p` here would land in the daemon container's writable
-  # layer and never on the host: it is the very bug this variable already had
-  # (crates/worker/src/daemon.rs's `create_dir_all`), not a fix for it. And a
-  # swap runs on a node build-worker.sh already provisioned, so a dir missing at
-  # this point means something removed it — which the engine's launch refusal
-  # should say out loud (#379), not a defensive create that hides it.
-  CACHE_ARGS=""
-  if [ -n "${WORKER_CACHE_DIR:-}" ]; then
-    CACHE_ARGS="-e WORKER_CACHE_DIR=$WORKER_CACHE_DIR"
-  fi
+  # Where the three artifacts go. The defaults are what build-worker.sh installs
+  # (deploy/prod/build-worker.sh `REMOTE_INSTALL`) and — for the channel binary
+  # and this script — what crates/worker/src/config.rs already defaults to, so a
+  # stock node needs none of these set.
+  DAEMON_BIN="${WORKER_DAEMON_BIN:-/usr/local/bin/chuggernaut}"
+  CHANNEL_BIN="${WORKER_CHANNEL_BINARY:-/usr/local/lib/chuggernaut/chuggernaut-channel}"
+  REFRESH_SCRIPT="${WORKER_REFRESH_SCRIPT:-/usr/local/lib/chuggernaut/worker-refresh.sh}"
+  SWAP_UNIT="${WORKER_UNIT:-chug-worker.service}"
+  SWAP_AGENT_LABEL="${WORKER_AGENT_LABEL:-com.chuggernaut.worker}"
 
-  # Same reasoning for the disk pre-flight knobs (deploy #248). A node whose disk
-  # shape needs a threshold other than the built-in default sets them on the
-  # daemon; if the swap dropped them, the very next self-refresh would silently
-  # revert that node to the default — the #55/#82 failure mode again. Unset adds
-  # nothing, so a stock node keeps the documented constant.
-  DISK_ARGS=""
-  if [ -n "${WORKER_REFRESH_DISK_FREE_GB_MIN:-}" ]; then
-    DISK_ARGS="-e WORKER_REFRESH_DISK_FREE_GB_MIN=$WORKER_REFRESH_DISK_FREE_GB_MIN"
-  fi
-  if [ -n "${WORKER_REFRESH_DISK_PATH:-}" ]; then
-    DISK_ARGS="$DISK_ARGS -e WORKER_REFRESH_DISK_PATH=$WORKER_REFRESH_DISK_PATH"
-  fi
+  # ── validate-first, exactly as the build phase does ──────────────────────────
+  # Everything that can refuse refuses HERE, before a single byte is installed,
+  # so a node this script cannot restart keeps serving on the daemon it has. The
+  # build phase already retag-swapped the images, so a refused swap is a node one
+  # generation behind with a failed deploy leg naming why — which is the trade
+  # #440 D4 makes everywhere else in this file.
 
-  # The node's FIRST-BOOT capacity (`WORKER_SLOTS`, spec §3.1). Same silent-revert
-  # class as the two above: this is the number the replacement daemon comes back
-  # reporting, so a swap that dropped it would restore a node deliberately sized
-  # at 2 to the default 4 — more concurrent job containers than the node was
-  # sized for. The dispatcher does reconcile its recorded intent back onto the
-  # node within a scan tick, but that is a repair after the fact and it only
-  # happens where an operator has ever set a number; carrying the boot value
-  # forward is what keeps the node correct in the gap, and correct at all on a
-  # node whose dispatcher is down. Capacity is CHANGED from the operator UI, not
-  # here (docs/reference/runbooks/worker-capacity.md). Unset adds nothing, so a stock node
-  # keeps the default.
-  SLOTS_ARGS=""
-  if [ -n "${WORKER_SLOTS:-}" ]; then
-    SLOTS_ARGS="-e WORKER_SLOTS=$WORKER_SLOTS"
-  fi
-
-  # The runtimes the node offers (`WORKER_MODES`, design #309 P0 / #322 W1). The
-  # swap re-composes `docker run` from a named list of knobs rather than copying
-  # the live container's environment, so a knob missing HERE is dropped on the
-  # first self-refresh — and prod's nodes only ever self-refresh (WORKER_SSH is
-  # unset for both, so build-worker.sh no-ops on every deploy), which would make
-  # this the #55/#82 silent revert with a longer fuse. Carried as the daemon set
-  # it, quoted like the KVM allow-list so a `container, host` spelling stays one
-  # argument; nothing is validated, because a value the daemon cannot parse could
-  # never have booted the live daemon this shell's environment comes from. Unset
-  # adds nothing, so a node that declared no modes keeps the daemon's default.
-  MODES_ARGS=""
-  MODES="${WORKER_MODES:-}"
-  MODES="${MODES#"${MODES%%[![:space:]]*}"}"
-  MODES="${MODES%"${MODES##*[![:space:]]}"}"
-  if [ -n "$MODES" ]; then
-    MODES_ARGS="-e WORKER_MODES='$MODES'"
-  fi
-
-  # KVM passthrough (design #367, daemon side shipped by #374). The three
-  # SETTINGS are carried the same pass-from-env way as every knob above: this
-  # phase runs INSIDE chug-worker, so whatever `docker run -e WORKER_KVM=…` put
-  # on the daemon at node creation is already in this shell's environment, and
-  # inspecting for them would only re-read what we can read directly. The DEVICE
-  # is different in kind and is recovered from the live container below — see
-  # KVM_DEVICE_ARGS. Values are single-quoted for the swapper's shell, matching
-  # build-worker.sh, so an allow-list written with spaces cannot word-split.
-  #
-  # $KVM_ON is whether this node actually HAS a device, resolved exactly as the
-  # daemon resolves it (`parse_kvm_device`: trim, then 0/false/off ⇒ no device).
-  # A node deliberately set to WORKER_KVM=0 runs with the setting and no device
-  # — build-worker.sh composes precisely that — so the device refusal below must
-  # key off the values that attach one, not off the var being set at all.
-  # Nothing validates the SHAPE here: an unparseable value could never have
-  # booted the live daemon, so anything else on this node means KVM is on.
-  KVM="${WORKER_KVM:-}"
-  KVM="${KVM#"${KVM%%[![:space:]]*}"}"
-  KVM="${KVM%"${KVM##*[![:space:]]}"}"
-  KVM_ON=""
-  case "$KVM" in
-    '' | 0 | false | off) ;;
-    *) KVM_ON=1 ;;
-  esac
-  KVM_ARGS=""
-  if [ -n "$KVM" ]; then
-    KVM_ARGS="-e WORKER_KVM='$KVM'"
-  fi
-  if [ -n "${WORKER_KVM_PROJECTS:-}" ]; then
-    KVM_ARGS="$KVM_ARGS -e WORKER_KVM_PROJECTS='$WORKER_KVM_PROJECTS'"
-  fi
-  if [ -n "${WORKER_ANDROID_SDK_DIR:-}" ]; then
-    KVM_ARGS="$KVM_ARGS -e WORKER_ANDROID_SDK_DIR='$WORKER_ANDROID_SDK_DIR'"
-  fi
-  # The node's Flutter SDK (#393), a SECOND independent leaf carried exactly as
-  # the Android SDK above is: unset ⇒ nothing here, and the run spec is what it
-  # was. Dropping it on a self-refresh would silently un-provision Flutter on a
-  # node whose builds need it, so it rides forward with the rest.
-  if [ -n "${WORKER_FLUTTER_DIR:-}" ]; then
-    KVM_ARGS="$KVM_ARGS -e WORKER_FLUTTER_DIR='$WORKER_FLUTTER_DIR'"
-  fi
-  # The node's JDK (#397), a THIRD independent leaf carried on the same terms:
-  # dropping it on a self-refresh would leave JAVA_HOME unset on a node whose
-  # gradle builds need it, which is the failure #396 measured.
-  if [ -n "${WORKER_JDK_DIR:-}" ]; then
-    KVM_ARGS="$KVM_ARGS -e WORKER_JDK_DIR='$WORKER_JDK_DIR'"
-  fi
-
-  # Recover the REAL host bind sources from the running daemon rather than
-  # reconstructing them from $HOME. build-worker.sh mounts the keys from the
-  # node login user's `\$HOME/chuggernaut-worker/keys` (expanded in the node's
-  # ssh shell), but the swap runs `RUN_NEW` inside the detached `docker:cli`
-  # swapper where HOME=/root — re-deriving $HOME there would bind an empty
-  # `/root/chuggernaut-worker/keys` and strand the new daemon without NATS creds.
-  # This phase runs inside chug-worker (docker.sock mounted), so inspect the
-  # live container for the literal Source paths and bake them into RUN_NEW.
-  KEYS_SRC="$(docker inspect chug-worker \
-    --format '{{range .Mounts}}{{if eq .Destination "/data/keys"}}{{.Source}}{{end}}{{end}}')"
-  SOCK_SRC="$(docker inspect chug-worker \
-    --format '{{range .Mounts}}{{if eq .Destination "/var/run/docker.sock"}}{{.Source}}{{end}}{{end}}')"
-  if [ -z "$KEYS_SRC" ]; then
-    echo "worker-refresh: no /data/keys mount on chug-worker; refusing swap (would strand creds)" >&2
-    exit 1
-  fi
-  SOCK_SRC="${SOCK_SRC:-/var/run/docker.sock}"
-
-  # The KVM device, recovered the same inspect-the-live-container way as the
-  # mounts above, and for a sharper reason. A device is a `docker run` flag, not
-  # an env var, so it cannot ride the daemon's environment into this shell; and
-  # dropping it while carrying WORKER_KVM forward does not degrade the node, it
-  # REMOVES it — the replacement daemon refuses to start on a device its own view
-  # lacks (crates/worker/src/daemon.rs `build_backend`), --restart=always
-  # restarts it into the same refusal, and the node leaves the fleet on the first
-  # self-refresh after an operator enabled KVM. Reading `.HostConfig.Devices` off
-  # what is ACTUALLY running means the carry-forward cannot drift from the live
-  # daemon the way a second copy of the run spec would.
-  KVM_DEVICE_ARGS="$(docker inspect chug-worker \
-    --format '{{range .HostConfig.Devices}}--device {{.PathOnHost}}:{{.PathInContainer}}:{{.CgroupPermissions}} {{end}}')"
-  if [ -n "$KVM_ON" ] && [ -z "$KVM_DEVICE_ARGS" ]; then
-    echo "worker-refresh: WORKER_KVM='$KVM' enables KVM but the live chug-worker has no device to carry forward; refusing swap (the replacement would refuse to start and --restart=always would loop it — node down). Recreate the daemon with deploy/prod/build-worker.sh, which passes --device." >&2
+  # A node NOBODY HAS CONVERTED YET. Until an operator runs build-worker.sh
+  # against it the daemon is still `chug-worker`, a container, and this phase
+  # cannot supervise what has no supervisor: installing a binary would write into
+  # the container's own writable layer and vanish with it. The fleet is mixed by
+  # design (#440's slice ordering), so this is the expected state of a node, not
+  # an error in it — but the refusal is the honest answer rather than half a
+  # swap, and it is the exact counterpart of the note build-worker.sh prints when
+  # it converts a node. The marker is docker's own; it is overridable because
+  # the shell test runs INSIDE a container and must be able to drive both sides.
+  if [ -f "${WORKER_SWAP_CONTAINER_MARKER:-/.dockerenv}" ]; then
+    echo "worker-refresh: this daemon is running INSIDE a container, so it is a node design #440 has not converted yet — the swap installs a binary and restarts a supervisor unit (#440 D6) and there is no unit here; REFUSING swap (live daemon untouched, job containers untouched, images already built). Convert the node from the operator's laptop with 'WORKER_SSH=<user>@<node> deploy/prod/build-worker.sh' (deploy/prod/README.md §6); until then this node is deployed over ssh, not by self-refresh." >&2
     exit 1
   fi
 
-  # Per-task nix GC roots (design #373 P1). The four SETTINGS ride the daemon's
-  # environment into this shell like every other knob; the MOUNTS cannot,
-  # and are recovered from the live container for the same reason the KVM device
-  # is. Dropping them does not degrade the node: the daemon's boot check refuses
-  # to start without its roots dir, its client and the socket in ITS OWN view
-  # (crates/worker/src/nix.rs), --restart=always loops the refusal, and the node
-  # leaves the fleet — the #377 node-down hazard, one mount over.
-  #
-  # Carried by DESTINATION rather than reconstructed: anything under /nix, the
-  # store prefix, the roots dir, and — when this node attaches a KVM device —
-  # the DIRECTORY HOLDING the toolchain path (never that path itself: a bind
-  # whose source is the operator's symlink resolves it host-side and the client
-  # then sees a non-store path it refuses to realise),
-  # with each mount's own read-only bit preserved (the
-  # store, the profiles and the toolchain are :ro; the socket dir and the roots
-  # dir must stay writable — connecting to a unix socket needs write on the
-  # inode). Reading what is ACTUALLY running is what keeps this from drifting
-  # the way a second copy of the run spec would, and it carries a node whose
-  # profiles or socket live on a different mount point (gumbo-nuc-0's
-  # /nix/var/nix/gcroots/profiles resolves through /mnt) with no path assumption
-  # here at all.
-  NIX_GCROOTS="${WORKER_NIX_GCROOTS_DIR:-}"
-  NIX_GCROOTS="${NIX_GCROOTS#"${NIX_GCROOTS%%[![:space:]]*}"}"
-  NIX_GCROOTS="${NIX_GCROOTS%"${NIX_GCROOTS##*[![:space:]]}"}"
-  NIX_ARGS=""
-  NIX_MOUNT_ARGS=""
-  if [ -n "$NIX_GCROOTS" ]; then
-    NIX_ARGS="-e WORKER_NIX_GCROOTS_DIR='$NIX_GCROOTS'"
-    if [ -n "${WORKER_NIX_CLIENT:-}" ]; then
-      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_CLIENT='$WORKER_NIX_CLIENT'"
-    fi
-    if [ -n "${WORKER_NIX_DAEMON_SOCKET:-}" ]; then
-      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_DAEMON_SOCKET='$WORKER_NIX_DAEMON_SOCKET'"
-    fi
-    if [ -n "${WORKER_NIX_REALISE_TIMEOUT_SECS:-}" ]; then
-      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_REALISE_TIMEOUT_SECS='$WORKER_NIX_REALISE_TIMEOUT_SECS'"
-    fi
-    if [ -n "${WORKER_NIX_STORE_DIR:-}" ]; then
-      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_STORE_DIR='$WORKER_NIX_STORE_DIR'"
-    fi
-    if [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
-      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS'"
-    fi
-    if [ -n "${WORKER_NIX_FLAKE_CLIENT:-}" ]; then
-      NIX_ARGS="$NIX_ARGS -e WORKER_NIX_FLAKE_CLIENT='$WORKER_NIX_FLAKE_CLIENT'"
-    fi
-    NIX_SOCKET_DIR="${WORKER_NIX_DAEMON_SOCKET:-/nix/var/nix/daemon-socket/socket}"
-    NIX_SOCKET_DIR="${NIX_SOCKET_DIR%/*}"
-    NIX_STORE_DIR="${WORKER_NIX_STORE_DIR:-/nix/store}"
-    NIX_TOOLCHAIN_DIR=""
-    if [ -n "$KVM_ON" ]; then
-      NIX_SDK_DIR="${WORKER_ANDROID_SDK_DIR:-/var/lib/chuggernaut/android-sdk}"
-      NIX_SDK_DIR="${NIX_SDK_DIR#"${NIX_SDK_DIR%%[![:space:]]*}"}"
-      NIX_SDK_DIR="${NIX_SDK_DIR%"${NIX_SDK_DIR##*[![:space:]]}"}"
-      NIX_TOOLCHAIN_DIR="${NIX_SDK_DIR%/*}"
-    fi
-    HAVE_STORE=""
-    HAVE_ROOTS=""
-    HAVE_SOCKET=""
-    HAVE_TOOLCHAIN=""
-    for m in $(docker inspect chug-worker \
-      --format '{{range .Mounts}}{{.Destination}}|{{.Source}}|{{.RW}} {{end}}'); do
-      dst="${m%%|*}"
-      rest="${m#*|}"
-      src="${rest%%|*}"
-      rw="${rest##*|}"
-      case "$dst" in
-        /nix | /nix/*) ;;
-        "$NIX_STORE_DIR") ;;
-        "$NIX_GCROOTS") ;;
-        *)
-          if [ -z "$NIX_TOOLCHAIN_DIR" ] || [ "$dst" != "$NIX_TOOLCHAIN_DIR" ]; then continue; fi
-          ;;
-      esac
-      if [ "$rw" = "true" ]; then
-        NIX_MOUNT_ARGS="$NIX_MOUNT_ARGS -v $src:$dst"
-      else
-        NIX_MOUNT_ARGS="$NIX_MOUNT_ARGS -v $src:$dst:ro"
-      fi
-      if [ "$dst" = "$NIX_STORE_DIR" ]; then HAVE_STORE=1; fi
-      if [ "$dst" = "$NIX_GCROOTS" ]; then HAVE_ROOTS=1; fi
-      if [ "$dst" = "$NIX_SOCKET_DIR" ]; then HAVE_SOCKET=1; fi
-      if [ -n "$NIX_TOOLCHAIN_DIR" ] && [ "$dst" = "$NIX_TOOLCHAIN_DIR" ]; then HAVE_TOOLCHAIN=1; fi
-    done
-    nix_mount_missing() {
-      echo "worker-refresh: WORKER_NIX_GCROOTS_DIR='$NIX_GCROOTS' enables per-task nix GC roots but the live chug-worker has no mount at '$1' to carry forward; refusing swap (the replacement would refuse to start and --restart=always would loop it — node down). Recreate the daemon with deploy/prod/build-worker.sh, which passes every nix mount." >&2
+  # Which supervisor, decided by what the node IS — the same question
+  # build-worker.sh asks over ssh, asked here of the node we are standing on.
+  case "$(uname -s)" in
+    Linux) SUPERVISOR=systemd ;;
+    Darwin) SUPERVISOR=launchd ;;
+    *)
+      echo "worker-refresh: 'uname -s' reports '$(uname -s)' — the worker daemon is supervised by systemd (Linux) or launchd (macOS) and there is no third supervisor (design #440 D2); REFUSING swap (live daemon untouched)" >&2
       exit 1
-    }
-    if [ -z "$HAVE_STORE" ]; then nix_mount_missing "$NIX_STORE_DIR"; fi
-    if [ -z "$HAVE_ROOTS" ]; then nix_mount_missing "$NIX_GCROOTS"; fi
-    if [ -z "$HAVE_SOCKET" ]; then nix_mount_missing "$NIX_SOCKET_DIR"; fi
-    if [ -n "$NIX_TOOLCHAIN_DIR" ] && [ -z "$HAVE_TOOLCHAIN" ]; then nix_mount_missing "$NIX_TOOLCHAIN_DIR"; fi
-  fi
+      ;;
+  esac
 
-  # The daemon's own log level (ticket #270). The binary configures tracing from
-  # RUST_LOG (`tracing_subscriber::fmt::init`) whose default directive is ERROR,
-  # so a daemon started without it emits NOTHING an operator can use: not the
-  # refresh phase markers, not the per-line relay of THIS script's output
-  # (`worker-refresh: <line>`, daemon.rs), not "worker up". That silence is why
-  # the deploy #267 post-mortem had to be reconstructed from docker event ring
-  # buffers. `info` is exactly the level those lines live at, and it is not a
-  # firehose: the daemon logs nothing per-op (launch/inspect/logs/ping are
-  # silent), and `docker build -q` keeps a ten-minute image build to one line per
-  # phase. Dependencies stay at warn so an async-nats reconnect storm cannot
-  # drown the refresh story. Carried forward like the other knobs so an operator
-  # who raised the level on the live daemon keeps it across self-refreshes
-  # (#55/#82's silent-revert lesson).
-  RUST_LOG_NEW="${RUST_LOG:-info,async_nats=warn}"
+  # The supervisor has to be reachable AND the daemon has to be its child. Both,
+  # because they fail differently: no `systemctl` on PATH is a node that cannot
+  # be restarted at all, while a unit that is not running is a daemon someone
+  # started by hand — and asking the supervisor to start it would leave TWO
+  # daemons on one node, which is the fleet-record split #440 §1 refuses and
+  # #372 §8 R2 names.
+  case "$SUPERVISOR" in
+    systemd)
+      if ! command -v systemctl > /dev/null 2>&1; then
+        echo "worker-refresh: no 'systemctl' on this daemon's PATH ('${PATH}') — the swap asks the supervisor to restart $SWAP_UNIT (design #440 D6) and cannot; REFUSING swap (live daemon untouched). The unit sets its own PATH (deploy/prod/build-worker.sh); re-apply the node's spec with build-worker.sh from the operator's laptop." >&2
+        exit 1
+      fi
+      if ! systemctl is-active --quiet "$SWAP_UNIT"; then
+        echo "worker-refresh: '$SWAP_UNIT' is not active, so this daemon is not the one systemd supervises — restarting the unit would start a SECOND daemon beside this one, which splits the node into two fleet rows (design #440 §1); REFUSING swap (live daemon untouched). Re-apply the node's spec with deploy/prod/build-worker.sh, or point WORKER_UNIT at the unit that owns this process." >&2
+        exit 1
+      fi
+      ;;
+    launchd)
+      if ! command -v launchctl > /dev/null 2>&1; then
+        echo "worker-refresh: no 'launchctl' on this daemon's PATH ('${PATH}') — the swap asks the supervisor to restart $SWAP_AGENT_LABEL (design #440 D6) and cannot; REFUSING swap (live daemon untouched)." >&2
+        exit 1
+      fi
+      if ! launchctl print "gui/$(id -u)/$SWAP_AGENT_LABEL" > /dev/null 2>&1; then
+        echo "worker-refresh: no launchd agent '$SWAP_AGENT_LABEL' in gui/$(id -u), so this daemon is not the one launchd supervises — kickstarting it would start a SECOND daemon beside this one (design #440 §1); REFUSING swap (live daemon untouched). Re-apply the node's spec with deploy/prod/build-worker.sh, or point WORKER_AGENT_LABEL at the agent that owns this process." >&2
+        exit 1
+      fi
+      ;;
+  esac
 
-  # The refreshed worker image already contains the (new SHA's) worker-refresh.sh
-  # and daemon binary, so no script is mounted from the host. All bind sources
-  # below are literal host paths (already expanded), so evaluating RUN_NEW inside
-  # the swapper reproduces build-worker.sh's exact mounts.
-  RUN_NEW="docker run -d --restart=always --name chug-worker \
-    -v $SOCK_SRC:/var/run/docker.sock \
-    -v $KEYS_SRC:/data/keys:ro \
-    -e WORKER_NODE=$NODE -e NATS_URL=$NATS -e NATS_CREDS=$CREDS \
-    -e RUST_LOG=$RUST_LOG_NEW \
-    -e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} \
-    -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git} \
-    $CACHE_ARGS $DISK_ARGS $SLOTS_ARGS $MODES_ARGS $KVM_ARGS $KVM_DEVICE_ARGS \
-    $NIX_ARGS $NIX_MOUNT_ARGS chuggernaut/worker:$TAG"
+  # The three install paths have to be WRITABLE, and that is a real question on
+  # both platforms: /usr/local is root's on Linux and on macOS, where the daemon
+  # is a GUI-domain agent running as the login user (deploy/prod/build-worker.sh
+  # asks the same thing over ssh before it converts a mac). Every write below is
+  # "unprivileged first, `sudo -n` as the fallback" — the shape build-worker.sh
+  # uses — so this asks exactly that of the nearest EXISTING ancestor, since the
+  # install creates what is missing. Asked without creating anything, so a
+  # refusal changes no node; without it the operator gets a bare `sudo: a
+  # password is required` from half-way through an install instead.
+  for _p in "$DAEMON_BIN" "$CHANNEL_BIN" "$REFRESH_SCRIPT"; do
+    _d="$(dirname "$_p")"
+    while [ ! -d "$_d" ]; do _d="$(dirname "$_d")"; done
+    if [ -w "$_d" ] || sudo -n test -w "$_d" 2> /dev/null; then continue; fi
+    echo "worker-refresh: cannot install '$_p' — neither this daemon's user nor 'sudo -n' can write '$_d', the nearest directory that exists; REFUSING swap (live daemon untouched, job containers untouched, images already built). Re-apply the node's spec with deploy/prod/build-worker.sh from the operator's laptop, or grant this user passwordless sudo on the node." >&2
+    exit 1
+  done
 
-  # Keep the swapper's transcript (ticket #270). This sibling container holds the
-  # only record of the moment the node is most likely to break — it removes the
-  # live daemon and starts its replacement — and it used to run `--rm`, so a
-  # `$RUN_NEW` that failed took its own error message with it seconds later,
-  # leaving a node with neither a daemon nor a reason. Named and retained, that
-  # transcript survives as `docker logs chug-worker-swap` (and, on a journald
-  # node, `journalctl CONTAINER_NAME=chug-worker-swap`). Bounded to ONE retained
-  # container per node: each swap force-removes the previous one by name first.
+  # ── extract, then install (design #440 D6) ───────────────────────────────────
+  # The binary comes OUT OF THE IMAGE the build phase just made, never from a
+  # compile on the node: that keeps its build environment byte-identical to the
+  # containerized daemon's, needs no Rust toolchain as a node machine fact, and
+  # leaves deploy/prod/Dockerfile.worker the single definition of how the binary
+  # is produced. This is the same `docker create` + `docker cp` pair
+  # build-worker.sh runs over ssh — one extraction, two callers.
+  refresh_phase "swap-extract"
+  SWAP_STAGE="$(mktemp -d)"
+  SWAP_CID=""
+  swap_cleanup() {
+    [ -z "$SWAP_CID" ] || docker rm -f "$SWAP_CID" > /dev/null 2>&1 || true
+    rm -rf "$SWAP_STAGE"
+  }
+  trap 'RC=$?; swap_cleanup; exit "$RC"' EXIT
+  SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
+  docker cp "$SWAP_CID:/usr/local/bin/chuggernaut" "$SWAP_STAGE/chuggernaut"
+  docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
+  docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/worker-refresh.sh" "$SWAP_STAGE/worker-refresh.sh"
+  docker rm "$SWAP_CID" > /dev/null
+  SWAP_CID=""
+  for f in chuggernaut chuggernaut-channel worker-refresh.sh; do
+    if [ ! -s "$SWAP_STAGE/$f" ]; then
+      echo "worker-refresh: '$f' came out of chuggernaut/worker:$TAG empty or not at all — refusing to install a daemon that cannot run; REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
+      exit 1
+    fi
+  done
+
+  # Installed by RENAME, and that is load-bearing twice over: writing over
+  # $DAEMON_BIN in place is ETXTBSY while the daemon is executing it, and
+  # truncating THIS SCRIPT under the shell that is reading it feeds the shell the
+  # tail of a different file. A rename swaps the directory entry and leaves both
+  # open inodes alone. The temp name sits beside the target so the rename stays
+  # within one filesystem. Each of the three writes escalates to `sudo -n` the
+  # way build-worker.sh's `chug_dir`/`chug_put` do, because /usr/local is root's
+  # and the daemon need not be; the pre-flight above has already established that
+  # one of the two arms can write here.
+  swap_install() {
+    _dir="$(dirname "$2")"
+    [ -d "$_dir" ] || mkdir -p "$_dir" 2> /dev/null || sudo -n mkdir -p "$_dir"
+    install -m 0755 "$1" "$2.chug-new" 2> /dev/null || sudo -n install -m 0755 "$1" "$2.chug-new"
+    mv -f "$2.chug-new" "$2" 2> /dev/null || sudo -n mv -f "$2.chug-new" "$2"
+  }
+  refresh_phase "swap-install"
+  swap_install "$SWAP_STAGE/chuggernaut" "$DAEMON_BIN"
+  swap_install "$SWAP_STAGE/chuggernaut-channel" "$CHANNEL_BIN"
+  swap_install "$SWAP_STAGE/worker-refresh.sh" "$REFRESH_SCRIPT"
+  echo "worker-refresh: installed $DAEMON_BIN, $CHANNEL_BIN and $REFRESH_SCRIPT from chuggernaut/worker:$TAG"
+
+  # The staging dir is dead the moment the three renames land, and it must go
+  # HERE rather than in the trap: the restart below kills this shell's cgroup,
+  # and POSIX sh runs no EXIT trap when it is killed by a signal (the same reason
+  # the build phase carries its own TERM handler). Left behind it is tens of MB
+  # of binaries per refresh on a node whose docker-disk headroom is the subject
+  # of the longest note in this file. The trap stays as the failure-path backstop.
+  swap_cleanup
+  # ── ask the supervisor to restart ────────────────────────────────────────────
+  # Said BEFORE the restart is requested, because after it there is no guarantee
+  # this process gets another scheduling quantum: the daemon is what relays these
+  # lines to the dispatcher, and the restart is what ends it.
   #
-  # It cannot ride back into the deploy job's output: the daemon that reports to
-  # the dispatcher is the very thing being replaced. That is why the node-side
-  # record has to survive at all.
-  SWAP_NAME="chug-worker-swap"
-  docker rm -f "$SWAP_NAME" >/dev/null 2>&1 || true
-
-  # sleep briefly so this RPC's reply flushes before the old daemon is removed.
-  # The inner `docker rm -f chug-worker` keeps its STDERR (only the removed-id
-  # echo is dropped): its failure — a docker socket that stopped answering, a
-  # container that will not die — is the first thing to know when the replacement
-  # never appears. Still non-fatal, exactly as before: the swap proceeds.
-  refresh_phase "swap-container"
-  docker run -d --name "$SWAP_NAME" \
-    -v /var/run/docker.sock:/var/run/docker.sock \
-    "$SWAP_IMAGE" \
-    sh -c "sleep 2; docker rm -f chug-worker >/dev/null || echo 'worker-refresh: docker rm -f chug-worker failed — continuing to start the replacement' >&2; $RUN_NEW"
-
-  echo "worker-refresh: swap scheduled -> chuggernaut/worker:$TAG on $NODE (RUST_LOG=$RUST_LOG_NEW; swapper transcript: docker logs $SWAP_NAME)"
+  # `--no-block` queues the job and returns instead of waiting on a restart that
+  # includes killing the caller (this shell is in the unit's cgroup). launchd's
+  # `kickstart -k` is the same act on the other platform and is what the macOS
+  # D3 proof exercised. Neither is a self-replacement problem the way `docker rm
+  # -f` of one's own container was: the supervisor performs both halves.
+  refresh_phase "swap-restart"
+  case "$SUPERVISOR" in
+    systemd)
+      echo "worker-refresh: swap -> chuggernaut/worker:$TAG on ${WORKER_NODE:-?}: asking systemd to restart $SWAP_UNIT; this daemon exits with it and Restart=always brings up the new binary (what follows is in 'journalctl -u ${SWAP_UNIT%.service}')"
+      systemctl restart --no-block "$SWAP_UNIT"
+      ;;
+    launchd)
+      echo "worker-refresh: swap -> chuggernaut/worker:$TAG on ${WORKER_NODE:-?}: asking launchd to restart $SWAP_AGENT_LABEL; this daemon exits with it and KeepAlive brings up the new binary (what follows is in the agent's StandardOutPath)"
+      launchctl kickstart -k "gui/$(id -u)/$SWAP_AGENT_LABEL"
+      ;;
+  esac
   ;;
 
 *)

@@ -19,7 +19,7 @@ device passthrough beats a host runtime) and not the normative text
 | Piece | Owned by | Where it lives |
 | --- | --- | --- |
 | the SDK, and a **stable path** to it | the node's NixOS config | `configuration.nix` — an `environment.etc` (or equivalent) entry pointing a fixed path such as `/etc/chug/android-sdk` at the current `androidsdk` output; §7 narrows this to a *direct* symlink once per-task GC roots are on |
-| `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`, the optional `WORKER_FLUTTER_DIR` and `WORKER_JDK_DIR` | `deploy/prod/build-worker.sh`, carried across every self-refresh by `deploy/prod/worker-refresh.sh` | the node's environment file, which its systemd unit or launchd agent hands the daemon |
+| `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`, the optional `WORKER_FLUTTER_DIR` and `WORKER_JDK_DIR` | `deploy/prod/build-worker.sh`; a self-refresh copies nothing forward, because the file is the declaration | the node's environment file, which its systemd unit or launchd agent hands the daemon |
 | **who** may use it | `WORKER_KVM_PROJECTS` — `owner/project` entries, comma-separated | the same environment file |
 
 The stable path is not a nicety. `/nix/store/3zr1pgw…-androidsdk/…` is
@@ -88,15 +88,15 @@ load-bearing, and the two ways to get it wrong are not symmetric:
 | the env var is dropped, the device survives | KVM turns off. Jobs still run, the node stays up. A quiet regression |
 | the device is dropped, the env var survives | **the node goes down** and stays down until someone recreates the daemon by hand |
 
-`worker-refresh.sh`'s swap is written around that asymmetry: it re-composes
-`docker run` from scratch, so it reads the device off the **live container's**
-`.HostConfig.Devices` — the same inspect-what-is-actually-running rule the keys
-and socket mounts follow — and **refuses the swap** if `WORKER_KVM` is *on* and
-no device can be carried forward. A node stuck on an old SHA is a deploy
-warning; a node that will not start is an outage. Both scripts trim and read the
-value exactly as the daemon does, so an explicit `WORKER_KVM=0` — a node with
-the setting and legitimately no device — swaps normally rather than being frozen
-on its current SHA.
+That asymmetry is what `worker-refresh.sh`'s swap used to be written around: it
+re-composed `docker run` from scratch, read the device off the **live
+container's** `.HostConfig.Devices`, and refused the swap when `WORKER_KVM` was
+on and no device could be carried forward. Since #440 slice 6 the swap installs
+a binary and restarts a unit, so there is no run spec to re-compose and no
+device to drop: a **native** daemon has the node's `/dev/kvm` because it has the
+node. The asymmetry itself survives one place over — `build-worker.sh` still
+refuses to recreate a container daemon that would come up without the device —
+and both scripts still trim and read `WORKER_KVM` exactly as the daemon does.
 
 ---
 
@@ -183,7 +183,8 @@ leaving a dead node behind.
 ## 5. Turning it off
 
 Recreate the daemon without `WORKER_KVM` (same command, that line dropped). The
-device goes with it, and the next self-refresh has nothing to carry forward.
+setting goes out of the node's environment file, so the next start reads a node
+with KVM off.
 Narrowing the grant instead of removing the capability is the smaller change:
 drop the project from `WORKER_KVM_PROJECTS` and no launch receives the device or
 the mounts, while the node keeps working.
@@ -196,7 +197,7 @@ the mounts, while the node keeps working.
 | --- | --- | --- |
 | the node vanishes from the fleet right after a KVM change, the supervisor shows the daemon restarting | the daemon is refusing to start. Its log (`journalctl -u chug-worker`, or `docker logs chug-worker` on an unconverted node) names the reason — almost always `WORKER_KVM names /dev/kvm, which this node does not have` | on a native daemon the node genuinely has no such device: remove `WORKER_KVM`. On a container daemon it is the env without `--device`: recreate it with `build-worker.sh` |
 | `build-worker: WORKER_KVM='…' is neither 1/0 nor an absolute device path` | the value would be rejected by the daemon's own parse, so the script refused before touching the live daemon | use `1`/`0` or an absolute device path |
-| `worker-refresh: WORKER_KVM='…' enables KVM but the live chug-worker has no device to carry forward` | the running daemon was created some other way — by hand, without `--device`. Only an *enabling* value gets here; `0`/`false`/`off` swaps normally | recreate it with `build-worker.sh`; the deploy leg carries this as a node warning, and the node stays up on its current SHA |
+| `worker-refresh: this daemon is running INSIDE a container …` on a KVM node's refresh leg | the node was never converted to a native daemon, and the swap no longer recreates a container (#440 slice 6) | convert it with `build-worker.sh` from the operator's laptop; the node stays up on its current SHA until then |
 | the daemon logs `WORKER_KVM is on but WORKER_KVM_PROJECTS is empty` | the capability is on and granted to nobody — fail-closed, working as intended | add the `owner/project` entry and recreate the daemon |
 | a job runs but the emulator reports no KVM | that project is not on the allow-list, so it gets neither the device nor the mounts | check `WORKER_KVM_PROJECTS` against the job's `JOB_PROJECT` (`owner/project`, exactly) |
 | the SDK is missing inside the container | the stable path does not resolve on the node | `readlink -f` it; the mount refuses a missing source rather than creating an empty directory, so the launch fails loudly |
@@ -220,7 +221,7 @@ node's nix daemon, held for exactly that task's lifetime.
 | Piece | Owned by | Where it lives |
 | --- | --- | --- |
 | the roots directory itself | `deploy/prod/build-worker.sh` (`mkdir -p`, then `sudo -n mkdir -p`) | a worker-writable host path, e.g. `/var/lib/chuggernaut/gcroots` |
-| the store, the profiles tree, the nix daemon socket and the toolchain path | the node itself — a native daemon reaches all four directly, and `build-worker.sh` only checks they are there. On a node still running the container daemon they are bind mounts `build-worker.sh` composed and `worker-refresh.sh` carries forward | the node's filesystem |
+| the store, the profiles tree, the nix daemon socket and the toolchain path | the node itself — a native daemon reaches all four directly, and `build-worker.sh` only checks they are there. On a node still running the container daemon they are bind mounts an operator composed, and its self-refresh refuses until the node is converted | the node's filesystem |
 | `WORKER_NIX_GCROOTS_DIR`, `WORKER_NIX_CLIENT`, `WORKER_NIX_DAEMON_SOCKET`, `WORKER_NIX_STORE_DIR`, `WORKER_NIX_REALISE_TIMEOUT_SECS` | `build-worker.sh` | the node's environment file |
 
 Add the roots dir to the §3 command and the rest follows:
@@ -232,12 +233,12 @@ WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
 
 A few things are worth knowing before you do:
 
-- **It is a node-down if a mount is dropped**, exactly like the device: the
-  daemon refuses to start without its roots dir, its client or the socket *in its
-  own view*, and `--restart=always` loops the refusal. Both scripts are written
-  around that — `build-worker.sh` refuses a deploy it cannot provision, and
-  `worker-refresh.sh` refuses a swap whose live container has no nix mount to
-  carry forward.
+- **It is a node-down if the daemon cannot see them**, exactly like the device:
+  it refuses to start without its roots dir, its client or the socket *in its own
+  view*, and the supervisor's `Restart=always` loops the refusal.
+  `build-worker.sh` is written around that and refuses a deploy it cannot
+  provision. A native daemon has nothing left to drop — it looks straight at the
+  node — so the swap has no such refusal since #440 slice 6.
 - **The client is a profiles path, deliberately.** `chug-worker` outlives many
   `nixos-rebuild`s and docker resolves a bind source host-side at create, so a
   client resolved into `/nix/store` is pinned to one generation and
@@ -304,7 +305,7 @@ a leak of disk, never of a job.
 | `WORKER_NIX_REALISE_TIMEOUT_SECS=… is over the ceiling` (daemon) or `is outside 1..45` (deploy) | the bound cannot fit inside the `launch` RPC | lower it to ≤45, and warm the toolchain with a scheduled job if that is not enough |
 | `build-worker: cannot provision WORKER_NIX_GCROOTS_DIR` | neither the login user nor `sudo -n` could create it; the live daemon was left running | create it by hand on the node, or unset the var |
 | `build-worker: … lacks the nix preconditions` | the node has no `/nix/store`, profiles tree or daemon socket | this node cannot hold roots — unset the var |
-| `worker-refresh: … has no mount at '<path>' to carry forward` | the running daemon was created some other way, without the nix mounts | recreate it with `build-worker.sh`; the node stays up on its current SHA |
+| `worker-refresh: this daemon is running INSIDE a container …` on a rooting node's refresh leg | the node was never converted to a native daemon, and the swap no longer recreates a container with the nix mounts (#440 slice 6) | convert it with `build-worker.sh`; the node stays up on its current SHA until then |
 | a launch fails naming `WORKER_NIX_REALISE_TIMEOUT_SECS` | the realise did not finish inside the node's bound | warm the toolchain (a scheduled job declaring it), or raise the bound at node creation, up to the 45s ceiling |
 
 ---

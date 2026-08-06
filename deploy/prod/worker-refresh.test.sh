@@ -1,11 +1,13 @@
 #!/bin/sh
 # Shell test for worker-refresh.sh — no Docker, no git server, no NATS.
 #
-# It drives worker-refresh.sh with fake `git` and `docker` on PATH that just log
-# their invocations, then asserts the build phase builds the three node images
-# and the swap phase schedules a DETACHED sibling that recreates chug-worker on
-# the new tag (spec §3.1). This locks the script's contract — the phase split,
-# the three images, the self-replace shape — without any real infrastructure.
+# It drives worker-refresh.sh with fake `git`, `docker` and supervisor commands
+# on PATH that just log their invocations, then asserts the build phase builds
+# the three node images and the swap phase EXTRACTS THE BINARY FROM THE IMAGE IT
+# JUST BUILT, INSTALLS IT AND ASKS THE SUPERVISOR TO RESTART (design #440 D6) —
+# with no detached process and no carry-forward of any kind. This locks the
+# script's contract — the phase split, the three images, the install-and-restart
+# shape and every refusal in front of it — without any real infrastructure.
 #
 # Run:  deploy/prod/worker-refresh.test.sh   (exits 0 iff all cases pass)
 set -eu
@@ -52,29 +54,23 @@ echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/vda1 104857600 0 \$(cat "$FREE_FILE") 50% /"
 EOF
 
-# Fake docker: log the full argv (so we can assert on `build -t <image>` and the
-# detached swapper's inner command), consume any piped stdin. `inspect` answers
-# with the real host bind Source the swap phase recovers instead of re-deriving
-# $HOME — keys under the node login user's home, socket at the usual path.
+# Fake docker: log the full argv (so we can assert on `build -t <image>` and on
+# the swap's `create`/`cp` extraction), consume any piped stdin.
 cat > "$BIN/docker" <<EOF
 #!/bin/sh
 cat >/dev/null 2>&1 || true
 echo "docker \$*" >> "$LOG"
 case "\$*" in
-  # The device carry-forward reads the LIVE container's .HostConfig.Devices.
-  # \$FAKE_KVM_DEVICES models a KVM-enabled node; empty (the default) is a fleet
-  # with no device, which is every node until an operator turns one on. Set it
-  # WITH the trailing space docker's \`{{range}}\` template really emits per
-  # device — command substitution strips newlines, not spaces, so a fixture
-  # without it would hide the double space the composed run actually carries.
-  inspect*HostConfig.Devices*) [ -z "\${FAKE_KVM_DEVICES:-}" ] || echo "\$FAKE_KVM_DEVICES" ;;
-  inspect*data/keys*)     echo "/home/worksalot/chuggernaut-worker/keys" ;;
-  inspect*docker.sock*)   echo "/var/run/docker.sock" ;;
-  # The nix mount carry-forward (design #373 P1) reads every mount of the LIVE
-  # container as \`Destination|Source|RW\`. \$FAKE_NIX_MOUNTS models a node with
-  # per-task GC roots on; empty (the default) is a node without them, which is
-  # every node until an operator turns them on.
-  inspect*Destination*)   [ -z "\${FAKE_NIX_MOUNTS:-}" ] || echo "\$FAKE_NIX_MOUNTS" ;;
+  # The swap extracts the daemon out of the image the build just made
+  # (design #440 D6): \`docker create\` hands back a container id and each
+  # \`docker cp\` materialises the file the script is about to install.
+  # \$FAKE_CP_EMPTY models an extraction that produced nothing — a stale or
+  # broken image — which must refuse before anything is installed.
+  create*) echo fakecid ;;
+  cp*)
+    shift
+    [ -n "\${FAKE_CP_EMPTY:-}" ] && : > "\$2" || echo "FAKE-BINARY" > "\$2"
+    ;;
   # Image-label read-back for the retag-swap guard: echo \$FAKE_LABEL (default
   # abc123, the requested SHA in the success cases) so the assert passes unless a
   # case forces a mismatch (the stale-image-label case).
@@ -118,7 +114,86 @@ echo "mkdir \$*" >> "$LOG"
 exec /bin/mkdir "\$@"
 EOF
 
-chmod +x "$BIN/git" "$BIN/docker" "$BIN/df" "$BIN/mkdir"
+# Fake systemctl: log the argv so the swap's two calls are assertable — the
+# is-active precondition (is this daemon the unit's, or would a restart start a
+# SECOND one) and the restart itself. $FAKE_UNIT_INACTIVE makes the node answer
+# "not mine". $FAKE_KILL_ON_RESTART makes the restart do to the caller what a
+# real `systemctl restart` does — kill the cgroup this shell is in — so a case
+# can assert what survives an exit that runs no EXIT trap.
+cat > "$BIN/systemctl" <<EOF
+#!/bin/sh
+echo "systemctl \$*" >> "$LOG"
+case "\$*" in
+  is-active*) [ -z "\${FAKE_UNIT_INACTIVE:-}" ] || exit 3 ;;
+  restart*)   [ -z "\${FAKE_KILL_ON_RESTART:-}" ] || kill -KILL "\$PPID" ;;
+esac
+exit 0
+EOF
+
+# The macOS half, kept in its OWN dir: a Linux case must not see `launchctl`,
+# and a "this node has no launchctl" case must be able to run with `uname`
+# saying Darwin and nothing to drive.
+MACBIN="$WORK/macbin"
+NOLCBIN="$WORK/nolcbin"
+mkdir -p "$MACBIN" "$NOLCBIN"
+for d in "$MACBIN" "$NOLCBIN"; do
+  cat > "$d/uname" <<'EOF'
+#!/bin/sh
+echo Darwin
+EOF
+  chmod +x "$d/uname"
+done
+cat > "$MACBIN/launchctl" <<EOF
+#!/bin/sh
+echo "launchctl \$*" >> "$LOG"
+case "\$*" in
+  print*) [ -z "\${FAKE_AGENT_MISSING:-}" ] || exit 113 ;;
+esac
+exit 0
+EOF
+chmod +x "$MACBIN/launchctl"
+
+# Fake install/mv: log the argv, then do the real thing. They exist so the
+# install-by-RENAME discipline is assertable — writing over the running daemon
+# binary in place is ETXTBSY, and truncating this very script under the shell
+# reading it feeds that shell the tail of a different file.
+REAL_INSTALL="$(command -v install)"
+REAL_MV="$(command -v mv)"
+cat > "$BIN/install" <<EOF
+#!/bin/sh
+echo "install \$*" >> "$LOG"
+exec "$REAL_INSTALL" "\$@"
+EOF
+cat > "$BIN/mv" <<EOF
+#!/bin/sh
+echo "mv \$*" >> "$LOG"
+exec "$REAL_MV" "\$@"
+EOF
+
+chmod +x "$BIN/git" "$BIN/docker" "$BIN/df" "$BIN/mkdir" "$BIN/systemctl" \
+  "$BIN/install" "$BIN/mv"
+
+# A path that does not exist, so the swap's "this daemon is itself a container"
+# marker reads FALSE. It has to be injectable: this test runs inside a container
+# on CI, where the real /.dockerenv is present and every native case would
+# refuse (design #440 slice 6).
+NOT_CONTAINER="$WORK/not-a-container"
+
+# Where a native swap installs the three artifacts it extracts. Under $WORK
+# rather than /usr/local so the test writes nothing outside its own temp dir.
+NATIVE="$WORK/native"
+mkdir -p "$NATIVE/bin" "$NATIVE/lib"
+DAEMON_BIN="$NATIVE/bin/chuggernaut"
+CHANNEL_BIN="$NATIVE/lib/chuggernaut-channel"
+NODE_SCRIPT="$NATIVE/lib/worker-refresh.sh"
+native_swap_reset() { rm -f "$DAEMON_BIN" "$CHANNEL_BIN" "$NODE_SCRIPT"; }
+
+# Where the swap's `mktemp -d` staging dir lands, so a case can assert the swap
+# removed it. Its own dir because "is it gone" is only decidable if nothing else
+# is in there.
+STAGE_TMP="$WORK/stage-tmp"
+mkdir -p "$STAGE_TMP"
+stage_tmp_empty() { [ -z "$(ls -A "$STAGE_TMP")" ]; }
 
 # Free space the fake df reports, in 1K blocks. Default ~57GB — comfortably over
 # the pre-flight threshold, so the pre-existing cases are unaffected.
@@ -132,6 +207,21 @@ KEY="$WORK/key"
 : > "$KEY"
 
 fail() { echo "FAIL: $1" >&2; exit 1; }
+
+# Runs the case that asserts a directory permission, which root bypasses — and
+# the CI gate's container is root. So when we are root the run under test drops
+# to `nobody` and the harness it reads is opened up to it; a non-root host needs
+# neither and $DROP stays empty.
+DROP=""
+if [ "$(id -u)" -eq 0 ]; then
+  command -v setpriv > /dev/null 2>&1 ||
+    fail "this suite needs 'setpriv' (util-linux) to run a case as an unprivileged user"
+  DROP="setpriv --reuid=65534 --regid=65534 --clear-groups"
+  chmod 0755 "$WORK" "$BIN" "$MACBIN" "$NOLCBIN"
+  : > "$LOG"
+  chmod 0666 "$LOG"
+fi
+
 grep_log() { grep -qF -- "$1" "$LOG" || fail "expected in log: $1"; }
 # Combined stdout+stderr of the run under test — the daemon streams exactly this
 # into the deploy leg, so the disk story is asserted on it.
@@ -391,427 +481,357 @@ grep_out "worker-refresh: phase build-image 3/3 agent-rust"
 unset FREE_KB_AFTER_PRUNE
 echo "ok: a failed build prunes what it stranded and reports the reclaim"
 
-# ── Case 3: swap schedules a detached sibling that recreates chug-worker ──────
+# ── Case 3: the swap installs the new binary and asks the supervisor to restart ─
+# Design #440 D6, and the whole of slice 6: a daemon that is a binary under a
+# unit is replaced by writing the binary and restarting the unit. The three
+# artifacts come OUT OF THE IMAGE the build phase just made (`docker create` +
+# `docker cp`), which is the same extraction build-worker.sh runs over ssh — one
+# definition of how the binary is produced, and no Rust toolchain as a node fact.
 : > "$LOG"
+native_swap_reset
 PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  sh "$SUT" swap prod
-
-# The swapper is detached (`run -d`) so `docker rm -f chug-worker` can't kill it,
-# and it recreates the daemon on the new tag.
-grep_log "docker run -d --name chug-worker-swap"
-grep_log "docker rm -f chug-worker"
-grep_log "chuggernaut/worker:prod"
-grep_log "WORKER_NODE=nuc"
-
-# The replacement must mount the REAL host keys source recovered from the live
-# container — NOT a $HOME-derived path. Re-deriving $HOME inside the swapper
-# (HOME=/root) would bind an empty dir and strand the daemon without NATS creds.
-grep_log "/home/worksalot/chuggernaut-worker/keys:/data/keys:ro"
-if grep -qF '$HOME' "$LOG"; then
-  fail "swap must not mount a \$HOME-derived keys path (strands creds in the swapper)"
-fi
-echo "ok: swap schedules a detached self-replace mounting the real keys source"
-
-# ── Case 3a: the swapper's transcript survives the swap (ticket #270) ──────────
-# The sibling that removes the live daemon and starts its replacement holds the
-# only account of the riskiest moment of a refresh. Under `--rm` a failed
-# `$RUN_NEW` was deleted seconds later, leaving a node with no daemon and no
-# reason (deploy #267). It must be NAMED and RETAINED — one per node, the previous
-# one force-removed first — and its inner `docker rm -f` must keep stderr.
-if grep -qF -- "--rm" "$LOG"; then
-  fail "the swapper must not run --rm (its transcript is the only record of a failed swap)"
-fi
-# Bounded retention: the prior swapper is removed by name before this one starts.
-grep_log "docker rm -f chug-worker-swap"
-# stdout of the inner rm is dropped (the id echo), stderr is NOT.
-if grep -F "sh -c" "$LOG" | grep -qF "rm -f chug-worker >/dev/null 2>&1"; then
-  fail "the swapper's docker rm -f must keep its stderr (2>&1 >/dev/null discards the cause)"
-fi
-# The deploy log says where the transcript is, so an operator does not have to
-# know the container's name by heart.
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
   sh "$SUT" swap prod > "$OUT" 2>&1
-grep_out "docker logs chug-worker-swap"
-echo "ok: swap retains its named swapper transcript and keeps the inner rm's stderr"
 
-# ── Case 3d: the replacement daemon gets a usable RUST_LOG (ticket #270) ───────
-# Without RUST_LOG the daemon's tracing default is ERROR, so every phase marker
-# and every relayed refresh line is filtered out and `docker logs chug-worker`
-# says nothing about a refresh — the silence the #267 post-mortem hit. Default to
-# info with noisy deps damped; an override on the live daemon is carried forward
-# (the #55/#82 silent-revert class of bug).
-grep_log "RUST_LOG=info,async_nats=warn"
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  RUST_LOG=debug \
-  sh "$SUT" swap prod
-grep_log "RUST_LOG=debug"
-if grep -qF "RUST_LOG=info" "$LOG"; then
-  fail "swap must carry the daemon's own RUST_LOG forward, not overwrite it"
+grep_log "docker create chuggernaut/worker:prod"
+grep_log "docker cp fakecid:/usr/local/bin/chuggernaut"
+grep_log "docker cp fakecid:/usr/local/lib/chuggernaut/chuggernaut-channel"
+grep_log "docker cp fakecid:/usr/local/lib/chuggernaut/worker-refresh.sh"
+grep_log "docker rm fakecid"
+for f in "$DAEMON_BIN" "$CHANNEL_BIN" "$NODE_SCRIPT"; do
+  [ -x "$f" ] || fail "the swap must install $f, executable"
+  [ -e "$f.chug-new" ] && fail "the swap must not leave $f.chug-new behind"
+done
+grep_log "systemctl restart --no-block chug-worker.service"
+echo "ok: the swap extracts the daemon from the image, installs it and restarts the unit"
+
+# ── Case 3a: there is NO detached process and NO container touched ────────────
+# What this deletes is the reason the old swap existed: a container cannot
+# replace itself, so the swap detached a `docker:cli` sibling that did
+# `docker rm -f chug-worker` + `docker run`. A supervisor restarting its own unit
+# has no such problem (#372 §8 R1 dissolves), so a `docker run` here would mean
+# the old shape survived — and a `docker rm -f` would mean the swap can still
+# take a container down, which is exactly what job containers are protected from.
+if grep -qF "docker run" "$LOG"; then
+  fail "the native swap must start no container at all (the detached swapper is gone)"
 fi
-echo "ok: swap gives the replacement daemon RUST_LOG=info by default, honouring an override"
+if grep -qF "chug-worker-swap" "$LOG"; then
+  fail "the detached swapper is deleted — nothing may name it"
+fi
+if grep -qF "rm -f chug-worker" "$LOG"; then
+  fail "the native swap must never remove the daemon container (job containers ride on that)"
+fi
+echo "ok: the native swap runs no detached process and removes no container"
 
-# ── Case 3b: swap carries WORKER_CACHE_DIR forward (env only, no daemon mount) ─
-# The refreshed daemon must inherit the node-local build cache config (#55/#82):
-# a refresh that dropped WORKER_CACHE_DIR would silently un-warm the cache. It is
-# passed as ENV only — the daemon binds the cache into sibling job containers via
-# the docker socket, so the daemon container needs no cache mount of its own.
+# ── Case 3b: NOTHING is carried forward, however much is set ──────────────────
+# Every `*_ARGS` block the old swap composed — the cache dir, the disk knobs,
+# WORKER_SLOTS, WORKER_MODES, the KVM settings, the nix settings, RUST_LOG —
+# existed because inheritance was how a value survived a container recreate.
+# With the run spec in an environment file the supervisor loads on every start,
+# a value survives because it is WRITTEN DOWN (design #440 D6/D7), and a swap
+# that still passed one would be re-declaring the node from a copy that can
+# drift. So: set them all, and assert none of them reaches any command.
 : > "$LOG"
+native_swap_reset
 PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
   WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache \
-  sh "$SUT" swap prod
-
-grep_log "WORKER_CACHE_DIR=/var/cache/chuggernaut/sccache"
-# ENV only: the replacement daemon must NOT bind the cache dir into itself.
-if grep -qF -- "-v /var/cache/chuggernaut/sccache:/var/cache/chuggernaut/sccache" "$LOG"; then
-  fail "swap must pass WORKER_CACHE_DIR as env only, not a daemon bind-mount"
-fi
-# Carried forward, never created. This phase runs INSIDE chug-worker, which does
-# not mount the cache path, so a `mkdir -p` here would land in the daemon
-# container's writable layer and never on the host — the same illusion the
-# daemon's own create_dir_all gives (#379). The host dir is provisioned at node
-# creation by build-worker.sh; a dir missing at swap time is something to fail
-# loudly on, not to re-create silently.
-# Catches both shapes: a direct `mkdir` (the fake logs one) and a `mkdir` smuggled
-# into the detached swapper's inner command (logged with the `docker run` argv).
-if grep -F "/var/cache/chuggernaut/sccache" "$LOG" | grep -qF "mkdir"; then
-  fail "the swap must not create the cache dir (it would land in the container, not on the host)"
-fi
-echo "ok: swap carries WORKER_CACHE_DIR forward as env, and creates no host dir"
-
-# ── Case 3c: swap carries the disk pre-flight knobs forward (deploy #248) ──────
-# Same class of silent-drop bug as WORKER_CACHE_DIR: a node tuned to a different
-# disk shape must keep that tuning across a self-refresh, or the very next
-# refresh reverts it to the built-in default and the operator's override is a
-# no-op. Unset ⇒ nothing passed, so a stock node keeps the documented constant.
-# The value deliberately differs from the built-in default, so a swap that
-# hardcoded the default instead of forwarding the operator's value still fails.
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
   WORKER_REFRESH_DISK_FREE_GB_MIN=45 \
   WORKER_REFRESH_DISK_PATH=/var/lib/docker \
-  sh "$SUT" swap prod
-
-grep_log "WORKER_REFRESH_DISK_FREE_GB_MIN=45"
-grep_log "WORKER_REFRESH_DISK_PATH=/var/lib/docker"
-
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  sh "$SUT" swap prod
-
-if grep -qF "WORKER_REFRESH_DISK_" "$LOG"; then
-  fail "swap must not pass a WORKER_REFRESH_DISK_ knob when unset (default applies)"
-fi
-echo "ok: swap carries the disk pre-flight knobs forward, and passes none when unset"
-
-# ── Case 3e: swap carries the node's capacity forward (WORKER_SLOTS) ───────────
-# The loudest member of the silent-revert class: the daemon announces its own slot
-# count and that announcement wins over the dispatcher's DOCKER_NODES seed (spec
-# §3.1), so a swap that dropped WORKER_SLOTS would put a node deliberately capped
-# at 2 back on the default 4 — more concurrent job containers than the node was
-# sized for, and nothing fleet-side to explain it. Unset ⇒ nothing passed.
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=air NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
   WORKER_SLOTS=2 \
-  sh "$SUT" swap prod
-
-grep_log "WORKER_SLOTS=2"
-
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  sh "$SUT" swap prod
-
-if grep -qF "WORKER_SLOTS" "$LOG"; then
-  fail "swap must not pass WORKER_SLOTS when unset (daemon default applies)"
-fi
-echo "ok: swap carries WORKER_SLOTS forward, and passes none when unset"
-
-# ── Case 3e2: swap carries the node's runtimes forward (WORKER_MODES) ─────────
-# Same silent-revert class, with the longest fuse in it: prod's nodes only ever
-# self-refresh (WORKER_SSH is unset for both, so build-worker.sh no-ops on every
-# deploy), so a knob this phase does not re-compose is gone at the next deploy
-# and only a hand-run build-worker.sh can put it back. Quoted so the spelling the
-# daemon accepts (`container, host` — it trims each entry) stays one argument;
-# unset ⇒ nothing passed, and the node keeps the container-only default.
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=air NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
   WORKER_MODES="container, host" \
-  sh "$SUT" swap prod
-
-grep_log "-e WORKER_MODES='container, host'"
-
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  sh "$SUT" swap prod
-
-if grep -qF "WORKER_MODES" "$LOG"; then
-  fail "swap must not pass WORKER_MODES when unset (daemon default applies)"
-fi
-echo "ok: swap carries WORKER_MODES forward, and passes none when unset"
-
-# ── Case 3f: KVM off ⇒ the swap carries neither the settings nor a device ─────
-# Every node in the fleet is here until an operator turns KVM on, so the
-# replacement daemon's run spec must be untouched by #367 existing.
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  sh "$SUT" swap prod
-
-if grep -qE "WORKER_KVM|WORKER_ANDROID_SDK_DIR|WORKER_FLUTTER_DIR|WORKER_JDK_DIR" "$LOG"; then
-  fail "swap must not pass a KVM setting when none is set (no passthrough)"
-fi
-# Scoped to the swapper's own command line: the device carry-forward READS
-# `.HostConfig.Devices` with a `--format` template that itself contains the flag,
-# so a whole-log grep would match the inspect that proves the node has none.
-if grep -F "chug-worker-swap" "$LOG" | grep -qF -- "--device"; then
-  fail "swap must not invent a device the live daemon is not running with"
-fi
-echo "ok: swap passes no KVM setting and no device when KVM is off"
-
-# ── Case 3g: KVM on ⇒ settings from the env, the DEVICE from the live container ─
-# The asymmetry that makes this dangerous: dropping a setting turns KVM off (a
-# quiet regression, the node stays up), but dropping the DEVICE while keeping
-# WORKER_KVM takes the NODE DOWN — the replacement daemon refuses to start on a
-# device its own view lacks (crates/worker/src/daemon.rs), --restart=always
-# restarts it into the same refusal, and the node leaves the fleet. The swap
-# re-composes `docker run` from scratch, so this is exactly where that happens.
-#
-# The live container is faked with a NON-default device, so a swap that
-# reconstructed `--device` from WORKER_KVM (which says the default path here)
-# rather than from what is actually running fails this case.
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  WORKER_KVM=1 \
-  WORKER_KVM_PROJECTS="acme/beacon, acme/api" \
+  WORKER_KVM=1 WORKER_KVM_PROJECTS="acme/beacon" \
   WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
-  FAKE_KVM_DEVICES="--device /dev/kvm1:/dev/kvm1:rwm " \
-  sh "$SUT" swap prod
+  WORKER_FLUTTER_DIR=/etc/chug/flutter WORKER_JDK_DIR=/etc/chug/jdk \
+  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
+  RUST_LOG=debug \
+  sh "$SUT" swap prod > "$OUT" 2>&1
 
-grep_log "-e WORKER_KVM='1'"
-grep_log "-e WORKER_KVM_PROJECTS='acme/beacon, acme/api'"
-grep_log "-e WORKER_ANDROID_SDK_DIR='/etc/chug/android-sdk'"
-grep_log "--device /dev/kvm1:/dev/kvm1:rwm"
-# The device must land as a `docker run` FLAG — after the image it would be the
-# container's command, and the daemon would never start. Asserted as ORDERING
-# rather than adjacency: the template's trailing space survives into the composed
-# run, so the two are separated by whitespace the swapper's shell collapses.
-case "$(grep -F chug-worker-swap "$LOG")" in
-  *"--device /dev/kvm1:/dev/kvm1:rwm"*"chuggernaut/worker:prod"*) ;;
-  *) fail "the device must precede the image (after it, it would be the container's command)" ;;
-esac
-echo "ok: swap carries the KVM settings forward and the device from the live container"
+if grep -qE "(-e |--device|-v )" "$LOG"; then
+  fail "the swap must compose no docker run spec at all (mounts, devices and -e are gone)"
+fi
+if grep -qE "WORKER_MODES|WORKER_KVM|WORKER_NIX|WORKER_SLOTS=|RUST_LOG" "$LOG"; then
+  fail "the swap must carry no environment forward — the environment file declares it"
+fi
+# The live daemon is never inspected either: there is no second copy of the run
+# spec to recover, so there is nothing to ask it.
+if grep -qF "docker inspect" "$LOG"; then
+  fail "the swap must not inspect the live daemon (nothing is recovered from it any more)"
+fi
+grep_log "systemctl restart --no-block chug-worker.service"
+echo "ok: the swap carries nothing forward and inspects nothing"
 
-# ── Case 3g1: the Flutter and JDK leaves ride forward too (#393, #397) ────────
-# A self-refresh that dropped one would silently un-provision it on a node whose
-# builds need it — the quiet-regression half of the asymmetry above, and for the
-# JDK it is exactly the JAVA_HOME failure #396 measured. The Android SDK must
-# come through unchanged beside them: three independent leaves.
+# ── Case 3c: installed by RENAME, never over the running file ─────────────────
+# Load-bearing twice: `install` straight onto $DAEMON_BIN is ETXTBSY while the
+# daemon is executing it, and straight onto the refresh script truncates the file
+# the running shell is reading by byte offset. A rename swaps the directory entry
+# and leaves both open inodes alone.
+grep_log "mv -f $DAEMON_BIN.chug-new $DAEMON_BIN"
+grep_log "mv -f $NODE_SCRIPT.chug-new $NODE_SCRIPT"
+if grep -F "install " "$LOG" | grep -qvE '\.chug-new$'; then
+  fail "install must target <path>.chug-new, never the live path itself (ETXTBSY / truncation)"
+fi
+echo "ok: the three artifacts are installed beside their targets and renamed over them"
+
+# ── Case 3d: an UN-CONVERTED node refuses, and says how to convert it ─────────
+# The fleet is mixed until an operator converts each node (design #440's slice
+# ordering), so a daemon that is still a container is an expected state, not a
+# broken one. It cannot be swapped natively — there is no unit here, and a binary
+# installed into a container's writable layer vanishes with it — so it refuses
+# with the live daemon untouched and names build-worker.sh. Nothing is extracted
+# and nothing is installed: the refusal is the FIRST thing the phase does.
 : > "$LOG"
+native_swap_reset
+MARKER="$WORK/dockerenv"
+: > "$MARKER"
+set +e
 PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  WORKER_KVM=1 \
-  WORKER_KVM_PROJECTS="acme/beacon" \
-  WORKER_ANDROID_SDK_DIR=/var/lib/chuggernaut/toolchain/android-sdk \
-  WORKER_FLUTTER_DIR=/var/lib/chuggernaut/toolchain/flutter \
-  WORKER_JDK_DIR=/var/lib/chuggernaut/toolchain/jdk \
-  FAKE_KVM_DEVICES="--device /dev/kvm:/dev/kvm:rwm " \
-  sh "$SUT" swap prod
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$MARKER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a node still running the containerized daemon must refuse the swap"
+grep_out "REFUSING swap"
+grep_out "deploy/prod/build-worker.sh"
+[ -e "$DAEMON_BIN" ] && fail "a refused swap must install nothing"
+if grep -qE "docker (create|cp|run|rm)" "$LOG"; then
+  fail "the un-converted refusal must come before any docker mutation"
+fi
+if grep -qF "systemctl" "$LOG"; then
+  fail "a container node has no unit to restart"
+fi
+echo "ok: an un-converted node refuses the swap and names the conversion"
 
-grep_log "-e WORKER_ANDROID_SDK_DIR='/var/lib/chuggernaut/toolchain/android-sdk'"
-grep_log "-e WORKER_FLUTTER_DIR='/var/lib/chuggernaut/toolchain/flutter'"
-grep_log "-e WORKER_JDK_DIR='/var/lib/chuggernaut/toolchain/jdk'"
-echo "ok: swap carries the Flutter and JDK leaves forward beside the unchanged Android SDK"
-
-# ── Case 3h: WORKER_KVM set, no device on the live container ⇒ REFUSE the swap ─
-# The node-down mode, made impossible: rather than launch a replacement that
-# cannot boot, refuse. The node keeps running its current daemon (an old SHA is a
-# deploy warning; a node that will not start is an outage).
+# ── Case 3e: a unit that is not active refuses (never TWO daemons) ────────────
+# `systemctl restart` on a unit this process does not belong to would start a
+# second daemon beside the running one — one machine as two fleet rows, with
+# nothing summing their slots (design #440 §1, #372 §8 R2). Refuse instead, with
+# the live daemon serving and nothing installed.
 : > "$LOG"
-if PATH="$BIN:$PATH" \
-     WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-     WORKER_KVM=1 \
-     sh "$SUT" swap prod > "$OUT" 2>&1; then
-  fail "a KVM daemon whose device cannot be carried forward must refuse the swap"
+native_swap_reset
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  FAKE_UNIT_INACTIVE=1 \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an inactive unit must refuse the swap (a restart would double the daemon)"
+grep_out "REFUSING swap"
+[ -e "$DAEMON_BIN" ] && fail "a refused swap must install nothing"
+if grep -qF "systemctl restart" "$LOG"; then
+  fail "the refusal must come before the restart"
 fi
-grep_out "refusing swap"
-if grep -qF "docker run -d --name chug-worker-swap" "$LOG"; then
-  fail "the refusal must happen BEFORE the swapper is scheduled (the live daemon keeps running)"
-fi
-echo "ok: a device that cannot be carried forward refuses the swap instead of downing the node"
+echo "ok: a daemon that is not the unit's refuses rather than starting a second one"
 
-# ── Case 3i: WORKER_KVM is OFF ⇒ no device is expected, so the swap PROCEEDS ───
-# The other side of 3h, and the one that bites: build-worker.sh composes an
-# explicitly-off node as `-e WORKER_KVM='0'` with NO device (build-worker.test.sh
-# case 2g), and the daemon reads 0/false/off as no passthrough at all. Refusing
-# that node's swap would freeze it on its old SHA forever for a node-down hazard
-# that cannot happen — so the refusal must key off the values that attach a
-# device, not off the var being set. The trailing/leading spaces ride along
-# because the daemon trims before it matches (`parse_kvm_device`) and the swap
-# must read the value the same way rather than seeing ` off ` as "on".
-for KVM_OFF_VALUE in 0 false " off "; do
-  : > "$LOG"
-  PATH="$BIN:$PATH" \
-    WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-    WORKER_KVM="$KVM_OFF_VALUE" \
-    sh "$SUT" swap prod > "$OUT" 2>&1 \
-    || fail "WORKER_KVM='$KVM_OFF_VALUE' is off — the swap must proceed, not refuse"
-  grep_log "docker run -d --name chug-worker-swap"
-  if grep -F "chug-worker-swap" "$LOG" | grep -qF -- "--device"; then
-    fail "WORKER_KVM='$KVM_OFF_VALUE' is off — no device may be carried forward"
-  fi
+# ── Case 3f: an extraction that produced nothing refuses before installing ────
+# A stale or broken image would otherwise put a zero-byte file where the daemon
+# binary goes, and the supervisor would restart the node into an exec failure it
+# loops on — the node-down hazard every refusal in this file exists for.
+: > "$LOG"
+native_swap_reset
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  FAKE_CP_EMPTY=1 \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an empty extraction must refuse the swap"
+grep_out "REFUSING swap"
+[ -e "$DAEMON_BIN" ] && fail "an empty extraction must install nothing"
+if grep -qF "systemctl restart" "$LOG"; then
+  fail "the refusal must come before the restart"
+fi
+echo "ok: an empty extraction refuses instead of installing a daemon that cannot run"
+
+# ── Case 3g: macOS asks launchd, with the same shape ──────────────────────────
+# The other supervisor (design #440 D2): a GUI-domain agent, restarted with the
+# `launchctl kickstart -k` the macOS D3 proof exercised firsthand
+# (docs/reference/runbooks/macos-host-supervision-proof.md).
+: > "$LOG"
+native_swap_reset
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+
+grep_log "launchctl print gui/$(id -u)/com.chuggernaut.worker"
+grep_log "launchctl kickstart -k gui/$(id -u)/com.chuggernaut.worker"
+[ -x "$DAEMON_BIN" ] || fail "the macOS swap installs the same three artifacts"
+if grep -qF "systemctl" "$LOG"; then
+  fail "a Darwin node must not be asked to drive systemd"
+fi
+echo "ok: a macOS node installs and kickstarts its launchd agent"
+
+# ── Case 3h: no supervisor to drive ⇒ refuse, install nothing ─────────────────
+# A node whose daemon cannot reach its own supervisor cannot be restarted, so
+# installing the binary would leave a node running an old daemon over a new one
+# on disk with nothing to say so. Exercised on the launchd side because "no
+# launchctl" is decidable on any Linux test host.
+: > "$LOG"
+native_swap_reset
+set +e
+PATH="$NOLCBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a node with no launchctl must refuse the swap"
+grep_out "REFUSING swap"
+[ -e "$DAEMON_BIN" ] && fail "a refused swap must install nothing"
+echo "ok: a node that cannot reach its supervisor refuses before installing anything"
+
+# ── Case 3i: an install path this node cannot write refuses before extracting ──
+# /usr/local is root's on BOTH platforms, and on macOS the daemon is a GUI-domain
+# agent running as the login user — so "the daemon cannot write where it must
+# install" is a real node, not a hypothetical. Without the pre-flight it surfaces
+# as a bare EACCES from half-way through the install, on a node whose images the
+# build phase has already retag-swapped. Run as an unprivileged user because root
+# bypasses every mode bit.
+: > "$LOG"
+chmod 0666 "$LOG"
+UNWRITABLE="$WORK/root-only"
+mkdir -p "$UNWRITABLE"
+chmod 0555 "$UNWRITABLE"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$UNWRITABLE/chuggernaut" \
+  WORKER_CHANNEL_BINARY="$UNWRITABLE/chuggernaut-channel" \
+  WORKER_REFRESH_SCRIPT="$UNWRITABLE/worker-refresh.sh" \
+  $DROP sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an install path the daemon cannot write must refuse the swap"
+grep_out "REFUSING swap"
+grep_out "$UNWRITABLE"
+[ -z "$(ls -A "$UNWRITABLE")" ] || fail "a refused swap must install nothing"
+if grep -qE "docker (create|cp|rm)" "$LOG"; then
+  fail "the unwritable-path refusal must come before any extraction"
+fi
+if grep -qF "systemctl restart" "$LOG"; then
+  fail "the refusal must come before the restart"
+fi
+echo "ok: an install path the daemon cannot write refuses before anything is extracted"
+
+# ── Case 3j: an install that needs privilege escalates, as build-worker.sh does ─
+# The binaries go to /usr/local, which is root's, and the daemon need not be — so
+# each write is "unprivileged first, `sudo -n` as the fallback", the same shape
+# `chug_dir`/`chug_put` use over ssh. Modelled with an `install` that fails
+# unless it came through `sudo`, which is what EACCES looks like from here.
+: > "$LOG"
+native_swap_reset
+SUDOBIN="$WORK/sudobin"
+mkdir -p "$SUDOBIN"
+cat > "$SUDOBIN/install" <<EOF
+#!/bin/sh
+echo "install \$*" >> "$LOG"
+[ -n "\${CHUG_VIA_SUDO:-}" ] || exit 1
+exec "$REAL_INSTALL" "\$@"
+EOF
+cat > "$SUDOBIN/sudo" <<EOF
+#!/bin/sh
+echo "sudo \$*" >> "$LOG"
+if [ "\$1" = "-n" ]; then shift; fi
+export CHUG_VIA_SUDO=1
+exec "\$@"
+EOF
+chmod +x "$SUDOBIN/install" "$SUDOBIN/sudo"
+set +e
+PATH="$SUDOBIN:$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "a denied plain write must escalate to 'sudo -n', not fail the swap"
+grep_log "sudo -n install -m 0755"
+for f in "$DAEMON_BIN" "$CHANNEL_BIN" "$NODE_SCRIPT"; do
+  [ -x "$f" ] || fail "the swap must install $f through sudo when the plain write is denied"
 done
-# The setting still rides, trimmed exactly as the daemon would trim it, so the
-# replacement daemon reads the same off as the one it replaces.
-grep_log "-e WORKER_KVM='off'"
-echo "ok: an explicitly-off WORKER_KVM swaps normally and carries the trimmed setting"
+grep_log "systemctl restart --no-block chug-worker.service"
+echo "ok: an install the daemon's own user cannot do escalates to 'sudo -n' rather than dying"
 
-# ── Case 3i: nix roots on ⇒ settings from the env, MOUNTS from the live node ──
-# design #373 P1, and the same asymmetry as the KVM device one case up: dropping
-# a nix SETTING turns roots off (quiet), dropping a nix MOUNT takes the node DOWN
-# — the replacement daemon refuses to start without its roots dir, its client or
-# the socket in its own view (crates/worker/src/nix.rs) and --restart=always
-# loops the refusal. The fixture uses a NON-default profiles path resolved
-# through /mnt (gumbo-nuc-0's real shape), so a swap that reconstructed the
-# mounts from a hardcoded path instead of reading the live container still fails.
+# ── Case 3k: the staging dir is gone before the restart, not by the EXIT trap ──
+# `systemctl restart` kills the cgroup this shell is in, and POSIX sh runs no
+# EXIT trap when it is killed by a signal — so a staging dir left to the trap is
+# tens of MB of binaries stranded on every successful refresh, on a node whose
+# docker-disk headroom is the thing this script exists to defend. The fake
+# systemctl does to the caller what the real one does.
 : > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
-  WORKER_NIX_REALISE_TIMEOUT_SECS=40 \
-  FAKE_NIX_MOUNTS="/nix/store|/mnt/nix/store|false /nix/var/nix/profiles|/mnt/nix/var/nix/profiles|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true /var/lib/chuggernaut/gcroots|/var/lib/chuggernaut/gcroots|true" \
-  sh "$SUT" swap prod
-
-grep_log "-e WORKER_NIX_GCROOTS_DIR='/var/lib/chuggernaut/gcroots'"
-grep_log "-e WORKER_NIX_REALISE_TIMEOUT_SECS='40'"
-grep_log "-v /mnt/nix/store:/nix/store:ro"
-grep_log "-v /mnt/nix/var/nix/profiles:/nix/var/nix/profiles:ro"
-grep_log "-v /nix/var/nix/daemon-socket:/nix/var/nix/daemon-socket"
-grep_log "-v /var/lib/chuggernaut/gcroots:/var/lib/chuggernaut/gcroots"
-# Each mount keeps the live container's own read-only bit: a socket mounted :ro
-# fails every realise (connecting needs write on the inode), and a store mounted
-# writable would hand a task the node's whole store to edit.
-if grep -qF -- "-v /nix/var/nix/daemon-socket:/nix/var/nix/daemon-socket:ro" "$LOG"; then
-  fail "the daemon socket must stay read-write across a swap"
-fi
-if grep -qF -- "-v /var/lib/chuggernaut/gcroots:/var/lib/chuggernaut/gcroots:ro" "$LOG"; then
-  fail "the roots dir must stay writable across a swap"
-fi
-# The swap must not create the roots dir: it runs INSIDE chug-worker, so a mkdir
-# here lands in the daemon container's filesystem and never on the host (#379/#380).
-if grep -F "/var/lib/chuggernaut/gcroots" "$LOG" | grep -qF "mkdir"; then
-  fail "the swap must not create the gcroots dir (it would land in the container)"
-fi
-echo "ok: swap carries the nix settings forward and the four mounts from the live container"
-
-# ── Case 3j: a nix mount that cannot be carried forward REFUSES the swap ──────
-# The node-down case: WORKER_NIX_GCROOTS_DIR says roots are on, but the live
-# container has no roots mount to carry, so the replacement could only come up
-# refusing to boot. Refuse the swap instead and leave the old daemon serving.
-: > "$LOG"
+native_swap_reset
+rm -rf "$STAGE_TMP"
+mkdir -p "$STAGE_TMP"
 set +e
 PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
-  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true" \
-  sh "$SUT" swap prod >"$WORK/nixswap.out" 2>&1
-rc=$?
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  TMPDIR="$STAGE_TMP" \
+  FAKE_KILL_ON_RESTART=1 \
+  sh "$SUT" swap prod > "$OUT" 2>&1
 set -e
-[ "$rc" -ne 0 ] || fail "a missing nix mount must refuse the swap (got rc=0)"
-grep -qF "/var/lib/chuggernaut/gcroots" "$WORK/nixswap.out" || fail "the refusal must name the missing mount"
-if grep -qF "docker run -d --name chug-worker-swap" "$LOG"; then
-  fail "a missing nix mount must not schedule the swapper (the live daemon keeps serving)"
-fi
-echo "ok: a nix mount that cannot be carried forward refuses the swap instead of downing the node"
-
-# ── Case 3l: roots + a KVM device ⇒ the toolchain's PARENT is carried forward ──
-# The fifth mount, and its destination is the DIRECTORY HOLDING the stable path
-# — binding that path itself would resolve the operator's symlink host-side and
-# hand the client a non-store path it refuses. Dropping the mount on a swap does
-# not turn roots off: it makes every admitted launch on the node fail, and the
-# replacement's own boot check refuses to start at all. Carried by destination
-# like the rest, with its read-only bit, and refused when it is not there.
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
-  WORKER_KVM=1 WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
-  FAKE_KVM_DEVICES="--device /dev/kvm:/dev/kvm:rwm" \
-  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true /var/lib/chuggernaut/gcroots|/var/lib/chuggernaut/gcroots|true /etc/chug|/etc/chug|false" \
-  sh "$SUT" swap prod
-
-grep_log "-v /etc/chug:/etc/chug:ro"
-
-: > "$LOG"
-set +e
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
-  WORKER_KVM=1 WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
-  FAKE_KVM_DEVICES="--device /dev/kvm:/dev/kvm:rwm" \
-  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true /var/lib/chuggernaut/gcroots|/var/lib/chuggernaut/gcroots|true" \
-  sh "$SUT" swap prod >"$WORK/nixsdk.out" 2>&1
-rc=$?
-set -e
-[ "$rc" -ne 0 ] || fail "a missing toolchain mount must refuse the swap (got rc=0)"
-grep -qF "no mount at '/etc/chug'" "$WORK/nixsdk.out" || fail "the refusal must name the missing mount"
-if grep -qF "docker run -d --name chug-worker-swap" "$LOG"; then
-  fail "a missing toolchain mount must not schedule the swapper"
-fi
-
-# A node with roots on and NO device realises nothing, so no toolchain mount is
-# expected and its absence must NOT refuse the swap.
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  WORKER_NIX_GCROOTS_DIR=/var/lib/chuggernaut/gcroots \
-  WORKER_KVM=0 WORKER_ANDROID_SDK_DIR=/etc/chug/android-sdk \
-  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false /nix/var/nix/daemon-socket|/nix/var/nix/daemon-socket|true /var/lib/chuggernaut/gcroots|/var/lib/chuggernaut/gcroots|true" \
-  sh "$SUT" swap prod
-grep_log "docker run -d --name chug-worker-swap"
-echo "ok: swap carries the toolchain mount forward with the device, and refuses when it is gone"
-
-# ── Case 3k: nix roots off ⇒ the swap is nix-free ─────────────────────────────
-: > "$LOG"
-PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
-  FAKE_NIX_MOUNTS="/nix/store|/nix/store|false" \
-  sh "$SUT" swap prod
-
-if grep -F "chug-worker-swap" "$LOG" | grep -qE "WORKER_NIX|/nix/store"; then
-  fail "a node with roots off must get no nix env and no nix mount"
-fi
-echo "ok: swap adds nothing nix when WORKER_NIX_GCROOTS_DIR is unset"
+[ -x "$DAEMON_BIN" ] || fail "the swap must still have installed the daemon"
+grep_log "systemctl restart --no-block chug-worker.service"
+stage_tmp_empty || fail "the swap must remove its staging dir before asking for the restart"
+echo "ok: the staging dir is reclaimed before the restart, which no EXIT trap survives"
 
 # ── Case 3m: every phase REPORTS the run spec it is running (ticket #390) ─────
-# This script's config is INHERITED from the daemon's own environment, which is
-# the only mechanism it can have — the swap runs inside chug-worker and the
-# dispatcher host cannot ssh a tagged worker, so nothing here can read
-# chuggernaut.env. Inheritance is how a value survives; it is not how a value is
-# DECLARED, and #390 found four settings living only inside the container. The
-# node therefore states its own spec on stdout, which the daemon relays into the
-# deploy's task output — that report IS the drift check for a node the Mini
-# cannot reach, and it costs no UI and no new mechanism.
+# This script's config is INHERITED from the daemon's own environment, which
+# since design #440 D6 is the node's environment file loaded by the supervisor —
+# so it is a DECLARATION now, not a value circulating from one container
+# generation to the next. The report stays because the node is still the only
+# thing that can say what it is running, and the dispatcher host cannot ssh a
+# tagged worker: the daemon relays these lines into the deploy's task output.
 : > "$LOG"
+native_swap_reset
 PATH="$BIN:$PATH" \
-  WORKER_NODE=air NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_NODE=air \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
   WORKER_SLOTS=2 \
   WORKER_CACHE_DIR=/Users/op/chuggernaut-worker/sccache \
   WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
-  WORKER_GIT_KEY=/data/keys/worker_git \
+  WORKER_GIT_KEY=/etc/chuggernaut/keys/worker_git \
   sh "$SUT" swap prod > "$OUT" 2>&1
 
-grep_out "run spec on air (swap): WORKER_SLOTS=2 WORKER_CACHE_DIR=/Users/op/chuggernaut-worker/sccache WORKER_REFRESH_GIT_URL=ssh://git@front:2222/acme/chug.git WORKER_GIT_KEY=/data/keys/worker_git"
+grep_out "run spec on air (swap): WORKER_SLOTS=2 WORKER_CACHE_DIR=/Users/op/chuggernaut-worker/sccache WORKER_REFRESH_GIT_URL=ssh://git@front:2222/acme/chug.git WORKER_GIT_KEY=/etc/chuggernaut/keys/worker_git"
 if grep -qF "WARNING" "$OUT"; then
   fail "a fully specified node must report its spec without warning about it"
 fi
@@ -831,8 +851,14 @@ echo "ok: both phases report the run spec the node is actually running"
 # Their absence looks exactly like a healthy node: caching off is a slow node
 # (#55's dormant cache, which took a dedicated fix to notice), and a dropped
 # capacity is an over-committed one. Nothing else reports either.
+: > "$LOG"
+native_swap_reset
 PATH="$BIN:$PATH" \
-  WORKER_NODE=nuc NATS_URL=nats://10.0.0.1:4222 NATS_CREDS=/data/keys/worker.creds \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
   sh "$SUT" swap prod > "$OUT" 2>&1
 
 grep_out "WARNING: WORKER_CACHE_DIR is unset"
@@ -840,8 +866,35 @@ grep_out "WARNING: WORKER_SLOTS is unset"
 grep_out "run spec on nuc (swap): WORKER_SLOTS=<unset> WORKER_CACHE_DIR=<unset>"
 # Reporting is all it does: a node missing a value must still swap, or a deploy
 # would leave it stranded on the old SHA over a line of config.
-grep_log "docker run -d --name chug-worker-swap"
+grep_log "systemctl restart --no-block chug-worker.service"
 echo "ok: an unset cache dir or capacity is named out loud, and still swaps"
+
+# ── Case 3o: the swap ANNOUNCES its phases, like every other long step ────────
+# The marker prefix is a contract with the daemon (`REFRESH_PHASE_MARKER` in
+# crates/worker/src/daemon.rs), which relays the current phase into the deploy's
+# task output. The swap is the moment a node is most likely to break, and the
+# restart is the last thing that happens before the daemon reporting it dies —
+# so each step is announced BEFORE it runs.
+: > "$LOG"
+native_swap_reset
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+grep_out "worker-refresh: phase swap-extract"
+grep_out "worker-refresh: phase swap-install"
+grep_out "worker-refresh: phase swap-restart"
+# The line that tells an operator where the rest of the story is must be printed
+# BEFORE the restart request: after it, this process has no guaranteed quantum.
+case "$(tr '\n' '|' < "$OUT")" in
+  *"asking systemd to restart chug-worker.service"*) ;;
+  *) fail "the swap must say what it is about to ask the supervisor for" ;;
+esac
+grep_out "journalctl -u chug-worker"
+echo "ok: the swap announces extract, install and restart before each runs"
 
 # ── Case 4: unknown phase is a hard error ────────────────────────────────────
 if PATH="$BIN:$PATH" sh "$SUT" frobnicate 2>/dev/null; then

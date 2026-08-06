@@ -107,13 +107,14 @@ removed in the same step. **Safe mid-job:** job containers are siblings on the
 node's docker socket, so they survive and the dispatcher's poll-based wait
 re-attaches (`docs/spec.md` §3.1).
 
-**Converting a node takes it off the self-refresh path until #440 slice 6.**
-`worker-refresh.sh`'s swap still recreates a container from the live one's
-mounts, so on a converted node it refuses (`no /data/keys mount on chug-worker;
-refusing swap (would strand creds)`) and the node stops updating itself — a
-deploy's refresh leg fails there rather than silently skipping. The script says
-so on every run that converts one. Redeploy that node over ssh with §1b until
-slice 6 lands.
+**Converting a node is what puts it BACK on the self-refresh path.** Since #440
+slice 6 the swap installs the daemon binary out of the image the build phase
+just made and asks the supervisor to restart, so a converted node updates
+itself again. The refusal moved to the other side: a node **nobody has
+converted** — one still running the `chug-worker` container — refuses its own
+swap (`this daemon is running INSIDE a container … REFUSING swap`) and its
+deploy leg fails rather than silently skipping, so redeploy that node over ssh
+with §1b until you convert it.
 
 ```sh
 WORKER_SSH=worksalot@gumbo-nuc-0 \
@@ -203,13 +204,15 @@ docker run -d --restart=always --name chug-worker \
 Three env details are load-bearing:
 
 - **`RUST_LOG`.** Omit it and the daemon logs **nothing**: the binary filters on
-  `RUST_LOG` and its default directive is `error`, so `docker logs chug-worker`
-  shows no "worker up", no refresh phase markers, and none of the relayed
+  `RUST_LOG` and its default directive is `error`, so the daemon's log shows no
+  "worker up", no refresh phase markers, and none of the relayed
   `worker-refresh.sh` output — the silence that made deploy #267 a live
   post-mortem across three hosts (#270). `info` is where those lines are;
   `async_nats=warn` keeps a reconnect storm from drowning them. `build-worker.sh`
-  and the self-refresh swap both set this default now, so a daemon you start by
-  hand is the only way back to a silent node.
+  writes this default into the node's environment file, which the supervisor
+  hands the daemon on every start — a self-refresh does not re-apply it and does
+  not have to — so a daemon you start by hand is the only way back to a silent
+  node.
 
 - **`WORKER_CACHE_DIR` + sccache.** This is passed to the **daemon as env
   only** — there is **no sccache mount on the daemon itself**. The daemon reads

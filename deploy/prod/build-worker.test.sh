@@ -1077,9 +1077,10 @@ echo "ok: WORKER_KEYS_DIR_<node> moves the credential directory and the guard wi
 # converts. The live container's own environment names /data/keys — a path that
 # only ever existed inside it — and reading that back must neither refuse nor
 # drop anything: the drift guard reports the two paths that moved and proceeds,
-# and the container is removed in the same install. worker-refresh.sh is
-# untouched by this slice, so an UNCONVERTED node self-refreshes exactly as it
-# did (design #440 slice 6 owns that half).
+# and the container is removed in the same install. This run is also what
+# RESTORES the node's self-refresh: since design #440 slice 6 the swap installs
+# a binary and restarts a unit, so an unconverted node's own swap refuses
+# (deploy/prod/worker-refresh.test.sh) and conversion is what ends that.
 : > "$LOG"
 PATH="$BIN:$PATH" \
   WORKER_SSH=worksalot@nuc \

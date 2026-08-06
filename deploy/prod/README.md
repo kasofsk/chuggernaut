@@ -575,13 +575,14 @@ macOS — over an environment file that carries the whole run spec (design
 [#440](../../docs/design/440-native-worker-daemon.md) D2). `build-worker.sh`
 installs all three, extracting the binary from the worker image it just built;
 job containers stay siblings on the node's docker socket, exactly as they were
-when the daemon was itself a container. **A converted node cannot self-refresh
-yet:** `worker-refresh.sh`'s swap still recreates a *container*, so it refuses
-(`no /data/keys mount on chug-worker; refusing swap (would strand creds)`)
-before composing anything — a loud stop, never a second daemon on one node
-name — until [#440](../../docs/design/440-native-worker-daemon.md) slice 6
-lands. `build-worker.sh` says so as it converts; deploy such a node over ssh
-with that script meanwhile. Launches are
+when the daemon was itself a container. **Converting a node is what puts it back
+on the self-refresh path:** since
+[#440](../../docs/design/440-native-worker-daemon.md) slice 6 the swap installs
+the daemon binary out of the image the build phase just made and asks the
+supervisor to restart, so a converted node updates itself again. A node nobody
+has converted refuses its own swap (`this daemon is running INSIDE a container …
+REFUSING swap`) and is deployed over ssh with `build-worker.sh` until it is —
+a loud stop, never a second daemon on one node name. Launches are
 small NATS messages; static artifacts (the channel binary, agent images) are
 built on the node at deploy time, and the daemon injects its own channel-binary
 copy into job containers. An unreachable worker is *out of service* (placement
@@ -688,9 +689,11 @@ quietly stops updating.
 Do it **before** the run that converts the node, not after: the deploy refuses
 until it is done, and until the home copy is gone the node has the old boundary
 with the new layout. A node still running the **containerized** daemon is
-unaffected by any of this until it is converted — `worker-refresh.sh`'s swap
-still binds whatever `docker inspect` reports, so a mixed fleet keeps working
-(#440 slice 6 collapses that swap).
+unaffected by the credential move until it is converted, but since #440 slice 6
+its self-refresh **refuses** (`this daemon is running INSIDE a container …
+REFUSING swap`) — the live daemon and its job containers are untouched and the
+node stays on the SHA it has, so deploy it over ssh with `build-worker.sh` until
+you convert it.
 
 **The run spec is declared, not inherited.**
 
@@ -700,10 +703,12 @@ holds only [`env.example`](env.example) — editing that changes nothing on any
 node. Everything a `chug-worker` daemon runs with is composed from that file by
 `build-worker.sh` at node (re)creation and written to the node's own environment
 file (`/etc/chuggernaut/worker.env` on Linux, `~/chuggernaut-worker/worker.env`
-on macOS); `worker-refresh.sh`'s swap then carries the daemon's environment
-forward across self-refreshes. Inheritance is how a
-value *survives*, not how it is *declared* — a setting that lives only in the
-daemon's own environment is gone the moment the node is recreated without it,
+on macOS); the supervisor hands the daemon that file on every start, so a value
+survives a self-refresh because it is **declared there**, not because the swap
+copies it forward (#440 D6/D7). Being written down is how a
+value *survives*, and this file is the only place it is *declared* — a setting
+that lives only in the daemon's own environment is gone the moment the node is
+recreated without it,
 and each of these fails quietly: `WORKER_CACHE_DIR` ⇒ caching off,
 `WORKER_SLOTS` ⇒ the node boots at the daemon's default of 4,
 `WORKER_REFRESH_GIT_URL` / `WORKER_GIT_KEY` ⇒ the node keeps serving jobs and
@@ -838,13 +843,14 @@ Notes:
   on the daemon at (re)creation like `WORKER_SLOTS`. A natively supervised
   daemon needs no `--device` alongside them: its own view of the node is the
   node's, so it sees `/dev/kvm` if the node has one and refuses to start if it
-  does not. On a node still running the container daemon the device is
-  load-bearing, and the self-refresh swap carries it forward from the live
-  container, refusing rather than replace a KVM daemon with one that cannot boot.
+  does not. The self-refresh swap carries no device at all any more (#440 slice
+  6): a node still running the container daemon refuses its own swap and is
+  converted with `build-worker.sh` instead.
 - **`WORKER_MODES` declares the runtimes a node offers** (design #309 P0, #322
   W1) — `container` (the default, and what the whole fleet runs) and/or `host`.
-  It rides the same `<VAR>_<node>` resolution as `WORKER_SLOTS`, and the swap
-  carries it forward. Declaring `host` does **not** make host jobs runnable:
+  It rides the same `<VAR>_<node>` resolution as `WORKER_SLOTS`, and it survives
+  a self-refresh by being written into the node's environment file, not by the
+  swap copying it forward (#440 D6/D7). Declaring `host` does **not** make host jobs runnable:
   #401 refuses `runtime.mode: host` as unsupported, and #309 P2 — which would
   put a node's modes on the wire — has not landed, so the dispatcher never sees
   them. It is also **not additive**: P0 has no per-request selector, so a node
@@ -859,9 +865,8 @@ Notes:
   reaches directly — the four bind mounts it used to compose are gone with the
   container. On a node with KVM on it also requires the toolchain path to
   **resolve into the store**, which is what the daemon's own boot check demands.
-  The swap still carries those mounts forward from a live container, refusing
-  rather than replacing a rooting daemon with one that cannot boot. Without
-  roots a task holds store paths no GC root protects.
+  The swap carries no mount forward either — there is none left to carry.
+  Without roots a task holds store paths no GC root protects.
 - **`WORKER_NIX_PROJECTS` is the grant that lets a PROJECT declare its own
   toolchain** (spec §3.1, [the runbook §8](../../docs/reference/runbooks/worker-kvm.md)):
   an allow-listed project's `runtime.env` is realised here from its job branch
@@ -906,20 +911,19 @@ Notes:
      the interleaved live stream sorted back into per-node stories.
      Overridable per deploy with `WORKER_REFRESH_TRANSCRIPT_LINES_MAX` /
      `_COLS_MAX` — a bound, not a dump: this stdout becomes the task record.
-  2. **The daemon actually logs.** The daemon container runs with
-     `RUST_LOG=info,async_nats=warn` (set by `build-worker.sh` at node
-     creation as `WORKER_RUST_LOG`, and carried forward by every swap). Without
-     it the binary's tracing default is `error` and `docker logs chug-worker`
-     says *nothing* about a refresh — the silence deploy #267 was
-     reconstructed around. An override on the live daemon survives a refresh.
-  3. **The swapper is retained.** The detached sibling that removes the old
-     daemon and starts the new one is named `chug-worker-swap` and no longer
-     runs `--rm`, so when a replacement fails to start the reason survives as
-     `docker logs chug-worker-swap` (on a journald node also
-     `journalctl CONTAINER_NAME=chug-worker-swap`). One retained container per
-     node — each swap removes the previous one first. This one *cannot* reach
-     the deploy job: the daemon that reports to the dispatcher is the very
-     thing being replaced.
+  2. **The daemon actually logs.** The daemon runs with
+     `RUST_LOG=info,async_nats=warn` (set by `build-worker.sh` at node creation
+     as `WORKER_RUST_LOG` and written into the node's environment file, so every
+     start reads it). Without it the binary's tracing default is `error` and the
+     daemon's log says *nothing* about a refresh — the silence deploy #267 was
+     reconstructed around. An override survives a refresh because it is
+     declared, not because the swap copies it.
+  3. **The supervisor keeps the swap's own record.** The swap installs a binary
+     and restarts the unit (#440 D6), so a replacement that will not start says
+     why in `journalctl -u chug-worker` (Linux) or the launchd agent's
+     `StandardOutPath` (macOS) — where the retained `chug-worker-swap` sibling
+     used to hold it. This one *cannot* reach the deploy job: the daemon that
+     reports to the dispatcher is the very thing being replaced.
 
   On the dispatcher side, the deploy Work task's `stdout.log` artifact is now
   harvested on the exit paths a self-deploy actually takes — a container found
