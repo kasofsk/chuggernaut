@@ -5,7 +5,7 @@
 //! Every backend here is given its own root **and its own workspace path**, so
 //! the suite never touches the machine's real `/workspace`.
 //!
-//! Three tests are the exception and say so on the way past: design #440 D3's
+//! Four tests are the exception and say so on the way past: design #440 D3's
 //! transient scope needs a systemd with a cgroup-v2 hierarchy that this
 //! evaluator does not have, so they self-skip loudly through `scope_or_skip`
 //! rather than certifying the mechanism vacuously. They take the manager the
@@ -17,6 +17,13 @@
 //! `a_setsid_escapee_is_staged_outside_the_task_process_group` asserts that half
 //! on every machine, and the scope test asserts it again alongside what only a
 //! scope adds — the escapee's cgroup, and the kill that reaches it.
+//!
+//! `a_setsid_escapee_is_staged_under_a_scope_as_well` is that same staging half
+//! with **only** the supervision changed, because the one difference four
+//! attempts at D8 never varied is that no escapee has ever been staged under a
+//! scope. It stops at the staging: a red there says the defect reproduces in the
+//! simplest fixture and D8's test is only its first victim, a green there says
+//! the cause is something the D8 test does and this one does not.
 //!
 //! The escapee redirects its own stderr into `escapee_trace` before it writes
 //! anything, because the one thing three attempts at D8 could not tell apart is
@@ -799,6 +806,50 @@ async fn a_setsid_escapee_is_staged_outside_the_task_process_group() {
         "the process-group signal reached the escapee, so D8's premise — that only the scope's \
          cgroup can — is not what this backend does"
     );
+    signal_escapee(escapee);
+
+    backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// The one variable four attempts at design #440 D8 never changed: the same
+/// script, helper and staging assertion as the test above, under
+/// `Supervision::Scope` instead of a process group. It stops at the staging,
+/// because what a `kill` then reaches is the scope's own claim and is asserted
+/// below.
+#[tokio::test]
+async fn a_setsid_escapee_is_staged_under_a_scope_as_well() {
+    let test = "a_setsid_escapee_is_staged_under_a_scope_as_well";
+    let Some(supervision) = scope_or_skip(test).await else {
+        return;
+    };
+    let Some(setsid) = setsid_or_skip(test) else {
+        return;
+    };
+    let root = temp_root("staging-scope");
+    let backend = HostBackend::with_workspace(
+        "w1",
+        root.join("tasks"),
+        root.join("workspace"),
+        supervision,
+    )
+    .unwrap();
+    let pidfile = root.join("escapee.pid");
+
+    let id = backend
+        .launch(cfg(&escapee_script(&setsid, &pidfile)))
+        .await
+        .unwrap();
+    let escapee = staged_escapee(&backend, &root, &id, &pidfile).await;
+    assert_ne!(
+        pgid_of(escapee),
+        Some(meta_of(&root, &id)["pgid"].as_i64().unwrap()),
+        "setsid left the escapee in the task's process group, so this fixture stages nothing under \
+         a scope either"
+    );
+
+    backend.kill(&id).await.unwrap();
+    assert_ne!(settle(&backend, &id).await, 0, "a killed task never passes");
     signal_escapee(escapee);
 
     backend.remove(&id).await.unwrap();
