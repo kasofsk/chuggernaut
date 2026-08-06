@@ -204,6 +204,9 @@ stranger could route on:
 Completeness of an index is not the same as being read: a catalogued doc can
 still be cited by nothing. What the row buys is the moment of authorship — a doc
 nobody can summarise in one line is a doc worth reconsidering before it merges.
+Whether anything *else* names it is the ledger's second question, below, and the
+catalogue is deliberately no answer to it — a row exists for every doc by
+construction, so counting one would make that question constant.
 
 ## When you land a design slice, you update its design doc
 
@@ -234,7 +237,7 @@ leisure.
 | `.chug/tasks/check-comments.sh` | pre-stage of every job | non-doc comments, and the two-sentence cap on doc comments | **error** |
 | `.chug/tasks/doc-lint.sh` | stage 1 of `docs` and `design` jobs | markdown well-formedness, relative links, the `{seq}-{slug}.md` filename shape | **error** for those two job types |
 | `.chug/tasks/review-docs-updated.md` | evaluation of every `code` and `web` job | cross-doc state claims, behavioural claims about symbols the diff touched, a design slice landed without its head updated | **error** — an agent evaluator, so it reads and never runs |
-| `.chug/tasks/doc-staleness.sh` | every job, and the pre-commit hook | whether a file a doc names has moved since the doc did | **advisory** — *suspect*, not wrong |
+| `.chug/tasks/doc-staleness.sh` | every job, and the pre-commit hook | whether a file a doc names has moved since the doc did, and whether anything under `docs/` is named by nothing | **advisory** — *suspect*, not wrong |
 
 Two things about that table are decisions rather than accidents:
 
@@ -248,6 +251,13 @@ Two things about that table are decisions rather than accidents:
   for history nobody in the commit caused is a ledger people disable — so the
   one case it blocks is a diff that edits a doc and then changes a non-doc file
   that doc names, which the author clears by re-reading the doc.
+- **The ledger's second half asks reach rather than truth.** Per tracked
+  `docs/**/*.md`, how many other tracked `*.md` name it — by a backticked path
+  claim or a relative link, prompts included, `docs/README.md` excluded. Zero is
+  a finding and anything else is silent. It is advisory for the same reason and
+  one of its own: a `PROPOSED` design doc is uncited until the work starts. It
+  runs whole-tree only, so the pre-commit hook never prints it: reach is a
+  property of the corpus, and a staged subset cannot answer it.
 
 A claim that is *correctly* unresolvable is marked on its line rather than
 rewritten: `<!-- intent -->`, `<!-- runtime -->`, `<!-- absent -->`. The three

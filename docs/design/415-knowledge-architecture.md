@@ -1,6 +1,9 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — D1–D15 decided; S0–S11 landed, and S12 remains intent.
+Status: IMPLEMENTED — D1–D15 decided; S0 through S12 all landed, in jobs #416
+through #468. One clause of S11 is deferred with cause rather than done: the
+`wiki/` prose note it would have consumed is untracked, so it is out of every
+job's reach.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
 [D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
@@ -85,9 +88,17 @@ tables whose left cell is a question and whose right cell is the doc that
 answers it, so a line on the page cannot go stale unless the doc it links stops
 answering. Its row's second clause was **not** done and is not claimed: the
 `wiki/` prose note it names is untracked, and an untracked file is the
-operator's to move, not a job's. S12 alone remains intent, which is why
-`Status:` still does not move — see the
+operator's to move, not a job's — see the
 [S11 correction](#correction--2026-08-06-job-467-s11-the-synthesis-page-and-the-wiki-clause-that-could-not-run).
+S12 landed on 2026-08-06 (job #468), last of the programme to be built:
+`.chug/tasks/doc-staleness.sh` reports each doc's inbound-reference count and
+**zero of the 41 docs under `docs/` is an orphan** at that base. The catalogue
+is excluded as a referrer — the decision that keeps the check from being
+constant-true — and the count needs a second route, `doc-lint.sh --emit-links`,
+because `docs/design/` cites its siblings by relative link rather than by
+backticked path. With S11 already merged, that is every slice, and `Status:`
+moves for the first time — see the
+[S12 correction](#correction--2026-08-06-job-468-s12-the-orphan-half-and-the-two-routes).
 
 Measured against the tree at `28e5aa1` (2026-08-04). Every number below was read
 out of that commit, not carried over from the brief; the commands are given so a
@@ -137,7 +148,7 @@ what can be checked mechanically is.**
 | **D12** | Every doc lives under `docs/`; the root keeps only `README.md`, `CLAUDE.md` and `wiki/`. `.chug/` prose stays put and every rule reaches it; `wiki/` is diagrams, not knowledge | [D12](#d12-where-everything-lives) |
 | **D13** | A **synthesis page** — a doc that states no new fact and decides nothing — is **reference**, bound by [D5](#d5-claudemd-may-gloss-never-define)'s gloss-and-link rule verbatim. It lives at `docs/overview.md`, live since job #467 | [D13](#d13-the-synthesis-page-is-a-reference-doc) |
 | **D14** | The doc **policy** is a reference doc (`docs/reference/docs.md`, absorbing `docs/design-docs.md`); this document keeps the **argument** | [D14](#d14-the-policy-is-reference-415-is-the-argument) |
-| **D15** | **Structural health** is a second axis, and two mechanisms: **check 5** compares `docs/README.md`'s catalogue against the tree both ways (blocking); the ledger reports **inbound-reference count**, zero being a finding (advisory) | [D15](#d15-structural-health-index-completeness-and-orphans) |
+| **D15** | **Structural health** is a second axis, and two mechanisms, both live: **check 5** compares `docs/README.md`'s catalogue against the tree both ways (blocking, job #461); the ledger reports **inbound-reference count**, zero being a finding (advisory, job #468) | [D15](#d15-structural-health-index-completeness-and-orphans) |
 
 ### The target tree
 
@@ -182,13 +193,13 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S9** | `docs/reference/docs.md` — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | **Landed** (job #461) — the policy doc states D1–D7, D10 and D15 in the present tense; `docs/design-docs.md` keeps its path as a pointer, because four of its inbound references sit in append-only bodies and in code |
 | **S10** | `docs/README.md` gains a one-line catalogue row per tracked doc; **check 5** compares catalogue ↔ tree both ways, `check-modules.sh`'s shape ([D15](#d15-structural-health-index-completeness-and-orphans)) | **Landed** (job #461) — the catalogue covers every tracked `docs/**/*.md` including itself, and check 5 fails both ways while skipping an unparseable row in silence |
 | **S11** | `docs/overview.md` — the synthesis page ([D13](#d13-the-synthesis-page-is-a-reference-doc)); any `wiki/` prose note resolved into it and reduced to a link | **Landed** (job #467) — the page is seven routing tables and a discipline note, and states no fact that is not behind a link. The `wiki/` clause is **deferred, not done**: the only prose note there is untracked, so it is out of every gate's reach and out of a job's — the same verdict `security-assessment.md` carries. See the [S11 correction](#correction--2026-08-06-job-467-s11-the-synthesis-page-and-the-wiki-clause-that-could-not-run) |
-| **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
+| **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | **Landed** (job #468) — **0 of 41** docs under `docs/` are orphans, the catalogue excluded as a referrer and two routes counted; the population is `docs/` alone and the referrers are every tracked `*.md`, both on measurement. See the [S12 correction](#correction--2026-08-06-job-468-s12-the-orphan-half-and-the-two-routes) |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Fifteen rows are landed — S0, S1a, S1b, S1c, S2, S3, S4, S5a, S5b, S6, S7, S8, S9, S10 and S11.**
-The one that remains (S12) is intent, marked as such per docs/reference/style.md's doc-claim
+**All sixteen rows are landed — S0, S1a, S1b, S1c, S2, S3, S4, S5a, S5b, S6, S7, S8, S9, S10, S11 and S12.**
+No row is intent any longer, so none now carries the marker docs/reference/style.md's doc-claim
 rule — which this
-document is partly written to make enforceable. This sentence read *six* and omitted
+document is partly written to make enforceable — asks of one. This sentence read *six* and omitted
 S3 until job #444 corrected it, four jobs after S3 merged: a count in the head is
 exactly the class of claim [check 4 cannot own](#what-check-4-cannot-do-and-what-took-its-slot),
 so it is a reviewer's to catch.
@@ -2594,3 +2605,125 @@ file is give its content somewhere to go; that is done.
   not consume. The one edit outside it and its catalogue row is this head.
 - `Status:` stays `IMPLEMENTED IN PART`. [S12](#slices) is unbuilt, and job #449
   argued that case before check 3 could verify it.
+
+## Correction — 2026-08-06 (job #468): S12, the orphan half and the two routes
+
+[S12](#slices) landed. `.chug/tasks/doc-staleness.sh` now reports, ahead of the
+staleness half, every tracked `docs/**/*.md` that **no other tracked `*.md`
+names**. Advisory, exactly as [D15](#d15-structural-health-index-completeness-and-orphans)
+specifies, and the ledger's exit code is untouched by it. Four things were
+decided by measurement rather than by the brief, and each is a narrowing.
+
+**The catalogue does not count, and that is the whole check.** Since job #461
+every tracked doc under `docs/` has a `docs/README.md` row, and check 5 fails
+both ways to keep it so. A row is therefore evidence of nothing: if one counted
+as an inbound reference then no doc could ever be an orphan and this half would
+report a constant — the same defect
+[M7](#the-problem-measured) records from the other end, a predicate whose value
+is fixed. So `docs/README.md` is excluded as a **referrer**, the whole file and
+not merely the table, while staying a doc that is itself judged.
+[D15](#d15-structural-health-index-completeness-and-orphans) already draws the
+line this implements: check 5 answers *is it catalogued* and the ledger answers
+*is it read*, and the second question is only worth asking if the first cannot
+supply its answer.
+
+**Counting only path claims is wrong, and the measurement is what says so.** The
+brief asked for check 1's extractor, and check 1 is a *path-claim* extractor: a
+backticked token that resolves against `git ls-files`. Run alone over the tree it
+reported **7 of the 41** docs orphaned —
+[#308](308-gha-port.md), [#310](310-scheduled-jobs.md),
+[#313](313-workload-identity-image-builds.md),
+[#322](322-macos-native-runtime.md), [#355](355-project-task-images.md),
+[#372](372-chug-node-modules.md) and [#373](373-project-toolchains.md) — and
+every one is false. #313 alone is named by eight files. The reason is one line of
+corpus convention: `docs/design/` cites its siblings as
+`[#313](./313-workload-identity-image-builds.md)`, and a link target is not
+backticked. A rule that reports seven false positives and no true one is
+[job #446](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear)'s
+directory-claim finding again, so it was narrowed the same way — by adding the
+route the corpus actually uses, not by shipping the count.
+
+**So there are two routes, and neither is written here.** A backticked path claim
+comes from `check-doc-facts.sh --emit-paths`, which the staleness half already
+reads. A relative markdown link comes from `doc-lint.sh --emit-links`, added by
+this slice: rule 2's extractor with the verdict removed, printing
+`<file><tab><line><tab><target>` with the target joined onto the linking file's
+directory and its `.`/`..` segments collapsed. It resolves nothing — an off-tree
+target simply falls out of the join, and a dangling link is already rule 2's
+finding. That is deliberately the same arrangement `--emit-paths` has: the
+alternative was a second link-target scanner in the ledger, and two
+implementations of one rule drift. Both routes together: **0 of 41**.
+
+**Only `docs/` is judged.** Over all 73 tracked `*.md` the count was **11** when
+this paragraph was first written, and none of the eleven was a finding:
+`.chug/prompts/review/code.md`,
+`.chug/prompts/work/manual.md` and `.chug/tasks/review-docs.md` are named by
+path from `.chug/jobs/*.yaml`; the `crates/platform-ops/templates/` and
+`deploy/dev/templates/` markdown is copied wholesale into a new project; and
+`fixtures/mobile/ios/Runner/Assets.xcassets/LaunchImage.imageset/README.md` is
+Xcode boilerplate. All of them are reached by machinery rather than by citation,
+so "nothing names it" is not a statement about any of them. `docs/` is also
+exactly check 5's population, which is what makes the pair a pair. Referrers
+stay every tracked `*.md`, prompts included — a doc read on every design job
+because `.chug/prompts/work/design.md` names it is no orphan.
+
+**The same measurement now returns 7, and this paragraph is why.** Naming four
+of the eleven by path — the three prompts and the Xcode README above — made them
+cited, so re-running it at this base finds the other seven and not them. Over
+`docs/` the count is unmoved, because a doc that had to be *written about* to
+acquire its only reference is exactly the finding; over the machinery-reached
+population it means the number measures whether someone has recently discussed a
+file, which is not reachability and is why that population is out. The
+observer effect is a property of any citation count and the reason to keep the
+population small enough that every member is expected to be cited by prose.
+
+**Is zero a usable signal?** It is the honest reading, and it is not a check that
+cannot fire. The corpus has produced exactly two orphans on record —
+[M4](#the-problem-measured)'s `spec_original.md`, deleted by [S2](#slices), and
+[M8](#three-more-measurements)'s #323, which now has one inbound reference and
+is at the bottom of the distribution with [#169](169-handoff-continuity.md).
+Both were found by a hand-written query, four days apart, and nothing in between
+noticed. The value here is the ratchet: the next one is reported on the job that
+creates it. The distribution is the thing to watch rather than the count — if
+the floor drifts toward zero, the refutation trigger
+[D15 already names](#what-would-refute-this-added) applies and the signal should
+be scoped to old *and* uncited rather than to either half.
+
+The orphan half runs in the two **whole-tree** modes only. Reach is a property of
+the whole tree, so a scoped run cannot answer it, and `--staged` is the
+pre-commit hook's ~2s budget. It costs **0.09s** — one extra `doc-lint.sh
+--emit-links` pass, the path set being already in hand.
+
+### `Status:` moves, and this is the job that gets to move it
+
+This slice was written expecting to leave the head at `IMPLEMENTED IN PART`,
+because [S11](#slices) was open when it started. S11 merged first (job #467)
+while it was in flight, so the rebase that brought this correction onto the
+current base is also what made every row in the table `**Landed**`. Job #449's
+argument, which check 3 now enforces, says a head may say `IMPLEMENTED` exactly
+when no row contradicts it. None does. `Status:` moves for the first
+time since this document was written, on the last of its sixteen slices.
+
+It is worth being exact about what that word now claims, because the programme
+finished with two things not done:
+
+- **S11's `wiki/` clause is deferred with cause**, as its own correction
+  records — the prose note is untracked, so no job can reach it. The head says
+  so rather than letting `IMPLEMENTED` absorb it.
+- **`security-assessment.md` was never in scope**; its row has said so from the
+  first draft and still does.
+
+Neither is an unlanded slice, which is the only thing check 3 reads, and neither
+is hidden — a head that says `IMPLEMENTED` over a deferred clause it does not
+mention is the drift [D10](#d10-the-implementing-job-owns-the-update) exists to
+prevent, so the clause travels in the head with the word.
+
+One thing the rebase changed underneath this correction, recorded because it is
+the check running on its own author: `docs/overview.md` is S11's page and the
+newest doc in the tree, so it joined this half's population between the
+measurement and the merge. It is **not** an orphan — but the only thing naming
+it, once `docs/README.md` is excluded as a referrer, is
+[the S11 correction](#correction--2026-08-06-job-467-s11-the-synthesis-page-and-the-wiki-clause-that-could-not-run)
+above. Had job #467 landed the page and its catalogue row alone, the tree's
+newest and most central doc would have been this half's first true positive on
+the day it was written. That is the exclusion earning its keep.

@@ -124,6 +124,64 @@ check "nested subdirectory is out of the filename rule's scope" 0 "$RC" "$OUT" "
 run_sut "$WORK/docs/design/something.md"
 check "absolute docs/design path is not gated by the filename rule" 0 "$RC" "$OUT" "0 error(s)"
 
+# --- `--emit-links`: rule 2's extractor with the verdict removed --------------
+# The mode .chug/tasks/doc-staleness.sh's orphan half reads (design #415 D15,
+# S12). It names paths against the tree, so it needs a checkout — the cases run
+# in their own `git init` fixture rather than in $WORK.
+
+check_absent() { # <name> <expected-rc> <actual-rc> <output-file> <must-NOT-contain>
+	name="$1"; want="$2"; got="$3"; out="$4"; needle="$5"
+	if [ "$got" = "$want" ] && ! grep -qF "$needle" "$out"; then
+		echo "ok   - $name (rc=$got)"
+		pass=$((pass + 1))
+	else
+		echo "FAIL - $name: rc want=$want got=$got; expected output NOT to contain: $needle"
+		echo "----- output -----"; cat "$out"; echo "------------------"
+		fail=$((fail + 1))
+	fi
+}
+
+# 9. Outside a checkout there is no tree to name paths against — a loud 2.
+run_sut_rel --emit-links docs/design/good.md
+check "--emit-links outside a checkout is a loud refusal" 2 "$RC" "$OUT" "not a git checkout"
+
+if command -v git >/dev/null 2>&1; then
+	REPO="$WORK/emit"
+	mkdir -p "$REPO/docs/design"
+	git -C "$REPO" -c init.defaultBranch=main init -q
+	printf '# Notes\n' > "$REPO/notes.md"
+	printf '# Sibling\n' > "$REPO/docs/design/sibling.md"
+	cat > "$REPO/docs/design/links.md" <<'EOF'
+# Links
+
+Up to [notes](../../notes.md) and across to [the sibling](./sibling.md).
+Off-tree: [home](https://example.invalid/) and [an anchor](#links).
+
+```md
+Fenced: [not a link record](sibling.md)
+```
+EOF
+	git -C "$REPO" add . >/dev/null 2>&1
+	git -C "$REPO" -c user.email=t@e -c user.name=t commit -qm fixture >/dev/null 2>&1
+
+	OUT="$WORK/out"
+	set +e
+	(cd "$REPO" && "$SUT" --emit-links) >"$OUT" 2>&1
+	RC=$?
+	set -e
+	check "--emit-links collapses ../ to a repo-relative path" 0 "$RC" "$OUT" \
+		"$(printf 'docs/design/links.md\t3\tnotes.md')"
+	check "--emit-links collapses ./ to a repo-relative path" 0 "$RC" "$OUT" \
+		"$(printf 'docs/design/links.md\t3\tdocs/design/sibling.md')"
+	check_absent "--emit-links drops an off-tree target" 0 "$RC" "$OUT" "example.invalid"
+	check_absent "--emit-links drops an anchor-only target" 0 "$RC" "$OUT" \
+		"$(printf 'docs/design/links.md\t4\t')"
+	check_absent "--emit-links inherits the fence tracking, so an example is not a link" \
+		0 "$RC" "$OUT" "$(printf 'docs/design/links.md\t7\t')"
+else
+	echo "skip - --emit-links fixture cases (git unavailable)"
+fi
+
 echo
 echo "passed $pass, failed $fail"
 [ "$fail" -eq 0 ]

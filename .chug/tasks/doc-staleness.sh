@@ -72,11 +72,55 @@
 # content — and it stays in the advisory ledger, where a near-constant-true
 # predicate costs a row a reader skims rather than a build.
 #
+# THE SECOND AXIS IS REACH, AND IT IS REPORTED FIRST (design #415 D15, slice
+# S12). Everything above asks whether a doc is still true; the orphan half asks
+# whether anyone can find it. Per doc under `docs/`, the number of other tracked
+# `*.md` naming it — zero is a finding, non-zero is silent. Advisory for D7's
+# own reason, and because an orphan is often correct: a `PROPOSED` design doc is
+# uncited by construction until the work it proposes starts.
+#
+# THE CATALOGUE DOES NOT COUNT, and that single decision is what keeps this half
+# alive. Check 5 gates `docs/README.md` to carry a row for every tracked
+# `docs/**/*.md` in both directions, so if a row were a reference then no doc
+# could ever be an orphan and this would report a constant. The two checks are a
+# pair over one population: check 5 answers "is it catalogued", which has a
+# mechanical right answer and therefore blocks, and this answers "is it read",
+# which does not. So `docs/README.md` is excluded as a REFERRER — the whole
+# file, index and routing prose alike — while remaining a doc that is judged.
+#
+# TWO ROUTES, NEITHER RE-DERIVED HERE. A backticked path claim comes from check
+# 1 via `check-doc-facts.sh --emit-paths`, the same set the staleness half
+# joins. A relative markdown link comes from `doc-lint.sh --emit-links`, rule
+# 2's extractor with the verdict removed. Both are needed and the measurement
+# says so: on the tree at this slice, path claims alone reported **7 of the 41**
+# docs orphaned — #308, #310, #313, #322, #355, #372, #373 — every one of them
+# false, because `docs/design/` cites its siblings as `[#313](./313-….md)` and a
+# link target is not backticked. Both routes together: **0 of 41**. That is the
+# honest reading of a corpus whose only recorded orphans, M4's
+# `spec_original.md` and M8's #323, were deleted and cited respectively; the
+# value here is as a ratchet against the next one.
+#
+# ONLY `docs/` IS JUDGED, and only markdown counts as a referrer. The other 32
+# tracked `*.md` are reached by machinery rather than by citation — a prompt or
+# task named by path from `.chug/jobs/*.yaml`, a `crates/platform-ops/templates/`
+# file copied wholesale into a new project, an Xcode fixture README — so
+# "nothing cites it" is not evidence about any of them, and judging the whole
+# population reported 11 findings with no true positive among them — 7 once
+# #415's correction had named four of the eleven by path, which is the same
+# point from the other side. `docs/` is
+# also exactly check 5's population, which is what makes the pair a pair.
+# Referrers are every tracked `*.md`, prompts included: a doc reached only from
+# `.chug/prompts/work/design.md` is read on every design job and is no orphan.
+#
 # Usage:
 #   .chug/tasks/doc-staleness.sh                  # every tracked *.md, one line per suspect doc
 #   .chug/tasks/doc-staleness.sh --staged         # the staged *.md, every suspect path
 #   .chug/tasks/doc-staleness.sh <file>...        # explicit, repo-relative, every suspect path
 #   .chug/tasks/doc-staleness.sh --gate <file>... # whole-tree counts; details only the listed docs
+#
+# The orphan half runs in the two whole-tree modes only. Reach is a property of
+# the whole tree, so a scoped run cannot answer it, and `--staged` is the hook's
+# ~2s budget.
 #
 # Exit: 0 = ran (suspicions are advisory). 1 = `--gate` and a diff-touched doc
 # is suspect. 2 = the ledger could not run — a LINTER ERROR, never a clean tree.
@@ -108,6 +152,11 @@ extractor="$HERE/check-doc-facts.sh"
 	"$extractor is missing or not executable — the ledger reads check 1's path" \
 	"    extractor rather than carrying a second one."
 
+linker="$HERE/doc-lint.sh"
+[ -x "$linker" ] || ledger_unrunnable \
+	"$linker is missing or not executable — the orphan half reads rule 2's link" \
+	"    extractor rather than carrying a second one."
+
 # --- Mode --------------------------------------------------------------------
 # `detail` is off for the whole tree only: 30 suspect docs listing every newer
 # file is a wall nobody reads, so the tree run prints the newest mover per doc
@@ -115,7 +164,9 @@ extractor="$HERE/check-doc-facts.sh"
 gate_list="$(mktemp)"
 ts_index="$(mktemp)"
 claims="$(mktemp)"
-trap 'rm -f "$gate_list" "$ts_index" "$claims"' EXIT
+orphan_pop="$(mktemp)"
+orphan_refs="$(mktemp)"
+trap 'rm -f "$gate_list" "$ts_index" "$claims" "$orphan_pop" "$orphan_refs"' EXIT
 : >"$gate_list"
 
 mode="tree"
@@ -154,6 +205,38 @@ else
 		"check-doc-facts.sh --emit-paths could not run"
 fi
 printf '%s\n' "$population" | grep -v '^$' >"$claims" || : >"$claims"
+
+# --- The orphan half: who names this doc? ------------------------------------
+# Reported before the staleness half so the `--gate` block, when there is one,
+# stays the last thing on the screen. `$claims` is already the whole-tree path
+# set in both of these modes, so only the link route costs a second call.
+catalogue="docs/README.md"
+if [ "$mode" = "tree" ] || [ "$mode" = "gate" ]; then
+	git ls-files -- '*.md' 2>/dev/null | awk '/^docs\/.*\.md$/' >"$orphan_pop" || : >"$orphan_pop"
+	{ cat "$claims"; "$linker" --emit-links 2>/dev/null || :; } >"$orphan_refs" || : >"$orphan_refs"
+	awk -F'\t' -v popf="$orphan_pop" -v cat="$catalogue" '
+		FILENAME == popf { pop[$0] = 1; order[++n] = $0; next }
+		$1 == cat { next }
+		{ if (($3 in pop) && $1 != $3) seen[$3] = 1 }
+		END {
+			orph = 0
+			for (i = 1; i <= n; i++) if (!(order[i] in seen)) orph++
+			if (n == 0) exit 0
+			if (orph == 0) {
+				printf "doc-staleness: all %d doc(s) under docs/ are named by something other than\n", n
+				printf "doc-staleness:   the catalogue — no orphans (design #415 D15).\n"
+				exit 0
+			}
+			printf "doc-staleness: %d of %d doc(s) under docs/ have ZERO inbound references:\n", orph, n
+			for (i = 1; i <= n; i++) if (!(order[i] in seen)) printf "  %s — no inbound reference\n", order[i]
+			printf "doc-staleness:   Nothing in the tree names them but %s, which carries a\n", cat
+			printf "doc-staleness:   row for every doc by construction (check 5) and so is no evidence\n"
+			printf "doc-staleness:   that a reader can reach one. UNREFERENCED IS NOT WRONG, and this\n"
+			printf "doc-staleness:   is advisory like the rest of the ledger: a PROPOSED design doc is\n"
+			printf "doc-staleness:   uncited until the work it proposes starts.\n"
+		}
+	' "$orphan_pop" "$orphan_refs"
+fi
 
 # --- The commit-time index both halves resolve against -----------------------
 # One `git log` pass rather than one per path: ~70 docs and ~320 distinct paths

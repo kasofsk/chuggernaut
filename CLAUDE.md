@@ -130,6 +130,20 @@ the absence of a workflow file.
   `.md` off the blocking side the relation is doc → non-doc and acyclic, so
   re-touching a flagged doc always clears it and can flip nothing else. The
   cross-reference stays on the advisory reading list, labelled.
+- **A doc nothing links to is unreachable however true it is**, and the same
+  ledger reports that too (#415 D15, job #468) — advisory, ahead of the
+  staleness half, in the two whole-tree modes only. Per tracked
+  `docs/**/*.md`, the other tracked `*.md` naming it, by a backticked path claim
+  (`check-doc-facts.sh --emit-paths`) or a relative link
+  (`doc-lint.sh --emit-links`, added for this); zero is the finding and anything
+  else is silent. **The catalogue does not count** — check 5 gates
+  `docs/README.md` to hold a row for every doc, so a row is evidence of nothing
+  and counting it would make the answer constant. Only `docs/` is judged: a
+  prompt or template named by path from a YAML is reached by machinery, not by
+  citation. Measured whole-tree at that job: **0 of 41**, against 7 false
+  positives if links are not counted and 11 if the population is every tracked
+  `*.md` — 7 of that 11 once the correction naming them landed, which is the
+  same argument again.
 - **A slice table cannot claim a job that never merged.** Check 3 (#415 S5a,
   job #444) resolves `**Landed** (job #N)` in a `docs/design/*.md` table row
   against a `job/N: {type}` squash-merge commit, and refuses a head saying

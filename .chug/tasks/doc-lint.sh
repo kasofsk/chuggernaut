@@ -35,11 +35,40 @@
 # if the changed set cannot be determined, it lints every tracked `.md` rather
 # than skip on uncertainty. Explicit file arguments override the diff selection
 # (used by .chug/tasks/doc-lint.test.sh).
+#
+# Usage:
+#   .chug/tasks/doc-lint.sh [<file>...]
+#   .chug/tasks/doc-lint.sh --emit-links [<file>...]
+#
+# `--emit-links` is rule 2's extractor with the verdict removed: it judges
+# nothing and prints `<file><tab><line><tab><target>` for every intra-repo
+# relative link, with the target normalized to a repo-relative path. It exists
+# so the D15 orphan half of .chug/tasks/doc-staleness.sh asks rule 2 "what does
+# this doc link to" rather than growing a second answer — the same arrangement
+# check 1's `--emit-paths` already has with that script's staleness half.
+# Whole-tree unless files are named, and it resolves nothing: a target that
+# names no tracked file simply falls out of the ledger's join, and a dangling
+# link is already rule 2's finding.
 set -eu
+
+emit_links=0
+if [ "${1:-}" = "--emit-links" ]; then
+	emit_links=1
+	shift
+	root="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+	[ -n "$root" ] || {
+		echo "doc-lint: not a git checkout — --emit-links has no tree to name paths against" >&2
+		exit 2
+	}
+	cd "$root" || exit 2
+fi
 
 # --- Select the markdown files to lint -------------------------------------
 files=""
-if [ "$#" -gt 0 ]; then
+if [ "$emit_links" -eq 1 ] && [ "$#" -eq 0 ]; then
+	files="$(git ls-files '*.md' 2>/dev/null || true)
+"
+elif [ "$#" -gt 0 ]; then
 	# Explicit mode: lint exactly the `.md` arguments given.
 	for f in "$@"; do
 		case "$f" in
@@ -81,7 +110,7 @@ fi
 # Drop blank entries.
 files="$(printf '%s' "$files" | grep -v '^$' || true)"
 if [ -z "$files" ]; then
-	echo "doc-lint: no markdown in the diff — nothing to lint, skipping"
+	[ "$emit_links" -eq 1 ] || echo "doc-lint: no markdown in the diff — nothing to lint, skipping"
 	exit 0
 fi
 
@@ -106,6 +135,42 @@ extract() {
 	END { if (fence) print "ERR:0:unclosed code fence" }
 	' "$1"
 }
+
+# `--emit-links` reads the same records and stops there. The target is joined
+# onto the linking file's directory and the `.`/`..` segments are collapsed, so
+# `docs/design/415-x.md` linking `../../.chug/tasks/ci.sh` emits the path the
+# rest of the tree calls it by; an anchor-only or off-tree target is dropped.
+if [ "$emit_links" -eq 1 ]; then
+	IFS='
+'
+	for f in $files; do
+		[ -f "$f" ] || continue
+		extract "$f" | awk -v f="$f" -v dir="$(dirname "$f")" '
+			function norm(p,   a, n, i, k, o, r) {
+				n = split(p, a, "/"); k = 0
+				for (i = 1; i <= n; i++) {
+					if (a[i] == "" || a[i] == ".") continue
+					if (a[i] == "..") { if (k > 0) k--; continue }
+					o[++k] = a[i]
+				}
+				for (i = 1; i <= k; i++) r = r (i > 1 ? "/" : "") o[i]
+				return r
+			}
+			/^LINK:/ {
+				rest = substr($0, 6)
+				ln = rest; sub(/:.*$/, "", ln)
+				t = substr(rest, length(ln) + 2)
+				sub(/ .*$/, "", t)
+				sub(/#.*$/, "", t)
+				if (t == "" || t ~ /:\/\// || t ~ /^(mailto|tel):/ || t ~ /^\//) next
+				out = norm(dir "/" t)
+				if (out != "") print f "\t" ln "\t" out
+			}
+		'
+	done
+	unset IFS
+	exit 0
+fi
 
 errors=0
 warnings=0

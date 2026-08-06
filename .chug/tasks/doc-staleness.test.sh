@@ -86,6 +86,30 @@ commit_at 2026-01-01 sources
 { printf '# Pair A\n\n'; printf 'See `docs/pair-b.md`.\n'; } > "$REPO/docs/pair-a.md"
 { printf '# Pair B\n\n'; printf 'See `docs/pair-a.md`.\n'; } > "$REPO/docs/pair-b.md"
 { printf '# Mixed\n\n'; printf 'See `docs/pair-b.md` and `crates/pkg/src/mover.rs`.\n'; } > "$REPO/docs/mixed.md"
+# The orphan half's fixture (design #415 D15, slice S12). `map.md` is reached
+# only from a prompt and reaches the rest by relative link, so every doc the
+# staleness cases assert on stays out of the orphan list; `orphan.md` is named
+# by the catalogue and by nothing else, and `linked-only.md` is named by both.
+mkdir -p "$REPO/.chug/prompts/work"
+{
+	printf '# Work prompt\n\n'
+	printf 'Read [the map](../../../docs/map.md) first.\n'
+} > "$REPO/.chug/prompts/work/hub.md"
+{
+	printf '# Map\n\n'
+	for p in quiet suspect absent dir bare marked pair-a pair-b mixed README linked-only; do
+		printf -- '- [%s](%s.md)\n' "$p" "$p"
+	done
+	printf -- '- a backticked claim on `docs/claimed-only.md`\n'
+} > "$REPO/docs/map.md"
+{
+	printf '# Catalogue\n\n## The catalogue\n\n'
+	printf -- '| [`docs/orphan.md`](orphan.md) | the only thing that names it |\n'
+	printf -- '| [`docs/linked-only.md`](linked-only.md) | catalogued AND linked |\n'
+} > "$REPO/docs/README.md"
+printf '# Orphan\n\nNothing but the catalogue names this.\n' > "$REPO/docs/orphan.md"
+printf '# Linked only\n\nReached by a relative link.\n' > "$REPO/docs/linked-only.md"
+printf '# Claimed only\n\nReached by a backticked path claim.\n' > "$REPO/docs/claimed-only.md"
 git -C "$REPO" add . >/dev/null 2>&1
 commit_at 2026-01-02 docs
 
@@ -207,6 +231,51 @@ check "the cross-reference row is labelled, not dropped" 1 "$RC" "$OUT" \
 run_sut docs/pair-a.md
 check "the advisory ledger still reports a doc->doc edge" 0 "$RC" "$OUT" \
 	"docs/pair-b.md"
+
+# --- The orphan half (design #415 D15, slice S12) -----------------------------
+# Reach, not truth: zero inbound references is the finding, and the catalogue is
+# not a reference. These run whole-tree, which is the only scope that can answer
+# "does anything name this".
+run_sut
+
+# 20. A doc nothing names but the catalogue is an orphan, named on its own line.
+check "a doc named only by the catalogue is reported" 0 "$RC" "$OUT" \
+	"1 of 14 doc(s) under docs/ have ZERO inbound references"
+check "the orphan row names the doc" 0 "$RC" "$OUT" \
+	"docs/orphan.md — no inbound reference"
+
+# 21. Being unreferenced is never phrased as a verdict, and the reason the
+#     catalogue does not count is on the screen rather than only in the header.
+check "the orphan report says unreferenced is not wrongness" 0 "$RC" "$OUT" \
+	"UNREFERENCED IS NOT WRONG"
+check "the orphan report says why the catalogue cannot be evidence" 0 "$RC" "$OUT" \
+	"row for every doc by construction (check 5)"
+
+# 22. One inbound reference is enough, by either route — a relative markdown
+#     link, or check 1's backticked path claim.
+check_silent "a doc reached by a relative link is silent" "$RC" "$OUT" \
+	"docs/linked-only.md — no inbound reference"
+check_silent "a doc reached by a backticked path claim is silent" "$RC" "$OUT" \
+	"docs/claimed-only.md — no inbound reference"
+
+# 23. The catalogue is excluded as a REFERRER and not from the population, which
+#     the `of 14` in case 20 pins: `docs/README.md` is one of those 14. A row on
+#     top of a real reference changes nothing either — `docs/linked-only.md` is
+#     both catalogued and linked, and case 22 pins it silent.
+
+# 24. A doc reached only from a prompt is read on every job of that type, so it
+#     is no orphan — referrers are every tracked `*.md`, not only `docs/`.
+check_silent "a doc reached only from a prompt is silent" "$RC" "$OUT" \
+	"docs/map.md — no inbound reference"
+
+# 25. The orphan half is whole-tree only: reach cannot be decided from a diff,
+#     and `--staged` is the pre-commit hook's ~2s budget.
+run_sut --staged
+check_silent "--staged does not attempt the orphan half" "$RC" "$OUT" \
+	"inbound references"
+run_sut --gate docs/quiet.md
+check "--gate reports orphans beside the staleness counts" 0 "$RC" "$OUT" \
+	"ZERO inbound references"
 
 # --- A prerequisite that is missing is loud, and is not a pass ----------------
 
