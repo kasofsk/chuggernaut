@@ -920,6 +920,11 @@ stale.
 - **function StatusFooter** — Health is a dispatcher round-trip (NATS req/reply), so probe on mount and a slow visible-tab interval rather than on every project event.
 - **const sized** — Fleet segment: same graceful-degrade rule as the capacity widget — hidden when the feed is unavailable or nothing sized has been published.
 
+### `web/src/components/TaskArtifacts.tsx`
+- **function TaskArtifacts** — Only the links live in the Tasks table's artifacts cell; which artifact is open is the page's state, not the component's, so the viewer can render elsewhere. The kinds query stays per-row because availability is per-task.
+- **function ArtifactViewer** — Same mount rule as `TaskLogPane` (#353), for the same reason: it used to render inside the artifacts `<td>`, and a table cell is sized by its content — a `session.jsonl` line is one enormous line, so a single opened transcript stretched the whole table to ~3400px at a 375px viewport and the pane's own bounds never applied. It mounts under `.table-scroll` instead, where the card bounds its width; keep it out of any content-sized box.
+- **function ArtifactViewer** — The body wraps rather than scrolling sideways: a transcript is inspected for what it says, and a horizontal scrollbar on a JSONL line makes it unreadable at any width. Keyed on task *and* kind by the caller, since the fetched text is component state.
+
 ### `web/src/components/TaskLogs.tsx`
 - Poll cadence while a container runs, and the ceiling a network-error backoff climbs to. The buffer is capped so a multi-hundred-megabyte cargo build log can't balloon the tab — we keep the tail and flag the truncation.
 - **const ANSI** — cargo/agent output carries ANSI colour + cursor escapes. Strip the common CSI/OSC sequences (rendering colour is a non-goal) rather than pull in a terminal library. Lone carriage returns (progress-bar redraws) collapse to newlines so a redrawn line doesn't run on forever.
@@ -1013,6 +1018,7 @@ stale.
 - **const queue** — Capacity launch-queue snapshot (spec §3.5): drives the "queued" badge's "position N of M". Best-effort — null when the dispatcher can't answer, in which case the badge still renders, just without a position.
 - **const loading** — Initial load only: skeleton until the first fetch answers. SSE-driven refreshes never re-skeleton; a seq/project change resets it (effect below).
 - **const openLogs** — The one task whose live-log pane is expanded, if any. Kept to a single open pane so at most one tail loop polls at a time, and — since a single pane needs no per-row slot — the pane renders once below the table rather than in the row, out of reach of the table's content-driven width (#353).
+- **const openArtifact** — The one task artifact whose viewer is expanded, as a task/kind pair: like the log pane, a single open viewer needs no per-row slot, so it renders once below the table rather than in the artifacts cell, out of reach of the table's content-driven width (#353).
 - **const triageImage** — The platform's triage image (from the config snapshot): a string when triage is available, null when it isn't (dispatcher rejects triage with 422), and undefined while unknown — snapshot not yet loaded, offline, or forbidden. We only disable the button on a confirmed null, so an unknown state keeps the current behavior (the 422 mapping below still catches a live rejection).
 - **const releasing** — True while the run (release) request is in flight. Disables the run button and shows a working label so a tap reads as acknowledged — and so a stray second tap can't land on the revoke button that wraps directly below it.
 - **const groupChoices** — The group vocabulary the picker suggests, and whether a groups write is in flight. `groups` is mutable in every state including Done and Revoked (design #321 Decision 5) — a finished job is the case this exists for — so the editor is offered here, on the read view, not only on a Draft.

@@ -899,6 +899,7 @@ td.actions button {
   border-radius: var(--r-sm);
   padding: 0.6rem;
   white-space: pre-wrap;
+  overflow-wrap: anywhere;
   margin: var(--sp-2) 0;
   max-height: 200px;
   overflow-y: auto;
@@ -1520,8 +1521,9 @@ table.jobs tbody tr.row-draft td:first-child {
   padding: 0.6rem;
   margin: var(--sp-2) 0 0;
   max-height: 50vh;
-  overflow: auto;
-  white-space: pre;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   font-size: var(--fs-xs);
 }
 .report-empty {
@@ -1543,8 +1545,10 @@ table.jobs tbody tr.row-draft td:first-child {
   font: inherit;
   text-decoration: underline;
 }
+/* The viewer sits under the table, not inside it: a table cell is sized by its
+   content, so a JSONL transcript line stretched the whole table sideways. */
 .artifact-viewer {
-  margin-top: 0.6rem;
+  margin-top: var(--sp-3);
   border: var(--border-w) solid var(--border);
   border-radius: var(--r-sm);
 }
@@ -1558,14 +1562,16 @@ table.jobs tbody tr.row-draft td:first-child {
 .artifact-head strong {
   margin-right: auto;
 }
-/* Transcripts run to megabytes: bound the viewport and let it scroll rather
-   than growing the page. Both axes — JSONL lines are single long lines. */
+/* Transcripts run to megabytes: bound the height and let it scroll rather than
+   growing the page. A JSONL line is one enormous line, so it wraps — the pane
+   never scrolls sideways (web/CLAUDE.md mobile rule). */
 .artifact-body {
   margin: 0;
   padding: 0.6rem;
   max-height: 60vh;
-  overflow: auto;
-  white-space: pre;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
   font-size: var(--fs-sm);
   line-height: 1.4;
 }

@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import {
   ApiError,
   api,
+  type ArtifactKind,
   type CommandResult,
   type DiffResponse,
   type EvalResult,
@@ -20,7 +21,7 @@ import {
 import { useDebouncedCallback, useProjectEvents, type JobEvent } from '../useEvents'
 import { StateBadge, TaskBadge } from '../components/StateBadge'
 import { ResolveForm } from '../components/ResolveForm'
-import { TaskArtifacts } from '../components/TaskArtifacts'
+import { ArtifactViewer, TaskArtifacts } from '../components/TaskArtifacts'
 import { TaskLogPane } from '../components/TaskLogs'
 import { EvaluatorTable } from '../components/EvaluatorTable'
 import { Markdown } from '../components/Markdown'
@@ -61,6 +62,7 @@ export function JobDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [openLogs, setOpenLogs] = useState<number | null>(null)
+  const [openArtifact, setOpenArtifact] = useState<{ task: number; kind: ArtifactKind } | null>(null)
   const [triageImage, setTriageImage] = useState<string | null | undefined>(undefined)
   const [releasing, setReleasing] = useState(false)
   const groupChoices = useGroupOptions(owner, project)
@@ -202,6 +204,7 @@ export function JobDetail() {
   const inputEntries = Object.entries(job.inputs ?? {})
 
   const openLogTask = tasks.find((t) => t.id === openLogs) ?? null
+  const openArtifactTask = tasks.find((t) => t.id === openArtifact?.task) ?? null
 
   const escalationBand = new Set<number>()
   for (const t of tasks) {
@@ -571,7 +574,14 @@ export function JobDetail() {
                   )}
                 </td>
                 <td>
-                  <TaskArtifacts owner={owner} project={project} seq={jobSeq} task={t} />
+                  <TaskArtifacts
+                    owner={owner}
+                    project={project}
+                    seq={jobSeq}
+                    task={t}
+                    open={openArtifact?.task === t.id ? openArtifact.kind : null}
+                    onOpen={(kind) => setOpenArtifact(kind ? { task: t.id, kind } : null)}
+                  />
                 </td>
                 <td className="logs-cell">
                   {hasLogs(t) ? (
@@ -600,6 +610,17 @@ export function JobDetail() {
           </tbody>
           </table>
         </div>
+        {openArtifact && openArtifactTask && (
+          <ArtifactViewer
+            key={`${openArtifactTask.id}:${openArtifact.kind}`}
+            owner={owner}
+            project={project}
+            seq={jobSeq}
+            task={openArtifactTask}
+            kind={openArtifact.kind}
+            onClose={() => setOpenArtifact(null)}
+          />
+        )}
         {openLogTask && (
           <TaskLogPane
             key={openLogTask.id}
