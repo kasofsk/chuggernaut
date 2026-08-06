@@ -25,7 +25,12 @@ failed; after jobs #455 and #456 the two that assert D3 passed **together** on
 shipped path** — with `XDG_RUNTIME_DIR` set in the invoking environment, which
 is #440 slice 7's provisioning question and is not settled by that run
 ([the Linux execution](../../design/440-native-worker-daemon.md#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456)).
-The third, D8's `setsid()` escapee, has still never reached its assertion.
+The third, D8's `setsid()` escapee
+(`a_kill_reaches_a_setsid_escapee_through_the_scope`), reached and passed its
+assertion for the first time on 2026-08-06, once `--expand-environment=no`
+landed: a 13/13 run with **no skips** on `gumbo-nuc-0` (systemd 260.2) at tree
+`692656e`, under the same `XDG_RUNTIME_DIR` qualifier
+([the D8 execution](../../design/440-native-worker-daemon.md#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466)).
 Until job #453 they
 could not have executed under an **unprivileged** run — the shape every hand run
 has taken since job #451 moved them to a `--user` scope: the probe cleared the
