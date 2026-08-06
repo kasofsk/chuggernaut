@@ -1,7 +1,9 @@
 # Design — the natively-supervised worker daemon
 
-Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1 and
-2 have landed; 3–8 have not started. [D3](#decisions) is **proven on both
+Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1, 2
+and 3 have landed — 3 as
+[the refusal at both checks](#correction-2026-08-06--slice-3-as-landed-job-460) —
+and 4–8 have not started. [D3](#decisions) is **proven on both
 platforms**: its **macOS** mechanism firsthand on 2026-08-06 against the
 mechanism itself — see [the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux) —
 and its **Linux** mechanism on 2026-08-06 **through the shipped code path**, on
@@ -89,7 +91,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | --- | --- | --- | --- | --- |
 | 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | **Landed** (job #442), plus a two-name floor the slice line does not mention — see [the correction](#correction-2026-08-05--slice-1-as-landed) |
 | 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **proven for D3 on both platforms**: the macOS proof PASSED on 2026-08-06 ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and D3's two Linux assertions PASSED through `HostBackend` on `gumbo-nuc-0` the same day and again at tree `af9f74e` ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)). Its third assertion, D8's escapee, is still unexecuted — see [the correction](#correction-2026-08-05--slice-2-as-landed), amended by job #451 for [the scope an unprivileged daemon can create](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451), by job #453 for [the bus that scope's client needs](#correction-2026-08-06--the-bus-the-client-needs-job-453), by job #455 for [a membership check that raced the manager](#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455), by job #457 for [the membership check the D8 test itself never had](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457), by job #458 for [a trace of the escapee's own](#correction-2026-08-06--the-escapees-own-trace-and-three-differences-ruled-out-job-458), and by job #459 for [the one fixture variable never varied](#correction-2026-08-06--the-one-variable-four-attempts-never-changed-job-459) |
-| 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | Proposed |
+| 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | **Landed** (job #460), with "live" decided against the exited-but-unremoved window and the tests placed at tier 1 for a reason the slice line does not mention — see [the correction](#correction-2026-08-06--slice-3-as-landed-job-460) |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | Proposed |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
 | 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | Proposed |
@@ -1680,3 +1682,121 @@ outcome it did not execute. What is new is that the failure now has a second,
 simpler fixture to fail in — or a discriminator that narrows it in one run. The
 stopping rule from job #458 stands: if this command does not settle D8, record
 what it showed and leave the claim unverified.
+
+---
+
+## Correction, 2026-08-06 — slice 3 as landed (job #460)
+
+Appended by job #460, which implemented [slice 3](#slices). Nothing above is
+edited except the head and that slice's State cell. This section records what
+"live" was decided to mean, what the two refusals look like on the wire, and why
+the tests are at tier 1 rather than where the test-placement note put half of
+them.
+
+### The two checks, as built
+
+Both live in `crates/worker/src/daemon.rs` and share one predicate, so the two
+sites cannot drift into refusing in different words:
+
+| Where | Shape | What the caller sees |
+| --- | --- | --- |
+| `refresh`, before `begin_refresh` | `RefreshOk { accepted: false, skipped: Some(reason) }` | `admin worker-refresh` prints `refresh SKIPPED — {reason}`; no build starts and the node's refresh slot is not consumed |
+| `run_refresh`, after `quiesce` and after the `drained` wait | `record_refresh_failure(.., "drain", ..)` then `abort()` | the same terminal shape the drain timeout already produces: `RefreshResult::Failed { stage: "drain" }`, launches reopened, node left on its old images |
+
+The accept refusal rides in `skipped` rather than as an RPC error because
+`skipped` already means exactly this — the node could not even *attempt* a
+refresh — and [`update.sh`](../../deploy/prod/update.sh) fails the deploy leg for
+any node that does not print `refresh OK:`, so the refusal is loud on the path
+that matters without a second reply shape. The boundary refusal invents nothing:
+it is the drain-timeout branch with a different reason, which is what
+[D4](#decisions) asked for.
+
+**The boundary check runs after the drain wait, not beside it.** A launch that
+was accepted before `quiesce` may not have created its task directory yet, so
+the listing is only complete once `drained()` holds — checking first would read
+"no host work" for a task that is about to exist. The build phase is what makes
+the second check load-bearing at all; the drain wait is what makes it *correct*.
+
+### "Live" means running — not launched-and-not-removed
+
+`list_managed_running` is the source, so a task counts as live while its status
+is `Running`: no `exit_code` written, and either this daemon's own live set or
+the #309 §2(b) pid-identity rule still claims it. The **exited-but-unremoved**
+window — one of the P1 gaps job #434's report named — is deliberately on the
+*permissive* side of the line, for two reasons:
+
+- **A swap cannot lose an exited task's result.** The exit status is written by
+  the task's own wrapper, not by the daemon (`supervised_cmd`, #309 correction
+  finding 2), and `inspect` is a pure function of the task directory. The daemon
+  being replaced under an exited-but-unremoved task costs nothing, which is
+  exactly what D4 exists to prevent and precisely what does not happen here.
+- **The window has no upper bound.** It closes when the dispatcher disposes of
+  the task, so a crash between exit and `remove` leaves a directory that is never
+  reclaimed by anything but the next launch's `reclaim_workspace`. Counting it as
+  live would turn one leaked directory into a node that can never be deployed to
+  again — trading a bounded, self-clearing refusal for a permanent one.
+
+So the refusal is bounded by `task_timeout` exactly as [§3](#3-the-drain-guarantee--the-crux)
+prices it, and no other state on the node can extend it.
+
+**A backend that cannot answer refuses.** `list_managed_running` failing is not
+read as "nothing is running": a daemon that cannot tell whether a swap would
+kill a task takes the same refusal, naming the backend error. That is the only
+answer that cannot lose work, and on a host node the listing fails only when the
+worker-owned root is unreadable.
+
+### A container node is untouched, and that is asserted
+
+The check reads a `host_mode` flag taken from `backend_kind(&config.modes)` at
+construction, so a node that does not name `host` never calls the backend at
+all — not "calls it and ignores the answer".
+`a_container_node_refreshes_without_asking_what_is_running` is that assertion in
+its sharpest available form: the fake backend is scripted to **fail** the
+listing, and the refresh still reaches its swap. If the query ever leaked onto
+the container path, that failure would refuse the refresh and the test would go
+red.
+
+### Why the tests are at tier 1, both of them
+
+The [test-placement note](#slices) puts the pure precondition at tier 1 and the
+swap-boundary re-check at tier 2 in `crates/worker/tests/nats_backend.rs`. The
+boundary test is at tier 1 instead, and the reason is not convenience:
+
+- **A host-mode daemon cannot boot in CI.** `run` refuses `WORKER_MODES=host`
+  when `probe_supervision` finds no scope mechanism, which is every machine
+  without systemd — including this repo's evaluator, where
+  `host_mode_without_a_supervision_unit_refuses_to_start` asserts that refusal
+  today. A tier-2 test driving the real RPC would self-skip everywhere it is
+  ever run.
+- **Staging a real host task through the daemon would delete the checkout.**
+  `local_backend` builds `HostBackend::new`, which pins the workspace to the
+  literal `/workspace` (only `with_workspace` avoids it), and `launch` calls
+  `reclaim_workspace` — `remove_dir_all` — when no managed task owns it. On any
+  machine where that path is a working tree, a suite that launched a host task
+  through a real daemon would remove it. `crates/container/tests/host_backend.rs`
+  is safe from this because every backend it builds names its own workspace; a
+  daemon-level test cannot.
+
+What the tier-1 tests exercise is not a re-implementation of the checks: they
+call the shipped `refresh` and `run_refresh` against a scripted backend and a
+stand-in refresh script, so both refusals are driven through the real code.
+`a_host_task_started_during_the_build_is_refused_at_the_swap_boundary` is the
+one that distinguishes this design from the naive one — the accept check passes
+on an idle node, the task appears while the build blocks on a release-file
+handshake, and the boundary refuses at the `drain` stage. Each check was deleted
+in turn and only its own test went red, which is the independence
+[D4](#decisions) claims, measured rather than asserted.
+
+### What this does not do
+
+No deploy path changed — `build-worker.sh` and `worker-refresh.sh` are slices
+4–6, and the [ordering note](#slices) is why they stay untouched.
+`probe_supervision`, the scope path and D8's test are untouched. No node config,
+no `WORKER_MODES` change, no schema and no epoch: the only wire-visible effect is
+that `RefreshOk::skipped` now carries a second reason, which an N-1 dispatcher
+already prints verbatim. `docs/spec.md` §3.1's drain guarantee is still written
+for a containerized daemon; narrowing it is still [slice 8](#slices)'s, and this
+slice is the mechanism that narrowing will describe. The
+[slice-2 correction](#correction-2026-08-05--slice-2-as-landed)'s line that
+"slice 3's `refresh` precondition is untouched" is superseded here and stands as
+the record of what was true at job #447.

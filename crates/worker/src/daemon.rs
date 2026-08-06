@@ -16,7 +16,7 @@ use crate::nix::{NixRoots, REAP_AGE_MIN, Realised, flake_installable};
 use container::docker::{DockerBackend, DockerNodeConfig, KvmGrant};
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
-    InjectedFile,
+    InjectedFile, RunningContainer,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -232,6 +232,11 @@ struct WorkerState {
     /// `platform-ops`'s `dispose` drives — drops exactly that task's root.
     /// Bounded by [`NIX_ROOTED_MAX`]; the reaper covers anything a crash loses.
     nix_rooted: std::sync::Mutex<HashMap<ContainerId, String>>,
+    /// This node serves its launches as host processes (`WORKER_MODES`, #309
+    /// P0), which is what makes them die with the daemon a refresh replaces
+    /// (design #440 D4). False ⇒ a container node, whose work survives the swap
+    /// by construction and whose refresh path is untouched.
+    host_mode: bool,
     /// Node-local build+swap script for self-refresh (spec §3.1); `None` ⇒
     /// refresh requests are rejected as unconfigured.
     refresh_script: Option<PathBuf>,
@@ -358,6 +363,48 @@ fn refresh_skip_reason(git_url: Option<&str>, git_key: &Path) -> Option<String> 
     None
 }
 
+/// Why a refresh must not proceed: this node is serving host work that the
+/// daemon swap would kill (design #440 D4). Pure over the listing so the
+/// `refresh` precondition and the swap-boundary re-check refuse in the same
+/// words, and so the id an operator has to act on is always named.
+fn host_work_refusal(node: &str, live: &[RunningContainer]) -> Option<String> {
+    if live.is_empty() {
+        return None;
+    }
+    let tasks = live
+        .iter()
+        .map(|c| match (c.job, c.task) {
+            (Some(job), Some(task)) => format!("{} (job {job} task {task})", c.id),
+            _ => c.id.clone(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "node {node} is running host work that would not survive the daemon swap: {tasks} — a \
+         host task is not a container and the drain guarantee (spec §3.1) does not cover it, so \
+         the refresh is refused rather than silently killing it (design #440 D4); retry once the \
+         task finishes, or drain the node first"
+    ))
+}
+
+/// The reason this node must refuse a refresh right now, or `None` (design #440
+/// D4). Asked at accept and again at the swap boundary, because a host task can
+/// be launched while the build between them runs.
+async fn host_work_check(state: &WorkerState) -> Option<String> {
+    if !state.host_mode {
+        return None;
+    }
+    match state.backend.list_managed_running().await {
+        Ok(live) => host_work_refusal(&state.node, &live),
+        Err(e) => Some(format!(
+            "node {} cannot list its host tasks ({e}), so it cannot tell whether a swap would \
+             kill one — refusing the refresh is the only answer that cannot lose work (design \
+             #440 D4)",
+            state.node
+        )),
+    }
+}
+
 /// Run the daemon until ctrl-c. Containers it launched keep running after
 /// shutdown; the dispatcher re-attaches.
 #[allow(
@@ -411,6 +458,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         kvm,
         nix: nix.clone(),
         nix_rooted: std::sync::Mutex::new(HashMap::new()),
+        host_mode: backend_kind(&config.modes) == WorkerMode::Host,
         refresh_script: config.refresh_script.clone(),
         refresh_git_url: config.refresh_git_url.clone(),
         refresh_git_key: config.refresh_git_key.clone(),
@@ -1407,6 +1455,14 @@ async fn refresh(state: &Arc<WorkerState>, payload: &[u8]) -> WorkerReply<Refres
                     from_version,
                 });
             }
+            if let Some(reason) = host_work_check(state).await {
+                tracing::warn!(node = %state.node, "worker refresh REFUSED — {reason}");
+                return Ok(RefreshOk {
+                    accepted: false,
+                    skipped: Some(reason),
+                    from_version,
+                });
+            }
             if !state.refresh.begin_refresh() {
                 return Ok(RefreshOk {
                     accepted: false,
@@ -1465,6 +1521,12 @@ async fn run_refresh(state: Arc<WorkerState>, script: PathBuf, req: RefreshReque
     state.refresh.quiesce();
     if !drain(&state.refresh, DRAIN_TIMEOUT).await {
         let e = format!("in-flight launches did not drain in {DRAIN_TIMEOUT:?}");
+        tracing::error!(node = %state.node, "worker refresh: {e}; aborting swap");
+        record_refresh_failure(&state, "drain", &e);
+        state.refresh.abort();
+        return;
+    }
+    if let Some(e) = host_work_check(&state).await {
         tracing::error!(node = %state.node, "worker refresh: {e}; aborting swap");
         record_refresh_failure(&state, "drain", &e);
         state.refresh.abort();
@@ -2372,5 +2434,237 @@ mod tests {
             wire.recent.last().map(String::len),
             Some(REFRESH_PROGRESS_LINE_BYTES)
         );
+    }
+
+    /// The one host task a host node may run (#309 §2 option iii), as the
+    /// backend reports it.
+    fn a_running_host_task() -> RunningContainer {
+        RunningContainer {
+            id: "w1/host-19f2c-0".into(),
+            project: Some("acme/chug".into()),
+            job: Some(440),
+            task: Some(3),
+        }
+    }
+
+    /// A directory this test alone owns, holding its stand-in refresh script and
+    /// that script's handshake files.
+    fn refresh_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "chug-d440-{name}-{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// A stand-in `worker-refresh.sh` recording every phase it is called with.
+    /// `hold` makes the build block until the test releases it, so "a task
+    /// appeared during the build" is a handshake rather than a timing bet.
+    fn stub_refresh_script(dir: &Path, hold: bool) -> PathBuf {
+        let script = dir.join("refresh.sh");
+        let waiter = if hold {
+            format!(
+                "  : > \"{started}\"\n  i=0\n  while [ ! -e \"{release}\" ] && [ $i -lt 600 ]; do \
+                 sleep 0.05; i=$((i+1)); done\n",
+                started = dir.join("build-started").display(),
+                release = dir.join("release").display(),
+            )
+        } else {
+            "  :\n".to_string()
+        };
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = build ]; then\n{waiter}fi\necho \"$1\" >> \"{phases}\"\nexit 0\n",
+                phases = dir.join("phases").display(),
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        script
+    }
+
+    /// The phases the stub script has been called with so far.
+    fn phases_run(dir: &Path) -> String {
+        std::fs::read_to_string(dir.join("phases")).unwrap_or_default()
+    }
+
+    /// A daemon state wired for a refresh: a git credential that exists (so the
+    /// #114 skip does not fire first) and the stand-in script.
+    fn refreshable_state(
+        backend: Arc<dyn ContainerBackend>,
+        host_mode: bool,
+        dir: &Path,
+        script: PathBuf,
+    ) -> Arc<WorkerState> {
+        let git_key = dir.join("worker_git");
+        std::fs::write(&git_key, b"stub").unwrap();
+        Arc::new(WorkerState {
+            node: "w1".into(),
+            backend,
+            capacity: Arc::new(Capacity::new(1, 1, crate::capacity::now_epoch_ms())),
+            announce_now: Arc::new(tokio::sync::Notify::new()),
+            artifacts: HashMap::new(),
+            artifact_hashes: HashMap::new(),
+            version: "0ldc0de".into(),
+            cache_enabled: false,
+            kvm: None,
+            nix: None,
+            nix_rooted: std::sync::Mutex::new(HashMap::new()),
+            host_mode,
+            refresh_script: Some(script),
+            refresh_git_url: Some("git@example.invalid:acme/chug.git".into()),
+            refresh_git_key: git_key,
+            refresh: RefreshGate::default(),
+            refresh_outcome: std::sync::Mutex::new(None),
+            refresh_progress: std::sync::Mutex::new(None),
+            refresh_pgid: std::sync::Mutex::new(None),
+        })
+    }
+
+    async fn ask_refresh(state: &Arc<WorkerState>) -> RefreshOk {
+        let payload = serde_json::to_vec(&RefreshRequest {
+            sha: "cafef00d".into(),
+            tag: "prod".into(),
+        })
+        .unwrap();
+        match refresh(state, &payload).await {
+            WorkerReply::Ok { value } => value,
+            WorkerReply::Err { error } => panic!("refresh errored: {error:?}"),
+        }
+    }
+
+    /// The refusal names the task, because a refusal an operator cannot act on
+    /// is barely better than the silent kill it replaces (design #440 D4).
+    #[test]
+    fn a_host_work_refusal_names_the_task() {
+        assert_eq!(host_work_refusal("w1", &[]), None);
+        let reason = host_work_refusal("w1", &[a_running_host_task()]).unwrap();
+        assert!(reason.contains("w1/host-19f2c-0"), "{reason}");
+        assert!(
+            reason.contains("job 440") && reason.contains("task 3"),
+            "{reason}"
+        );
+        assert!(
+            reason.contains("#440"),
+            "the reason cites its design: {reason}"
+        );
+    }
+
+    /// The accept-time precondition (design #440 D4): a host node running a task
+    /// refuses the refresh in the reply, names the task, and never starts the
+    /// build.
+    #[tokio::test]
+    async fn a_live_host_task_refuses_the_refresh_at_accept() {
+        let dir = refresh_dir("accept");
+        let backend = Arc::new(test_utils::FakeBackend::new());
+        backend.set_managed_running([a_running_host_task()]);
+        let script = stub_refresh_script(&dir, false);
+        let state = refreshable_state(backend, true, &dir, script);
+
+        let ok = ask_refresh(&state).await;
+        assert!(!ok.accepted, "a host node with live work must not accept");
+        let reason = ok.skipped.expect("the refusal rides in the reply");
+        assert!(reason.contains("w1/host-19f2c-0"), "{reason}");
+        assert_eq!(phases_run(&dir), "", "no build may start: {reason}");
+        assert!(
+            state.refresh.begin_refresh(),
+            "a refusal must not consume the node's refresh slot"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The check that is actually load-bearing (design #440 D4): the accept-time
+    /// one passed on an idle node, a task landed while the build ran, and the
+    /// swap-boundary re-check refused it at the `drain` stage instead of killing
+    /// it.
+    #[tokio::test]
+    async fn a_host_task_started_during_the_build_is_refused_at_the_swap_boundary() {
+        let dir = refresh_dir("boundary");
+        let backend = Arc::new(test_utils::FakeBackend::new());
+        let script = stub_refresh_script(&dir, true);
+        let state = refreshable_state(backend.clone(), true, &dir, script);
+
+        let ok = ask_refresh(&state).await;
+        assert!(ok.accepted, "an idle host node accepts: {ok:?}");
+
+        let started = dir.join("build-started");
+        test_utils::wait::poll_default("the stub build to start", || {
+            started.exists().then_some(())
+        })
+        .await;
+        backend.set_managed_running([a_running_host_task()]);
+        std::fs::write(dir.join("release"), b"go").unwrap();
+
+        let (stage, tail) =
+            test_utils::wait::poll_default("the refresh to reach its terminal verdict", || {
+                match state
+                    .refresh_outcome
+                    .lock()
+                    .unwrap()
+                    .as_ref()?
+                    .result
+                    .clone()
+                {
+                    RefreshResult::Failed { stage, error_tail } => Some((stage, error_tail)),
+                    _ => None,
+                }
+            })
+            .await;
+        assert_eq!(
+            stage, "drain",
+            "the boundary refusal fails at the drain stage"
+        );
+        assert!(tail.contains("w1/host-19f2c-0"), "{tail}");
+        assert!(
+            phases_run(&dir).contains("build") && !phases_run(&dir).contains("swap"),
+            "the build ran and the swap did not: {:?}",
+            phases_run(&dir)
+        );
+        assert!(
+            state.refresh.try_launch().is_some(),
+            "an aborted refresh reopens launches"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A container-only node is untouched by design #440 D4: its work survives
+    /// the swap by construction (spec §3.1), so the daemon never even asks what
+    /// is running — a backend that fails that listing still refreshes to swap.
+    #[tokio::test]
+    async fn a_container_node_refreshes_without_asking_what_is_running() {
+        let dir = refresh_dir("container");
+        let backend = Arc::new(test_utils::FakeBackend::new());
+        backend.set_managed_running([a_running_host_task()]);
+        backend.fail_list_managed_running("a container node must never ask this");
+        let script = stub_refresh_script(&dir, false);
+        let state = refreshable_state(backend, false, &dir, script);
+
+        assert!(ask_refresh(&state).await.accepted);
+        test_utils::wait::poll_default("the refresh to reach the swap", || {
+            phases_run(&dir).contains("swap").then_some(())
+        })
+        .await;
+        assert!(
+            state
+                .refresh_outcome
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .result
+                == RefreshResult::InProgress,
+            "nothing failed on the way to the swap"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

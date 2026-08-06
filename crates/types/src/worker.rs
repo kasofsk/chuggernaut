@@ -235,13 +235,12 @@ pub struct RefreshOk {
     /// The daemon began refreshing (false → a refresh was already in progress,
     /// or was skipped — see `skipped`).
     pub accepted: bool,
-    /// Set when the node could not even *attempt* a refresh because it has no
-    /// git credential to fetch the build context (spec §3.1): `WORKER_REFRESH_GIT_URL`
-    /// unset or its key file missing. The daemon reports the skip in the reply
-    /// (rather than accepting and no-oping silently in the background) so a
-    /// deploy surfaces it LOUDLY instead of a 41s "success" that refreshed
-    /// nothing. `None` on a normal accept or already-in-progress reply.
-    /// `#[serde(default)]` keeps a pre-field daemon's reply decodable.
+    /// Set when the node could not even *attempt* a refresh — no git credential
+    /// to fetch the build context (spec §3.1), or live host work a swap would
+    /// kill (design #440 D4) — and reported in the reply rather than accepted
+    /// and silently no-oped, so a deploy surfaces it LOUDLY. `None` on a normal
+    /// accept or already-in-progress reply, and `#[serde(default)]` keeps a
+    /// pre-field daemon's reply decodable.
     #[serde(default)]
     pub skipped: Option<String>,
     /// The version the node is refreshing away from.
