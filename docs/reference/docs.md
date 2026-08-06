@@ -250,7 +250,10 @@ Two things about that table are decisions rather than accidents:
   names moved after it did, which is very often fine. A ledger that fails builds
   for history nobody in the commit caused is a ledger people disable — so the
   one case it blocks is a diff that edits a doc and then changes a non-doc file
-  that doc names, which the author clears by re-reading the doc.
+  that doc names, which the author clears by re-reading the doc and *saying so*:
+  a `Doc-reread: <path>` trailer in a commit message on the branch, one line per
+  doc. The assertion is the point — a timestamp records that a doc was edited,
+  not that anyone read it.
 - **The ledger's second half asks reach rather than truth.** Per tracked
   `docs/**/*.md`, how many other tracked `*.md` name it — by a backticked path
   claim or a relative link, prompts included, `docs/README.md` excluded. Zero is

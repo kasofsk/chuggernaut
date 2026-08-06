@@ -52,12 +52,24 @@
 # current diff touches and exits 1 if one of them is suspect. In a job branch
 # that set is nearly always empty by construction: editing a doc makes it the
 # newest thing in the comparison. What survives is the one ordering that is a
-# real finding — the branch edited the doc and THEN changed a file the doc names
-# — and it clears the way the author would fix it anyway, by re-reading the doc
-# and committing it again. The hook gets no `--gate`: before the commit the
+# real finding — the branch edited the doc and THEN changed a file the doc names.
+# The hook gets no `--gate`: before the commit the
 # staged doc's last commit is still the old one, so every staged doc would be
 # suspect and no edit could clear it inside that commit. A block nobody can
 # clear except with `--no-verify` is how a ledger gets turned off.
+#
+# THE BLOCK CLEARS ON AN ASSERTED RE-READ, NOT ON A TIMESTAMP (job #471). A
+# `Doc-reread: <path>` line in a commit message between `--since <ref>` and HEAD
+# clears exactly the doc it names, and nothing else — it is an assertion per
+# doc, not a blanket waiver, so a branch owing three re-reads writes three
+# lines. This gate used to print "commit the doc again" as its remedy, which
+# satisfies the ordering without satisfying the purpose: D7 wants the doc
+# RE-READ against the change, and a timestamp cannot express attention. A
+# trailer can be written falsely, like every reviewer-facing rule; the
+# difference is that it is then a visible false statement in a commit message
+# rather than an invisible whitespace edit. With no `--since` there is no branch
+# whose messages to read, so the block stands — a caller that omits the argument
+# cannot silently stop enforcing.
 #
 # A `*.md` MOVER NEVER BLOCKS, and that is what makes the block above always
 # clearable (job #454). Only a `*.md` file makes claims, so a doc is the only
@@ -65,9 +77,9 @@
 # other are a cycle with no fixed point except one commit holding both, which is
 # a squash and not something a rework can reach. Job #449 and job #453 both hit
 # it and both cleared it by squashing. Dropping `.md` from the blocking side
-# leaves the relation doc → non-doc, which is acyclic by construction: re-touching
-# a flagged doc clears its row and can flip no other, because the touched doc is
-# itself a `.md` and so never a blocking mover. A cross-reference is also the
+# leaves the relation doc → non-doc, which is acyclic by construction: acting on
+# a flagged doc clears its row and can flip no other, because the doc so touched
+# is itself a `.md` and so never a blocking mover. A cross-reference is also the
 # weaker claim — one doc LINKING another is a pointer, not a statement about its
 # content — and it stays in the advisory ledger, where a near-constant-true
 # predicate costs a row a reader skims rather than a build.
@@ -116,7 +128,9 @@
 #   .chug/tasks/doc-staleness.sh                  # every tracked *.md, one line per suspect doc
 #   .chug/tasks/doc-staleness.sh --staged         # the staged *.md, every suspect path
 #   .chug/tasks/doc-staleness.sh <file>...        # explicit, repo-relative, every suspect path
-#   .chug/tasks/doc-staleness.sh --gate <file>... # whole-tree counts; details only the listed docs
+#   .chug/tasks/doc-staleness.sh --gate [--since <ref>] <file>...
+#                                                 # whole-tree counts; details only the listed docs,
+#                                                 # cleared by a Doc-reread: trailer since <ref>
 #
 # The orphan half runs in the two whole-tree modes only. Reach is a property of
 # the whole tree, so a scoped run cannot answer it, and `--staged` is the hook's
@@ -162,12 +176,14 @@ linker="$HERE/doc-lint.sh"
 # file is a wall nobody reads, so the tree run prints the newest mover per doc
 # and names how many it summarised. Re-run on one doc to see all of them.
 gate_list="$(mktemp)"
+reread_list="$(mktemp)"
 ts_index="$(mktemp)"
 claims="$(mktemp)"
 orphan_pop="$(mktemp)"
 orphan_refs="$(mktemp)"
-trap 'rm -f "$gate_list" "$ts_index" "$claims" "$orphan_pop" "$orphan_refs"' EXIT
+trap 'rm -f "$gate_list" "$reread_list" "$ts_index" "$claims" "$orphan_pop" "$orphan_refs"' EXIT
 : >"$gate_list"
+: >"$reread_list"
 
 mode="tree"
 detail=0
@@ -178,11 +194,27 @@ case "${1:-}" in
 	mode="gate"
 	gate=1
 	detail=1
+	_want_since=""
 	for f in "$@"; do
+		if [ -n "$_want_since" ]; then
+			# The branch's own commit messages are the only place an author can
+			# ASSERT a re-read. Derived from git like everything else here.
+			git log "$f..HEAD" --format=%B 2>/dev/null |
+				sed -n 's/^[[:space:]]*Doc-reread:[[:space:]]*//p' |
+				sed 's/[[:space:]]*$//' |
+				grep -v '^$' >>"$reread_list" || :
+			_want_since=""
+			continue
+		fi
 		case "$f" in
+		--since) _want_since=1 ;;
 		*.md) printf '%s\n' "$f" >>"$gate_list" ;;
 		esac
 	done
+	[ -z "$_want_since" ] || {
+		echo "doc-staleness: --since needs a ref" >&2
+		exit 2
+	}
 	set --
 	;;
 --staged)
@@ -258,7 +290,7 @@ git log --no-renames --format='@@@%ct %cs' --name-only 2>/dev/null | awk '
 # --- Join --------------------------------------------------------------------
 # A doc with no commit of its own (added but never committed) is skipped: it is
 # newer than everything by construction, so there is nothing to suspect it of.
-awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v detail="$detail" -v gate="$gate" '
+awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v rrf="$reread_list" -v detail="$detail" -v gate="$gate" '
 	# Docs are ranked by the GAP — how long the newest mover has sat unread —
 	# and never by the date of that mover. Ranking by date puts everything this
 	# repo touched today at the top, which on ~15 jobs a day is the churn and
@@ -280,6 +312,7 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v detail="$detail" -v gate=
 	}
 	FILENAME == tsf { ts[$1] = $2 + 0; ds[$1] = $3; next }
 	FILENAME == gatef { gated[$0] = 1; next }
+	FILENAME == rrf { attested[$0] = 1; next }
 	{
 		doc = $1; line = $2; path = $3
 		if (!(doc in ts)) next
@@ -301,15 +334,17 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v detail="$detail" -v gate=
 		if (ts[path] - ts[doc] > gap[doc]) gap[doc] = ts[path] - ts[doc]
 	}
 	END {
-		total = 0; sus = 0; blocked = 0; aged = 0; crossref = 0
+		total = 0; sus = 0; blocked = 0; aged = 0; crossref = 0; cleared = 0
 		for (d in docs) {
 			total++
 			if (!(d in cnt)) continue
 			sus++
 			if (gap[d] >= 86400) aged++
 			if (!(d in gated)) continue
-			if (d in hard) blocked++
-			else crossref++
+			if (d in hard) {
+				if (d in attested) cleared++
+				else blocked++
+			} else crossref++
 		}
 		if (sus == 0) {
 			printf "doc-staleness: no doc is suspect (%d doc(s) with file claims read).\n", total
@@ -330,8 +365,13 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v detail="$detail" -v gate=
 				printf "doc-staleness:   content it points at, and doc-names-doc is the one ordering no\n"
 				printf "doc-staleness:   rework commit can clear. Not blocking (design #415 D7, job #454).\n"
 			}
+			if (cleared > 0) {
+				printf "doc-staleness:   %d doc(s) carry a Doc-reread: trailer on this branch — the\n", cleared
+				printf "doc-staleness:   author asserts they read it against the change. Cleared.\n"
+			}
 			if (blocked == 0) exit 0
-			for (d in cnt) if ((d in gated) && (d in hard)) order[d] = gap[d] + 1
+			for (d in cnt)
+				if ((d in gated) && (d in hard) && !(d in attested)) order[d] = gap[d] + 1
 			sus = blocked
 		} else {
 			for (d in cnt) order[d] = gap[d] + 1
@@ -349,10 +389,13 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v detail="$detail" -v gate=
 			printf "!!! doc-staleness: %d doc(s) above are edited by this diff and still suspect.\n", blocked
 			printf "!!!     The branch changed a non-doc file the doc names AFTER it last touched\n"
 			printf "!!!     the doc, so nothing in this change has re-read one against the other.\n"
-			printf "!!!     Re-read it and commit the doc again — one commit clears it, and it can\n"
-			printf "!!!     flip no other row, because a *.md* never blocks. (design #415 D7)\n"
+			printf "!!!     Re-read it, then say so in a commit message on this branch:\n"
+			printf "!!!         Doc-reread: <path>\n"
+			printf "!!!     one line per doc. A trailer is an ASSERTION that you looked; committing\n"
+			printf "!!!     the doc unchanged would satisfy a timestamp without satisfying that, which\n"
+			printf "!!!     is what this gate used to accept. (design #415 D7, job #471)\n"
 			exit 1
 		}
 		exit 0
 	}
-' "$ts_index" "$gate_list" "$claims"
+' "$ts_index" "$gate_list" "$reread_list" "$claims"

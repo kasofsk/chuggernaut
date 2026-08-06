@@ -45,6 +45,13 @@ is a pointer, and doc-names-doc is the only edge that can form a cycle — which
 makes the gate satisfiable in one rework commit while the advisory reading list
 keeps the edge. See the
 [#454 correction](#correction--2026-08-06-job-454-d7-the-gate-that-a-rework-could-not-clear).
+Satisfiable is not the same as *right*, and job #471 measured the difference:
+across the three jobs `--gate` had blocked, one finding was arguable and two
+were ordering artifacts, because a timestamp cannot express attention. The block
+stands and its clearing rule changed — a `Doc-reread: <path>` trailer in a
+commit message on the branch now clears exactly the doc it names, which is an
+assertion a content edit is not. See the
+[#471 correction](#correction--2026-08-06-job-471-d7s-blocking-half-asked-for-the-wrong-thing).
 S4 landed on 2026-08-05 (job #449), last of the original programme:
 `docs/concepts.md` holds **12** rows and check 4 is live. Its measured yield is
 **one** duplicate in the whole tree *under the two shapes D4 gates* — the value
@@ -187,7 +194,7 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S4** | `docs/concepts.md` + the seed concept set + check 4 (definitional shape) | **Landed** (job #449) — 12 rows, one owner each; check 4 reads D4's two shapes, narrowed so a term must OPEN a sentence, and found exactly **one** duplicate under them. See the [S4 correction](#correction--2026-08-05-job-449-s4-check-4-and-the-yield-it-does-not-have) |
 | **S5a** | Check 3 (slice ↔ merged job) — the detector for the drift this head suffered twice | **Landed** (job #444) — one shape, `**Landed** (job #N)` in a `docs/design/*.md` table row, resolved against the `job/N:` squash-merge subject; a doc with no slice table is silent. See the [S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split) |
 | **S5b** | Design-doc heads retrofitted (D2), plans demoted to design docs (D1) | **Landed** (job #445) — 22 docs given a `Status:` line, nine given a lifted slice table, no table invented for a doc that had none. See the [S5b correction](#correction--2026-08-05-job-445-s5b-the-head-retrofit) |
-| **S6** | The staleness ledger (D7) | **Landed** (job #446) — `.chug/tasks/doc-staleness.sh`, sharing check 1's extractor through a new `--emit-paths` mode; **30 of 61** docs suspect, 7 of them by a day or more. Directory claims are out and the pre-commit block is not built, both on measurement. See the [S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear) |
+| **S6** | The staleness ledger (D7) | **Landed** (job #446) — `.chug/tasks/doc-staleness.sh`, sharing check 1's extractor through a new `--emit-paths` mode; **30 of 61** docs suspect, 7 of them by a day or more. Directory claims are out and the pre-commit block is not built, both on measurement. The CI block's clearing rule was replaced in job #471 — a `Doc-reread:` trailer, not a touched timestamp. See the [S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear) and the [#471 correction](#correction--2026-08-06-job-471-d7s-blocking-half-asked-for-the-wrong-thing) |
 | **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | **Landed** (job #448) — `docs-update.md` now opens on the reference/design split and makes the D10 head update an author's step; `review-docs-updated.md` is blocking on **three** classes, not two — D10 compliance joined the two D9 names, because check 3 exempts the landing job. See the [S7 correction](#correction--2026-08-05-job-448-s7-the-instructions-and-the-evaluators-teeth) |
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `docs/reference/style.md` / `docs/README.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded  <!-- absent --> |
 | **S9** | `docs/reference/docs.md` — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | **Landed** (job #461) — the policy doc states D1–D7, D10 and D15 in the present tense; `docs/design-docs.md` keeps its path as a pointer, because four of its inbound references sit in append-only bodies and in code |
@@ -2727,3 +2734,46 @@ it, once `docs/README.md` is excluded as a referrer, is
 above. Had job #467 landed the page and its catalogue row alone, the tree's
 newest and most central doc would have been this half's first true positive on
 the day it was written. That is the exclusion earning its keep.
+
+---
+
+## Correction — 2026-08-06, job #471: D7's blocking half asked for the wrong thing
+
+`--gate` blocked when a doc's last commit was older than that of a non-`.md`
+file it names. That is an **ordering** test, and D7 wanted an **attention**
+test. The two come apart in both directions, and the gap was not theoretical:
+the gate's own printed remedy — *"Re-read it and commit the doc again"* — is
+satisfied by committing the doc unchanged, so **the remedy the gate offered was
+the way to game it**.
+
+**Measured.** `--gate` blocked three jobs. Job #449 cycle 2 is the arguable
+one: two commits, and the first's docs named files the second moved, so a
+re-read was genuinely owed. Jobs #453 and #469 were artifacts. #453 reworked one
+runbook, which made it newer than three docs that name it, none of them stale.
+Job #469 changed **one error-message string** in
+`deploy/prod/build-worker.sh` and six docs went suspect; three were read by hand and none was made untrue by a
+reworded string. One arguable finding against two artifacts, each costing a
+rework cycle, is the [M7](#the-problem-measured) ratio applied to a gate this
+document built.
+
+**The fix keeps the block and changes what clears it.** A doc still blocks when
+the branch changed a non-doc file it names afterwards; it now also clears when a
+commit on that branch carries a `Doc-reread: <path>` trailer naming it. The
+trailer is derived from git like the rest of the ledger — no manifest, nothing
+to maintain, nothing that can itself go stale — and it cannot be produced
+without reading the list of what needs re-reading. It remains gameable, as every
+reviewer-facing rule is; the difference is that gaming it is now a **visible
+false statement in a commit message** rather than an invisible whitespace edit.
+
+**What was rejected.** Demoting `--gate` to advisory (D7 does say *"suspect,
+not wrong"*, and job #446 argued the pre-commit variant down on that ground)
+stays the honest retreat if the trailer proves to be theatre — but it gives up
+the enforcement while the signal has caught one real thing. Narrowing "names a
+file" to claims rather than pointers is the same undecidable problem check 4
+faced, and check 4's answer — a registry plus a syntactic shape — would mean
+marking some 290 path references. Firing only when the changed hunks are what
+the doc describes is too clever, and here a false negative is worse than a
+false positive.
+
+**Unchanged:** the advisory whole-tree ledger, the orphan half, the doc-names-doc
+exemption job #454 added, and every check in `check-doc-facts.sh`.

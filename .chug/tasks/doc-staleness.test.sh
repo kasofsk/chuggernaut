@@ -81,6 +81,12 @@ commit_at 2026-01-01 sources
 { printf '# Dir\n\n'; printf 'Everything under `crates/pkg/src/`.\n'; } > "$REPO/docs/dir.md"
 { printf '# Bare\n\n'; printf 'No path claims here at all.\n'; } > "$REPO/docs/bare.md"
 { printf '# Marked\n\n'; printf 'Reads `crates/pkg/src/mover.rs`. <!-- intent -->\n'; } > "$REPO/docs/marked.md"
+# A second doc suspect through the SAME mover, so job #471's trailer can be shown
+# to clear one doc and not the other — an assertion is per-doc, never a blanket
+# waiver. Linked from dir.md so it is not also a new ORPHAN: this fixture is for
+# the trailer cases and must not perturb the orphan half beyond its total.
+{ printf '# Suspect2\n\n'; printf 'Also reads `crates/pkg/src/mover.rs`.\n'; } > "$REPO/docs/suspect2.md"
+printf 'See [s2](suspect2.md).\n' >> "$REPO/docs/dir.md"
 # The doc<->doc cycle jobs #449 and #453 could only clear by squashing: two docs
 # that name each other, plus one doc naming both a doc and a source file.
 { printf '# Pair A\n\n'; printf 'See `docs/pair-b.md`.\n'; } > "$REPO/docs/pair-a.md"
@@ -180,6 +186,33 @@ run_sut --gate docs/suspect.md
 check "--gate fails on a diff-touched suspect doc" 1 "$RC" "$OUT" \
 	"edited by this diff and still suspect"
 
+# 11b. A `Doc-reread:` trailer on this branch CLEARS that block (job #471). The
+#      gate wants attention; a timestamp cannot express it, and committing the
+#      doc unchanged satisfied the timestamp without satisfying the purpose —
+#      which made the gate's own remedy the way to game it.
+BASE="$(cd "$REPO" && git rev-parse HEAD)"
+(cd "$REPO" && git -c user.email=t@e -c user.name=t commit -q --allow-empty -m "rework
+
+Doc-reread: docs/suspect.md")
+run_sut --gate --since "$BASE" docs/suspect.md
+check "an asserted re-read clears the block" 0 "$RC" "$OUT" \
+	"carry a Doc-reread: trailer"
+check_silent "a cleared doc is not listed as blocking" "$RC" "$OUT" \
+	"edited by this diff and still suspect"
+
+# 11c. The trailer clears only the doc it names. A second suspect doc on the
+#      same branch still blocks, so the assertion cannot be a blanket waiver.
+run_sut --gate --since "$BASE" docs/suspect.md docs/suspect2.md
+check "the trailer clears only the doc it names" 1 "$RC" "$OUT" \
+	"edited by this diff and still suspect"
+
+# 11d. Without --since there is no branch to read trailers from, so the block
+#      stands — the gate never silently stops enforcing because a caller
+#      forgot an argument.
+run_sut --gate docs/suspect.md
+check "no --since means no clearing" 1 "$RC" "$OUT" \
+	"edited by this diff and still suspect"
+
 # 12. A doc the diff edits that is NOT suspect passes.
 run_sut --gate docs/quiet.md
 check "--gate passes a diff-touched doc that is current" 0 "$RC" "$OUT" \
@@ -240,7 +273,7 @@ run_sut
 
 # 20. A doc nothing names but the catalogue is an orphan, named on its own line.
 check "a doc named only by the catalogue is reported" 0 "$RC" "$OUT" \
-	"1 of 14 doc(s) under docs/ have ZERO inbound references"
+	"1 of 15 doc(s) under docs/ have ZERO inbound references"
 check "the orphan row names the doc" 0 "$RC" "$OUT" \
 	"docs/orphan.md — no inbound reference"
 
@@ -259,7 +292,7 @@ check_silent "a doc reached by a backticked path claim is silent" "$RC" "$OUT" \
 	"docs/claimed-only.md — no inbound reference"
 
 # 23. The catalogue is excluded as a REFERRER and not from the population, which
-#     the `of 14` in case 20 pins: `docs/README.md` is one of those 14. A row on
+#     the `of 15` in case 20 pins: `docs/README.md` is one of those 15. A row on
 #     top of a real reference changes nothing either — `docs/linked-only.md` is
 #     both catalogued and linked, and case 22 pins it silent.
 

@@ -662,7 +662,9 @@ doc_staleness_ledger() {
 	done
 	set -- $_md
 	unset IFS
-	.chug/tasks/doc-staleness.sh --gate "$@"
+	# --since lets a doc clear its block with a `Doc-reread:` trailer instead of a
+	# content edit: the gate wants attention, and a timestamp cannot express it (#471).
+	.chug/tasks/doc-staleness.sh --gate --since "$base" "$@"
 }
 
 # --- shell test suites (job #385) ---------------------------------------------

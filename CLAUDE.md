@@ -121,7 +121,13 @@ the absence of a workflow file.
   edited the doc and *then* changed a **non-doc** file it names. It blocks
   nowhere else on
   purpose: failing a build for history nobody in the commit caused is how a
-  ledger gets disabled, and at the commit no edit could clear it anyway. Only
+  ledger gets disabled, and at the commit no edit could clear it anyway. Since
+  #471 that block is cleared by an **assertion of attention** rather than an
+  ordering: a `Doc-reread: <path>` trailer in a commit message on the branch
+  clears exactly the doc it names, read out of `--gate --since <base>`, which
+  `.chug/tasks/ci.sh` passes. Re-touching the doc still satisfies the timestamp,
+  but the gate's printed remedy names the trailer, because committing a doc
+  unchanged satisfies the ordering without satisfying the purpose. Only
   file claims are judged — a directory is newer than every doc the moment
   anything under it changes, so it is a constant, not a signal. **A `*.md` mover
   never blocks** (job #454): only a doc makes claims, so only a doc can sit on

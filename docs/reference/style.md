@@ -273,7 +273,10 @@ verify it in seconds and must name it when rejecting.
    because a doc is suspect until the commit that re-reads it lands. Its one
    blocking case never counts a `*.md` mover (job #454): a doc linking a doc is
    a pointer rather than a claim about that content, and it is the only edge
-   that can form a cycle no rework commit can clear.
+   that can form a cycle no rework commit can clear. That block clears on an
+   asserted re-read — a `Doc-reread: <path>` trailer in a commit message on the
+   branch, one line per doc (job #471) — because a timestamp records that a doc
+   was edited, where the gate is asking whether anyone looked.
 
    A marker covers **the line that carries it**, so put it at the end of the
    line making the claim; a claim on the next line is judged on its own. No
