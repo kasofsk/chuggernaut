@@ -1,9 +1,11 @@
 # Design — the natively-supervised worker daemon
 
-Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1, 2
-and 3 have landed — 3 as
-[the refusal at both checks](#correction-2026-08-06--slice-3-as-landed-job-460) —
-and 4–8 have not started. [D3](#decisions) and [D8](#decisions) are **both
+Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1, 2,
+3 and 8 have landed — 3 as
+[the refusal at both checks](#correction-2026-08-06--slice-3-as-landed-job-460),
+8 as
+[the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470) —
+and 4–7 have not started. [D3](#decisions) and [D8](#decisions) are **both
 proven on Linux, through the shipped code path**: on `gumbo-nuc-0` (NixOS,
 **systemd 260 (260.2)**, cgroup v2) on 2026-08-06, all thirteen tests in
 `crates/container/tests/host_backend.rs` passed with **no skips** at tree
@@ -99,7 +101,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
 | 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | Proposed |
 | 7 | `code` — `nix/chug-node/` gains the unit and the `chug.node` charter amendment; the macOS plist template and its opt-in installer | `chug.node` option surface | 4, 6 | Proposed |
-| 8 | `docs` — `docs/spec.md` §3.1's drain guarantee narrowed to say what survives a *native* daemon restart and what does not | spec §3.1 | 2, 3 | Proposed |
+| 8 | `docs` — `docs/spec.md` §3.1's drain guarantee narrowed to say what survives a *native* daemon restart and what does not | spec §3.1 | 2, 3 | **Landed** (job #470) — four cases, the reboot residue explicit, and both live qualifiers stated; see [the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470) |
 
 **The ordering between 2–3 and 4–6 is load-bearing**, not a preference: flipping
 a node to a native daemon before the drain mechanism lands means the first deploy
@@ -2053,3 +2055,38 @@ and nothing in this repo pins or reports the client's version.
   unified hierarchy, so all five scope tests self-skip there exactly as job
   #447 recorded. These assertions run when someone points the suite at a systemd
   host, which is what happened here.
+
+---
+
+## Slice 8, 2026-08-06 — the guarantee narrowed in the spec (job #470)
+
+Appended by job #470, a `docs` job that changed no code, no test and no gate.
+Nothing above is edited except the head's `Status:` line and
+[slice 8](#slices)'s State cell.
+
+[`docs/spec.md`](../spec.md) §3.1's drain guarantee now says what a **native**
+daemon restart covers, immediately under the paragraph it qualifies, in four
+cases: container tasks (unconditional, however the daemon is deployed), host
+tasks across a restart of the daemon's own supervision unit ([D3](#decisions),
+with the 2026-08-06 proof pointers for both platforms), host tasks across the
+platform's self-refresh (refused rather than risked, [D4](#decisions)), and a
+reboot or any broader restart (**not** guaranteed, said plainly rather than left
+as the unstated exception the sentence carried before). Both live qualifiers are
+stated there rather than buried: `XDG_RUNTIME_DIR` in the invoking environment,
+[slice 7](#slices)'s unanswered provisioning question, and the systemd-version
+window in which `--expand-environment=no` is load-bearing
+([the version table](#the-systemd-version-dependency-plainly)).
+
+Two things it deliberately does not do. It restates **no mechanism** this
+document owns — the scope, the process group, and where the two refusal checks
+hang stay here, and the spec links ([#415](415-knowledge-architecture.md) D1,
+D5). And it claims **no availability**: the spec's new text says the host half is
+written because the mode is designed, not because it is offered, and #401's
+`runtime.mode: host` refusal is untouched and still cited in §1.1.
+
+### What this does not do
+
+No code, no gate, no deploy path, no test. Slices 4–7 are unstarted and their
+State cells are as they were; `crates/container/src/host.rs`,
+`crates/worker/src/daemon.rs` and `deploy/prod/build-worker.sh` are untouched.
+Whether a real node ever advertises `host` remains #309 P1's, not this slice's.
