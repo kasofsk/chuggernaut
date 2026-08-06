@@ -5,7 +5,9 @@ document in this tree, one line each, and it is gated in both directions so it
 cannot quietly fall behind. Everything after it is the **structural north
 star** — the target factoring the codebase refactors toward.
 
-New to the tree? Read `docs/spec.md` for what the platform does,
+New to the tree? Start at [`docs/overview.md`](overview.md), which orients you
+across the whole system in one reading and links out to the doc that owns each
+part. Then `docs/spec.md` for what the platform does,
 [`docs/reference/docs.md`](reference/docs.md) for how these documents are
 written and gated, and the catalogue for everything else.
 
@@ -26,6 +28,7 @@ from being the one everyone forgets (design
 | [`docs/concepts.md`](concepts.md) | The concept registry — which doc owns each term's definition, and the criterion for a row |
 | [`docs/design-docs.md`](design-docs.md) | A pointer: the design-doc header contract now lives in the doc policy |
 | [`docs/implementation-notes.md`](implementation-notes.md) | Per-module rationale, hoisted out of the comments the tree no longer carries |
+| [`docs/overview.md`](overview.md) | The synthesis page: the shape of the whole system, entirely as glosses linking to the doc that owns each part |
 | [`docs/spec.md`](spec.md) | Normative platform behaviour: the data model, the state machine, the prompts |
 | [`docs/reference/contracts.md`](reference/contracts.md) | Extracting and formalizing the dispatcher's interfaces |
 | [`docs/reference/crates.md`](reference/crates.md) | The crate and module map: what each crate owns, and why |

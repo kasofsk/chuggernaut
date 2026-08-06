@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — D1–D15 decided; S0–S10 landed, and S11 and S12 remain intent.
+Status: IMPLEMENTED IN PART — D1–D15 decided; S0–S11 landed, and S12 remains intent.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
 [D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
@@ -77,9 +77,17 @@ S9 and S10 landed on 2026-08-06 (job #461): `docs/reference/docs.md` states the
 policy in the present tense and absorbs `docs/design-docs.md`, which is reduced
 to a pointer rather than deleted; `docs/README.md` carries a catalogue row per
 tracked doc under `docs/`, and check 5 compares the two sets both ways as an
-error in every job's pre-stage. S11 and S12 remain intent, which is why
-`Status:` does not move — see the
+error in every job's pre-stage — see the
 [S9/S10 correction](#correction--2026-08-06-job-461-s9-and-s10-the-policy-doc-and-the-catalogue).
+S11 landed on 2026-08-06 (job #467): `docs/overview.md` is the synthesis page,
+written as [D13](#d13-the-synthesis-page-is-a-reference-doc) asks — routing
+tables whose left cell is a question and whose right cell is the doc that
+answers it, so a line on the page cannot go stale unless the doc it links stops
+answering. Its row's second clause was **not** done and is not claimed: the
+`wiki/` prose note it names is untracked, and an untracked file is the
+operator's to move, not a job's. S12 alone remains intent, which is why
+`Status:` still does not move — see the
+[S11 correction](#correction--2026-08-06-job-467-s11-the-synthesis-page-and-the-wiki-clause-that-could-not-run).
 
 Measured against the tree at `28e5aa1` (2026-08-04). Every number below was read
 out of that commit, not carried over from the brief; the commands are given so a
@@ -127,7 +135,7 @@ what can be checked mechanically is.**
 | **D10** | The **implementing job** updates the design doc it implements | [D10](#d10-the-implementing-job-owns-the-update) |
 | **D11** | A **ratchet, not a flag day** | [D11](#d11-a-ratchet-not-a-flag-day) |
 | **D12** | Every doc lives under `docs/`; the root keeps only `README.md`, `CLAUDE.md` and `wiki/`. `.chug/` prose stays put and every rule reaches it; `wiki/` is diagrams, not knowledge | [D12](#d12-where-everything-lives) |
-| **D13** | A **synthesis page** — a doc that states no new fact and decides nothing — is **reference**, bound by [D5](#d5-claudemd-may-gloss-never-define)'s gloss-and-link rule verbatim. It lives at `docs/overview.md` <!-- intent --> | [D13](#d13-the-synthesis-page-is-a-reference-doc) |
+| **D13** | A **synthesis page** — a doc that states no new fact and decides nothing — is **reference**, bound by [D5](#d5-claudemd-may-gloss-never-define)'s gloss-and-link rule verbatim. It lives at `docs/overview.md`, live since job #467 | [D13](#d13-the-synthesis-page-is-a-reference-doc) |
 | **D14** | The doc **policy** is a reference doc (`docs/reference/docs.md`, absorbing `docs/design-docs.md`); this document keeps the **argument** | [D14](#d14-the-policy-is-reference-415-is-the-argument) |
 | **D15** | **Structural health** is a second axis, and two mechanisms: **check 5** compares `docs/README.md`'s catalogue against the tree both ways (blocking); the ledger reports **inbound-reference count**, zero being a finding (advisory) | [D15](#d15-structural-health-index-completeness-and-orphans) |
 
@@ -173,12 +181,12 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `docs/reference/style.md` / `docs/README.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded  <!-- absent --> |
 | **S9** | `docs/reference/docs.md` — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | **Landed** (job #461) — the policy doc states D1–D7, D10 and D15 in the present tense; `docs/design-docs.md` keeps its path as a pointer, because four of its inbound references sit in append-only bodies and in code |
 | **S10** | `docs/README.md` gains a one-line catalogue row per tracked doc; **check 5** compares catalogue ↔ tree both ways, `check-modules.sh`'s shape ([D15](#d15-structural-health-index-completeness-and-orphans)) | **Landed** (job #461) — the catalogue covers every tracked `docs/**/*.md` including itself, and check 5 fails both ways while skipping an unparseable row in silence |
-| **S11** | `docs/overview.md` <!-- intent --> — the synthesis page ([D13](#d13-the-synthesis-page-is-a-reference-doc)); any `wiki/` prose note resolved into it and reduced to a link | S3, S4 |
+| **S11** | `docs/overview.md` — the synthesis page ([D13](#d13-the-synthesis-page-is-a-reference-doc)); any `wiki/` prose note resolved into it and reduced to a link | **Landed** (job #467) — the page is seven routing tables and a discipline note, and states no fact that is not behind a link. The `wiki/` clause is **deferred, not done**: the only prose note there is untracked, so it is out of every gate's reach and out of a job's — the same verdict `security-assessment.md` carries. See the [S11 correction](#correction--2026-08-06-job-467-s11-the-synthesis-page-and-the-wiki-clause-that-could-not-run) |
 | **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Fourteen rows are landed — S0, S1a, S1b, S1c, S2, S3, S4, S5a, S5b, S6, S7, S8, S9 and S10.**
-The two that remain (S11 and S12) are intent, marked as such per docs/reference/style.md's doc-claim
+**Fifteen rows are landed — S0, S1a, S1b, S1c, S2, S3, S4, S5a, S5b, S6, S7, S8, S9, S10 and S11.**
+The one that remains (S12) is intent, marked as such per docs/reference/style.md's doc-claim
 rule — which this
 document is partly written to make enforceable. This sentence read *six* and omitted
 S3 until job #444 corrected it, four jobs after S3 merged: a count in the head is
@@ -2488,3 +2496,101 @@ link; they do not define it.
 `Status:` stays `IMPLEMENTED IN PART`. [S11](#slices) and [S12](#slices) are not
 built, and job #449 argued that case correctly — check 3 now verifies it, so a
 head claiming otherwise over an unlanded row fails its own gate.
+
+## Correction — 2026-08-06, job #467 (S11: the synthesis page, and the wiki clause that could not run)
+
+[S11](#slices) landed as `docs/overview.md`, and half of its row did not land at
+all. Both halves are recorded here because the row above is now marked
+`**Landed**`, and a landed row that quietly drops a clause is the drift
+[check 3](#d6-four-mechanical-checks) exists to make visible.
+
+### What the page is
+
+Eight sections, seven of them a two-column table: the left cell is a question a
+reader arrives with, the right cell is the document that answers it. That shape
+was chosen for one property — **a row cannot go stale unless the doc it links
+stops answering its question**, which is a far rarer event than the thing the
+doc describes changing. It links 23 distinct destinations across 42 links, and
+it names no symbol and no constant: the only tree paths on the page are the
+documents it routes to, four config directories under `.chug/`, and
+`.chug/tasks/ci.sh`, which is itself a destination rather than a claim.
+
+[D13](#d13-the-synthesis-page-is-a-reference-doc) predicted the failure mode
+exactly — *"the doc whose whole job is restatement is the last one that should be
+trusted to restate freely"* — and the discipline turned out to be a writing
+constraint rather than an editing one. Two sentences were written and then
+withdrawn for stating something checkable rather than routing to it, and the
+test that caught both was the one S11's brief supplied: *would this need editing
+if the thing it describes changed?* One asserted that the repo carries no
+`.github/` workflow <!-- absent --> — true, load-bearing, and owned by
+`CLAUDE.md`, which is where the surviving sentence sends the reader instead. The
+other counted the rows of the table beneath it, which is
+[the class job #450 recorded](#finding--2026-08-05-job-450-a-case-count-two-reviewers-derived-differently)
+and which no gate here catches.
+
+**Check 4 never fired**, on any draft. That is worth stating rather than
+celebrating: the page mentions six of the twelve registered concepts — `job`,
+`job type`, `task`, `work`, `evaluation` and `merge gate` — and defines none,
+but it also avoids the two gated shapes by construction, since a table cell is
+skipped in silence
+([`docs/concepts.md`](../concepts.md#what-the-gate-reads-here)). The gate's
+silence is therefore consistent with the page being right and would also be
+consistent with it being wrong in a shape D4 does not name — which is
+[the shape D4 did not name](#the-shape-d4-did-not-name), arriving in the one doc
+most exposed to it. The check that actually bites here is a reader's.
+
+### The wiki clause could not be done, and is deferred rather than dropped
+
+S11's row reads *"any `wiki/` prose note resolved into it and reduced to a
+link"*. Measured on this branch's base:
+
+```sh
+git ls-files wiki/ | wc -l   # 8 — .gitignore, 4 .obsidian/ config files,
+                             #     Chuggernaut Diagram.canvas, 2 .base stubs
+ls wiki/                     # the same set, in a job checkout
+```
+
+Not one of them is prose. The note the clause is aimed at — the one
+[Correction 3](#three-more-measurements) reports and that
+[D13](#d13-the-synthesis-page-is-a-reference-doc) treats as the evidence its
+demand is real — is **untracked**, and a job cannot act on it for two
+independent reasons:
+
+1. **It is not in the checkout.** A work container clones the platform's bare
+   repo, which holds tracked objects only, so the file is not merely
+   unauthorised to touch — it is absent. `ls wiki/` above is run in that
+   checkout and lists the same eight paths git does.
+2. **It is the operator's.** Committing someone's untracked working file is a
+   decision about their material, not a doc chore, and this repo already has the
+   precedent: `security-assessment.md` sits in the slice table as
+   **out of scope, its own job** for the same reason.
+
+So the clause is **deferred with cause**, not satisfied and not silently
+dropped. If the operator tracks the note, resolving it into `docs/overview.md`
+and reducing it to a link is a follow-up job — and a small one, because the
+destination now exists, which was D13's entire point.
+
+This is also the second time this document has met the same wall from a
+different side.
+[D13](#d13-the-synthesis-page-is-a-reference-doc) already argues that the demand
+for a synthesis page *"cannot be met by extending a check's reach, because the
+writing that evidences the demand is out of reach by construction."* Neither can
+the clause that would consume it. Everything a job here can do about an untracked
+file is give its content somewhere to go; that is done.
+
+### What else changed, and what deliberately did not
+
+- `docs/README.md` gained the catalogue row check 5 requires, and its opening
+  paragraph now sends a cold reader to `docs/overview.md` first. A row satisfies
+  the gate; the pointer is what makes the page reachable, and
+  [D15](#d15-structural-health-index-completeness-and-orphans) is explicit that
+  those are different properties.
+- **No concept was registered.** The page wanted no term that
+  [`docs/concepts.md`](../concepts.md) lacks, and a synthesis page is the worst
+  possible place to discover one: a row there constrains every other doc, so it
+  should be argued from the doc that would own the definition, not from the doc
+  that merely links it.
+- **No existing doc was moved, absorbed or rewritten.** Overview links; it does
+  not consume. The one edit outside it and its catalogue row is this head.
+- `Status:` stays `IMPLEMENTED IN PART`. [S12](#slices) is unbuilt, and job #449
+  argued that case before check 3 could verify it.
