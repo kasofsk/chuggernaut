@@ -11,6 +11,12 @@
 //! rather than certifying the mechanism vacuously. They take the manager the
 //! probe chose rather than naming one, because an unprivileged run gets a
 //! `--user` scope and must signal and tear down that same manager's units.
+//!
+//! Everything about the D8 escapee that is *not* the cgroup — staging it,
+//! and the group signal missing it — needs no systemd, so
+//! `a_setsid_escapee_is_staged_outside_the_task_process_group` asserts that half
+//! on every machine, and the scope test asserts it again alongside what only a
+//! scope adds — the escapee's cgroup, and the kill that reaches it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -406,14 +412,14 @@ fn supervised_cgroup(pid: i64, unit: &str, context: impl Fn() -> String) -> Stri
     );
 }
 
-/// What a launch that never reached its scope left behind: `systemd-run` is the
-/// task's own process, so the client's refusal is in the task's log, and an
-/// unmoved pid still reads the launcher's cgroup.
+/// What a launch that never did what it was told left behind: `systemd-run` is
+/// the task's own process, so the client's refusal is in the task's log, and so
+/// is anything the task's own shell could not run.
 fn launch_diagnosis(root: &std::path::Path, id: &str) -> String {
     let dir = root.join("tasks").join(id.split_once('/').unwrap().1);
     format!(
-        "the launcher is in {}; the task's log holds {:?}; exit_code {:?}",
-        live_cgroup(std::process::id().into()),
+        "the launcher is in {:?}; the task's log holds {:?}; exit_code {:?}",
+        cgroup_of(std::process::id().into()),
         std::fs::read_to_string(dir.join("output.log"))
             .unwrap_or_default()
             .trim(),
@@ -443,20 +449,38 @@ fn alive(pid: i64) -> bool {
     !matches!(state, None | Some("Z"))
 }
 
-/// Whether this machine can stage a `setsid()` escapee at all, announcing the
-/// skip in `scope_or_skip`'s words when it cannot.
-fn setsid_or_skip(test: &str) -> bool {
-    let usable = std::process::Command::new("setsid")
-        .arg("true")
-        .status()
-        .is_ok_and(|s| s.success());
-    if !usable {
+/// Where this machine's `setsid` is **on the PATH a host task is launched
+/// with**, announcing the skip in `scope_or_skip`'s words when there is none.
+/// It follows slice 1's floor rather than the caller's environment — the same
+/// `PATH` today — so the guard stays honest if the floor stops carrying it.
+fn setsid_or_skip(test: &str) -> Option<String> {
+    let path = container::host::task_path();
+    let found = std::env::split_paths(&path)
+        .map(|dir| dir.join("setsid"))
+        .find(|candidate| {
+            candidate.is_file()
+                && std::process::Command::new(candidate)
+                    .arg("true")
+                    .status()
+                    .is_ok_and(|s| s.success())
+        });
+    if found.is_none() {
         eprintln!(
-            "skipping {test}: this machine has no usable setsid, so design #440 D8's escapee \
-             assertion is NOT covered by this run"
+            "skipping {test}: no usable setsid on the PATH a host task is launched with ({path:?}), \
+             so design #440 D8's escapee assertion is NOT covered by this run"
         );
     }
-    usable
+    found.map(|p| p.display().to_string())
+}
+
+/// A task that stages a `setsid()` escapee: a child that leaves the task's
+/// process group, records its own pid and outlives the assertions. `setsid` is
+/// named absolutely, so what it stages never depends on the task resolving it.
+fn escapee_script(setsid: &str, pidfile: &std::path::Path) -> String {
+    format!(
+        "{setsid} sh -c 'printf %s \"$$\" > {}; sleep 120' & sleep 120",
+        pidfile.display()
+    )
 }
 
 /// One `systemctl` verb against the manager the probed supervision's scopes live
@@ -501,20 +525,49 @@ fn unit_state(supervision: Supervision, unit: &str) -> String {
         .unwrap_or_else(|e| format!("systemctl is unusable: {e}"))
 }
 
+/// How long a launched process gets to record its own pid, which is **setup**
+/// for every assertion below rather than one of them.
+const STAGING: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A pid a launched process recorded for itself, waited for rather than raced.
-fn wait_for_pid(path: &std::path::Path) -> i64 {
-    for _ in 0..400 {
+/// `None` is a staging step that never ran, so each caller reports what its own
+/// launch left behind instead of a bare timeout.
+fn recorded_pid(path: &std::path::Path) -> Option<i64> {
+    let deadline = std::time::Instant::now() + STAGING;
+    loop {
         let recorded = std::fs::read_to_string(path)
             .ok()
             .and_then(|raw| raw.trim().parse().ok());
-        if let Some(pid) = recorded {
-            return pid;
+        if recorded.is_some() {
+            return recorded;
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+}
+
+/// The escapee this task staged, or the panic that says the staging is what
+/// failed. The task is killed first: a setup failure that then waits out the
+/// task's own `sleep` costs the run minutes and tells it nothing.
+async fn staged_escapee(
+    backend: &HostBackend,
+    root: &std::path::Path,
+    id: &String,
+    pidfile: &std::path::Path,
+) -> i64 {
+    if let Some(pid) = recorded_pid(pidfile) {
+        return pid;
+    }
+    let diagnosis = launch_diagnosis(root, id);
+    let _ = backend.kill(id).await;
     panic!(
-        "the stand-in daemon never recorded a task pid at {}",
-        path.display()
+        "no escapee recorded a pid at {} within {}s, so the task never staged one and NOTHING \
+         about design #440 D8 was exercised — this is the fixture's setup, not the claim: \
+         {diagnosis}",
+        pidfile.display(),
+        STAGING.as_secs()
     );
 }
 
@@ -607,6 +660,61 @@ async fn a_host_task_runs_in_its_own_supervision_unit() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// Design #440 D8's premise, on **every** machine: the shipped launch
+/// composition stages a `setsid()` escapee that leaves the task's process group
+/// and that a `kill` of that group therefore cannot reach. It needs no systemd,
+/// so a fixture that cannot stage an escapee is red here rather than a silent
+/// timeout on the one host that has a scope to test the rest with.
+#[tokio::test]
+async fn a_setsid_escapee_is_staged_outside_the_task_process_group() {
+    let test = "a_setsid_escapee_is_staged_outside_the_task_process_group";
+    let Some(setsid) = setsid_or_skip(test) else {
+        return;
+    };
+    let root = temp_root("staging");
+    let backend = backend(&root);
+    let pidfile = root.join("escapee.pid");
+
+    let id = backend
+        .launch(cfg(&escapee_script(&setsid, &pidfile)))
+        .await
+        .unwrap();
+    let escapee = staged_escapee(&backend, &root, &id, &pidfile).await;
+    assert_ne!(
+        pgid_of(escapee),
+        Some(meta_of(&root, &id)["pgid"].as_i64().unwrap()),
+        "setsid left the escapee in the task's process group, so the D8 test above stages nothing"
+    );
+
+    backend.kill(&id).await.unwrap();
+    assert_ne!(settle(&backend, &id).await, 0, "a killed task never passes");
+    assert!(
+        alive(escapee),
+        "the process-group signal reached the escapee, so D8's premise — that only the scope's \
+         cgroup can — is not what this backend does"
+    );
+    signal_escapee(escapee);
+
+    backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// End an escapee the way nothing else in this suite can: a task's `kill`
+/// deliberately misses it (design #440 D8), so a test that stages one outside a
+/// scope reclaims it or leaks a process for two minutes.
+///
+/// It signals the **group** `setsid` made the escapee the leader of and then the
+/// pid itself, so the `sleep` the escapee is holding open is reclaimed with it
+/// rather than orphaned for the full two minutes.
+fn signal_escapee(pid: i64) {
+    let target = i32::try_from(pid).unwrap();
+    // SAFETY: `kill` takes no pointers and cannot fail other than ESRCH or EPERM — a target that is already gone, which is the outcome being asked for.
+    unsafe {
+        libc::kill(-target, libc::SIGKILL);
+        libc::kill(target, libc::SIGKILL);
+    }
+}
+
 /// Design #440 D8, the half that took code: a `setsid()` escapee leaves the
 /// task's process group and stays in its cgroup, so the group signal cannot
 /// reach it and `kill` ends it only by signalling the scope by name (#309 §2).
@@ -616,9 +724,9 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
     let Some(supervision) = scope_or_skip(test).await else {
         return;
     };
-    if !setsid_or_skip(test) {
+    let Some(setsid) = setsid_or_skip(test) else {
         return;
-    }
+    };
     let root = temp_root("escapee");
     let backend = HostBackend::with_workspace(
         "w1",
@@ -630,16 +738,13 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
 
     let pidfile = root.join("escapee.pid");
     let id = backend
-        .launch(cfg(&format!(
-            "setsid sh -c 'printf %s \"$$\" > {}; sleep 120' & sleep 120",
-            pidfile.display()
-        )))
+        .launch(cfg(&escapee_script(&setsid, &pidfile)))
         .await
         .unwrap();
     let meta = meta_of(&root, &id);
     let unit = meta["unit"].as_str().unwrap().to_string();
 
-    let escapee = wait_for_pid(&pidfile);
+    let escapee = staged_escapee(&backend, &root, &id, &pidfile).await;
     assert_ne!(
         pgid_of(escapee),
         Some(meta["pgid"].as_i64().unwrap()),
@@ -689,7 +794,14 @@ async fn a_host_task_survives_the_teardown_of_the_launching_unit() {
     let pidfile = root.join("stand-in.pid");
     let mut stand_in = stand_in_daemon(supervision, &daemon_unit, &task_unit, &pidfile);
 
-    let task_pid = wait_for_pid(&pidfile);
+    let task_pid = recorded_pid(&pidfile).unwrap_or_else(|| {
+        panic!(
+            "the stand-in daemon never recorded a task pid at {} within {}s, so its own launch is \
+             what failed and no teardown was exercised",
+            pidfile.display(),
+            STAGING.as_secs()
+        )
+    });
     let daemon_cgroup = supervised_cgroup(stand_in.id().into(), &daemon_unit, || {
         "the stand-in daemon is not in a unit of its own, so the teardown below would tear down \
          nothing"

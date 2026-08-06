@@ -19,10 +19,13 @@ so this is operator-verified in the shape of `.chug/jobs/android-proof.yaml` and
 `.chug/jobs/gcp-proof.yaml`: the operator runs one thing and reads one answer.
 The Linux half of D3 is a transient systemd scope and is asserted in
 `crates/container/tests/host_backend.rs`, which self-skips where no scope can be
-created — those assertions first executed on 2026-08-06 and two of the three
-failed, so D3's Linux half is proven as a *mechanism* by the hand run #440's
-proof section records and **not** through the shipped path
-([the first execution](../../design/440-native-worker-daemon.md#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455)).
+created. Those assertions first executed on 2026-08-06 and two of the three
+failed; after jobs #455 and #456 the two that assert D3 passed **together** on
+`gumbo-nuc-0` at `186beeb`, so D3's Linux half is now proven **through the
+shipped path** — with `XDG_RUNTIME_DIR` set in the invoking environment, which
+is #440 slice 7's provisioning question and is not settled by that run
+([the Linux execution](../../design/440-native-worker-daemon.md#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456)).
+The third, D8's `setsid()` escapee, has still never reached its assertion.
 Until job #453 they
 could not have executed under an **unprivileged** run — the shape every hand run
 has taken since job #451 moved them to a `--user` scope: the probe cleared the

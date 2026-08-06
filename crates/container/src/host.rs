@@ -653,6 +653,16 @@ fn floor_env(daemon: &HashMap<String, String>) -> BTreeMap<String, OsString> {
     env
 }
 
+/// The `PATH` a launch composes when the config declares none — the daemon's, or
+/// [`PATH_FALLBACK`] when the daemon carries none. A caller staging a tool for a
+/// task resolves it through this, so the guard follows the floor rather than its
+/// own environment.
+pub fn task_path() -> OsString {
+    floor_env(&daemon_floor())
+        .remove(PATH_VAR)
+        .unwrap_or_else(|| OsString::from(PATH_FALLBACK))
+}
+
 /// The bus variables as the daemon holds them, read **by name** the way the
 /// floor is so nothing else of the daemon's is copied. They are the client's,
 /// which is why they are read here and not in [`daemon_floor`].
@@ -1388,6 +1398,13 @@ mod tests {
             ["HOME", "PATH"],
             "the launch's own environment is the floor and nothing else — the client's bus \
              variables are composed beside it, never into it"
+        );
+
+        assert_eq!(
+            task_path(),
+            task_env(&daemon_floor(), &HashMap::new(), dir)[PATH_VAR],
+            "a tool staged for a task is resolved through the PATH a launch composes, so a floor \
+             that stopped carrying the daemon's would break the staging guard and not only the task"
         );
 
         let bare = task_env(&HashMap::new(), &HashMap::new(), dir);
