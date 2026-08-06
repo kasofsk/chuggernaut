@@ -5,15 +5,20 @@ Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1 a
 platforms**: its **macOS** mechanism firsthand on 2026-08-06 against the
 mechanism itself — see [the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux) —
 and its **Linux** mechanism on 2026-08-06 **through the shipped code path**, on
-a real systemd node, both of its assertions passing together — see
-[the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456).
-That run needed `XDG_RUNTIME_DIR` set in the invoking environment; whether a
-daemon under a supervisor has one is [slice 7](#slices)'s provisioning question
-and this run does **not** settle it. [D8](#decisions) is a separate claim that
-rides on the same mechanism and is **still unverified in execution**: its one
-test has never reached its assertion, because it failed in its own staging, and
-**why that staging failed is still unidentified** — the Linux execution records
-which candidates are ruled out and how the fixture now names the answer.
+`gumbo-nuc-0` (NixOS, systemd, cgroup v2), both of its assertions passing
+together at tree `186beeb` and again at `af9f74e` under
+`cargo test -p container --test host_backend` — see
+[the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456)
+and [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457).
+Both runs needed `XDG_RUNTIME_DIR=/run/user/1000` set in the invoking
+environment; whether a daemon under a supervisor has one is
+[slice 7](#slices)'s provisioning question and neither run settles it.
+[D8](#decisions) is a separate claim that rides on the same mechanism and is
+**still unverified in execution**: its one test has never reached its assertion,
+because it failed in its own staging, and **why that staging failed is still
+unidentified** — [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)
+records what the escapee's own launch composition is now measured to do and what
+is left.
 
 Slice 2's Linux mechanism was corrected by job #451 to the scope an unprivileged
 daemon can actually create — see
@@ -21,11 +26,15 @@ daemon can actually create — see
 and by job #453 to give that scope's `systemd-run` client the bus variables it
 needs, which is why the Linux assertion had still never run — see
 [the correction](#correction-2026-08-06--the-bus-the-client-needs-job-453). Its
-assertions were then fixed twice: job #455 for a membership check that raced the
-manager's start job — see
+assertions were then fixed three times: job #455 for a membership check that
+raced the manager's start job — see
 [the first execution](#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455) —
-and job #456 for an escapee fixture that reported a failed setup as a silent
-timeout, and whose staging had never executed on any machine.
+job #456 for an escapee fixture that reported a failed setup as a silent
+timeout, and whose staging had never executed on any machine, and job #457 for
+the membership check the D8 test itself never had, so that its staging budget is
+no longer shared with the manager's start job — an asymmetry read off the code
+and **not** measured, and the same change makes the next run name the step that
+fails.
 
 Written against the tree at `1030704`. Every claim about current behavior below
 was read out of the source or out of [`docs/spec.md`](../spec.md) in this tree, not
@@ -58,19 +67,19 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | --- | --- | --- |
 | **D1** | **One daemon per node, run natively, serving both modes.** There is never a second daemon process on a node. | A native daemon reaches the host's docker socket directly, so container mode is unchanged and the container-vs-native question becomes a deployment detail; two daemons would split one machine into two fleet rows with no one summing their slots. |
 | **D2** | **Linux: a systemd unit declared by `chug.node`**, amending that module's "owns no lifecycle" charter. **macOS: a `launchd` agent in the login user's GUI domain**, the same shape `deploy/prod/install-launchd.sh` already installs for the dispatcher and api. | #372 §8's four reasons for refusing to declare the container are artifacts of the container swap; three dissolve when the daemon is native — R4 because a unit over a binary has no tag to be missing — and R3, the strongest, is answered by splitting lifecycle (nix) from run spec (the platform's env file). |
-| **D3** | **Host tasks run in their own supervision unit, not the daemon's** — Linux: a transient systemd scope per task; macOS: the process group `spawn_task` already creates — **proven on both, 2026-08-06**: macOS 26.5.1 against the mechanism itself ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and Linux through the shipped path on `gumbo-nuc-0`, with `XDG_RUNTIME_DIR` set in the invoking environment ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456)). | It is the same mechanism #309 §6, §7 and §2 each independently need, and it is the only way `systemctl restart chug-worker` can stop killing in-flight work. |
+| **D3** | **Host tasks run in their own supervision unit, not the daemon's** — Linux: a transient systemd scope per task; macOS: the process group `spawn_task` already creates — **proven on both, 2026-08-06**: macOS 26.5.1 (Darwin) on `gumbo-air-0` against the mechanism itself, `sh deploy/prod/macos-host-supervision-proof.sh` at tree `c8a8354` ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and Linux through the shipped path on `gumbo-nuc-0` (NixOS, systemd, cgroup v2), `cargo test -p container --test host_backend` at trees `186beeb` and `af9f74e`, with `XDG_RUNTIME_DIR=/run/user/1000` set in the invoking environment ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)). | It is the same mechanism #309 §6, §7 and §2 each independently need, and it is the only way `systemctl restart chug-worker` can stop killing in-flight work. |
 | **D4** | **And the daemon declines a `refresh` while any host task is live**, naming the task — evaluated **twice: at accept, and again at the swap boundary** beside `RefreshGate::drained`. | D3 covers a unit restart; it does not cover a reboot or a rebuild that restarts more than the unit, and the self-refresh is the only restart the platform performs *automatically* — a loud refusal there is cheap and unconditional. The accept check is the fast, informative one; the swap-boundary check is the one that is actually load-bearing, because the build phase runs between them. |
 | **D5** | **Credentials move to a root-owned `0700` directory named by the unit, not the login user's home.** `chuggernaut admin worker-creds` is unchanged; the install step in `deploy/prod/README.md` §6 changes. | The login user is in the `docker` group and is who `build-worker.sh` ssh's in as, so a creds file under that user's home is readable by anything that user runs — a strictly worse boundary than the one the mount was pretending to give. |
 | **D6** | **`build-worker.sh` renders and installs a unit + environment file; `worker-refresh.sh`'s swap collapses to "install the binary, ask the supervisor to restart".** The daemon binary is extracted from the worker image the build phase already produces. | Every mount, device and `docker inspect` carry-forward in the swap phase exists only because the daemon is a container that must be re-composed; extracting the binary keeps its build environment byte-identical to today's and needs no host Rust toolchain. |
 | **D7** | **#390's drift guard keeps its meaning and gains reach**: presence-decides-refusal over the same `WORKER_*` key set, comparing the live unit's environment against the composed environment file. | The comparison was never about docker — it is about what a recreate would drop — and a declaration that is a file on the node is legible without `docker inspect`. |
-| **D8** | **Of #309 P0's three known holes, two get worse and one gets better.** Environment inheritance (§10) and `/proc/<pid>/environ` (§8) get worse and stop being P3; the `setsid()` escape (§2) is closed on Linux for free by D3 — **not for free** ([the correction](#d8-is-confirmed-on-linux-and-it-needed-one-line-of-code)), and **still unverified in execution**: the one test asserting it has never reached its assertion on any machine, having failed in its own staging for a reason job #456 did not identify and did not run ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456)). | Blast radius is what changes: a task inheriting a *native* daemon's environment inherits the node, not a container that happens to hold a socket. |
+| **D8** | **Of #309 P0's three known holes, two get worse and one gets better.** Environment inheritance (§10) and `/proc/<pid>/environ` (§8) get worse and stop being P3; the `setsid()` escape (§2) is closed on Linux for free by D3 — **not for free** ([the correction](#d8-is-confirmed-on-linux-and-it-needed-one-line-of-code)), and **still unverified in execution**: the one test asserting it has never reached its assertion on any machine, having failed in its own staging for a reason no job has yet identified ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)). Its premise is separately asserted, and **passing**, by `a_setsid_escapee_is_staged_outside_the_task_process_group`, which measures the *opposite* half — that a process-group signal cannot reach the escapee — so the two are complementary and both are needed. | Blast radius is what changes: a task inheriting a *native* daemon's environment inherits the node, not a container that happens to hold a socket. |
 
 ## Slices
 
 | # | Slice | Contract changed | Depends on | State |
 | --- | --- | --- | --- | --- |
 | 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | **Landed** (job #442), plus a two-name floor the slice line does not mention — see [the correction](#correction-2026-08-05--slice-1-as-landed) |
-| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **proven for D3 on both platforms**: the macOS proof PASSED on 2026-08-06 ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and D3's two Linux assertions PASSED through `HostBackend` on `gumbo-nuc-0` the same day ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456)). Its third assertion, D8's escapee, is still unexecuted — see [the correction](#correction-2026-08-05--slice-2-as-landed), amended by job #451 for [the scope an unprivileged daemon can create](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451), by job #453 for [the bus that scope's client needs](#correction-2026-08-06--the-bus-the-client-needs-job-453) and by job #455 for [a membership check that raced the manager](#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455) |
+| 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **proven for D3 on both platforms**: the macOS proof PASSED on 2026-08-06 ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and D3's two Linux assertions PASSED through `HostBackend` on `gumbo-nuc-0` the same day and again at tree `af9f74e` ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)). Its third assertion, D8's escapee, is still unexecuted — see [the correction](#correction-2026-08-05--slice-2-as-landed), amended by job #451 for [the scope an unprivileged daemon can create](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451), by job #453 for [the bus that scope's client needs](#correction-2026-08-06--the-bus-the-client-needs-job-453), by job #455 for [a membership check that raced the manager](#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455) and by job #457 for [the membership check the D8 test itself never had](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457) |
 | 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | Proposed |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | Proposed |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
@@ -825,8 +834,14 @@ correction named, still outstanding.
 
 **Superseded the same day.** Those three assertions did run on `gumbo-nuc-0`,
 and after two fixes D3's two of them pass through the shipped path — see
-[the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456).
-Everything above stands as the record of what the hand run alone established.
+[the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456),
+re-run at tree `af9f74e` in
+[the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457).
+So the heading above is the record of the hand run alone, and "D3 is not proven
+on Linux" is no longer true of the tree: **D3 is proven on both platforms**, on
+`gumbo-air-0` (Darwin 26.5.1) and on `gumbo-nuc-0` (NixOS, systemd, cgroup v2),
+through the shipped code on each. Everything above stands as what the hand run
+alone established.
 
 ### What this lifts, and what it does not
 
@@ -1358,3 +1373,140 @@ cargo test -p container --test host_backend -- --nocapture 2>&1 | tail -40
 
 The three D3-and-D8 scope tests are unchanged in what they assert. Nothing here
 touches `probe_supervision`, the macOS path or the two tests that passed.
+
+---
+
+## Correction, 2026-08-06 — D3 holds on both platforms, and the escapee staging is narrowed (job #457)
+
+The run that settles the head, on `gumbo-nuc-0` (NixOS, systemd, cgroup v2),
+against the tree at `af9f74e`, by the operator with
+`XDG_RUNTIME_DIR=/run/user/1000` in the invoking environment:
+
+```sh
+cargo test -p container --test host_backend
+```
+
+| Test | 2026-08-06, tree `af9f74e` |
+| --- | --- |
+| `a_host_task_runs_in_its_own_supervision_unit` | **ok** |
+| `a_host_task_survives_the_teardown_of_the_launching_unit` | **ok** |
+| `a_setsid_escapee_is_staged_outside_the_task_process_group` | **ok** |
+| `a_kill_reaches_a_setsid_escapee_through_the_scope` | **FAILED**, in its own staging |
+
+9 passed, 1 failed. **The first two are the whole of [D3](#decisions) on Linux**,
+and they pass through `HostBackend` rather than beside it, with the membership
+check [job #455](#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455)
+put **before** the teardown — which is what makes the second one mean anything.
+With [the macOS proof](#proofs-2026-08-06--d3-on-macos-and-on-linux) on
+`gumbo-air-0` (Darwin 26.5.1) against the real `launchctl kickstart -k`, **D3
+holds on both platforms, through the shipped code on each**. This is the second
+consecutive Linux run of the pair, after `186beeb`.
+
+**The qualifier travels with the result, unchanged.** Both Linux runs had
+`XDG_RUNTIME_DIR` set in the invoking environment, which is what an interactive
+login gets from `pam_systemd` and what job #453's client borrows to reach the
+user bus. A daemon under a supervisor has no login, so whether it holds that
+variable is [slice 7](#slices)'s provisioning question — `loginctl
+enable-linger` plus `XDG_RUNTIME_DIR` in the unit's environment, or running as
+root and taking the system manager per [D2](#decisions). **Neither run settles
+any of that.** `host_refusal` is what a node that does not satisfy the
+precondition gets, loudly, at boot.
+
+### The staging test's first execution on a systemd node, and why it is not D8
+
+`a_setsid_escapee_is_staged_outside_the_task_process_group` is job #456's, and
+this is the first time it has run anywhere but the evaluator. It passes on
+`gumbo-nuc-0`, which is the measurement that matters most here: **the same
+`escapee_script`, through the same `spawn_task`, `supervised_cmd` and
+`supervised_launch`, stages an escapee on that host** — under
+`Supervision::ProcessGroup`.
+
+It asserts the *opposite* premise on purpose, and its own message says so: `the
+process-group signal reached the escapee, so D8's premise — that only the
+scope's cgroup can — is not what this backend does`. So it is not a substitute
+for the scope test and never becomes one. The two are complementary: one
+measures that a group signal **cannot** reach the escapee, the other that the
+scope's signal **can**. Both are needed and only one of them runs today.
+
+### What the launch composition is now measured to do
+
+The two escapee tests differ in exactly one argument — `Supervision::ProcessGroup`
+against the probed `Supervision::Scope` — and everything the scope adds is in
+three places: the `systemd-run --user --scope --quiet --collect --unit=… --`
+prefix `supervised_launch` puts in front of the argv, the `unset` of the
+borrowed bus variables `shed_borrowed` puts at the head of the wrapper, and
+those two variables in the client's own environment.
+
+Measured this job **on the evaluator**, with a `systemd-run` shim on `PATH` that
+consumes options up to `--` and `exec`s the rest: `probe_supervision` returns
+`Scope(System)`, the launch goes through `supervised_launch`'s scope argv, and
+**the escapee stages** — the test reaches the escapee's cgroup assertion, which
+only a real scope can satisfy, instead of timing out in `staged_escapee`. So the
+argv shape, the `--`, the wrapper's `"$@"` handoff, the composed environment,
+the task-directory cwd, the log fds and `process_group(0)` are ruled out **by
+execution rather than by argument**. What that shim run does *not* cover is the
+`unset` prefix, which `borrowed_bus` emits only for `Scope(User)` and the
+evaluator's root euid resolves to `Scope(System)`.
+
+**What is left is what only a real `systemd-run --scope` does**: the bus round
+trip, the manager's start job, and the cgroup move — none of which this
+workspace can perform (`systemd-run` is absent, `/proc/self/cgroup` reads
+`0::/`, and `/sys/fs/cgroup` is read-only).
+
+### What actually differed: the D8 test paid for the start job out of its setup budget
+
+`systemd-run --scope` execs the task's command only **once the manager's start
+job has completed** — job #455's finding, and the reason `SCOPE_ENTRY` exists at
+all. `HostBackend::launch` returns as soon as the client is forked, so under
+`Supervision::Scope` there is a window between the launch returning and the
+task's first instruction that the process-group path does not have.
+
+`a_kill_reaches_a_setsid_escapee_through_the_scope` started its **10s** staging
+clock at that moment and waited for a file the task could not write until the
+window closed, while `a_host_task_runs_in_its_own_supervision_unit` is allowed
+that same 10s for the window **alone**. The two were never comparable: the D8
+test was strictly the tighter of the two, on the one step neither of them
+controls. It now waits for the task's own scope membership through the same
+bounded `supervised_cgroup` check the other two tests use, **before** it waits
+for the escapee — membership first, exactly as job #455 ordered the teardown
+test — so the staging budget buys staging and nothing else.
+
+**This is the asymmetry, stated from the code; it is not a measured cause.** If
+the next run still fails, it fails somewhere the message now names, because the
+same change decomposes that failure:
+
+- the task's shell echoes `host-task-shell-running` before it does anything and
+  `host-task-forked-escapee` with the escapee's pid after the fork, both to the
+  task's own log, so a staging that never finishes says *which* step never ran;
+- between the second marker and a written pidfile lie only `setsid` and the
+  redirect, whose own errors go to that same log;
+- `launch_diagnosis` now carries the task pid's cgroup and whether it is live,
+  beside the launcher's;
+- and `staged_escapee` prints the diagnosis on its own lines **before** it
+  panics, so a truncated paste of the panic still carries the measurement.
+
+### D8 is recorded as unverified, and the command that settles it is unrun
+
+[D8](#decisions) has never once executed. It is **not** proven and **not**
+refuted here, and nothing in this job changed what its test asserts: the
+assertion was not weakened, and the test was not switched to
+`Supervision::ProcessGroup` to make it pass — that would delete the only test of
+the claim.
+
+On `gumbo-nuc-0` as `worksalot`, with `XDG_RUNTIME_DIR` set, in a checkout of
+this branch:
+
+```sh
+cargo test -p container --test host_backend -- --nocapture 2>&1 | tail -60
+```
+
+| What it prints | What it means |
+| --- | --- |
+| all four `ok`, no "skipping" | D8 is confirmed in execution: the escapee left the process group, stayed in the scope's cgroup, and only the scope signal could have ended it |
+| `the task's own command has not started …` | the manager's start job is what the D8 test was waiting out, and the line carries the cgroup the task pid was in, whether it is live, and the client's own stderr from the task log |
+| `no escapee recorded a pid at …` | the task entered its scope and still staged nothing; the markers in the log above the panic say whether its shell ran and whether it forked |
+| the escapee outlived a kill | D8 is **refuted** on this node, and the line carries the escapee's cgroup and what the manager says about the scope |
+| any "skipping" line | nothing was covered; the reason is on the line |
+
+Nothing here touches `probe_supervision`, the macOS path, `supervised_launch`,
+or the two tests that pass. No production code changed in this job.

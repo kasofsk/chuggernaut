@@ -417,9 +417,16 @@ fn supervised_cgroup(pid: i64, unit: &str, context: impl Fn() -> String) -> Stri
 /// is anything the task's own shell could not run.
 fn launch_diagnosis(root: &std::path::Path, id: &str) -> String {
     let dir = root.join("tasks").join(id.split_once('/').unwrap().1);
+    let pid = std::fs::read_to_string(dir.join("meta.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|meta| meta["pid"].as_i64());
     format!(
-        "the launcher is in {:?}; the task's log holds {:?}; exit_code {:?}",
+        "the launcher is in {:?}; the task pid {pid:?} is in {:?} (live: {:?}); the task's log \
+         holds {:?}; exit_code {:?}",
         cgroup_of(std::process::id().into()),
+        pid.and_then(cgroup_of),
+        pid.map(alive),
         std::fs::read_to_string(dir.join("output.log"))
             .unwrap_or_default()
             .trim(),
@@ -474,14 +481,26 @@ fn setsid_or_skip(test: &str) -> Option<String> {
 }
 
 /// A task that stages a `setsid()` escapee: a child that leaves the task's
-/// process group, records its own pid and outlives the assertions. `setsid` is
-/// named absolutely, so what it stages never depends on the task resolving it.
+/// process group, records its own pid and outlives the assertions, announcing
+/// each step on stderr — the task's own log — so a staging that never finishes
+/// says which step never ran. `setsid` is named absolutely, so what it stages
+/// never depends on the task resolving it.
 fn escapee_script(setsid: &str, pidfile: &std::path::Path) -> String {
     format!(
-        "{setsid} sh -c 'printf %s \"$$\" > {}; sleep 120' & sleep 120",
+        "echo {SHELL_MARKER} >&2; {setsid} sh -c 'printf %s \"$$\" > {}; sleep 120' & echo \
+         {FORK_MARKER} \"$!\" >&2; sleep 120",
         pidfile.display()
     )
 }
+
+/// The task's shell reached its first instruction, which under
+/// `Supervision::Scope` is only true once the manager's start job has completed
+/// and `systemd-run` has exec'd.
+const SHELL_MARKER: &str = "host-task-shell-running";
+
+/// The task's shell forked the escapee. Between this and no pidfile lies
+/// `setsid` itself, whose own failure goes to the same log.
+const FORK_MARKER: &str = "host-task-forked-escapee";
 
 /// One `systemctl` verb against the manager the probed supervision's scopes live
 /// in, and whether it succeeded. A `--user` scope is not a unit the system
@@ -562,6 +581,12 @@ async fn staged_escapee(
     }
     let diagnosis = launch_diagnosis(root, id);
     let _ = backend.kill(id).await;
+    eprintln!("STAGING FAILED for {id}: {diagnosis}");
+    eprintln!(
+        "STAGING FAILED for {id}: the log above holds {SHELL_MARKER} if the task's shell ran at \
+         all, and {FORK_MARKER} if it forked the escapee — between the second and a written \
+         pidfile lies only setsid and the redirect, whose own errors are in that same log"
+    );
     panic!(
         "no escapee recorded a pid at {} within {}s, so the task never staged one and NOTHING \
          about design #440 D8 was exercised — this is the fixture's setup, not the claim: \
@@ -718,6 +743,11 @@ fn signal_escapee(pid: i64) {
 /// Design #440 D8, the half that took code: a `setsid()` escapee leaves the
 /// task's process group and stays in its cgroup, so the group signal cannot
 /// reach it and `kill` ends it only by signalling the scope by name (#309 §2).
+///
+/// It waits for the task's **own** scope membership before it waits for the
+/// escapee, because `systemd-run --scope` execs the task's command only once the
+/// manager's start job completes — a window the process-group path does not have
+/// and the staging budget must not be spent on.
 #[tokio::test]
 async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
     let test = "a_kill_reaches_a_setsid_escapee_through_the_scope";
@@ -743,6 +773,13 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
         .unwrap();
     let meta = meta_of(&root, &id);
     let unit = meta["unit"].as_str().unwrap().to_string();
+    supervised_cgroup(meta["pid"].as_i64().unwrap(), &unit, || {
+        format!(
+            "the task's own command has not started, so nothing could have staged an escapee yet; \
+             {}",
+            launch_diagnosis(&root, &id)
+        )
+    });
 
     let escapee = staged_escapee(&backend, &root, &id, &pidfile).await;
     assert_ne!(
