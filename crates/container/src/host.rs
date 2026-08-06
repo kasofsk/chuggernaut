@@ -708,6 +708,18 @@ fn probe_env(
     env
 }
 
+/// The environment a **launch's** `systemd-run` client runs in: the task's own,
+/// plus what the client borrows to find its bus. It is [`probe_env`]'s superset
+/// by construction, so a launch cannot fall back where the probe succeeded.
+fn launch_env(
+    task: &BTreeMap<String, OsString>,
+    borrowed: &BTreeMap<String, OsString>,
+) -> BTreeMap<String, OsString> {
+    let mut env = task.clone();
+    env.extend(borrowed.clone());
+    env
+}
+
 /// The `unset` a task's wrapper opens with, so a variable the client borrowed to
 /// find its bus does not survive into the task (#309 §10). Empty for every
 /// launch that borrowed nothing.
@@ -813,8 +825,7 @@ fn spawn_task(
         .args(&wrapped[1..])
         .current_dir(dir)
         .env_clear()
-        .envs(&env)
-        .envs(&borrowed)
+        .envs(launch_env(&env, &borrowed))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(errors))
@@ -1720,6 +1731,42 @@ mod tests {
             "a declared name keeps the launch config's value, which the daemon's never overwrites \
              and the shed never removes"
         );
+    }
+
+    /// The **launch's** client is handed everything the probe measured with, so
+    /// a node whose `probe_supervision` returned a scope cannot silently fall
+    /// back to the daemon's own cgroup at launch (job #455's first suspect).
+    #[test]
+    fn the_launch_client_gets_everything_the_probe_measured() {
+        let dir = Path::new("/var/lib/chuggernaut/host-tasks/host-1-0");
+        let bus = HashMap::from([
+            (
+                RUNTIME_DIR_VAR.to_string(),
+                OsString::from("/run/user/1000"),
+            ),
+            (
+                BUS_ADDRESS_VAR.to_string(),
+                OsString::from("unix:path=/run/user/1000/bus"),
+            ),
+        ]);
+        let launch = HashMap::from([("JOB_ID".to_string(), "455".to_string())]);
+        let task = task_env(&daemon_env(), &launch, dir);
+        let borrowed = borrowed_bus(Supervision::Scope(ScopeManager::User), &bus, &task);
+        let client = launch_env(&task, &borrowed);
+
+        for (name, value) in probe_env(&daemon_env(), &borrowed) {
+            assert_eq!(
+                client.get(&name),
+                Some(&value),
+                "the probe measured with {name} and the launch's client does not carry it, so the \
+                 launch would refuse where the probe passed"
+            );
+        }
+        for name in BUS_VARS {
+            assert!(client.contains_key(name), "{name} reaches the client");
+            assert!(!task.contains_key(name), "{name} never reaches the task");
+        }
+        assert_eq!(client["JOB_ID"], OsString::from("455"));
     }
 
     /// The shed runs **inside** the scope: `systemd-run` reads the bus variables

@@ -19,8 +19,11 @@ so this is operator-verified in the shape of `.chug/jobs/android-proof.yaml` and
 `.chug/jobs/gcp-proof.yaml`: the operator runs one thing and reads one answer.
 The Linux half of D3 is a transient systemd scope and is asserted in
 `crates/container/tests/host_backend.rs`, which self-skips where no scope can be
-created — those assertions have still never executed, so D3's Linux half is
-confirmed only by the hand run #440's proof section records. Until job #453 they
+created — those assertions first executed on 2026-08-06 and two of the three
+failed, so D3's Linux half is proven as a *mechanism* by the hand run #440's
+proof section records and **not** through the shipped path
+([the first execution](../../design/440-native-worker-daemon.md#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455)).
+Until job #453 they
 could not have executed under an **unprivileged** run — the shape every hand run
 has taken since job #451 moved them to a `--user` scope: the probe cleared the
 bus variables out of its own `systemd-run` call, so that skip was unconditional

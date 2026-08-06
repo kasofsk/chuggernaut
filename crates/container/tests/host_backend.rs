@@ -375,6 +375,52 @@ fn live_cgroup(pid: i64) -> String {
     cgroup_of(pid).unwrap_or_else(|| panic!("no cgroup v2 line for live pid {pid}"))
 }
 
+/// How long a launched pid gets to appear inside its own scope. `systemd-run
+/// --scope` execs the command only once the manager's start job has completed,
+/// so for the first milliseconds of a launch the pid is still the launcher's.
+const SCOPE_ENTRY: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Design #440 D3's membership check: the cgroup a pid is supervised in, waited
+/// for rather than raced. It is what every assertion below stands on, so it
+/// fails loudly with what the pid was in instead and what the launch left behind.
+fn supervised_cgroup(pid: i64, unit: &str, context: impl Fn() -> String) -> String {
+    let deadline = std::time::Instant::now() + SCOPE_ENTRY;
+    let mut seen;
+    loop {
+        match cgroup_of(pid) {
+            Some(cgroup) if cgroup.ends_with(unit) => return cgroup,
+            Some(cgroup) => seen = cgroup,
+            None => seen = format!("<no /proc/{pid}/cgroup: the process is gone>"),
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!(
+        "pid {pid} never entered {unit} within {}s and is in {seen} (live: {}) — the launch was \
+         NOT supervised, so design #440 D3 does not hold on this path: {}",
+        SCOPE_ENTRY.as_secs(),
+        alive(pid),
+        context()
+    );
+}
+
+/// What a launch that never reached its scope left behind: `systemd-run` is the
+/// task's own process, so the client's refusal is in the task's log, and an
+/// unmoved pid still reads the launcher's cgroup.
+fn launch_diagnosis(root: &std::path::Path, id: &str) -> String {
+    let dir = root.join("tasks").join(id.split_once('/').unwrap().1);
+    format!(
+        "the launcher is in {}; the task's log holds {:?}; exit_code {:?}",
+        live_cgroup(std::process::id().into()),
+        std::fs::read_to_string(dir.join("output.log"))
+            .unwrap_or_default()
+            .trim(),
+        std::fs::read_to_string(dir.join("exit_code")).ok()
+    )
+}
+
 /// The process group of one live pid, out of field 5 of `/proc/<pid>/stat` —
 /// what makes "this process left the group" an observation rather than an
 /// assumption.
@@ -418,15 +464,41 @@ fn setsid_or_skip(test: &str) -> bool {
 /// manager can see at all, so the flag is the difference between a teardown and
 /// a no-op.
 fn systemctl(supervision: Supervision, args: &[&str]) -> bool {
+    std::process::Command::new("systemctl")
+        .args(systemctl_argv(supervision, args))
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn systemctl_argv(supervision: Supervision, args: &[&str]) -> Vec<String> {
     let mut argv: Vec<String> = match supervision {
         Supervision::Scope(ScopeManager::User) => vec!["--user".to_string()],
         _ => Vec::new(),
     };
     argv.extend(args.iter().map(|a| (*a).to_string()));
+    argv
+}
+
+/// What the manager says about a task's scope, so a kill that failed to reach
+/// the cgroup is never confused with a scope that was already gone when the
+/// signal was sent.
+fn unit_state(supervision: Supervision, unit: &str) -> String {
+    let args = [
+        "show",
+        "--property=ActiveState",
+        "--property=SubState",
+        unit,
+    ];
     std::process::Command::new("systemctl")
-        .args(&argv)
-        .status()
-        .is_ok_and(|s| s.success())
+        .args(systemctl_argv(supervision, &args))
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_else(|e| format!("systemctl is unusable: {e}"))
 }
 
 /// A pid a launched process recorded for itself, waited for rather than raced.
@@ -514,11 +586,13 @@ async fn a_host_task_runs_in_its_own_supervision_unit() {
         "the manager is recorded, so a kill after a daemon restart signals the one the scope is in"
     );
 
-    let task_cgroup = live_cgroup(meta["pid"].as_i64().unwrap());
+    let task_cgroup = supervised_cgroup(meta["pid"].as_i64().unwrap(), &unit, || {
+        launch_diagnosis(&root, &id)
+    });
     let launcher_cgroup = live_cgroup(std::process::id().into());
-    assert!(
-        task_cgroup.ends_with(&unit),
-        "the task runs in its own unit: {task_cgroup}"
+    assert_ne!(
+        task_cgroup, launcher_cgroup,
+        "the task shares the launcher's own cgroup, so nothing supervises it"
     );
     if launcher_cgroup != "/" {
         assert!(
@@ -571,10 +645,12 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
         Some(meta["pgid"].as_i64().unwrap()),
         "setsid left the escapee in the task's process group, so nothing was tested"
     );
-    assert!(
-        live_cgroup(escapee).ends_with(&unit),
-        "leaving the process group does not leave the cgroup — that is what D8 rests on"
-    );
+    supervised_cgroup(escapee, &unit, || {
+        format!(
+            "leaving the process group does not leave the cgroup — that is what D8 rests on; {}",
+            launch_diagnosis(&root, &id)
+        )
+    });
 
     backend.kill(&id).await.unwrap();
     for _ in 0..200 {
@@ -586,7 +662,9 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
     assert!(
         !alive(escapee),
         "the escapee outlived a kill of its task: the scope signal is the only one that could \
-         reach it, and it did not (#440 D8)"
+         reach it, and it did not (#440 D8) — it is in {:?} and the manager reports {unit} as {}",
+        cgroup_of(escapee),
+        unit_state(supervision, &unit)
     );
 
     assert_ne!(settle(&backend, &id).await, 0, "a killed task never passes");
@@ -595,8 +673,9 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
 }
 
 /// **The crux of design #440** (D3), half two: tearing down the unit that
-/// launched a host task leaves the task running. This is the assertion slices
-/// 3–8 assume and spec §3.1's drain guarantee rests on in host mode.
+/// launched a host task leaves the task running. It asserts both units'
+/// membership **first**, because outliving a teardown proves nothing about a
+/// task that was never supervised.
 #[tokio::test]
 async fn a_host_task_survives_the_teardown_of_the_launching_unit() {
     let Some(supervision) =
@@ -611,9 +690,18 @@ async fn a_host_task_survives_the_teardown_of_the_launching_unit() {
     let mut stand_in = stand_in_daemon(supervision, &daemon_unit, &task_unit, &pidfile);
 
     let task_pid = wait_for_pid(&pidfile);
+    let daemon_cgroup = supervised_cgroup(stand_in.id().into(), &daemon_unit, || {
+        "the stand-in daemon is not in a unit of its own, so the teardown below would tear down \
+         nothing"
+            .to_string()
+    });
+    let task_cgroup = supervised_cgroup(task_pid, &task_unit, || {
+        format!("the stand-in daemon is in {daemon_cgroup}")
+    });
     assert!(
-        live_cgroup(task_pid).ends_with(&task_unit),
-        "the stand-in's task is in its own scope"
+        !task_cgroup.starts_with(&format!("{}/", daemon_cgroup.trim_end_matches('/'))),
+        "the task is inside the launching unit's cgroup ({task_cgroup} under {daemon_cgroup}), so \
+         surviving its teardown would prove nothing"
     );
     assert!(
         systemctl(supervision, &["kill", "--signal=SIGKILL", &daemon_unit]),
