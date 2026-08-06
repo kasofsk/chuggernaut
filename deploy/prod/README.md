@@ -568,7 +568,20 @@ and restart the dispatcher), and all work/eval containers land on
 
 The node runs a **`chuggernaut worker` daemon** (spec §3.1): it dials OUT to
 the Mini's NATS and executes container ops against its local Docker socket —
-**no Docker endpoint, tunnel, or listening port on the node**. Launches are
+**no Docker endpoint, tunnel, or listening port on the node**. It is supervised
+**natively** — a `chug-worker.service` systemd unit on Linux, a
+`com.chuggernaut.worker` launchd agent in the login user's GUI domain on
+macOS — over an environment file that carries the whole run spec (design
+[#440](../../docs/design/440-native-worker-daemon.md) D2). `build-worker.sh`
+installs all three, extracting the binary from the worker image it just built;
+job containers stay siblings on the node's docker socket, exactly as they were
+when the daemon was itself a container. **A converted node cannot self-refresh
+yet:** `worker-refresh.sh`'s swap still recreates a *container*, so it refuses
+(`no /data/keys mount on chug-worker; refusing swap (would strand creds)`)
+before composing anything — a loud stop, never a second daemon on one node
+name — until [#440](../../docs/design/440-native-worker-daemon.md) slice 6
+lands. `build-worker.sh` says so as it converts; deploy such a node over ssh
+with that script meanwhile. Launches are
 small NATS messages; static artifacts (the channel binary, agent images) are
 built on the node at deploy time, and the daemon injects its own channel-binary
 copy into job containers. An unreachable worker is *out of service* (placement
@@ -579,7 +592,8 @@ skips it, dispatcher starts fine, no restart needed when it returns).
 ```sh
 # 1. Mini: mint the daemon's scoped NATS creds (subscribe req.worker.nuc.> only)
 chug admin --keys-dir "$KEYS_DIR" worker-creds --node nuc
-# 2. copy to the node (the worker container mounts this dir read-only)
+# 2. copy to the node (the daemon reads it off the node; build-worker.sh
+#    REFUSES a deploy that cannot read it, before touching the live daemon)
 ssh worksalot@gumbo-nuc-0 mkdir -p chuggernaut-worker/keys
 scp "$KEYS_DIR/worker-nuc.creds" worksalot@gumbo-nuc-0:chuggernaut-worker/keys/worker.creds
 # 3. env (chuggernaut.env): see env.example — worker fleet form. The worker
@@ -590,9 +604,10 @@ scp "$KEYS_DIR/worker-nuc.creds" worksalot@gumbo-nuc-0:chuggernaut-worker/keys/w
 #    WORKER_SLOTS_nuc=2                             # the node's FIRST-BOOT value
 #    WORKER_CACHE_DIR_nuc=/var/cache/chuggernaut/sccache
 #    WORKER_REFRESH_GIT_URL=ssh://git@100.116.243.42:2222/<owner>/chuggernaut.git
-#    WORKER_GIT_KEY=/data/keys/worker_git
+#    WORKER_GIT_KEY=/home/worksalot/chuggernaut-worker/keys/worker_git
 #    (the whole run spec, per node — "The run spec is declared" below)
-# 4. build + start the daemon on the node (also runs on every CD deploy)
+# 4. build the images, install the daemon and its unit, start it (also runs on
+#    every CD deploy)
 set -a; . deploy/prod/chuggernaut.env; set +a
 deploy/prod/build-worker.sh
 # 5. no dispatcher restart needed: the daemon announces itself and the
@@ -606,13 +621,16 @@ The file a human edits is **`deploy/prod/chuggernaut.env` on the Mini** <!-- run
 (`~/chuggernaut/deploy/prod/chuggernaut.env`). It is gitignored, so this repo
 holds only [`env.example`](env.example) — editing that changes nothing on any
 node. Everything a `chug-worker` daemon runs with is composed from that file by
-`build-worker.sh` at node (re)creation; `worker-refresh.sh`'s swap then carries
-the daemon's environment forward across self-refreshes. Inheritance is how a
-value *survives*, not how it is *declared* — a setting that lives only inside
-the container is gone the moment the node is recreated without it, and each of
-these fails quietly: `WORKER_CACHE_DIR` ⇒ caching off, `WORKER_SLOTS` ⇒ the node
-boots at the daemon's default of 4, `WORKER_REFRESH_GIT_URL` / `WORKER_GIT_KEY`
-⇒ the node keeps serving jobs and stops updating.
+`build-worker.sh` at node (re)creation and written to the node's own environment
+file (`/etc/chuggernaut/worker.env` on Linux, `~/chuggernaut-worker/worker.env`
+on macOS); `worker-refresh.sh`'s swap then carries the daemon's environment
+forward across self-refreshes. Inheritance is how a
+value *survives*, not how it is *declared* — a setting that lives only in the
+daemon's own environment is gone the moment the node is recreated without it,
+and each of these fails quietly: `WORKER_CACHE_DIR` ⇒ caching off,
+`WORKER_SLOTS` ⇒ the node boots at the daemon's default of 4,
+`WORKER_REFRESH_GIT_URL` / `WORKER_GIT_KEY` ⇒ the node keeps serving jobs and
+stops updating.
 
 Declare **per node**: `WORKER_*_<node>` wins over the bare `WORKER_*` (the node
 is `CHUG_WORKER_NODE`). A fleet's nodes do not share paths, so one value cannot
@@ -625,15 +643,16 @@ WORKER_SLOTS_nuc=2
 WORKER_CACHE_DIR_air=/Users/<you>/chuggernaut-worker/sccache
 WORKER_CACHE_DIR_nuc=/var/cache/chuggernaut/sccache
 WORKER_REFRESH_GIT_URL=ssh://git@100.116.243.42:2222/<owner>/chuggernaut.git
-WORKER_GIT_KEY=/data/keys/worker_git
+WORKER_GIT_KEY=/home/worksalot/chuggernaut-worker/keys/worker_git
 ```
 
-Read a node's **live** values off the node before declaring them — the container
-is what it is running, not what anyone wrote down:
+Read a node's **live** values off the node before declaring them — what it is
+running is not what anyone wrote down:
 
 ```sh
+ssh <node> 'cat /etc/chuggernaut/worker.env'      # a converted node
 ssh <node> 'docker inspect chug-worker --format "{{range .Config.Env}}{{println .}}{{end}}"' \
-  | grep '^WORKER_'
+  | grep '^WORKER_'                               # one still running the container
 ```
 
 A colima node's `WORKER_CACHE_DIR` must sit under a prefix colima shares into
@@ -643,11 +662,20 @@ the mac-side path never appears at all.
 
 **Drift is reported, both ways round.**
 
-- `build-worker.sh` compares the live container's environment with the run it is
+- `build-worker.sh` compares the node's own environment file with the run it is
   about to compose and **refuses**, live daemon untouched, when the new run
   would drop a setting the node is running — including one this script never
   forwards (`WORKER_SLOTS_MAX`). Declare it, or pass `WORKER_SPEC_DROP_OK=1` to
-  drop it on purpose. Both are loud; neither is silent.
+  drop it on purpose. Both are loud; neither is silent. A node that still runs
+  the container daemon has no environment file yet, so the live container's
+  environment is read instead — the conversion is exactly the recreate this
+  guard exists for, and it says which side it read. The file is installed
+  **`0644`** — it carries paths, URLs and settings and no secret, it only
+  *names* the credential — so the `cat` above works as the login user and so
+  does the guard on the next deploy. A file the guard cannot **read** is a third
+  case, distinct from one that is not there, and it **refuses** rather than
+  reading as a fresh node: a guard blind to the declaration is not a guard that
+  passes.
 - On the no-ssh path nothing can push this file to a node, so each refresh
   **reports the node's own spec** on stdout, which the daemon relays into the
   deploy's task output (`worker-refresh: run spec on air (build): …`, plus a
@@ -681,8 +709,9 @@ Notes:
   `REPO_URL_BASE=ssh://git@100.116.243.42:2222` (ports 4222/2222 are published
   on all interfaces by compose).
 - **CD** — `update.sh` calls `build-worker.sh`: worker+agent images build
-  natively on the node (context streamed over ssh from the deployed SHA) and
-  the daemon restarts on the new image. Safe mid-job: containers survive and
+  natively on the node (context streamed over ssh from the deployed SHA), the
+  daemon binary is extracted from the worker image, installed, and the
+  supervisor is asked to restart. Safe mid-job: job containers survive and
   the dispatcher's poll-based wait re-attaches.
 - **Verify placement** — during a job: `ssh worksalot@gumbo-nuc-0 docker ps`
   shows the work/eval containers; the Mini's colima shows none
@@ -728,12 +757,12 @@ Notes:
   the optional `WORKER_FLUTTER_DIR` and `WORKER_JDK_DIR` (further toolchain
   leaves at `/opt/flutter` and `/opt/jdk`; unset ⇒ no mount and no
   `FLUTTER_ROOT` / `JAVA_HOME`) go
-  on the daemon at (re)creation like `WORKER_SLOTS`, and `build-worker.sh` adds
-  `--device` to the daemon's own `docker run` alongside them. That device is
-  load-bearing: `chug-worker` is itself a container, so a daemon given the env
-  without the device refuses to start and `--restart=always` loops the refusal.
-  The self-refresh swap carries the device forward from the live container and
-  refuses the swap rather than replace a KVM daemon with one that cannot boot.
+  on the daemon at (re)creation like `WORKER_SLOTS`. A natively supervised
+  daemon needs no `--device` alongside them: its own view of the node is the
+  node's, so it sees `/dev/kvm` if the node has one and refuses to start if it
+  does not. On a node still running the container daemon the device is
+  load-bearing, and the self-refresh swap carries it forward from the live
+  container, refusing rather than replace a KVM daemon with one that cannot boot.
 - **`WORKER_MODES` declares the runtimes a node offers** (design #309 P0, #322
   W1) — `container` (the default, and what the whole fleet runs) and/or `host`.
   It rides the same `<VAR>_<node>` resolution as `WORKER_SLOTS`, and the swap
@@ -747,20 +776,19 @@ Notes:
   the `WORKER_SLOTS_MAX` half no script forwards.
 - **Per-task nix GC roots are the same shape of per-node opt-in** (spec §3.1,
   [the runbook §7](../../docs/reference/runbooks/worker-kvm.md)). `WORKER_NIX_GCROOTS_DIR`
-  turns them on; `build-worker.sh` provisions the directory and mounts four
-  paths into `chug-worker` itself (the store and the profiles tree read-only,
-  the nix daemon socket dir and the roots dir read-write) plus, on a node with a
-  KVM device, the **directory holding** the toolchain path the realise resolves
-  (binding that path itself would resolve the operator's symlink away and leave
-  the client a non-store path) — and the swap carries
-  those mounts forward from the live container, refusing rather than replacing
-  a rooting daemon with one that cannot boot. Without it a task holds store
-  paths no GC root protects.
+  turns them on; `build-worker.sh` provisions the directory and checks the node
+  has a store, a profiles tree and a nix daemon socket, which a native daemon
+  reaches directly — the four bind mounts it used to compose are gone with the
+  container. On a node with KVM on it also requires the toolchain path to
+  **resolve into the store**, which is what the daemon's own boot check demands.
+  The swap still carries those mounts forward from a live container, refusing
+  rather than replacing a rooting daemon with one that cannot boot. Without
+  roots a task holds store paths no GC root protects.
 - **`WORKER_NIX_PROJECTS` is the grant that lets a PROJECT declare its own
   toolchain** (spec §3.1, [the runbook §8](../../docs/reference/runbooks/worker-kvm.md)):
   an allow-listed project's `runtime.env` is realised here from its job branch
   and put on the task's `PATH`. Empty grants nobody, granting it grants
-  *evaluation* of that project's flake inside `chug-worker`, and the environment
+  *evaluation* of that project's flake in the node's daemon process, and the environment
   must already be substituted on the node — the realise is capped at 45s, so an
   unwarmed toolchain fails the launch rather than running slowly.
 - The daemon's version is reported in its ping; the dispatcher logs a warning

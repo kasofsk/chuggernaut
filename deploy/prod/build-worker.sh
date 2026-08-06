@@ -5,6 +5,11 @@
 # the agent images job types reference. Build context streams over ssh via
 # `git archive`, so the node needs nothing but Docker and an authorized key.
 #
+# The daemon itself is NOT a container (design #440 D1/D2/D6): the binary is
+# extracted from the image just built and supervised natively — a systemd unit
+# on Linux, a launchd agent in the login user's GUI domain on macOS — over an
+# environment file that carries the whole run spec.
+#
 # No-ops cleanly when WORKER_SSH is unset (single-node deploys).
 # Called from update.sh after the env is loaded; runnable by hand:
 #   WORKER_SSH=worksalot@gumbo-nuc-0 deploy/prod/build-worker.sh
@@ -75,6 +80,14 @@ BK="DOCKER_BUILDKIT=1"
 PROBE_TIMEOUT_SECS="${PROBE_TIMEOUT_SECS:-60}"
 PROBE_INTERVAL_SECS="${PROBE_INTERVAL_SECS:-3}"
 
+# EVERY ssh below reads `< /dev/null` except the three that are genuinely fed a
+# build context. `ssh <host> <cmd>` with no redirect hands the remote command
+# THIS script's stdin, and update.sh runs this whole script over an ssh session —
+# so a call that reads nothing still drains the session's stdin, and a caller
+# holding that pipe open blocks the deploy where nothing is waiting on anything.
+# The drift check said this of its own two calls; it is true of all of them, and
+# the health probe (a loop) is the one that turns it into a hang.
+#
 # Stage every build context to a FILE, then feed `docker build` from it — never
 # `git archive | ssh docker build`. A POSIX pipeline reports only the LAST
 # command's status, so a `git archive` that dies mid-stream is masked by a
@@ -86,6 +99,50 @@ CTX="$(mktemp)"
 # Scratch for the run-spec drift check below (the live daemon's environment).
 SPEC="$(mktemp)"
 trap 'rm -f "$CTX" "$SPEC"' EXIT INT TERM
+
+# ── the node's platform, and the paths that follow from it (design #440 D2) ──
+# The daemon is supervised natively, so the supervisor, the unit path and the
+# restart command are all decided by what the node IS. Asked in ONE round trip
+# before anything is built — a node this script cannot supervise refuses in
+# seconds rather than after a ten-minute image build — and $HOME comes back with
+# it because the keys directory and the macOS agent both hang off a value that
+# cannot be expanded from here.
+NODE_PROBE="$(ssh "$WORKER_SSH" 'printf "%s\n%s\n" "$(uname -s)" "$HOME"' < /dev/null)"
+NODE_OS="$(printf '%s\n' "$NODE_PROBE" | sed -n 1p)"
+NODE_HOME="$(printf '%s\n' "$NODE_PROBE" | sed -n 2p)"
+case "$NODE_OS" in
+  Linux | Darwin) ;;
+  *)
+    echo "build-worker: $WORKER_SSH reports 'uname -s' = '$NODE_OS' — the worker daemon is supervised by systemd (Linux) or launchd (macOS) and there is no third supervisor here (design #440 D2); REFUSING (live daemon untouched)" >&2
+    exit 1
+    ;;
+esac
+if [ -z "$NODE_HOME" ]; then
+  echo "build-worker: $WORKER_SSH reports no \$HOME — the node's keys directory and its log path are both relative to it; REFUSING (live daemon untouched)" >&2
+  exit 1
+fi
+# The daemon's node-local artifacts land at the paths crates/worker/src/config.rs
+# ALREADY defaults to (WORKER_CHANNEL_BINARY, WORKER_REFRESH_SCRIPT): they were
+# shaped like host paths while being image paths, so materialising the same
+# layout on the host makes both defaults correct with no code change (#440 §4).
+BIN_DIR=/usr/local/bin
+LIB_DIR=/usr/local/lib/chuggernaut
+# Where the daemon reads its NATS credential and its git key off the NODE. The
+# `:ro` bind of $HOME/chuggernaut-worker/keys is gone with the container, and the
+# boundary it was pretending to give with it (#440 D5) — moving these to a
+# root-owned directory is slice 5's, and this knob is where that lands.
+KEYS_DIR="${WORKER_KEYS_DIR:-$NODE_HOME/chuggernaut-worker/keys}"
+if [ "$NODE_OS" = Linux ]; then
+  UNIT_DIR="${WORKER_UNIT_DIR:-/etc/systemd/system}"
+  UNIT_PATH="$UNIT_DIR/chug-worker.service"
+  ENV_FILE="${WORKER_ENV_FILE:-/etc/chuggernaut/worker.env}"
+else
+  AGENT_LABEL=com.chuggernaut.worker
+  UNIT_PATH="$NODE_HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
+  ENV_FILE="${WORKER_ENV_FILE:-$NODE_HOME/chuggernaut-worker/worker.env}"
+  WORKER_LOG_PATH="$NODE_HOME/Library/Logs/chuggernaut/worker.log"
+fi
+ENV_DIR="${ENV_FILE%/*}"
 
 # Worker daemon image (repo-root context; bakes chuggernaut + channel binary).
 # --label chug.git.sha=<sha> stamps the requested SHA INTO the image so we can
@@ -102,7 +159,7 @@ ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/worker:$TAG \
 # must never reach `docker run` — refuse loudly and leave the live daemon as-is.
 GOT_LABEL="$(ssh "$WORKER_SSH" \
   "docker inspect --format '{{index .Config.Labels \"chug.git.sha\"}}' chuggernaut/worker:$TAG" \
-  2>/dev/null | tr -d '[:space:]' || true)"
+  < /dev/null 2>/dev/null | tr -d '[:space:]' || true)"
 if [ "$GOT_LABEL" != "$SHA" ]; then
   echo "build-worker: worker image label '$GOT_LABEL' != requested SHA '$SHA' — REFUSING daemon restart (stale or failed build; live daemon untouched)" >&2
   exit 1
@@ -118,14 +175,66 @@ git archive --format=tar HEAD > "$CTX"
 ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent-rust:$TAG \
     -f deploy/prod/Dockerfile.agent-rust -" < "$CTX"
 
-# (Re)start the worker daemon on the new image. Safe mid-job: containers
-# survive, the dispatcher's poll-based wait re-attaches (spec §3.1).
-# NODE/NATS URL expand HERE (from chuggernaut.env); \$HOME expands on the node.
+# (Re)start the worker daemon on the new binary. Safe mid-job: job containers
+# are siblings on the node's docker socket and survive, and the dispatcher's
+# poll-based wait re-attaches (spec §3.1). NODE/NATS URL expand HERE (from
+# chuggernaut.env); every path below is resolved against the node's own $HOME.
 NATS="${WORKER_NATS_URL:?set WORKER_NATS_URL (tailnet NATS URL of the dispatcher host)}"
-# Pass the self-refresh coordinates (spec §3.1) through so a daemon started via
-# this legacy path can also be refreshed later over the worker RPC (no-ssh path).
-# Empty when unset — the daemon then just rejects refresh requests.
-REFRESH_ENV="-e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} -e WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git}"
+
+# ── the environment file the supervisor hands the daemon (design #440 D2) ────
+# One line per setting, in place of the `-e` flags the `docker run` composed.
+# Values are single-quoted because BOTH readers are shell-like — systemd's
+# EnvironmentFile parser and the macOS agent's `. <file>` — so `container, host`
+# is one value on each rather than a word-split on one. A value that carries a
+# single quote of its own is refused rather than escaped two ways: no run spec
+# has ever held one, and a wrong guess here is a daemon that will not boot.
+SPEC_ENV=""
+spec_line() {
+  case "$2" in
+    *"'"*)
+      echo "build-worker: run spec: $1 contains a single quote, which the environment file cannot carry unambiguously (systemd's EnvironmentFile parser and the macOS agent's shell each read it as a quote); REFUSING (live daemon untouched)" >&2
+      exit 1
+      ;;
+  esac
+  SPEC_ENV="$SPEC_ENV$1='$2'
+"
+}
+# The self-refresh coordinates (spec §3.1) ride so the node can also be
+# refreshed later over the worker RPC (no-ssh path). Empty URL when unset — the
+# daemon then just rejects refresh requests.
+#
+# WORKER_GIT_KEY defaulted to `/data/keys/worker_git`, which only ever existed
+# INSIDE the container. A native daemon resolves it on the node, so the default
+# follows the keys directory — and a declaration still naming the mount point is
+# refused rather than handed to a daemon that cannot fetch anything.
+GIT_KEY="${WORKER_GIT_KEY:-$KEYS_DIR/worker_git}"
+case "$GIT_KEY" in
+  /data/keys/*)
+    echo "build-worker: WORKER_GIT_KEY='$GIT_KEY' names the container's key mount, which a NATIVE daemon does not have (design #440 D2) — the node would come up and every self-refresh would fail to fetch; REFUSING (live daemon untouched). Declare WORKER_GIT_KEY_$NODE=$KEYS_DIR/worker_git in deploy/prod/chuggernaut.env ON THE MINI, or drop it and take that default." >&2
+    exit 1
+    ;;
+esac
+# The credential is read off the NODE now, so its absence is a daemon that
+# cannot reach NATS and is restarted into the same failure — checked here, while
+# the live daemon is still running, exactly as the label and capacity guards are.
+if ! ssh "$WORKER_SSH" "[ -r '$KEYS_DIR/worker.creds' ]" < /dev/null; then
+  echo "build-worker: '$KEYS_DIR/worker.creds' is not readable on $WORKER_SSH — a native daemon reads its NATS credential off the node (there is no /data/keys mount any more), so it would fail to connect and the supervisor would restart it into the same failure; REFUSING (live daemon untouched). Mint it with \`chug admin worker-creds --node $NODE\` and install it there (deploy/prod/README.md §6), or point WORKER_KEYS_DIR_$NODE at the directory that holds it." >&2
+  exit 1
+fi
+spec_line WORKER_NODE "$NODE"
+spec_line NATS_URL "$NATS"
+spec_line NATS_CREDS "$KEYS_DIR/worker.creds"
+# Log level for the daemon (ticket #270). The binary filters on RUST_LOG and its
+# default directive is ERROR, so a daemon started without it emits nothing — not
+# even the "worker up" line the probe below waits for, nor the refresh relay that
+# is the node's only account of a self-refresh. `info` is where those lines live
+# and costs nothing per-op; deps stay at warn. Overridable per node at creation
+# via WORKER_RUST_LOG (a dedicated knob, so an unrelated RUST_LOG in the
+# operator's own shell cannot leak into the fleet), and worker-refresh.sh's swap
+# carries whatever is set forward across self-refreshes.
+spec_line RUST_LOG "${WORKER_RUST_LOG:-info,async_nats=warn}"
+spec_line WORKER_REFRESH_GIT_URL "${WORKER_REFRESH_GIT_URL:-}"
+spec_line WORKER_GIT_KEY "$GIT_KEY"
 # An empty URL is not a neutral default: the node comes up healthy, serves jobs,
 # and is SKIPPED by every subsequent deploy — a node that looks like it is
 # participating and has quietly stopped updating (#382, one guise over). The
@@ -134,21 +243,20 @@ REFRESH_ENV="-e WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-} -e WORKER_GIT
 if [ -z "${WORKER_REFRESH_GIT_URL:-}" ]; then
   echo "build-worker: WARNING: WORKER_REFRESH_GIT_URL is undeclared — $NODE will be built WITHOUT self-refresh coordinates and every deploy will SKIP it ('refresh SKIPPED — no git credential'). Declare it in deploy/prod/chuggernaut.env on the Mini (README §6)." >&2
 fi
-# Node-local build cache (spec §3.1 "Node-local build caching"): pass the HOST
-# path as ENV ONLY — no bind-mount into the DAEMON container is needed. The
-# daemon adds the cache bind to each *sibling* job container via the docker
-# socket using this host path, so the daemon itself never touches the cache
-# files. Empty when unset ⇒ caching stays off (the daemon reads None). This is
-# the durable fix for #55's dormant cache: baked-in sccache only warms when the
-# daemon actually runs with WORKER_CACHE_DIR.
+# Node-local build cache (spec §3.1 "Node-local build caching"): a HOST path the
+# daemon adds as a bind to each *sibling* job container via the docker socket, so
+# the daemon itself never touches the cache files. Empty when unset ⇒ caching
+# stays off (the daemon reads None). This is the durable fix for #55's dormant
+# cache: baked-in sccache only warms when the daemon actually runs with
+# WORKER_CACHE_DIR.
 #
-# The HOST directory is provisioned HERE, at node creation, because nothing else
-# does: the daemon's own `create_dir_all` (crates/worker/src/daemon.rs) runs
-# inside the daemon container, which does not mount this path, so it lands in
-# that container's writable layer and never on the host. Until #379 dockerd
-# covered for that — the sibling launch's `-v` silently created a missing source
-# — but the cache is a typed mount now and the engine REFUSES a missing source,
-# so a fresh node with WORKER_CACHE_DIR set would fail every launch, permanently.
+# The HOST directory is still provisioned HERE, at node creation, and the reason
+# is now PERMISSION rather than reach: a native daemon's own `create_dir_all`
+# (crates/worker/src/daemon.rs, in `local_backend` before it serves anything)
+# does land on the host, but only where it can create — a path under a
+# root-owned parent is a config refusal at start that the supervisor then loops
+# on. Provisioning first also keeps the directory's ownership and mode what the
+# fleet has run on.
 #
 # Plain `mkdir -p` first (idempotent: an existing dir is a success, which is
 # every node built before this, and needs no privilege), `sudo -n` only as the
@@ -158,18 +266,17 @@ fi
 # containers write to it as root (neither agent Dockerfile sets `USER`, and the
 # launch config sets no user), and widening the mode of a directory that already
 # holds a warm cache is not this script's call. A failure REFUSES the deploy
-# before the live daemon is touched, rather than starting a daemon whose every
-# launch fails.
+# before the live daemon is touched, rather than starting a daemon that refuses
+# its own config (native) or that comes up and fails every launch (container).
 #
 # Ownership of this step is #372's if the chug-node module ever lands: it
 # provisions the same path via systemd.tmpfiles (#372 §5, the treatment #373
 # Decision 4 gives the nix gcroots dir). This is the bridge until then, and it
 # moves out in the same change that lands the module — never alongside it.
-CACHE_ENV=""
 if [ -n "${WORKER_CACHE_DIR:-}" ]; then
-  CACHE_ENV="-e WORKER_CACHE_DIR=$WORKER_CACHE_DIR"
-  if ! ssh "$WORKER_SSH" "mkdir -p '$WORKER_CACHE_DIR' 2>/dev/null || sudo -n mkdir -p '$WORKER_CACHE_DIR'"; then
-    echo "build-worker: cannot provision WORKER_CACHE_DIR '$WORKER_CACHE_DIR' on $WORKER_SSH (tried mkdir -p, then sudo -n mkdir -p) — the daemon would start and then fail EVERY launch with 'bind source path does not exist'; REFUSING daemon restart (live daemon untouched). Create it by hand on the node, or unset WORKER_CACHE_DIR to run without caching." >&2
+  spec_line WORKER_CACHE_DIR "$WORKER_CACHE_DIR"
+  if ! ssh "$WORKER_SSH" "mkdir -p '$WORKER_CACHE_DIR' 2>/dev/null || sudo -n mkdir -p '$WORKER_CACHE_DIR'" < /dev/null; then
+    echo "build-worker: cannot provision WORKER_CACHE_DIR '$WORKER_CACHE_DIR' on $WORKER_SSH (tried mkdir -p, then sudo -n mkdir -p) — a native daemon cannot create it either and would REFUSE TO START, and a containerized one starts and then fails EVERY launch with 'bind source path does not exist'; REFUSING daemon restart (live daemon untouched). Create it by hand on the node, or unset WORKER_CACHE_DIR to run without caching." >&2
     exit 1
   fi
   echo "build-worker: host cache dir $WORKER_CACHE_DIR present on $WORKER_SSH"
@@ -180,12 +287,11 @@ fi
 # on its own filesystem) tunes it here, at creation — the refresh's swap phase
 # carries whatever is set forward, so the override survives self-refreshes.
 # Empty when unset ⇒ the documented default applies.
-DISK_ENV=""
 if [ -n "${WORKER_REFRESH_DISK_FREE_GB_MIN:-}" ]; then
-  DISK_ENV="-e WORKER_REFRESH_DISK_FREE_GB_MIN=$WORKER_REFRESH_DISK_FREE_GB_MIN"
+  spec_line WORKER_REFRESH_DISK_FREE_GB_MIN "$WORKER_REFRESH_DISK_FREE_GB_MIN"
 fi
 if [ -n "${WORKER_REFRESH_DISK_PATH:-}" ]; then
-  DISK_ENV="$DISK_ENV -e WORKER_REFRESH_DISK_PATH=$WORKER_REFRESH_DISK_PATH"
+  spec_line WORKER_REFRESH_DISK_PATH "$WORKER_REFRESH_DISK_PATH"
 fi
 # The node's FIRST-BOOT capacity (`WORKER_SLOTS`, spec §3.1 dynamic registration):
 # the number it starts at before any operator intent exists, and the last resort
@@ -197,11 +303,10 @@ fi
 # the recorded intent back onto it (one scan tick). Set it to something the node
 # can serve (prod runs air and nuc at 2 each); empty when unset ⇒ the daemon's
 # documented default of 4. The ceiling is a separate knob, `WORKER_SLOTS_MAX`,
-# which this script does not pass — add it to the `docker run` below by hand on a
-# node whose CPU count overstates what it can serve.
-SLOTS_ENV=""
+# which this script does not pass — add it to the node's environment file by hand
+# on a node whose CPU count overstates what it can serve.
 if [ -n "${WORKER_SLOTS:-}" ]; then
-  SLOTS_ENV="-e WORKER_SLOTS=$WORKER_SLOTS"
+  spec_line WORKER_SLOTS "$WORKER_SLOTS"
 fi
 # The runtimes the node OFFERS (`WORKER_MODES`, design #309 P0 / #322 W1, daemon
 # side shipped by #434). A node property exactly like WORKER_CACHE_DIR: the node
@@ -218,17 +323,17 @@ fi
 # — #309 §2's /workspace collision, taken as option (iii). Only the first of
 # those is forwardable from here (WORKER_SLOTS_MAX is the one knob no script
 # passes, env.example says so), so this refuses the half it can see and names the
-# half it cannot, rather than replacing a working daemon with one that boot-loops
-# on --restart=always.
+# half it cannot, rather than replacing a working daemon with one the supervisor
+# boot-loops on `Restart=always` (systemd) or `KeepAlive` (launchd).
 #
 # Unset stays UNSET rather than becoming the daemon's `container` default: a node
 # that declared nothing must produce the run it produced before this knob existed,
 # and an explicit default would make every node advertise a value it never chose
 # and turn a future change of that default into a silent no-op. Trimmed and
 # whitespace-only-reads-as-unset because that is the daemon's own reading
-# (crates/worker/src/config.rs `parse_modes`), and single-quoted so the
-# `container, host` spelling the daemon accepts cannot word-split into a stray
-# `docker run` argument.
+# (crates/worker/src/config.rs `parse_modes`), and the environment file's own
+# quoting is what keeps the `container, host` spelling the daemon accepts one
+# value on both readers.
 #
 # Anything `parse_modes` rejects is refused HERE, for WORKER_KVM's reason: each
 # of its rejections is a hard config error, so a replacement daemon would refuse
@@ -239,7 +344,6 @@ fi
 # with the live daemon untouched. The scan runs over a comma-TERMINATED copy so
 # the final entry is examined like every other one; a bare split would consume
 # `container,` as one entry and never see the empty one behind it.
-MODES_ENV=""
 MODES="${WORKER_MODES:-}"
 MODES="${MODES#"${MODES%%[![:space:]]*}"}"
 MODES="${MODES%"${MODES##*[![:space:]]}"}"
@@ -269,59 +373,54 @@ if [ -n "$MODES" ]; then
     MODES_SEEN="$MODES_SEEN,$_mode"
   done
   if [ -n "$MODES_HOST" ] && [ "${WORKER_SLOTS:-}" != "1" ]; then
-    echo "build-worker: WORKER_MODES='$MODES' names host, which the daemon serves only at WORKER_SLOTS=1 (one host task per node — design #309 §2 option (iii)), but WORKER_SLOTS is '${WORKER_SLOTS:-<unset: daemon default 4>}' on $NODE; REFUSING daemon restart (live daemon untouched). Declare WORKER_SLOTS_$NODE=1 too — and note the daemon also demands WORKER_SLOTS_MAX=1, which NO script forwards (env.example), so a host node needs that flag added to its \`docker run\` by hand." >&2
+    echo "build-worker: WORKER_MODES='$MODES' names host, which the daemon serves only at WORKER_SLOTS=1 (one host task per node — design #309 §2 option (iii)), but WORKER_SLOTS is '${WORKER_SLOTS:-<unset: daemon default 4>}' on $NODE; REFUSING daemon restart (live daemon untouched). Declare WORKER_SLOTS_$NODE=1 too — and note the daemon also demands WORKER_SLOTS_MAX=1, which NO script forwards (env.example), so a host node needs that line added to $ENV_FILE by hand." >&2
     exit 1
   fi
-  MODES_ENV="-e WORKER_MODES='$MODES'"
+  spec_line WORKER_MODES "$MODES"
 fi
 # KVM passthrough for Android emulator work (design #367 §2.3/§3.5, daemon side
-# shipped by #374): the node settings AND the device node itself. The
-# device is not optional decoration — `chug-worker` is itself a container, so the
-# daemon's "does this node have the device" check reads the DAEMON CONTAINER's
-# own view (crates/worker/src/daemon.rs `build_backend`), and a daemon that gets
-# WORKER_KVM without `--device` refuses to start, is restarted into the same
-# refusal by --restart=always, and the node leaves the fleet.
+# shipped by #374). The `--device` flag is GONE with the container (design #440
+# §5): the daemon's "does this node have the device" check reads its OWN view
+# (crates/worker/src/daemon.rs `build_backend`), and a native daemon's own view
+# IS the node's — so a node that has /dev/kvm passes, and one that does not is
+# told so by the daemon rather than by a flag that could disagree with it.
 #
 # The value maps to a device path exactly as the daemon parses it
 # (crates/worker/src/config.rs `parse_kvm_device`): a boolean turns on the
 # default device node, an absolute path names another. A value that is neither is
-# refused HERE, before the live daemon is removed, rather than by a replacement
-# that then cannot boot. Values are single-quoted for the node's shell so an
-# allow-list written with spaces (`acme/beacon, acme/api` — the daemon trims)
-# cannot word-split into a stray `docker run` argument.
+# refused HERE, before the live daemon is replaced, rather than by a replacement
+# that then cannot boot.
 #
 # Trimmed first, because `parse_kvm_device` trims before it matches: a ` 1 ` the
 # daemon accepts must not be refused by the deploy, and a whitespace-only value
 # must read as unset (the daemon's own reading) rather than as unparseable. The
-# trimmed value is what rides in `-e`, so the daemon and worker-refresh.sh's swap
-# both see exactly what was decided on here.
+# trimmed value is what lands in the environment file, so the daemon and
+# worker-refresh.sh's swap both see exactly what was decided on here.
 #
-# All of them empty when unset ⇒ no passthrough and no device: exactly the run this
-# script produced before Android existed. Enabling KVM on a node and granting it
-# to a project stay two separate acts — WORKER_KVM_PROJECTS is fail-closed, and
-# an empty one grants nobody. docs/reference/runbooks/worker-kvm.md is the procedure.
-KVM_ENV=""
-KVM_DEVICE_ARG=""
+# All of them empty when unset ⇒ no passthrough: exactly the spec this script
+# produced before Android existed. Enabling KVM on a node and granting it to a
+# project stay two separate acts — WORKER_KVM_PROJECTS is fail-closed, and an
+# empty one grants nobody. docs/reference/runbooks/worker-kvm.md is the procedure.
+KVM_ON=""
 KVM="${WORKER_KVM:-}"
 KVM="${KVM#"${KVM%%[![:space:]]*}"}"
 KVM="${KVM%"${KVM##*[![:space:]]}"}"
 if [ -n "$KVM" ]; then
-  KVM_ENV="-e WORKER_KVM='$KVM'"
   case "$KVM" in
     0 | false | off) ;;
-    1 | true | on) KVM_DEVICE_ARG="--device '/dev/kvm'" ;;
-    /*) KVM_DEVICE_ARG="--device '$KVM'" ;;
+    1 | true | on | /*) KVM_ON=1 ;;
     *)
       echo "build-worker: WORKER_KVM='$KVM' is neither 1/0 nor an absolute device path — the daemon would refuse to start on it (crates/worker/src/config.rs); REFUSING (live daemon untouched)" >&2
       exit 1
       ;;
   esac
+  spec_line WORKER_KVM "$KVM"
 fi
 if [ -n "${WORKER_KVM_PROJECTS:-}" ]; then
-  KVM_ENV="$KVM_ENV -e WORKER_KVM_PROJECTS='$WORKER_KVM_PROJECTS'"
+  spec_line WORKER_KVM_PROJECTS "$WORKER_KVM_PROJECTS"
 fi
 if [ -n "${WORKER_ANDROID_SDK_DIR:-}" ]; then
-  KVM_ENV="$KVM_ENV -e WORKER_ANDROID_SDK_DIR='$WORKER_ANDROID_SDK_DIR'"
+  spec_line WORKER_ANDROID_SDK_DIR "$WORKER_ANDROID_SDK_DIR"
 fi
 # The node's Flutter SDK (#393): a SECOND, independent toolchain leaf, mounted
 # read-only at /opt/flutter for an allow-listed launch with FLUTTER_ROOT pointed
@@ -330,7 +429,7 @@ fi
 # WORKER_ANDROID_SDK_DIR's meaning is untouched. It is NOT realised and takes no
 # GC root: #373 P2's declared project toolchains supersede this stopgap.
 if [ -n "${WORKER_FLUTTER_DIR:-}" ]; then
-  KVM_ENV="$KVM_ENV -e WORKER_FLUTTER_DIR='$WORKER_FLUTTER_DIR'"
+  spec_line WORKER_FLUTTER_DIR "$WORKER_FLUTTER_DIR"
 fi
 # The node's JDK (#397): a THIRD leaf on the same terms, mounted read-only at
 # /opt/jdk with JAVA_HOME pointed at it. It exists because the nix wrappers'
@@ -339,7 +438,7 @@ fi
 # PATH, `flutter build apk` did not. Optional exactly as the others are — unset ⇒
 # no mount, no env, no migration — and superseded by #373 P2 with them.
 if [ -n "${WORKER_JDK_DIR:-}" ]; then
-  KVM_ENV="$KVM_ENV -e WORKER_JDK_DIR='$WORKER_JDK_DIR'"
+  spec_line WORKER_JDK_DIR "$WORKER_JDK_DIR"
 fi
 # Per-task nix GC roots (design #373 P1, daemon side in crates/worker/src/nix.rs).
 # WORKER_NIX_GCROOTS_DIR is the switch: unset ⇒ nothing below happens and the run
@@ -348,34 +447,23 @@ fi
 # for the task's lifetime, so a weekly `nix-gc` cannot collect a store path out
 # from under a running task (the mounts #374 shipped hold NO root today).
 #
-# Four mounts, each load-bearing, plus a fifth when a device is attached:
-#   * the store read-only (WORKER_NIX_STORE_DIR, nix's own default) — the closure
-#     the client and the task both read, and the prefix the daemon's boot check
-#     requires a realise target to resolve into.
-#   * the profiles dir read-only — where the CLIENT comes from. Not the store
-#     path: chug-worker is long-lived and survives many `nixos-rebuild`s, and
-#     docker resolves a bind source host-side at create, so a client resolved at
-#     create pins the generation current at the last swap — which
-#     `--delete-older-than` collects. `/nix/var/nix/gcroots/profiles` is itself a
-#     root, so a client resolved THROUGH the profiles at each use follows the
-#     node's current generation and is never collectable.
-#   * the daemon socket dir READ-WRITE — connecting to a unix socket needs write
-#     on the inode, so a read-only parent will not do. The socket is 0666 on a
-#     stock node, so no uid mapping is needed (the /dev/kvm situation in #367).
-#   * the roots dir read-write, at the SAME path inside the container as on the
-#     host: the nix daemon registers an indirect root by the path it is handed,
-#     and resolves that path in its own (host) namespace.
+# The four read-only/read-write MOUNTS this used to compose are gone with the
+# container (design #440 §5): a native daemon has the node's /nix, the node's
+# profiles and the node's daemon socket by construction, at the same paths the
+# nix daemon itself resolves them by. What survives is the PRECONDITION — a node
+# without a store, a profiles tree and a daemon socket cannot serve this at all —
+# and it is now checked against exactly the view the daemon will have.
 #
-# The roots dir is provisioned here for the same reason WORKER_CACHE_DIR is
-# (#380): the daemon's own view is a container, so nothing it does reaches the
-# host path. #372 §5 A5 declines to own this — the chug-node modules contribute
-# nothing for GC roots — so this script is the provisioner, and a failure REFUSES
-# the deploy with the live daemon untouched rather than starting a daemon that
-# refuses to boot and is looped by --restart=always.
+# The roots dir is still provisioned here (#380): #372 §5 A5 declines to own it —
+# the chug-node modules contribute nothing for GC roots — so this script is the
+# provisioner, and a failure REFUSES the deploy with the live daemon untouched
+# rather than starting a daemon that refuses to boot and is looped by the
+# supervisor's own restart policy.
 #
-# TRUST COST, stated where an operator will see it (design #373 3b): giving the
-# worker container the nix daemon socket means anything that realises here runs
-# in the process that also holds docker.sock, the NATS creds and the git key.
+# TRUST COST, stated where an operator will see it (design #373 3b): letting the
+# worker reach the nix daemon socket means anything that realises here runs in
+# the process that also holds docker.sock, the NATS creds and the git key — and
+# that process is now a NODE process, which is design #440 D8's whole point.
 # P1 realises only what the NODE already declares (WORKER_ANDROID_SDK_DIR) — no
 # project-supplied flake is evaluated, so P1 does not yet incur the unsandboxed
 # project-code half of that cost. It does incur the rest: unbounded build CPU and
@@ -384,7 +472,7 @@ fi
 #
 # WORKER_NIX_PROJECTS IS WHERE THAT COST BECOMES REAL (design #373 P2). Every
 # owner/project listed there may have its OWN flake realised on this node, and
-# flake evaluation is client-side and unsandboxed: it runs inside chug-worker,
+# flake evaluation is client-side and unsandboxed: it runs in the daemon,
 # beside docker.sock, the NATS creds and the git key. GRANTING IT GRANTS
 # EVALUATION, not merely a package. It is tolerable only because #373 Decision 1
 # makes such a node single-tenant — the boundary crossed is platform-vs-project,
@@ -399,8 +487,6 @@ fi
 # band, on the project's own clock: a scheduled job declaring the same
 # runtime.env is warmed by this same pre-launch realise (#373 Decision 5), and a
 # binary cache in the node's nix.conf is the operator's half.
-NIX_ENV=""
-NIX_MOUNT_ARGS=""
 GCROOTS="${WORKER_NIX_GCROOTS_DIR:-}"
 GCROOTS="${GCROOTS#"${GCROOTS%%[![:space:]]*}"}"
 GCROOTS="${GCROOTS%"${GCROOTS##*[![:space:]]}"}"
@@ -414,25 +500,24 @@ if [ -n "$GCROOTS" ]; then
   esac
   NIX_PROFILES_DIR="${WORKER_NIX_PROFILES_DIR:-/nix/var/nix/profiles}"
   NIX_SOCKET="${WORKER_NIX_DAEMON_SOCKET:-/nix/var/nix/daemon-socket/socket}"
-  NIX_SOCKET_DIR="${NIX_SOCKET%/*}"
   NIX_STORE_DIR="${WORKER_NIX_STORE_DIR:-/nix/store}"
-  if ! ssh "$WORKER_SSH" "mkdir -p '$GCROOTS' 2>/dev/null || sudo -n mkdir -p '$GCROOTS'"; then
-    echo "build-worker: cannot provision WORKER_NIX_GCROOTS_DIR '$GCROOTS' on $WORKER_SSH (tried mkdir -p, then sudo -n mkdir -p) — the daemon refuses to start without it and --restart=always would loop it, taking the node out of the fleet; REFUSING daemon restart (live daemon untouched). Create it by hand on the node, or unset WORKER_NIX_GCROOTS_DIR to run without per-task GC roots." >&2
+  if ! ssh "$WORKER_SSH" "mkdir -p '$GCROOTS' 2>/dev/null || sudo -n mkdir -p '$GCROOTS'" < /dev/null; then
+    echo "build-worker: cannot provision WORKER_NIX_GCROOTS_DIR '$GCROOTS' on $WORKER_SSH (tried mkdir -p, then sudo -n mkdir -p) — the daemon refuses to start without it and the supervisor would loop that refusal, taking the node out of the fleet; REFUSING daemon restart (live daemon untouched). Create it by hand on the node, or unset WORKER_NIX_GCROOTS_DIR to run without per-task GC roots." >&2
     exit 1
   fi
-  if ! ssh "$WORKER_SSH" "[ -d '$NIX_STORE_DIR' ] && [ -d '$NIX_PROFILES_DIR' ] && [ -S '$NIX_SOCKET' ]"; then
+  if ! ssh "$WORKER_SSH" "[ -d '$NIX_STORE_DIR' ] && [ -d '$NIX_PROFILES_DIR' ] && [ -S '$NIX_SOCKET' ]" < /dev/null; then
     echo "build-worker: $WORKER_SSH lacks the nix preconditions for WORKER_NIX_GCROOTS_DIR (want '$NIX_STORE_DIR', '$NIX_PROFILES_DIR' and the daemon socket '$NIX_SOCKET') — REFUSING daemon restart (live daemon untouched). This node has no nix daemon; unset WORKER_NIX_GCROOTS_DIR." >&2
     exit 1
   fi
-  NIX_ENV="-e WORKER_NIX_GCROOTS_DIR='$GCROOTS'"
+  spec_line WORKER_NIX_GCROOTS_DIR "$GCROOTS"
   if [ "$NIX_STORE_DIR" != "/nix/store" ]; then
-    NIX_ENV="$NIX_ENV -e WORKER_NIX_STORE_DIR='$NIX_STORE_DIR'"
+    spec_line WORKER_NIX_STORE_DIR "$NIX_STORE_DIR"
   fi
   if [ -n "${WORKER_NIX_CLIENT:-}" ]; then
-    NIX_ENV="$NIX_ENV -e WORKER_NIX_CLIENT='$WORKER_NIX_CLIENT'"
+    spec_line WORKER_NIX_CLIENT "$WORKER_NIX_CLIENT"
   fi
   if [ "$NIX_SOCKET" != "/nix/var/nix/daemon-socket/socket" ]; then
-    NIX_ENV="$NIX_ENV -e WORKER_NIX_DAEMON_SOCKET='$NIX_SOCKET'"
+    spec_line WORKER_NIX_DAEMON_SOCKET "$NIX_SOCKET"
   fi
   if [ -n "${WORKER_NIX_REALISE_TIMEOUT_SECS:-}" ]; then
     # Refused HERE for the same reason WORKER_KVM's shape is: a bound the daemon
@@ -451,57 +536,40 @@ if [ -n "$GCROOTS" ]; then
       echo "build-worker: WORKER_NIX_REALISE_TIMEOUT_SECS='$WORKER_NIX_REALISE_TIMEOUT_SECS' is outside 1..45 — the realise runs inside the launch RPC the dispatcher abandons after 60s, so the daemon refuses a longer bound at parse time (crates/worker/src/config.rs NIX_REALISE_TIMEOUT_SECS_MAX); REFUSING (live daemon untouched)" >&2
       exit 1
     fi
-    NIX_ENV="$NIX_ENV -e WORKER_NIX_REALISE_TIMEOUT_SECS='$WORKER_NIX_REALISE_TIMEOUT_SECS'"
+    spec_line WORKER_NIX_REALISE_TIMEOUT_SECS "$WORKER_NIX_REALISE_TIMEOUT_SECS"
   fi
   if [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
     NIX_FLAKE_CLIENT="${WORKER_NIX_FLAKE_CLIENT:-$NIX_PROFILES_DIR/system/sw/bin/nix}"
-    if ! ssh "$WORKER_SSH" "[ -x '$NIX_FLAKE_CLIENT' ]"; then
-      echo "build-worker: WORKER_NIX_PROJECTS grants '$WORKER_NIX_PROJECTS' project-declared toolchains, but '$NIX_FLAKE_CLIENT' is not executable on $WORKER_SSH — a flake ref is built with \`nix build\`, not \`nix-store --realise\`, so the daemon refuses to start and --restart=always would loop it; REFUSING daemon restart (live daemon untouched). Point WORKER_NIX_FLAKE_CLIENT at the node's nix binary through its profiles, or unset WORKER_NIX_PROJECTS." >&2
+    if ! ssh "$WORKER_SSH" "[ -x '$NIX_FLAKE_CLIENT' ]" < /dev/null; then
+      echo "build-worker: WORKER_NIX_PROJECTS grants '$WORKER_NIX_PROJECTS' project-declared toolchains, but '$NIX_FLAKE_CLIENT' is not executable on $WORKER_SSH — a flake ref is built with \`nix build\`, not \`nix-store --realise\`, so the daemon refuses to start and the supervisor would loop that refusal; REFUSING daemon restart (live daemon untouched). Point WORKER_NIX_FLAKE_CLIENT at the node's nix binary through its profiles, or unset WORKER_NIX_PROJECTS." >&2
       exit 1
     fi
-    NIX_ENV="$NIX_ENV -e WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS'"
+    spec_line WORKER_NIX_PROJECTS "$WORKER_NIX_PROJECTS"
     if [ -n "${WORKER_NIX_FLAKE_CLIENT:-}" ]; then
-      NIX_ENV="$NIX_ENV -e WORKER_NIX_FLAKE_CLIENT='$WORKER_NIX_FLAKE_CLIENT'"
+      spec_line WORKER_NIX_FLAKE_CLIENT "$WORKER_NIX_FLAKE_CLIENT"
     fi
-    echo "build-worker: WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS' — these projects' OWN flakes will be evaluated inside chug-worker, beside docker.sock and the node's credentials (design #373 3b); the node must stay single-tenant and their toolchains must already be in '$NIX_STORE_DIR' (the realise is capped at 45s)"
+    echo "build-worker: WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS' — these projects' OWN flakes will be evaluated in the node's daemon process, beside docker.sock and the node's credentials (design #373 3b); the node must stay single-tenant and their toolchains must already be in '$NIX_STORE_DIR' (the realise is capped at 45s)"
   fi
-  NIX_MOUNT_ARGS="-v '$NIX_STORE_DIR':'$NIX_STORE_DIR':ro -v '$NIX_PROFILES_DIR':'$NIX_PROFILES_DIR':ro -v '$NIX_SOCKET_DIR':'$NIX_SOCKET_DIR' -v '$GCROOTS':'$GCROOTS'"
-  # And a FIFTH mount when a device is actually attached: the DIRECTORY HOLDING
-  # the toolchain path, never that path itself. `nix-store --realise` resolves
-  # its argument CLIENT-side — inside chug-worker, before it says anything to the
-  # nix daemon — and the operator's stable path is a symlink into the store, so
-  # the client has to be able to READ that symlink. A bind whose source IS the
-  # stable path destroys it: mount(2) resolves the source host-side, and the
-  # container gets the store path's CONTENT at a non-store PATH, which the client
-  # refuses ("not in the Nix store"). Binding the parent keeps the symlink a
-  # symlink and lets it resolve through the store mount above — and, because a
-  # bound directory is shared rather than copied, it follows the node across a
-  # `nixos-rebuild` instead of pinning the generation current at this deploy.
-  #
-  # Hence the shape requirement checked below: a DIRECT, absolute symlink into
-  # the store under a real parent directory (a `systemd.tmpfiles` `L+` line).
-  # NixOS's `environment.etc` routes each entry through `/etc/static`, a second
-  # hop that no mount here reproduces — refused with the remedy named, rather
-  # than deployed into a daemon whose every admitted launch fails. Gated on
-  # $KVM_DEVICE_ARG because attaching the device is exactly the condition that
-  # makes a launch admitted, and therefore realised
-  # (crates/worker/src/daemon.rs `realise_for_launch`); the daemon's own boot
-  # check re-derives the same property from inside the container
-  # (crates/worker/src/nix.rs `store_target`).
-  if [ -n "$KVM_DEVICE_ARG" ]; then
+  # The toolchain path's SHAPE, ported rather than deleted. Design #440 §5 reads
+  # this guard as a mount constraint and it is only half one: the "direct symlink
+  # under a real parent" half existed because a bind resolves its source
+  # host-side, and that half goes with the mount. What survives is that
+  # `store_target` (crates/worker/src/nix.rs) CANONICALIZES the realise target at
+  # boot and refuses anything landing outside the store — so a plain directory
+  # still refuses the daemon's start, natively, and the supervisor still loops
+  # that refusal. Native means MORE paths qualify (any number of symlink hops,
+  # /etc/static included), so this asks exactly what the daemon asks: does it
+  # resolve into the store. Gated on KVM being on because attaching the device is
+  # the condition that makes a launch admitted, and therefore realised
+  # (crates/worker/src/daemon.rs `realise_for_launch`).
+  if [ -n "$KVM_ON" ]; then
     SDK_DIR="${WORKER_ANDROID_SDK_DIR:-/var/lib/chuggernaut/android-sdk}"
     SDK_DIR="${SDK_DIR#"${SDK_DIR%%[![:space:]]*}"}"
     SDK_DIR="${SDK_DIR%"${SDK_DIR##*[![:space:]]}"}"
-    SDK_PARENT="${SDK_DIR%/*}"
-    if [ -z "$SDK_PARENT" ]; then
-      echo "build-worker: WORKER_ANDROID_SDK_DIR='$SDK_DIR' sits directly under / — chug-worker would have to bind the node's root filesystem to reach it; REFUSING (live daemon untouched). Put the toolchain path in a directory of its own." >&2
+    if ! ssh "$WORKER_SSH" "case \"\$(readlink -f '$SDK_DIR' 2>/dev/null)\" in '$NIX_STORE_DIR'/*) [ -e '$SDK_DIR' ] ;; *) false ;; esac" < /dev/null; then
+      echo "build-worker: per-task nix GC roots are on and WORKER_KVM is on, but '$SDK_DIR' on $WORKER_SSH does not resolve to a path under '$NIX_STORE_DIR' — the daemon canonicalizes its realise target at boot (crates/worker/src/nix.rs \`store_target\`) and refuses to start when it lands outside the store; REFUSING daemon restart (live daemon untouched). Declare it as a symlink into the store — systemd.tmpfiles.rules = [ \"L+ $SDK_DIR - - - - \${pkgs.androidsdk}\" ] — or unset WORKER_NIX_GCROOTS_DIR." >&2
       exit 1
     fi
-    if ! ssh "$WORKER_SSH" "[ -d '$SDK_PARENT' ] && [ -L '$SDK_DIR' ] && case \"\$(readlink '$SDK_DIR')\" in '$NIX_STORE_DIR'/*) [ -e '$SDK_DIR' ] ;; *) false ;; esac"; then
-      echo "build-worker: per-task nix GC roots are on and WORKER_KVM attaches a device, but '$SDK_DIR' on $WORKER_SSH is not a direct symlink into '$NIX_STORE_DIR' under a real parent directory — chug-worker mounts '$SDK_PARENT' read-only and resolves that symlink itself, so anything else (a plain directory, or a NixOS environment.etc entry, which hops through /etc/static) cannot be realised and the daemon refuses to start; REFUSING daemon restart (live daemon untouched). Declare it as one hop — systemd.tmpfiles.rules = [ \"L+ $SDK_DIR - - - - \${pkgs.androidsdk}\" ] — or unset WORKER_NIX_GCROOTS_DIR." >&2
-      exit 1
-    fi
-    NIX_MOUNT_ARGS="$NIX_MOUNT_ARGS -v '$SDK_PARENT':'$SDK_PARENT':ro"
   fi
   echo "build-worker: per-task nix GC roots on — roots dir $GCROOTS present on $WORKER_SSH"
 elif [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
@@ -511,45 +579,193 @@ elif [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
   echo "build-worker: WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS' grants project-declared toolchains, but WORKER_NIX_GCROOTS_DIR is unset — a realised environment with no GC root is collectable mid-task, so the daemon realises nothing and refuses every launch declaring runtime.env; REFUSING (live daemon untouched). Set WORKER_NIX_GCROOTS_DIR, or unset WORKER_NIX_PROJECTS." >&2
   exit 1
 fi
-# Log level for the daemon (ticket #270). The binary filters on RUST_LOG and its
-# default directive is ERROR, so a daemon started without it emits nothing — not
-# even the "worker up" line the probe below waits for, nor the refresh relay that
-# is the node's only account of a self-refresh. `info` is where those lines live
-# and costs nothing per-op; deps stay at warn. Overridable per node at creation
-# via WORKER_RUST_LOG (a dedicated knob, so an unrelated RUST_LOG in the
-# operator's own shell cannot leak into the fleet), and worker-refresh.sh's swap
-# carries whatever is set forward across self-refreshes.
-LOG_ENV="-e RUST_LOG=${WORKER_RUST_LOG:-info,async_nats=warn}"
-REMOTE="docker rm -f chug-worker >/dev/null 2>&1 || true
-docker run -d --restart=always --name chug-worker \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -v \$HOME/chuggernaut-worker/keys:/data/keys:ro \
-  -e WORKER_NODE=$NODE \
-  -e NATS_URL=$NATS \
-  -e NATS_CREDS=/data/keys/worker.creds \
-  $LOG_ENV \
-  $REFRESH_ENV \
-  $CACHE_ENV \
-  $DISK_ENV \
-  $SLOTS_ENV \
-  $MODES_ENV \
-  $KVM_ENV \
-  $KVM_DEVICE_ARG \
-  $NIX_ENV \
-  $NIX_MOUNT_ARGS \
-  chuggernaut/worker:$TAG >/dev/null"
-
-# ── run-spec drift (ticket #390) ─────────────────────────────────────────────
-# The live container is not a declaration. Everything above composes the run
-# spec from the environment, and `docker rm -f chug-worker` then makes that
-# composition the node's whole truth — so any setting the LIVE daemon carries
-# that this composition does not is DROPPED here, silently, and the node comes
-# back degraded in a way nothing reports: caching off (#55), the boot capacity
-# back at the daemon's default, or a node that keeps serving jobs and quietly
-# stops updating. That is #265 reason 3, and this is where it is catchable.
+# ── what gets installed, and who supervises it (design #440 D2, D6) ──────────
+# The daemon binary is EXTRACTED from the image just built rather than compiled
+# on the node: that keeps its build environment byte-identical to today's, needs
+# no Rust toolchain as a node machine fact, and leaves the pinned Dockerfile the
+# single definition of how the binary is produced (#440 D6). The channel binary
+# and the refresh script ride out of the same image, into the paths
+# crates/worker/src/config.rs already defaults to.
 #
-# The comparison is against $REMOTE, not against the shell's variables, because
-# only $REMOTE knows what will actually be passed: a knob this script does not
+# Every write is "unprivileged first, `sudo -n` as the fallback" — the shape the
+# cache-dir provisioning above already uses. The binaries go to /usr/local on
+# BOTH platforms, which is root's on both; what differs is the supervision and
+# the run spec, which are root's on Linux and the login user's own tree on macOS.
+#
+# The environment file is 0644, not 0640. It carries paths, URLs and settings and
+# no secret — it NAMES the credential file, it does not hold it — and the drift
+# guard below must be able to read it back as the login user on every subsequent
+# deploy. A mode that made it root-only would turn #390's guard into a guard that
+# silently passes, which is the failure it exists to prevent.
+REMOTE_INSTALL="set -e
+chug_dir() { mkdir -p \"\$1\" 2>/dev/null || sudo -n mkdir -p \"\$1\"; }
+chug_put() { install -m \"\$1\" \"\$2\" \"\$3\" 2>/dev/null || sudo -n install -m \"\$1\" \"\$2\" \"\$3\"; }
+STAGE=\$(mktemp -d)
+trap 'rm -rf \"\$STAGE\"' EXIT INT TERM
+CID=\$(docker create chuggernaut/worker:$TAG)
+docker cp \"\$CID:/usr/local/bin/chuggernaut\" \"\$STAGE/chuggernaut\"
+docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel\"
+docker cp \"\$CID:/usr/local/lib/chuggernaut/worker-refresh.sh\" \"\$STAGE/worker-refresh.sh\"
+docker rm \"\$CID\" >/dev/null
+chug_dir '$BIN_DIR'
+chug_dir '$LIB_DIR'
+chug_dir '$ENV_DIR'
+chug_put 0755 \"\$STAGE/chuggernaut\" '$BIN_DIR/chuggernaut'
+chug_put 0755 \"\$STAGE/chuggernaut-channel\" '$LIB_DIR/chuggernaut-channel'
+chug_put 0755 \"\$STAGE/worker-refresh.sh\" '$LIB_DIR/worker-refresh.sh'
+cat > \"\$STAGE/worker.env\" <<'CHUG_WORKER_ENV'
+${SPEC_ENV}CHUG_WORKER_ENV
+chug_put 0644 \"\$STAGE/worker.env\" '$ENV_FILE'"
+
+if [ "$NODE_OS" = Linux ]; then
+  # The unit is a MACHINE FACT and the environment file is the RUN SPEC — the
+  # split #440 D2 answers #372 §8's R3 with. This script writes both today;
+  # slice 7 hands the unit half to `nix/chug-node/`, which is why the unit
+  # carries nothing an operator would ever tune per project.
+  #
+  # PATH is set here rather than in the run spec for the same reason: the daemon
+  # shells out to git, ssh and docker, whose homes differ between a NixOS node
+  # (/run/current-system/sw/bin) and a Debian one, and systemd's default PATH
+  # names neither. It is also the value slice 1's launch floor carries into a
+  # host task (crates/container/src/host.rs).
+  NODE_PATH="${WORKER_PATH:-/run/current-system/sw/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin}"
+  UNIT_TEXT="[Unit]
+Description=Chuggernaut worker daemon ($NODE)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=$ENV_FILE
+Environment=PATH=$NODE_PATH
+ExecStart=$BIN_DIR/chuggernaut worker
+User=root
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target"
+  # `systemctl restart` kills the unit's cgroup and nothing else, which is
+  # exactly what design #440 D3's per-task scope is for: a host task launched
+  # into its own scope is not in this cgroup and survives. Job containers are
+  # siblings on the docker socket and were never in it.
+  REMOTE="$REMOTE_INSTALL
+cat > \"\$STAGE/chug-worker.service\" <<'CHUG_WORKER_UNIT'
+$UNIT_TEXT
+CHUG_WORKER_UNIT
+chug_dir '$UNIT_DIR'
+chug_put 0644 \"\$STAGE/chug-worker.service\" '$UNIT_PATH'
+sudo -n systemctl daemon-reload
+sudo -n systemctl enable chug-worker.service >/dev/null
+docker rm -f chug-worker >/dev/null 2>&1 || true
+sudo -n systemctl restart chug-worker.service"
+else
+  # A GUI-domain agent, not a LaunchDaemon: CoreSimulator and the keychain are
+  # per-user-session services (#322), so a system daemon would be in the wrong
+  # session. It deliberately does NOT live in deploy/prod/launchd/ — that
+  # directory is globbed by install-launchd.sh, which would then install a
+  # worker agent on the Mini, whose colima node sits at 0 slots on purpose
+  # (#440 §2).
+  #
+  # launchd has no EnvironmentFile, so the agent SOURCES the same file the
+  # systemd unit reads. One declaration, one thing for the drift guard to read,
+  # and the reason every value in it is quoted.
+  #
+  # The log is truncated between `bootout` and `bootstrap` because launchd opens
+  # StandardOutPath append-only: without it the health probe's tail spans every
+  # generation the node has ever run, and a previous one's "worker up" would
+  # pass a daemon that never came up. Safe there and only there — the old agent
+  # is gone and the new one has not been asked to start.
+  PLIST_TEXT="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
+<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
+<plist version=\"1.0\">
+<dict>
+  <key>Label</key><string>$AGENT_LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; . '$ENV_FILE'; set +a; exec '$BIN_DIR/chuggernaut' worker</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>$NODE_HOME</string>
+    <key>PATH</key><string>${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}</string>
+  </dict>
+  <key>StandardOutPath</key><string>$WORKER_LOG_PATH</string>
+  <key>StandardErrorPath</key><string>$WORKER_LOG_PATH</string>
+</dict>
+</plist>"
+  REMOTE="$REMOTE_INSTALL
+cat > \"\$STAGE/$AGENT_LABEL.plist\" <<'CHUG_WORKER_PLIST'
+$PLIST_TEXT
+CHUG_WORKER_PLIST
+plutil -lint \"\$STAGE/$AGENT_LABEL.plist\" >/dev/null
+mkdir -p '$NODE_HOME/Library/LaunchAgents' '${WORKER_LOG_PATH%/*}'
+install -m 0644 \"\$STAGE/$AGENT_LABEL.plist\" '$UNIT_PATH'
+launchctl bootout gui/\$(id -u)/$AGENT_LABEL 2>/dev/null || true
+: > '$WORKER_LOG_PATH'
+docker rm -f chug-worker >/dev/null 2>&1 || true
+launchctl bootstrap gui/\$(id -u) '$UNIT_PATH'"
+fi
+
+# A unit path that cannot be written is a node with no daemon at all, and on
+# NixOS /etc/systemd/system is a read-only symlink into the store — which is
+# precisely the state design #440 slice 7 exists for. Refuse here, with the live
+# daemon still running, rather than half-way through the install.
+if [ "$NODE_OS" = Linux ] && ! ssh "$WORKER_SSH" "command -v systemctl >/dev/null && [ -d '$UNIT_DIR' ] && { [ -w '$UNIT_DIR' ] || sudo -n test -w '$UNIT_DIR'; }" < /dev/null; then
+  echo "build-worker: $WORKER_SSH has no usable systemd unit directory at '$UNIT_DIR' (want \`systemctl\` on PATH and a directory writable by the login user or by \`sudo -n\`) — on NixOS that path is a read-only symlink into the store, where the unit is the node configuration's to declare (design #440 slice 7); REFUSING daemon restart (live daemon untouched). Point WORKER_UNIT_DIR_$NODE at a writable unit path, or declare the unit on the node itself." >&2
+  exit 1
+fi
+
+# The same courtesy on macOS, for the paths that are NOT in the login user's
+# tree. deploy/prod/install-launchd.sh — the precedent design #440 D2 names —
+# writes only under $HOME, so the binaries are the first thing on this platform
+# to need /usr/local, and on an Apple-Silicon mac (which the plist's own
+# /opt/homebrew PATH assumes) /usr/local is root-owned and often absent
+# altogether. Without this the operator gets a bare `sudo: a password is
+# required` from inside the install, where the Linux side gets a named remedy.
+# Asked of the nearest EXISTING ancestor because the install creates what is
+# missing, and asked without creating anything, so a refusal changes no node.
+if [ "$NODE_OS" = Darwin ] && ! ssh "$WORKER_SSH" "for d in '$BIN_DIR' '$LIB_DIR'; do
+  p=\$d
+  while [ ! -d \"\$p\" ]; do p=\$(dirname \"\$p\"); done
+  [ -w \"\$p\" ] || sudo -n test -w \"\$p\" || exit 1
+done" < /dev/null; then
+  echo "build-worker: $WORKER_SSH cannot install the daemon binaries into '$BIN_DIR' and '$LIB_DIR' (neither the login user nor \`sudo -n\` can write the nearest existing parent) — on a stock mac /usr/local is root-owned and \`sudo\` wants a password, which a non-interactive deploy cannot give; REFUSING daemon restart (live daemon untouched). Create them once on the node and hand them to the login user — \`sudo mkdir -p $BIN_DIR $LIB_DIR && sudo chown \$(id -un) $BIN_DIR $LIB_DIR\` — or grant that user passwordless sudo." >&2
+  exit 1
+fi
+
+# ── run-spec drift (ticket #390, design #440 D7) ─────────────────────────────
+# What the node is RUNNING is not a declaration. Everything above composes the
+# run spec from the environment and then overwrites the node's environment file
+# with it — so any setting the LIVE daemon carries that this composition does not
+# is DROPPED here, silently, and the node comes back degraded in a way nothing
+# reports: caching off (#55), the boot capacity back at the daemon's default, or
+# a node that keeps serving jobs and quietly stops updating. That is #265 reason
+# 3, and this is where it is catchable.
+#
+# The guard keeps its meaning and gains reach (#440 D7): the live side is the
+# node's own environment file, which an operator can read without `docker
+# inspect`. A node that has never been converted has no such file, so the
+# container's environment is read instead — the CONVERSION is exactly the
+# recreate this guard exists to police, and a guard that went blind at it would
+# be worse than no guard.
+#
+# WHICH IS WHY THE READ IS TRI-STATE, not "did anything come back". "The file is
+# absent" and "the file is there and I could not read it" produce the same empty
+# output, and collapsing them is how a guard degrades to a pass: an unreadable
+# file falls through to a `docker inspect` that a converted node also answers
+# emptily, and the run then prints "no live worker" — the fresh-node line — on a
+# node whose whole run spec is about to be overwritten unchecked. So the node
+# ANSWERS which case it is, and "cannot read" REFUSES with the live daemon
+# untouched. A guard that cannot see the declaration is not a guard that passes.
+#
+# The comparison is against $SPEC_ENV, not against the shell's variables, because
+# only $SPEC_ENV knows what will actually be written: a knob this script does not
 # forward (WORKER_SLOTS_MAX is the documented one) is dropped no matter what
 # chuggernaut.env says about it, and a check that read the env would call that
 # clean. Presence decides the refusal; the VALUE comparison is informational
@@ -557,18 +773,32 @@ docker run -d --restart=always --name chug-worker \
 # wrong verdict.
 #
 # A drop REFUSES, with the live daemon still running, in the same spirit as the
-# label and KVM-device guards above — removing a setting on purpose is a real
+# label and capacity guards above — removing a setting on purpose is a real
 # thing to want, so WORKER_SPEC_DROP_OK=1 is the way to say so out loud.
 build_worker_run_spec_drift() {
-  # stdin from /dev/null: this ssh reads nothing, and update.sh runs this whole
-  # script over an ssh session whose stdin it must not swallow.
-  ssh "$WORKER_SSH" \
-    "docker inspect chug-worker --format '{{range .Config.Env}}{{println .}}{{end}}'" \
-    > "$SPEC" 2>/dev/null < /dev/null || true
+  # stdin from /dev/null: these ssh calls read nothing, and update.sh runs this
+  # whole script over an ssh session whose stdin it must not swallow.
+  ssh "$WORKER_SSH" "if [ -e '$ENV_FILE' ]; then
+  cat '$ENV_FILE' 2>/dev/null || sudo -n cat '$ENV_FILE' 2>/dev/null || echo CHUG_SPEC_UNREADABLE
+else
+  echo CHUG_SPEC_ABSENT
+fi" > "$SPEC" 2>/dev/null < /dev/null || true
+  if grep -qxF CHUG_SPEC_UNREADABLE "$SPEC"; then
+    echo "build-worker: '$ENV_FILE' exists on $WORKER_SSH but neither the login user nor \`sudo -n\` can read it — the run-spec drift guard (#390, design #440 D7) compares the live daemon's environment against the one composed here, and it cannot see the live side; a guard that cannot read the declaration is not a guard that passes. REFUSING daemon restart (live daemon untouched). Make it readable (\`sudo chmod 0644 $ENV_FILE\` — it carries no secret, only the PATH of the credential), or grant the login user passwordless sudo on this node." >&2
+    return 1
+  fi
+  _live_from="the environment file $ENV_FILE"
+  if grep -qxF CHUG_SPEC_ABSENT "$SPEC" || [ ! -s "$SPEC" ]; then
+    ssh "$WORKER_SSH" \
+      "docker inspect chug-worker --format '{{range .Config.Env}}{{println .}}{{end}}'" \
+      > "$SPEC" 2>/dev/null < /dev/null || true
+    _live_from="the live chug-worker CONTAINER (this run converts $NODE to a native daemon)"
+  fi
   if [ ! -s "$SPEC" ]; then
-    echo "build-worker: no live chug-worker on $WORKER_SSH to compare against — this run declares $NODE's whole run spec"
+    echo "build-worker: no live worker on $WORKER_SSH to compare against — this run declares $NODE's whole run spec"
     return 0
   fi
+  echo "build-worker: run-spec drift checked against $_live_from"
   _dropped=""
   while IFS= read -r _line; do
     case "$_line" in
@@ -577,12 +807,20 @@ build_worker_run_spec_drift() {
     esac
     _key="${_line%%=*}"
     _live="${_line#*=}"
+    # The environment file quotes every value; the container's environment did
+    # not. Unquoting keeps a converted node's report free of a spurious
+    # "live '2' -> declared '2'" on every run.
+    case "$_live" in
+      "'"*"'") _live="${_live#\'}" ; _live="${_live%\'}" ;;
+    esac
     case "$_key" in
       *[!A-Za-z0-9_]*) continue ;;
     esac
     _passed=""
-    case "$REMOTE" in
-      *"-e $_key="*) _passed=1 ;;
+    case "
+$SPEC_ENV" in
+      *"
+$_key="*) _passed=1 ;;
     esac
     if [ -z "$_passed" ]; then
       _dropped="$_dropped $_key"
@@ -596,7 +834,7 @@ build_worker_run_spec_drift() {
     fi
     case "$_key" in
       WORKER_NODE) _declared="$NODE" ;;
-      WORKER_GIT_KEY) _declared="${WORKER_GIT_KEY:-/data/keys/worker_git}" ;;
+      WORKER_GIT_KEY) _declared="$GIT_KEY" ;;
       *) eval "_declared=\${$_key:-}" ;;
     esac
     [ "$_declared" != "$_live" ] || continue
@@ -612,26 +850,52 @@ build_worker_run_spec_drift() {
 }
 build_worker_run_spec_drift || exit 1
 
-echo "build-worker: run spec for $NODE: WORKER_SLOTS=${WORKER_SLOTS:-<unset: daemon default 4>} WORKER_CACHE_DIR=${WORKER_CACHE_DIR:-<unset: caching OFF>} WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-<unset: cannot self-refresh>} WORKER_GIT_KEY=${WORKER_GIT_KEY:-/data/keys/worker_git}"
-ssh "$WORKER_SSH" "$REMOTE"
+echo "build-worker: run spec for $NODE: WORKER_SLOTS=${WORKER_SLOTS:-<unset: daemon default 4>} WORKER_CACHE_DIR=${WORKER_CACHE_DIR:-<unset: caching OFF>} WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-<unset: cannot self-refresh>} WORKER_GIT_KEY=$GIT_KEY"
+echo "build-worker: supervising $NODE natively on $NODE_OS — $UNIT_PATH over $ENV_FILE (design #440 D2)"
+ssh "$WORKER_SSH" "$REMOTE" < /dev/null
 
-# Positively PROVE the daemon actually came up before we claim "deployed". An
-# exit code from `docker run` only says the container was created, not that it
+# Positively PROVE the daemon actually came up before we claim "deployed". The
+# supervisor's own exit code only says it accepted the job, not that the process
 # stayed up. A direct NATS ping from this laptop path is impractical (the
 # dispatcher's NATS is not generally reachable here), so the probe demands the
 # daemon's OWN proof of NATS liveness: the "worker up" log line, which the
 # daemon emits only AFTER its NATS connection and worker-RPC subscription
 # succeed (daemon.rs) — the ping RPC is serving once that line exists. This is
-# strictly stronger than container-running + any-log-line (#207 review: a
-# crash-looping daemon can log plenty without ever reaching NATS). A timeout
-# is a LOUD failure with a non-zero exit — never a silent "deployed".
-PROBE_REMOTE='r=$(docker inspect -f "{{.State.Running}}" chug-worker 2>/dev/null || echo false); [ "$r" = true ] && docker logs --tail 50 chug-worker 2>&1 | grep -q "worker up" && echo HEALTHY'
+# strictly stronger than running + any-log-line (#207 review: a crash-looping
+# daemon can log plenty without ever reaching NATS). A timeout is a LOUD failure
+# with a non-zero exit — never a silent "deployed".
+#
+# The log is the supervisor's now: journald on Linux (read as root when the
+# login user is not in the journal group), the agent's StandardOutPath on macOS.
+#
+# BOTH READS ARE BOUNDED TO *THIS* START, and that bound is the whole of #207's
+# guarantee under a supervisor. `docker logs` on a container the run had just
+# created could only ever show that container's output; a unit's journal and an
+# agent's append-only log both span every generation the node has ever run. A
+# crash-looping daemon under `Restart=always`/`KeepAlive` is `active (running)`
+# on most polls, so an unbounded tail would find the PREVIOUS generation's
+# "worker up" on a quiet node and report HEALTHY over a daemon that never reached
+# NATS — the silent "deployed" this block exists to make impossible.
+#
+# Linux binds by InvocationID, which systemd mints fresh per start: exact, and
+# immune to clock skew in a way `--since` is not. A systemd too old to report one
+# yields no verdict rather than a false pass, so the probe times out loudly.
+# macOS has no such handle, so the install TRUNCATES the agent's log between
+# `bootout` and `bootstrap` (above) and the tail can only see the new agent.
+if [ "$NODE_OS" = Linux ]; then
+  PROBE_REMOTE='systemctl is-active --quiet chug-worker.service || exit 0
+INV=$(systemctl show -p InvocationID --value chug-worker.service 2>/dev/null)
+[ -n "$INV" ] || exit 0
+{ journalctl _SYSTEMD_INVOCATION_ID="$INV" -n 50 --no-pager 2>/dev/null || sudo -n journalctl _SYSTEMD_INVOCATION_ID="$INV" -n 50 --no-pager; } 2>&1 | grep -q "worker up" && echo HEALTHY'
+else
+  PROBE_REMOTE="launchctl print gui/\$(id -u)/$AGENT_LABEL >/dev/null 2>&1 && tail -n 50 '$WORKER_LOG_PATH' 2>&1 | grep -q 'worker up' && echo HEALTHY"
+fi
 probe_deadline=$(( $(date +%s) + PROBE_TIMEOUT_SECS ))
 probe_attempt=0
-until ssh "$WORKER_SSH" "$PROBE_REMOTE" 2>/dev/null | grep -q HEALTHY; do
+until ssh "$WORKER_SSH" "$PROBE_REMOTE" < /dev/null 2>/dev/null | grep -q HEALTHY; do
   probe_attempt=$((probe_attempt + 1))
   if [ "$(date +%s)" -ge "$probe_deadline" ]; then
-    echo "build-worker: chug-worker did NOT report healthy within ${PROBE_TIMEOUT_SECS}s on $WORKER_SSH (State.Running + a "worker up" NATS-subscribed log line) — FAILED; the daemon is not confirmed up" >&2
+    echo "build-worker: chug-worker did NOT report healthy within ${PROBE_TIMEOUT_SECS}s on $WORKER_SSH (supervised + a "worker up" NATS-subscribed log line) — FAILED; the daemon is not confirmed up" >&2
     exit 1
   fi
   echo "build-worker: waiting for chug-worker to report healthy (attempt $probe_attempt) — retrying in ${PROBE_INTERVAL_SECS}s"
@@ -639,12 +903,21 @@ until ssh "$WORKER_SSH" "$PROBE_REMOTE" 2>/dev/null | grep -q HEALTHY; do
 done
 echo "build-worker: verified chug-worker is running and NATS-subscribed (worker up) on $WORKER_SSH"
 
+# A natively supervised node cannot self-refresh yet, and it learns that HERE —
+# at the moment it is converted — rather than from a failed deploy leg later.
+# worker-refresh.sh's swap still recreates a CONTAINER: it reads the live
+# container's /data/keys mount first and, finding none, exits 1 with "no
+# /data/keys mount on chug-worker; refusing swap (would strand creds)" before
+# RUN_NEW is composed. So the refusal is loud and nothing starts beside the
+# native daemon — but refused is still refused until design #440 slice 6.
+echo "build-worker: NOTE: $NODE is supervised NATIVELY now, and worker-refresh.sh's swap still recreates a container — a self-refresh of this node REFUSES ('no /data/keys mount on chug-worker; refusing swap (would strand creds)') and the node does not update itself. Deploy it over ssh with this script until design #440 slice 6 lands." >&2
+
 # Bound the node's docker disk (the 2026-07-23 air incident: 27G of BuildKit
 # cache + dangling image generations filled the colima partition and an image
 # build died ENOSPC mid-deploy). Each rebuild strands the previous image
 # generation as dangling — prune those (NEVER -a: tagged agent images must
 # survive, the #183 lesson) and cap the BuildKit cache at 15G, which keeps the
 # hot cargo/sccache cache-mounts (#115) while shedding stale layers.
-ssh "$WORKER_SSH" "docker image prune -f >/dev/null; docker builder prune -f --keep-storage 15GB >/dev/null 2>&1 || true"
+ssh "$WORKER_SSH" "docker image prune -f >/dev/null; docker builder prune -f --keep-storage 15GB >/dev/null 2>&1 || true" < /dev/null
 
 echo "build-worker: chuggernaut/{worker,agent,agent-rust}:$TAG deployed + VERIFIED on $WORKER_SSH ($SHA) — image label matches and chug-worker is up"

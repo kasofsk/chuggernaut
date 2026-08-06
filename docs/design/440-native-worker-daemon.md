@@ -1,11 +1,13 @@
 # Design — the natively-supervised worker daemon
 
-Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1, 2,
-3 and 8 have landed — 3 as
+Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1–4
+and 8 have landed — 3 as
 [the refusal at both checks](#correction-2026-08-06--slice-3-as-landed-job-460),
 8 as
-[the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470) —
-and 4–7 have not started. [D3](#decisions) and [D8](#decisions) are **both
+[the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470),
+4 as [a unit, an agent and an environment file](#correction-2026-08-06--slice-4-as-landed-job-469)
+that **no node has yet been given** — and 5–7 have not started.
+[D3](#decisions) and [D8](#decisions) are **both
 proven on Linux, through the shipped code path**: on `gumbo-nuc-0` (NixOS,
 **systemd 260 (260.2)**, cgroup v2) on 2026-08-06, all thirteen tests in
 `crates/container/tests/host_backend.rs` passed with **no skips** at tree
@@ -97,7 +99,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | **Landed** (job #442), plus a two-name floor the slice line does not mention — see [the correction](#correction-2026-08-05--slice-1-as-landed) |
 | 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **every assertion it carries is now executed and passing**: the macOS proof PASSED on 2026-08-06 ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and on `gumbo-nuc-0` (NixOS, systemd 260 (260.2), cgroup v2) all three Linux assertions PASSED through `HostBackend` at tree `692656e` — D3's two (`a_host_task_runs_in_its_own_supervision_unit`, `a_host_task_survives_the_teardown_of_the_launching_unit`), already passing at `186beeb` and `af9f74e` ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)), and D8's escapee (`a_kill_reaches_a_setsid_escapee_through_the_scope`), for the first time, in a thirteen-of-thirteen run with no skips ([D8 in execution](#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466)) — see [the correction](#correction-2026-08-05--slice-2-as-landed), amended by job #451 for [the scope an unprivileged daemon can create](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451), by job #453 for [the bus that scope's client needs](#correction-2026-08-06--the-bus-the-client-needs-job-453), by job #455 for [a membership check that raced the manager](#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455), by job #457 for [the membership check the D8 test itself never had](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457), by job #458 for [a trace of the escapee's own](#correction-2026-08-06--the-escapees-own-trace-and-three-differences-ruled-out-job-458), by job #459 for [the one fixture variable never varied](#correction-2026-08-06--the-one-variable-four-attempts-never-changed-job-459), and by job #462 for [the client that was rewriting the task's own command](#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462) |
 | 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | **Landed** (job #460), with "live" decided against the exited-but-unremoved window and the tests placed at tier 1 for a reason the slice line does not mention — see [the correction](#correction-2026-08-06--slice-3-as-landed-job-460) |
-| 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | Proposed |
+| 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | **Landed** (job #469), and **no node has been converted** — the script changes, nothing was applied. Three things the slice line does not mention: the guard keeps a `docker inspect` path *for the conversion itself*, the nix toolchain-shape guard was **ported rather than deleted**, and two knobs were added the design did not name — see [the correction](#correction-2026-08-06--slice-4-as-landed-job-469) |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
 | 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | Proposed |
 | 7 | `code` — `nix/chug-node/` gains the unit and the `chug.node` charter amendment; the macOS plist template and its opt-in installer | `chug.node` option surface | 4, 6 | Proposed |
@@ -125,7 +127,7 @@ slice 7 does not change that.
 
 | Fact | Where | State |
 | --- | --- | --- |
-| The daemon is a container: `docker run -d --restart=always --name chug-worker` with the host's docker socket and `keys` bind-mounted | `deploy/prod/build-worker.sh:524` | Shipped |
+| The daemon is a container: `docker run -d --restart=always --name chug-worker` with the host's docker socket and `keys` bind-mounted | `deploy/prod/build-worker.sh` | **Superseded** by slice 4 (job #469) in the script — it now installs a unit or agent over an environment file — and **still true of every node**, because nothing has run it against one |
 | So it is docker-out-of-docker: task containers are **siblings on the host**, and container mode is correct | same, plus `docs/spec.md` §3.1 | Shipped |
 | `HostBackend` spawns a task with `process_group(0)` and `.envs(&config.env)` — and **no `env_clear()`**, so the task inherits the daemon's whole environment | `crates/container/src/host.rs` (`spawn_task`) | **Superseded** by slice 1 (job #442): the environment is composed, not inherited |
 | A host task's exit status is written by the task's own wrapper, not by the daemon, so the daemon need not be alive when a task exits | `crates/container/src/host.rs` (`supervised_cmd`); #309 correction finding 2 | Shipped |
@@ -2090,3 +2092,251 @@ No code, no gate, no deploy path, no test. Slices 4–7 are unstarted and their
 State cells are as they were; `crates/container/src/host.rs`,
 `crates/worker/src/daemon.rs` and `deploy/prod/build-worker.sh` are untouched.
 Whether a real node ever advertises `host` remains #309 P1's, not this slice's.
+
+---
+
+## Correction, 2026-08-06 — slice 4 as landed (job #469)
+
+Appended by job #469, which implemented [slice 4](#slices). Nothing above is
+edited except that slice's State cell, the `Status:` line and the first row of
+[what is true today](#what-is-true-today). **No node was touched**: this changes
+what `build-worker.sh` *would* install, and prod's two nodes are unreachable
+from the Mini, so both still run the container the row above describes.
+
+### What the script installs
+
+| Piece | Linux | macOS |
+| --- | --- | --- |
+| supervision | `chug-worker.service` in `WORKER_UNIT_DIR` (default `/etc/systemd/system`), `User=root`, `Restart=always` | `com.chuggernaut.worker.plist` in `~/Library/LaunchAgents`, bootstrapped into `gui/$(id -u)`, `KeepAlive` |
+| the run spec | `WORKER_ENV_FILE` (default `/etc/chuggernaut/worker.env`), read by `EnvironmentFile=` | the same file under `~/chuggernaut-worker/`, **sourced** by the agent's `sh -c` — `launchd` has no `EnvironmentFile` |
+| the binaries | `/usr/local/bin/chuggernaut`, `/usr/local/lib/chuggernaut/{chuggernaut-channel,worker-refresh.sh}`, `docker cp`'d out of the worker image the same run built | the same paths |
+
+Every value in the environment file is **single-quoted**, and a value carrying a
+single quote of its own is refused rather than escaped. Both readers are
+shell-like and their quoting rules agree, so `WORKER_MODES='container, host'` is
+one value to systemd and one value to `. <file>`; escaping it two ways would be
+a guess, and a wrong guess is a daemon that will not boot.
+
+The plist deliberately does **not** live in `deploy/prod/launchd/`. §2's finding
+stands: `install-launchd.sh` globs that directory, so a template there would
+install a worker agent on the Mini.
+
+### A container-only node ends up equivalent, and here is the argument
+
+Every node in the fleet is container-only, so this is the claim that decides
+whether the change is safe. Taken piece by piece against the `docker run` it
+replaces:
+
+| What the container had | What the unit gives | Same? |
+| --- | --- | --- |
+| `-e WORKER_NODE`, `NATS_URL`, `RUST_LOG`, `WORKER_REFRESH_GIT_URL`, and every optional `WORKER_*` | the same names, same values, one line each in the environment file — asserted as a whole-file golden in `deploy/prod/build-worker.test.sh` | yes |
+| `--restart=always` | `Restart=always` / `KeepAlive` | yes |
+| `-v /var/run/docker.sock:/var/run/docker.sock` | nothing — the daemon opens `unix:///var/run/docker.sock` on the node, which is `WORKER_DOCKER_ENDPOINT`'s default already | yes, and see below |
+| `-v $HOME/chuggernaut-worker/keys:/data/keys:ro`, `NATS_CREDS=/data/keys/worker.creds` | `NATS_CREDS` naming the **host** path under `WORKER_KEYS_DIR` | equivalent, path changed |
+| `WORKER_GIT_KEY` defaulting to `/data/keys/worker_git` | the host path beside the creds | equivalent, path changed |
+| `--device /dev/kvm` when `WORKER_KVM` is on | nothing — the daemon's own view is the node's | yes |
+| four nix bind mounts | nothing — the node's `/nix`, profiles and daemon socket are already at those paths | yes |
+| `WORKER_CACHE_DIR` as env only, host dir provisioned first | unchanged | yes |
+| the daemon binary, built in the pinned Dockerfile | the same bytes, `docker cp`'d out of the same image | yes |
+
+**The docker socket is the sharpest case and it gets *more* permission, not
+less.** The container reached the socket because the socket was bind-mounted
+into it and the container ran as root. The unit runs as `User=root` on the node,
+so it reaches `/var/run/docker.sock` whatever that socket's group is — the login
+user's membership of `docker` (which is how `build-worker.sh` runs `docker build`
+over ssh at all, and what [D5](#decisions) cites) stops being load-bearing for
+the daemon. On macOS the agent runs as the login user, which is the same uid
+that owns the colima socket today, so nothing changes there either. What changes
+is stated plainly: on Linux the daemon is now root on the node rather than root
+in a container that held a socket — [D8](#decisions)'s "blast radius is what
+changes", exactly.
+
+**Two paths genuinely move**, and both are refused rather than silently wrong: a
+`worker.creds` the daemon cannot read fails the deploy before the live daemon is
+touched, and a `WORKER_GIT_KEY` still naming `/data/keys/...` is refused with the
+host path to declare instead. `/data` only ever existed inside the container, so
+a declaration naming it is a conversion trap with no correct interpretation.
+
+**`WORKER_CACHE_DIR`'s row says "unchanged", and the reason underneath it did
+change.** The deploy still provisions the host directory before the daemon
+starts, but not for the reason it used to. Containerized, the daemon's own
+`create_dir_all` never reached the host at all, so the engine refused every
+launch whose bind source was missing (#379). Natively it *does* reach the host,
+and runs in `local_backend` before the daemon serves anything — so the gap that
+argument closed is gone, and a different one opens: it creates only where that
+process may, and how far that reaches is the supervisor's, not the daemon's. The
+macOS agent runs as the login user in their GUI domain, so a path under a
+root-owned parent is a `Config` refusal at start that `KeepAlive` then loops on.
+The Linux unit is `User=root` (above), so its gap is the narrower one — a
+read-only or otherwise unwritable path, not merely a parent it does not own. The
+deploy's own `mkdir` is the login user's on both, which is why the fallback is
+`sudo -n`. Provisioning first forecloses the lot, which is why the row is
+"unchanged" rather than "no longer needed"; the script's refusal names both
+failure modes, and `docs/spec.md` §3.1 states the prerequisite per view.
+
+### The drift guard keeps a `docker inspect` path, on purpose
+
+[D7](#decisions) says the guard compares the live unit's environment against the
+composed environment file, and that is what it does — the live side is
+`cat $WORKER_ENV_FILE`, legible on the node with no `docker inspect`. But a node
+that has never been converted **has no such file**, and the conversion is
+precisely the recreate the guard exists to police: read nothing there and the
+one deploy that replaces the container is the one deploy that drops every
+setting silently. So the guard falls back to the container's environment and
+says which side it read. The `docker inspect` half retires when the last node is
+converted, not when this slice lands.
+
+The comparison itself is unchanged in shape — presence over the same `WORKER_*`
+key set decides the refusal, values are informational, `WORKER_SPEC_DROP_OK=1`
+is still the way to drop one on purpose — with one addition: the live side is
+unquoted before it is compared, so a converted node does not report
+`live ''2'' -> declared '2'` on every run.
+
+**The read is tri-state, and that is what keeps the guard from degrading to a
+pass.** "The file is absent" and "the file is there and I cannot read it"
+produce the same empty output. Collapse them and a converted node whose
+environment file the login user cannot `cat` falls through to a `docker inspect`
+that the same node also answers emptily — and the run prints the *fresh-node*
+line while overwriting the node's whole run spec unchecked. That is #390's
+failure mode restored, invisibly, on the one path [D7](#decisions) exists to
+cover. So the node answers which case it is, and **cannot read REFUSES**, with
+the live daemon untouched. The environment file is installed `0644` for the same
+reason: it carries paths, URLs and settings and no secret — it *names* the
+credential, it does not hold it — and the guard must be able to read it back as
+the login user on every later deploy. A root-only mode there would have made
+every converted Linux node silently unguarded from its second deploy onward.
+
+### The health probe had to be bounded to *this* start
+
+`docker logs --tail 50 chug-worker`, read after a `docker rm -f` and a
+`docker run`, could only ever show the new container's output — the bound was
+free. A unit's journal and a launchd agent's `StandardOutPath` both span **every
+generation the node has ever run**, so the same 50 lines are no longer a
+statement about this start. The failure that opens: a converted, idle node is
+redeployed, the new daemon cannot reach NATS and crash-loops; under
+`Type=simple` + `Restart=always` the unit is `active (running)` on most 3s
+polls, and the last 50 journal lines still hold the *previous* generation's
+`worker up` because a quiet node logs little between deploys. The probe would
+print HEALTHY over a daemon that never connected — the silent "deployed" #207
+built this block to make impossible.
+
+So each platform gets a real bound. Linux reads
+`_SYSTEMD_INVOCATION_ID`, which systemd mints fresh per start: exact, and immune
+to the clock skew a `--since` would inherit. A systemd too old to report one
+yields no verdict rather than a false pass, so the deploy times out loudly.
+macOS has no such handle, so the install **truncates the agent's log between
+`bootout` and `bootstrap`** — the one window where the old agent is gone and the
+new one has not started — and the `tail` can only see the new agent.
+
+### Both platforms pre-flight the paths they write
+
+The Linux unit directory had a check from the start ([slice 7](#slices)'s NixOS
+case demanded it). macOS needed the same courtesy and did not have it: only the
+environment file and the agent live in the login user's tree, while
+`/usr/local/bin` and `/usr/local/lib/chuggernaut` are root's on **both**
+platforms — and on a stock Apple-Silicon mac (which the plist's own
+`/opt/homebrew` PATH assumes) `/usr/local` is root-owned and often absent.
+`install-launchd.sh`, the precedent [D2](#decisions) names, writes only under
+`$HOME`, so this is the first thing on that platform to need it. Without the
+check the operator gets a bare `sudo: a password is required` from inside the
+install; with it, the same shape of named refusal the unit-directory case gives,
+before anything is extracted.
+
+Separately, **every `ssh` that reads nothing now reads `< /dev/null`.** The
+drift check already said why for its own two calls — `update.sh` runs this whole
+script over an ssh session whose stdin it must not swallow — and it is true of
+all of them. The health probe is the one that turns it into a hang, being a
+loop.
+
+### The nix toolchain-shape guard was ported, not deleted
+
+[§5](#build-workersh) reads that guard as a mount constraint and says it "can be
+deleted rather than ported". **That is half right, and the half it misses is
+load-bearing.** Two things were entangled in one check:
+
+- *A direct symlink under a real parent* — a mount constraint, because
+  `mount(2)` resolves a bind source host-side and would flatten the symlink.
+  Gone with the mount, correctly.
+- *Resolves into the store* — **not** a mount constraint. `store_target`
+  (`crates/worker/src/nix.rs`) canonicalizes the realise target in the daemon's
+  own boot check and refuses anything landing outside the store dir. A native
+  daemon runs that same check against the node's filesystem, so a plain
+  directory still refuses the boot and the supervisor still loops it.
+
+So the check became `readlink -f` resolving under `WORKER_NIX_STORE_DIR`: it
+asks exactly what the daemon asks, and it is genuinely looser — a NixOS
+`environment.etc` entry, disqualified before because of its `/etc/static` hop,
+now qualifies. Deleting it outright would have reintroduced the node-down class
+this file is built around.
+
+### Three knobs the design did not name
+
+`WORKER_UNIT_DIR`, `WORKER_ENV_FILE` and `WORKER_KEYS_DIR` (plus `WORKER_PATH`
+for the PATH the supervisor gives the daemon, which is also the PATH
+[slice 1](#slices)'s launch floor carries into a host task). They resolve
+per node like every other `WORKER_*`, and each has a default that needs no
+declaration.
+
+`WORKER_UNIT_DIR` is the one that is not cosmetic. **On NixOS
+`/etc/systemd/system` is a read-only symlink into the store**, so a unit cannot
+be dropped there at all — which is the state [slice 7](#slices) exists for. The
+script refuses, with the live daemon running, naming both the remedy (point the
+knob at a writable unit path) and the owner (declare the unit on the node). It
+does not silently fall back to `/run/systemd/system`: that path does not survive
+a reboot, and a node whose daemon disappears on the next power cycle is worse
+than a deploy that failed.
+
+### What this does not do
+
+- **It converts nothing.** No `chuggernaut.env` edit, no node run, no restart.
+  An operator converts a node by running `build-worker.sh` against it.
+- **`worker-refresh.sh` is untouched**, and that is the ordering hazard to hold:
+  its swap still removes and re-creates a *container*. A converted node asked to
+  self-refresh does **not** get a second daemon, though — the swap reads
+  `KEYS_SRC` from `docker inspect chug-worker` and, finding no container, exits
+  1 with `no /data/keys mount on chug-worker; refusing swap (would strand
+  creds)` (`deploy/prod/worker-refresh.sh`) **before `RUN_NEW` is composed**. So
+  the real behaviour is a loudly refused swap surfaced as a node-refresh
+  warning: the node stops updating itself and says so, which is better news than
+  a second daemon on one node name and is the note [slice 6](#slices) should be
+  read against. `build-worker.sh` prints the same thing at the moment it
+  converts a node, so an operator learns it there rather than from a failed
+  deploy leg. The detached swapper and every mount and device carry-forward are
+  deliberately left in place for slice 6 to delete in one piece.
+- **[Slice 5](#slices) is not started**: the creds stay under the login user's
+  home, so [D5](#decisions)'s root-owned `0700` boundary is still nominal. The
+  `WORKER_KEYS_DIR` default is the one line that moves when it lands.
+- **`nix/chug-node/` is untouched** ([slice 7](#slices)), so the unit is the
+  platform's for now and the charter still says the module declares none.
+- **`docs/spec.md` §3.1's drain guarantee** was narrowed by [slice 8](#slices)
+  (job #470), which landed in this branch's base while it was in review — so
+  the guarantee already distinguishes container tasks, host tasks under a unit
+  restart, host tasks under the self-refresh, and the reboot residue. Nothing
+  here changes it.
+
+### Verification — stated, and what was not run
+
+`deploy/prod/build-worker.test.sh` (50 cases, all passing) is the whole of it,
+and it is the tier the change can be expressed at: the script's output is a
+remote command string, and the test drives it with a fake `ssh` and `git` that
+log their argv. What is asserted: the whole environment file and the whole unit
+as goldens for a container-only node, the binary extraction, the drift guard
+firing on a declared-but-unforwarded key, `WORKER_MODES` round-tripping
+byte-identically, the macOS branch producing a plist and never a unit, and every
+refusal reaching neither the supervisor nor the install.
+
+Five of those cases are the ones this correction's later half exists for, and
+each was **checked against the un-fixed code**, not merely written beside the
+fix: an unreadable environment file (`rc=0`, and the fresh-node line printed,
+before the tri-state read), a stale `worker up` on Linux (`rc=0` before the
+InvocationID bound) and on macOS (`rc=0` before the truncation), the
+`/usr/local` refusal, and the fresh-node contrast that keeps the first from
+being a blanket refusal.
+
+**Not run, and it cannot be from here:** the composed script has never executed
+on a node. `systemctl`, `launchctl`, `plutil` and `docker cp` are all faked. The
+rendered unit was read against systemd's syntax rather than loaded by it; the
+plist was parsed as a property list and the environment file was sourced by
+`sh`, both outside the test. The first real execution is an operator running
+this against a node they can reach — which the [risk list](#risks-and-open-questions)
+already says should be a reachable node, not a prod one.

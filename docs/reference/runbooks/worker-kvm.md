@@ -19,8 +19,8 @@ device passthrough beats a host runtime) and not the normative text
 | Piece | Owned by | Where it lives |
 | --- | --- | --- |
 | the SDK, and a **stable path** to it | the node's NixOS config | `configuration.nix` — an `environment.etc` (or equivalent) entry pointing a fixed path such as `/etc/chug/android-sdk` at the current `androidsdk` output; §7 narrows this to a *direct* symlink once per-task GC roots are on |
-| `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`, the optional `WORKER_FLUTTER_DIR` and `WORKER_JDK_DIR`, **and `--device`** | `deploy/prod/build-worker.sh`, carried across every self-refresh by `deploy/prod/worker-refresh.sh` | the `chug-worker` container's `docker run` |
-| **who** may use it | `WORKER_KVM_PROJECTS` — `owner/project` entries, comma-separated | the same `docker run` |
+| `WORKER_KVM`, `WORKER_KVM_PROJECTS`, `WORKER_ANDROID_SDK_DIR`, the optional `WORKER_FLUTTER_DIR` and `WORKER_JDK_DIR` | `deploy/prod/build-worker.sh`, carried across every self-refresh by `deploy/prod/worker-refresh.sh` | the node's environment file, which its systemd unit or launchd agent hands the daemon |
+| **who** may use it | `WORKER_KVM_PROJECTS` — `owner/project` entries, comma-separated | the same environment file |
 
 The stable path is not a nicety. `/nix/store/3zr1pgw…-androidsdk/…` is
 content-hashed, so an SDK bump changes it: a pinned store path keeps testing the
@@ -66,37 +66,37 @@ to no launch.
 
 ---
 
-## 2. The device is not optional, and forgetting it is a node-down
+## 2. The device, and why a native daemon no longer needs one named
 
-`chug-worker` is **itself a container**. The daemon's "does this node have the
-device" check therefore reads the *daemon container's* view of it
-(`crates/worker/src/daemon.rs`, `local_backend`), and a daemon that is given
-`WORKER_KVM` without `--device /dev/kvm` **refuses to start**. It is then
-restarted into the same refusal by `--restart=always`, and the node leaves the
-fleet.
+The daemon's "does this node have the device" check reads *its own* view of it
+(`crates/worker/src/daemon.rs`, `local_backend`), and refuses to start when
+`WORKER_KVM` names one it cannot see — after which the supervisor restarts it
+into the same refusal and the node leaves the fleet.
 
-The two ways to get this wrong are not symmetric:
+A **natively supervised** daemon's own view is the node's, so the check and the
+node agree by construction and `build-worker.sh` passes no `--device`
+(design #440 §5). It still refuses a `WORKER_KVM` value the daemon's parser
+would reject — a boolean or an absolute device path, anything else refused
+before the live daemon is replaced — because that refusal is about a value, not
+about a view.
+
+On a node still running the **container** daemon the device is separate and
+load-bearing, and the two ways to get it wrong are not symmetric:
 
 | Mistake | Result |
 | --- | --- |
 | the env var is dropped, the device survives | KVM turns off. Jobs still run, the node stays up. A quiet regression |
 | the device is dropped, the env var survives | **the node goes down** and stays down until someone recreates the daemon by hand |
 
-Both scripts are written around that asymmetry, so a normal deploy cannot
-produce either:
-
-- `build-worker.sh` adds `--device` whenever `WORKER_KVM` is on, mapping the
-  value the way the daemon parses it (a boolean ⇒ `/dev/kvm`, an absolute path ⇒
-  that device). A value that is neither is **refused before the live daemon is
-  removed**.
-- `worker-refresh.sh`'s swap re-composes `docker run` from scratch, so it reads
-  the device off the **live container's** `.HostConfig.Devices` — the same
-  inspect-what-is-actually-running rule the keys and socket mounts follow — and
-  **refuses the swap** if `WORKER_KVM` is *on* and no device can be carried
-  forward. A node stuck on an old SHA is a deploy warning; a node that will not
-  start is an outage. Both scripts trim and read the value exactly as the daemon
-  does, so an explicit `WORKER_KVM=0` — a node with the setting and legitimately
-  no device — swaps normally rather than being frozen on its current SHA.
+`worker-refresh.sh`'s swap is written around that asymmetry: it re-composes
+`docker run` from scratch, so it reads the device off the **live container's**
+`.HostConfig.Devices` — the same inspect-what-is-actually-running rule the keys
+and socket mounts follow — and **refuses the swap** if `WORKER_KVM` is *on* and
+no device can be carried forward. A node stuck on an old SHA is a deploy
+warning; a node that will not start is an outage. Both scripts trim and read the
+value exactly as the daemon does, so an explicit `WORKER_KVM=0` — a node with
+the setting and legitimately no device — swaps normally rather than being frozen
+on its current SHA.
 
 ---
 
@@ -123,8 +123,12 @@ WORKER_SSH=worksalot@gumbo-nuc-0 CHUG_WORKER_NODE=nuc \
   deploy/prod/build-worker.sh
 ```
 
-Pass **every** var the node should keep, not just the new ones: this recreates
-the daemon container, so a var you omit is a var the node loses. Drop the
+Pass **every** var the node should keep, not just the new ones: this rewrites
+the node's whole run spec — the environment file on a native node, the
+container's env on an unconverted one — so a var you omit is a var the node
+loses. `build-worker.sh`'s run-spec drift guard (#390) refuses rather than
+dropping a setting it can see the live daemon running, but that is the reminder,
+not the fix. Drop the
 `WORKER_FLUTTER_DIR` and `WORKER_JDK_DIR` lines on a node that provisions
 neither.
 
@@ -140,16 +144,22 @@ daemon's** env, which is the one the command above set.
 ## 4. Verifying
 
 ```sh
-# the daemon came up and says what it enabled
+# the daemon came up and says what it enabled — native node, then unconverted
+ssh worksalot@gumbo-nuc-0 journalctl -u chug-worker -b 2>&1 | grep -i kvm
 ssh worksalot@gumbo-nuc-0 docker logs chug-worker 2>&1 | grep -i kvm
 #   KVM passthrough enabled for the allow-listed projects device=/dev/kvm …
 
-# the device is on the daemon container itself (this is the one people forget)
+# the second half of the declaration is where the daemon's own view comes from,
+# and it is the one people forget. On a native node that is the environment file
+# and there is no device to inspect (§2); on an unconverted one it is the device
+# on the daemon container itself.
+ssh worksalot@gumbo-nuc-0 grep WORKER_KVM /etc/chuggernaut/worker.env
 ssh worksalot@gumbo-nuc-0 \
   docker inspect chug-worker --format '{{json .HostConfig.Devices}}'
 #   [{"PathOnHost":"/dev/kvm","PathInContainer":"/dev/kvm","CgroupPermissions":"rwm"}]
 
-# during an allow-listed job: the job container has the device and the mounts
+# during an allow-listed job, either way: the job container has the device and
+# the mounts — the daemon composes them, so this half does not change
 ssh worksalot@gumbo-nuc-0 docker inspect <job-container> \
   --format '{{json .HostConfig.Devices}} {{json .HostConfig.Mounts}}'
 ```
@@ -184,7 +194,7 @@ the mounts, while the node keeps working.
 
 | Symptom | What it means | What to do |
 | --- | --- | --- |
-| the node vanishes from the fleet right after a KVM change, `docker ps -a` shows `chug-worker` restarting | the daemon is refusing to start. `docker logs chug-worker` names the reason — almost always `WORKER_KVM names /dev/kvm, which this node does not have`, i.e. the env without the device | recreate the daemon with `build-worker.sh` (which passes `--device`), or remove `WORKER_KVM` |
+| the node vanishes from the fleet right after a KVM change, the supervisor shows the daemon restarting | the daemon is refusing to start. Its log (`journalctl -u chug-worker`, or `docker logs chug-worker` on an unconverted node) names the reason — almost always `WORKER_KVM names /dev/kvm, which this node does not have` | on a native daemon the node genuinely has no such device: remove `WORKER_KVM`. On a container daemon it is the env without `--device`: recreate it with `build-worker.sh` |
 | `build-worker: WORKER_KVM='…' is neither 1/0 nor an absolute device path` | the value would be rejected by the daemon's own parse, so the script refused before touching the live daemon | use `1`/`0` or an absolute device path |
 | `worker-refresh: WORKER_KVM='…' enables KVM but the live chug-worker has no device to carry forward` | the running daemon was created some other way — by hand, without `--device`. Only an *enabling* value gets here; `0`/`false`/`off` swaps normally | recreate it with `build-worker.sh`; the deploy leg carries this as a node warning, and the node stays up on its current SHA |
 | the daemon logs `WORKER_KVM is on but WORKER_KVM_PROJECTS is empty` | the capability is on and granted to nobody — fail-closed, working as intended | add the `owner/project` entry and recreate the daemon |
@@ -210,8 +220,8 @@ node's nix daemon, held for exactly that task's lifetime.
 | Piece | Owned by | Where it lives |
 | --- | --- | --- |
 | the roots directory itself | `deploy/prod/build-worker.sh` (`mkdir -p`, then `sudo -n mkdir -p`) | a worker-writable host path, e.g. `/var/lib/chuggernaut/gcroots` |
-| the mounts into `chug-worker` (the store and the profiles tree read-only, the socket dir and the roots dir read-write, plus the **directory holding** the toolchain path read-only when a device is attached) | `build-worker.sh`, carried across every self-refresh by `worker-refresh.sh` | the daemon's own `docker run` |
-| `WORKER_NIX_GCROOTS_DIR`, `WORKER_NIX_CLIENT`, `WORKER_NIX_DAEMON_SOCKET`, `WORKER_NIX_STORE_DIR`, `WORKER_NIX_REALISE_TIMEOUT_SECS` | the same `docker run` | the daemon's environment |
+| the store, the profiles tree, the nix daemon socket and the toolchain path | the node itself — a native daemon reaches all four directly, and `build-worker.sh` only checks they are there. On a node still running the container daemon they are bind mounts `build-worker.sh` composed and `worker-refresh.sh` carries forward | the node's filesystem |
+| `WORKER_NIX_GCROOTS_DIR`, `WORKER_NIX_CLIENT`, `WORKER_NIX_DAEMON_SOCKET`, `WORKER_NIX_STORE_DIR`, `WORKER_NIX_REALISE_TIMEOUT_SECS` | `build-worker.sh` | the node's environment file |
 
 Add the roots dir to the §3 command and the rest follows:
 
@@ -247,24 +257,26 @@ A few things are worth knowing before you do:
   mounted.** `nix-store --realise` resolves its argument *client-side* — inside
   `chug-worker`, before the nix daemon hears anything — so the daemon container
   has to be able to read the operator's symlink and follow it into the mounted
-  store. A bind whose source *is* that symlink cannot deliver it: `mount(2)`
-  resolves the source host-side, and the container gets the store path's content
-  at a non-store path, which the client refuses ("not in the Nix store"). So
-  `build-worker.sh` binds `dirname` of the toolchain path read-only, and requires
-  the path itself to be a **direct, absolute symlink into the store**:
+  store. A **native** daemon reads the node's own filesystem, so the requirement
+  is exactly the daemon's own: the path must **resolve** into the store, by any
+  number of hops. The cleanest declaration is still one:
 
   ```nix
   systemd.tmpfiles.rules = [ "L+ /etc/chug/android-sdk - - - - ${pkgs.androidsdk}" ];
   ```
 
-  A NixOS `environment.etc` entry does *not* qualify — it routes through
-  `/etc/static`, a second hop no mount here reproduces. Check yours with
-  `readlink /etc/chug/android-sdk` (one hop, not `readlink -f`): the answer must
-  begin `/nix/store/`. `build-worker.sh` refuses the deploy when it does not, and
-  the daemon re-derives the same property from inside the container at boot, so
-  neither shape ever reaches a per-launch failure. Binding the parent also means
-  the symlink is *shared*, not copied: a `nixos-rebuild` moves the toolchain
-  under a running daemon rather than pinning the generation current at the swap.
+  A NixOS `environment.etc` entry qualifies too — its `/etc/static` hop resolves
+  like any other. Check yours with `readlink -f /etc/chug/android-sdk`: the
+  answer must begin `/nix/store/`. `build-worker.sh` refuses the deploy when it
+  does not, and the daemon re-derives the same property at boot, so neither
+  shape ever reaches a per-launch failure.
+
+  On a node still running the **container** daemon the rule is narrower, because
+  a bind whose source *is* the symlink cannot deliver it: `mount(2)` resolves the
+  source host-side, and the container gets the store path's content at a
+  non-store path, which the client refuses ("not in the Nix store"). That daemon
+  therefore needs `dirname` of the toolchain bound read-only and the path itself
+  to be a **direct** symlink into the store, with `environment.etc` disqualified.
 
 - **This is the opposite of what the JOB container's mounts do, and both are
   right.** `/opt/android-sdk`, `/opt/flutter` and `/opt/jdk` bind the **leaf
@@ -285,10 +297,10 @@ a leak of disk, never of a job.
 
 | Symptom | What it means | What to do |
 | --- | --- | --- |
-| `WORKER_NIX_GCROOTS_DIR … is not a directory in the daemon's own view` in `docker logs chug-worker` | the dir is missing on the host, or is not mounted into the daemon container | recreate the daemon with `build-worker.sh`, which creates it and mounts every path |
-| `the toolchain this node realises (…) does not resolve in the daemon's own view` | the SDK path's **parent** is not mounted into `chug-worker` (the realise resolves it client-side) | recreate the daemon with `build-worker.sh`; it adds that mount whenever a device is attached |
+| `WORKER_NIX_GCROOTS_DIR … is not a directory in the daemon's own view` in the daemon's log | the dir is missing on the node (or, on a container daemon, is not mounted into it) | recreate the daemon with `build-worker.sh`, which creates it |
+| `the toolchain this node realises (…) does not resolve in the daemon's own view` | the SDK path does not resolve into the store — on a container daemon, usually because its **parent** is not mounted | fix the path (below), or recreate the daemon with `build-worker.sh` |
 | `… resolves to … which is not under /nix/store` | the stable path reached the container as a plain directory — the leaf was bound instead of its parent, or the path is not a symlink into the store | make it one direct `L+` hop into the store (above) and recreate the daemon |
-| `build-worker: … is not a direct symlink into '/nix/store' under a real parent directory` | `WORKER_ANDROID_SDK_DIR` is missing, is a plain directory, or is an `environment.etc` entry hopping through `/etc/static` | declare it with `systemd.tmpfiles` (above), or unset `WORKER_NIX_GCROOTS_DIR` |
+| `build-worker: … does not resolve to a path under '/nix/store'` | `WORKER_ANDROID_SDK_DIR` is missing or is a plain directory | declare it as a symlink into the store (above), or unset `WORKER_NIX_GCROOTS_DIR` |
 | `WORKER_NIX_REALISE_TIMEOUT_SECS=… is over the ceiling` (daemon) or `is outside 1..45` (deploy) | the bound cannot fit inside the `launch` RPC | lower it to ≤45, and warm the toolchain with a scheduled job if that is not enough |
 | `build-worker: cannot provision WORKER_NIX_GCROOTS_DIR` | neither the login user nor `sudo -n` could create it; the live daemon was left running | create it by hand on the node, or unset the var |
 | `build-worker: … lacks the nix preconditions` | the node has no `/nix/store`, profiles tree or daemon socket | this node cannot hold roots — unset the var |

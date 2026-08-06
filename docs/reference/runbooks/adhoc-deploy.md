@@ -97,9 +97,23 @@ a warm rebuild.
 
 `deploy/prod/build-worker.sh` builds all three node images (`worker`, `agent`,
 `agent-rust`) natively on the node — context streams over SSH via `git archive`,
-so the node needs nothing but Docker and your authorized key — then restarts the
-daemon on the new `worker` image. **Safe mid-job:** job containers survive and
-the dispatcher's poll-based wait re-attaches (`docs/spec.md` §3.1).
+so the node needs nothing but Docker and your authorized key — then **extracts
+the daemon binary from the new `worker` image**, installs it with an environment
+file and a systemd unit (Linux) or launchd agent (macOS), and asks the
+supervisor to restart it (design
+[#440](../../design/440-native-worker-daemon.md) D2/D6). A node still running
+the `chug-worker` container is converted by that run, and its container is
+removed in the same step. **Safe mid-job:** job containers are siblings on the
+node's docker socket, so they survive and the dispatcher's poll-based wait
+re-attaches (`docs/spec.md` §3.1).
+
+**Converting a node takes it off the self-refresh path until #440 slice 6.**
+`worker-refresh.sh`'s swap still recreates a container from the live one's
+mounts, so on a converted node it refuses (`no /data/keys mount on chug-worker;
+refusing swap (would strand creds)`) and the node stops updating itself — a
+deploy's refresh leg fails there rather than silently skipping. The script says
+so on every run that converts one. Redeploy that node over ssh with §1b until
+slice 6 lands.
 
 ```sh
 WORKER_SSH=worksalot@gumbo-nuc-0 \
@@ -118,11 +132,15 @@ WORKER_NATS_URL=nats://100.x.y.z:4222 \
   `WORKER_REFRESH_GIT_URL`, `WORKER_GIT_KEY` — comes from `chuggernaut.env`, so
   **source it** (`set -a; . deploy/prod/chuggernaut.env; set +a`) instead of
   retyping values: each may be declared per node as `<VAR>_<node>`, and the
-  script forwards what it resolves to the daemon's `docker run` (see §1c for why
-  they matter). Before it replaces a live daemon the script compares the
-  container's environment with the run it is about to compose and **refuses**
-  when the new run would drop something the node is running — declare it, or
-  pass `WORKER_SPEC_DROP_OK=1` to drop it deliberately.
+  script writes what it resolves into the node's environment file (see §1c for
+  why they matter). Before it replaces a live daemon the script compares that
+  file — or, on a node still running the container, the container's
+  environment — with the run it is about to compose and **refuses** when the new
+  run would drop something the node is running: declare it, or pass
+  `WORKER_SPEC_DROP_OK=1` to drop it deliberately.
+- The node's `worker.creds` must be readable on the node before the run: a
+  native daemon reads it off the filesystem rather than through a `:ro` bind, so
+  the script refuses a deploy that cannot find it, live daemon untouched.
 - `WORKER_CACHE_DIR`'s host path is created on the node
   by this script before it starts the daemon (`mkdir -p`, falling back to
   `sudo -n mkdir -p`); a path it cannot create refuses the deploy with the live
@@ -133,17 +151,22 @@ The image tag is `CHUG_IMAGE_TAG` (default `prod`).
 **Verify:**
 
 ```sh
-ssh "$WORKER_SSH" 'docker ps --filter name=chug-worker --format "{{.Image}} {{.Status}}"'
+ssh "$WORKER_SSH" 'systemctl status chug-worker --no-pager | head -3; cat /etc/chuggernaut/worker.env'
+# on macOS: launchctl print gui/$(id -u)/com.chuggernaut.worker | head
 # then confirm the dispatcher no longer warns about a drifting node version:
 #   watch the dispatcher log / fleet snapshot — the node's ping version should
 #   match the deployed SHA (spec §3.1, #109).
 ```
 
-### 1c. Stranded or stale worker daemon — the full `docker run` recipe
+### 1c. Stranded or stale worker daemon — the by-hand `docker run` recipe
 
 **When:** the daemon is wedged, was started without the cache/refresh env, or you
-need to (re)start it standalone without a full image rebuild. This is the exact
-`docker run` `build-worker.sh` issues — reproduce it by hand:
+need to (re)start it standalone without a full image rebuild, **on a node that
+still runs the containerised daemon**. `build-worker.sh` no longer issues this
+run — it installs a native daemon (§1b) — so this is the recipe for a node that
+has not been converted, and running it on one that has puts a second daemon on
+the node's name. Prod's nodes are unconverted: the Mini cannot ssh either of
+them, so nothing has re-applied `chuggernaut.env` to one.
 
 **Whatever you set here, declare it too**, in `deploy/prod/chuggernaut.env` on <!-- runtime -->
 the Mini (per node as `<VAR>_<node>`, `deploy/prod/README.md` §6). A value that

@@ -297,18 +297,26 @@ verify it in seconds and must name it when rejecting.
    the tier, the more often the test actually runs.
 
 7. **Re-derive every host fact inside the namespace that will use it.** The
-   worker daemon is itself a container (`deploy/prod/build-worker.sh`), so a
-   path, device or socket the host has is absent to `chug-worker` unless it is
-   mounted in — and **existence, identity and provenance are three separate
-   questions**: a check that answers one does not answer the others. Ask all
+   namespace that runs the code is not always the node: until design #440
+   slice 4 the worker daemon was itself a container
+   (`deploy/prod/build-worker.sh`, now a native unit — though every deployed
+   node still runs the container until an operator converts it), so a path,
+   device or socket the host has is absent to `chug-worker` unless it is
+   mounted in. That is where all four cases below came from, and the rule
+   outlives the packaging: whatever the view is, ask it — and **existence,
+   identity and provenance are three separate questions**: a check that answers
+   one does not answer the others. Ask all
    three of the view that will actually run the code: *is it there, is it the
    thing it claims to be, and did it get there by a route that survives?* A
    `create_dir_all` or a `stat` on the daemon's side is a statement about the
-   container, never about the node — provision host state from the deploy
-   script, and check it from the daemon in the daemon's own view. *Why:* this
+   daemon's view — the container's while the daemon is one, and even natively
+   only about what that process may reach — never about the node as such:
+   provision host state from the deploy script, and check it from the daemon in
+   the daemon's own view. *Why:* this
    one root cause produced a rework cycle in job #374 (a boot-time `/dev/kvm`
-   check that reads the daemon container's view, so enabling KVM also means
-   passing the device into `chug-worker`), in #379/#380 (a `create_dir_all` of
+   check that reads the daemon container's view, so — on a node whose daemon is
+   still the container — enabling KVM also means passing the device into
+   `chug-worker`), in #379/#380 (a `create_dir_all` of
    `WORKER_CACHE_DIR` that lands in the daemon's writable layer and never on the
    host, which is why `worker-refresh.sh` deliberately does not `mkdir` it), and
    in all three of job #384's (a realise target mounted nowhere — *existence*; a

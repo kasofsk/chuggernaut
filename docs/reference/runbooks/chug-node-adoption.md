@@ -34,7 +34,7 @@ asserts (NixOS, [`nix/chug-node/nixos.nix`](../../../nix/chug-node/nixos.nix)):
 | `virtualisation.docker.enableOnBoot` | `--restart=always` containers come back from a reboot | socket activation makes docker *available*, not *running* — the node comes back dead and silent |
 | `daemon.settings.live-restore` | a dockerd restart does not kill in-flight tasks | the cost is real and worth a build failure: live-restore is incompatible with docker swarm |
 | `autoPrune.flags += --filter=label!=chug.managed` | the nightly sweep spares the agent images | an unfiltered `docker system prune` deletes the node's whole image set — the 2026-07-25 outage |
-| `users.users.<user>.extraGroups += docker` | `deploy/prod/build-worker.sh` can `docker build` over ssh | without it every leg of that path fails as if the socket were broken |
+| `users.users.<user>.extraGroups += docker` | `deploy/prod/build-worker.sh` can `docker build` over ssh | without it every leg of that path fails as if the socket were broken. It is *not* what gets the daemon to the socket any more: since design [#440](../../design/440-native-worker-daemon.md) slice 4 the Linux unit runs as root, so the membership is the deploy path's alone |
 | a `systemd.tmpfiles` rule for `cacheDir` | the sccache dir exists, owned by your user | nothing else creates it any more — the mount is typed, so a missing source is refused |
 
 Two different merge mechanisms, one outcome. The three scalar settings
@@ -63,9 +63,10 @@ the VM does not share resolves *inside the VM*, silently, as an empty directory 
 and that `darwin.dockerBootAgent`, when set to a name, names a `launchd` entry
 that exists (§4).
 
-**What it does not touch, on purpose:** the `chug-worker` container, its
-`docker run`, its environment, and the node's slot count. Adopting the module
-changes no container and no capacity. `WORKER_*` still comes from
+**What it does not touch, on purpose:** the worker daemon, its unit or launchd
+agent, its environment file, and the node's slot count — bringing the unit into
+`chug.node` is design [#440](../../design/440-native-worker-daemon.md) slice 7,
+still Proposed. Adopting the module changes no daemon and no capacity. `WORKER_*` still comes from
 `deploy/prod/build-worker.sh` and is carried by `worker-refresh.sh`; capacity
 still belongs to the Cluster page ([`worker-capacity.md`](worker-capacity.md)
 §1). Per-project tooling — Flutter, an Android SDK composition, a Rust
@@ -378,5 +379,6 @@ unverified — including the `chug.node` block you just added.
 - [`docs/spec.md`](../../spec.md) §3.1 — normative: worker nodes and their node-local
   properties, including the cache directory's ownership.
 - [`deploy/prod/README.md`](../../../deploy/prod/README.md) §6 — provisioning a
-  worker node's `chug-worker` container, which this module deliberately does not
-  declare.
+  worker node's daemon: its systemd unit or launchd agent and the environment
+  file carrying its run spec, which this module deliberately does not declare
+  (until design [#440](../../design/440-native-worker-daemon.md) slice 7).
