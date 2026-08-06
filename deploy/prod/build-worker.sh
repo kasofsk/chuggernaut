@@ -129,20 +129,113 @@ BIN_DIR=/usr/local/bin
 LIB_DIR=/usr/local/lib/chuggernaut
 # Where the daemon reads its NATS credential and its git key off the NODE. The
 # `:ro` bind of $HOME/chuggernaut-worker/keys is gone with the container, and the
-# boundary it was pretending to give with it (#440 D5) — moving these to a
-# root-owned directory is slice 5's, and this knob is where that lands.
-KEYS_DIR="${WORKER_KEYS_DIR:-$NODE_HOME/chuggernaut-worker/keys}"
+# boundary it was pretending to give with it — the bind SOURCE was a directory in
+# the login user's home, and that user is in the `docker` group and is who this
+# script ssh's in as. So the default is a ROOT-OWNED 0700 directory beside the
+# unit's own environment file, outside any user's home (design #440 D5), and the
+# guard below refuses a node whose directory is not one.
 if [ "$NODE_OS" = Linux ]; then
   UNIT_DIR="${WORKER_UNIT_DIR:-/etc/systemd/system}"
   UNIT_PATH="$UNIT_DIR/chug-worker.service"
   ENV_FILE="${WORKER_ENV_FILE:-/etc/chuggernaut/worker.env}"
+  KEYS_DIR="${WORKER_KEYS_DIR:-/etc/chuggernaut/keys}"
 else
   AGENT_LABEL=com.chuggernaut.worker
   UNIT_PATH="$NODE_HOME/Library/LaunchAgents/$AGENT_LABEL.plist"
   ENV_FILE="${WORKER_ENV_FILE:-$NODE_HOME/chuggernaut-worker/worker.env}"
   WORKER_LOG_PATH="$NODE_HOME/Library/Logs/chuggernaut/worker.log"
+  # macOS runs the daemon as the LOGIN USER in their GUI domain (#322: the
+  # keychain and CoreSimulator are per-user-session services), so there is no
+  # user for a root-owned directory to exclude and D5's boundary does not port.
+  # The home path is therefore the default here, unchanged — the status quo #440
+  # §4 names, and the gap #322 §7 already lists under what it gives up.
+  KEYS_DIR="${WORKER_KEYS_DIR:-$NODE_HOME/chuggernaut-worker/keys}"
 fi
 ENV_DIR="${ENV_FILE%/*}"
+
+# ── the credential directory, checked before anything is built (design #440 D5) ─
+# A daemon that cannot read its own credential does not come up degraded, it
+# FAILS TO START, and the supervisor's Restart=always loops that failure on a
+# node an operator has just converted. So the whole of it is asked here, in one
+# round trip, before the ten-minute image build and with the live daemon still
+# running: does the directory exist, is it root's at 0700, and is the credential
+# inside it there at all.
+#
+# WORKER_GIT_KEY defaulted to `/data/keys/worker_git`, which only ever existed
+# INSIDE the container. A native daemon resolves it on the node, so the default
+# follows the keys directory — and a declaration still naming the mount point is
+# refused rather than handed to a daemon that cannot fetch anything.
+GIT_KEY="${WORKER_GIT_KEY:-$KEYS_DIR/worker_git}"
+case "$GIT_KEY" in
+  /data/keys/*)
+    echo "build-worker: WORKER_GIT_KEY='$GIT_KEY' names the container's key mount, which a NATIVE daemon does not have (design #440 D2) — the node would come up and every self-refresh would fail to fetch; REFUSING (live daemon untouched). Declare WORKER_GIT_KEY_$NODE=$KEYS_DIR/worker_git in deploy/prod/chuggernaut.env ON THE MINI, or drop it and take that default." >&2
+    exit 1
+    ;;
+esac
+# The SAME finding one directory over, and the one this slice creates: a Linux
+# node's declaration still naming the LOGIN USER's home. It is not merely the
+# weaker boundary D5 refuses for the credential — README §6's migration DELETES
+# that copy, so the run spec would name a file that is gone and the node would
+# keep serving jobs while every self-refresh silently failed to fetch, which is
+# the failure the /data/keys refusal above exists to prevent. A path INSIDE the
+# credential directory is exempt however it was reached: the owner-and-mode guard
+# below has already vouched for that directory, so a node keeping its keys under
+# a root-owned 0700 WORKER_KEYS_DIR is served rather than refused twice.
+if [ "$NODE_OS" = Linux ]; then
+  case "$GIT_KEY" in
+    "$KEYS_DIR"/*) ;;
+    "$NODE_HOME"/*)
+      echo "build-worker: WORKER_GIT_KEY='$GIT_KEY' is under the login user's home ('$NODE_HOME') on a Linux node, outside the credential directory '$KEYS_DIR' — that user is in the 'docker' group, so the git key is readable by anything they run (design #440 D5), and deploy/prod/README.md §6's migration DELETES that copy, after which the node keeps serving jobs and every self-refresh fails to fetch; REFUSING (live daemon untouched). Move the key with the credential ('sudo install -o root -g root -m 0600 $GIT_KEY $KEYS_DIR/worker_git', and worker_git-cert.pub beside it), then drop WORKER_GIT_KEY_$NODE from deploy/prod/chuggernaut.env ON THE MINI to take the default '$KEYS_DIR/worker_git', or point it there." >&2
+      exit 1
+      ;;
+  esac
+fi
+if [ "$NODE_OS" = Linux ]; then
+  # THE READ IS TRI-STATE for the credential, the way the run-spec drift guard's
+  # is: inside a root-owned 0700 directory the login user cannot look at all, so
+  # "not there" and "I am not allowed to look" produce the same failed `test -r`.
+  # Collapsing them would tell an operator to re-mint a credential that is
+  # already installed correctly, which is the cryptic failure this whole block
+  # exists to avoid. The owner and mode come back as data rather than as a
+  # verdict so the refusal can name what it actually found.
+  KEYS_PROBE="$(ssh "$WORKER_SSH" "printf 'own=%s mode=%s\n' \"\$(stat -c %U '$KEYS_DIR' 2>/dev/null)\" \"\$(stat -c %a '$KEYS_DIR' 2>/dev/null)\"
+if [ -r '$KEYS_DIR/worker.creds' ] || sudo -n test -r '$KEYS_DIR/worker.creds' 2>/dev/null; then
+  echo creds=readable
+elif sudo -n true 2>/dev/null; then
+  echo creds=absent
+else
+  echo creds=unknown
+fi" < /dev/null)"
+  KEYS_OWNER="$(printf '%s\n' "$KEYS_PROBE" | sed -n 's/^own=\([^ ]*\) mode=.*/\1/p')"
+  KEYS_MODE="$(printf '%s\n' "$KEYS_PROBE" | sed -n 's/^own=.* mode=\(.*\)$/\1/p')"
+  KEYS_CREDS="$(printf '%s\n' "$KEYS_PROBE" | sed -n 's/^creds=\(.*\)$/\1/p')"
+  if [ -z "$KEYS_OWNER" ]; then
+    echo "build-worker: '$KEYS_DIR' does not exist on $WORKER_SSH — a natively supervised daemon reads its NATS credential and its git key from a ROOT-OWNED 0700 directory outside any user's home (design #440 D5), and it FAILS TO START without them; REFUSING (live daemon untouched). On the node: 'sudo install -d -o root -g root -m 0700 $KEYS_DIR', then install the credential into it (deploy/prod/README.md §6, which is also where an existing node's move out of \$HOME is written down). Or point WORKER_KEYS_DIR_$NODE at the directory that already holds them." >&2
+    exit 1
+  fi
+  if [ "$KEYS_OWNER" != root ] || [ "$KEYS_MODE" != 700 ]; then
+    echo "build-worker: '$KEYS_DIR' on $WORKER_SSH is owned by '$KEYS_OWNER' at mode '$KEYS_MODE'; the daemon's credential directory must be owned by 'root' at mode '700' (design #440 D5). The login user this deploy ssh's in as is in the 'docker' group, so a credential that user can read is readable by anything that user runs — a WEAKER boundary than the read-only bind mount the native daemon replaces, and going native must not lower it. REFUSING (live daemon untouched). On the node: 'sudo chown root:root $KEYS_DIR && sudo chmod 0700 $KEYS_DIR' (and 'sudo chown root:root $KEYS_DIR/* && sudo chmod 0600 $KEYS_DIR/*' for what is inside it), or point WORKER_KEYS_DIR_$NODE at a directory that already is one." >&2
+    exit 1
+  fi
+  case "$KEYS_CREDS" in
+    readable) ;;
+    unknown)
+      echo "build-worker: cannot tell whether '$KEYS_DIR/worker.creds' exists on $WORKER_SSH — it is inside a root-owned 0700 directory, so only root can look, and 'sudo -n' is not available to the login user there. A check that cannot see the credential is not a check that passes, and the install needs that same passwordless sudo to write the unit and restart it; REFUSING (live daemon untouched). Grant the login user passwordless sudo on this node, or run this script from an account that has it." >&2
+      exit 1
+      ;;
+    *)
+      echo "build-worker: '$KEYS_DIR/worker.creds' is not on $WORKER_SSH — a native daemon reads its NATS credential off the node (there is no /data/keys mount any more), so it would fail to connect and the supervisor would restart it into the same failure; REFUSING (live daemon untouched). Mint it on the Mini with 'chuggernaut admin worker-creds --node $NODE', scp it to a staging path the login user owns, then 'sudo install -o root -g root -m 0600 <staged> $KEYS_DIR/worker.creds' (deploy/prod/README.md §6). Or point WORKER_KEYS_DIR_$NODE at the directory that holds it." >&2
+      exit 1
+      ;;
+  esac
+  echo "build-worker: credential directory $KEYS_DIR on $WORKER_SSH is root-owned at 0700 and holds worker.creds (design #440 D5)"
+else
+  if ! ssh "$WORKER_SSH" "[ -r '$KEYS_DIR/worker.creds' ]" < /dev/null; then
+    echo "build-worker: '$KEYS_DIR/worker.creds' is not readable on $WORKER_SSH — a native daemon reads its NATS credential off the node (there is no /data/keys mount any more), so it would fail to connect and the supervisor would restart it into the same failure; REFUSING (live daemon untouched). Mint it with 'chuggernaut admin worker-creds --node $NODE' and install it there (deploy/prod/README.md §6), or point WORKER_KEYS_DIR_$NODE at the directory that holds it." >&2
+    exit 1
+  fi
+  echo "build-worker: NOTE: $NODE runs the daemon as the LOGIN USER in their GUI domain, so design #440 D5's root-owned 0700 boundary does not port to macOS — $KEYS_DIR stays in that user's home and cross-task secret isolation there remains given up (#322 §7)"
+fi
 
 # Worker daemon image (repo-root context; bakes chuggernaut + channel binary).
 # --label chug.git.sha=<sha> stamps the requested SHA INTO the image so we can
@@ -201,26 +294,8 @@ spec_line() {
 }
 # The self-refresh coordinates (spec §3.1) ride so the node can also be
 # refreshed later over the worker RPC (no-ssh path). Empty URL when unset — the
-# daemon then just rejects refresh requests.
-#
-# WORKER_GIT_KEY defaulted to `/data/keys/worker_git`, which only ever existed
-# INSIDE the container. A native daemon resolves it on the node, so the default
-# follows the keys directory — and a declaration still naming the mount point is
-# refused rather than handed to a daemon that cannot fetch anything.
-GIT_KEY="${WORKER_GIT_KEY:-$KEYS_DIR/worker_git}"
-case "$GIT_KEY" in
-  /data/keys/*)
-    echo "build-worker: WORKER_GIT_KEY='$GIT_KEY' names the container's key mount, which a NATIVE daemon does not have (design #440 D2) — the node would come up and every self-refresh would fail to fetch; REFUSING (live daemon untouched). Declare WORKER_GIT_KEY_$NODE=$KEYS_DIR/worker_git in deploy/prod/chuggernaut.env ON THE MINI, or drop it and take that default." >&2
-    exit 1
-    ;;
-esac
-# The credential is read off the NODE now, so its absence is a daemon that
-# cannot reach NATS and is restarted into the same failure — checked here, while
-# the live daemon is still running, exactly as the label and capacity guards are.
-if ! ssh "$WORKER_SSH" "[ -r '$KEYS_DIR/worker.creds' ]" < /dev/null; then
-  echo "build-worker: '$KEYS_DIR/worker.creds' is not readable on $WORKER_SSH — a native daemon reads its NATS credential off the node (there is no /data/keys mount any more), so it would fail to connect and the supervisor would restart it into the same failure; REFUSING (live daemon untouched). Mint it with \`chug admin worker-creds --node $NODE\` and install it there (deploy/prod/README.md §6), or point WORKER_KEYS_DIR_$NODE at the directory that holds it." >&2
-  exit 1
-fi
+# daemon then just rejects refresh requests. $GIT_KEY and the credential
+# directory holding it were decided and checked above, before the build.
 spec_line WORKER_NODE "$NODE"
 spec_line NATS_URL "$NATS"
 spec_line NATS_CREDS "$KEYS_DIR/worker.creds"

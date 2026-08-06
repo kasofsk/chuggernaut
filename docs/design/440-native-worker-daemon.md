@@ -1,12 +1,14 @@
 # Design — the natively-supervised worker daemon
 
-Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1–4
+Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1–5
 and 8 have landed — 3 as
 [the refusal at both checks](#correction-2026-08-06--slice-3-as-landed-job-460),
 8 as
 [the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470),
 4 as [a unit, an agent and an environment file](#correction-2026-08-06--slice-4-as-landed-job-469)
-that **no node has yet been given** — and 5–7 have not started.
+that **no node has yet been given**, 5 as
+[a root-owned directory and four refusals](#correction-2026-08-06--slice-5-as-landed-job-472)
+over it — and 6–7 have not started.
 [D3](#decisions) and [D8](#decisions) are **both
 proven on Linux, through the shipped code path**: on `gumbo-nuc-0` (NixOS,
 **systemd 260 (260.2)**, cgroup v2) on 2026-08-06, all thirteen tests in
@@ -100,7 +102,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **every assertion it carries is now executed and passing**: the macOS proof PASSED on 2026-08-06 ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and on `gumbo-nuc-0` (NixOS, systemd 260 (260.2), cgroup v2) all three Linux assertions PASSED through `HostBackend` at tree `692656e` — D3's two (`a_host_task_runs_in_its_own_supervision_unit`, `a_host_task_survives_the_teardown_of_the_launching_unit`), already passing at `186beeb` and `af9f74e` ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)), and D8's escapee (`a_kill_reaches_a_setsid_escapee_through_the_scope`), for the first time, in a thirteen-of-thirteen run with no skips ([D8 in execution](#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466)) — see [the correction](#correction-2026-08-05--slice-2-as-landed), amended by job #451 for [the scope an unprivileged daemon can create](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451), by job #453 for [the bus that scope's client needs](#correction-2026-08-06--the-bus-the-client-needs-job-453), by job #455 for [a membership check that raced the manager](#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455), by job #457 for [the membership check the D8 test itself never had](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457), by job #458 for [a trace of the escapee's own](#correction-2026-08-06--the-escapees-own-trace-and-three-differences-ruled-out-job-458), by job #459 for [the one fixture variable never varied](#correction-2026-08-06--the-one-variable-four-attempts-never-changed-job-459), and by job #462 for [the client that was rewriting the task's own command](#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462) |
 | 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | **Landed** (job #460), with "live" decided against the exited-but-unremoved window and the tests placed at tier 1 for a reason the slice line does not mention — see [the correction](#correction-2026-08-06--slice-3-as-landed-job-460) |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | **Landed** (job #469), and **no node has been converted** — the script changes, nothing was applied. Three things the slice line does not mention: the guard keeps a `docker inspect` path *for the conversion itself*, the nix toolchain-shape guard was **ported rather than deleted**, and two knobs were added the design did not name — see [the correction](#correction-2026-08-06--slice-4-as-landed-job-469) |
-| 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | Proposed |
+| 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | **Landed** (job #472), on **Linux only** and with the migration left to the operator's hands — two things the slice line does not mention, plus a third: the node-local *artifacts* had already moved in slice 4, so what this changed is the credentials and the guard over them — see [the correction](#correction-2026-08-06--slice-5-as-landed-job-472) |
 | 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | Proposed |
 | 7 | `code` — `nix/chug-node/` gains the unit and the `chug.node` charter amendment; the macOS plist template and its opt-in installer | `chug.node` option surface | 4, 6 | Proposed |
 | 8 | `docs` — `docs/spec.md` §3.1's drain guarantee narrowed to say what survives a *native* daemon restart and what does not | spec §3.1 | 2, 3 | **Landed** (job #470) — four cases, the reboot residue explicit, and both live qualifiers stated; see [the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470) |
@@ -136,7 +138,7 @@ slice 7 does not change that.
 | The Mini already runs the dispatcher and api **natively under launchd**, rendered from templates | `deploy/prod/install-launchd.sh`, `deploy/prod/launchd/` | Shipped |
 | `WORKER_CACHE_DIR` is env-only — a host path the daemon passes to sibling containers, never mounted into the daemon | `deploy/prod/worker-refresh.sh` swap comment; `crates/worker/src/config.rs` | Shipped |
 | `WORKER_CHANNEL_BINARY` and `WORKER_REFRESH_SCRIPT` default to `/usr/local/lib/chuggernaut/…` — paths that are *inside the image* today but are shaped like host paths | `crates/worker/src/config.rs` | Shipped |
-| `chuggernaut admin worker-creds` writes the `.creds` at mode `0600` on the dispatcher host; the operator `scp`s it into the node login user's `chuggernaut-worker/keys/` | `crates/cli/src/admin.rs`, `crates/cli/src/keygen.rs`, `deploy/prod/README.md` §6 | Shipped |
+| `chuggernaut admin worker-creds` writes the `.creds` at mode `0600` on the dispatcher host; the operator `scp`s it into the node login user's `chuggernaut-worker/keys/` | `crates/cli/src/admin.rs`, `crates/cli/src/keygen.rs`, `deploy/prod/README.md` §6 | **The minting is unchanged** and stays exactly this. The *install* was superseded by slice 5 (job #472) on Linux: `scp` to a staging path, then `install -o root -m 0600` into a root-owned `0700` directory. Still true of macOS, and of every node until it is converted |
 | Prod's nodes only ever self-refresh — `WORKER_SSH` is unset for both, so `build-worker.sh` no-ops on every deploy | `deploy/prod/README.md` | Shipped |
 
 **The consequence #309 P0 finding 6 records, restated in one line:** a
@@ -2340,3 +2342,164 @@ plist was parsed as a property list and the environment file was sourced by
 `sh`, both outside the test. The first real execution is an operator running
 this against a node they can reach — which the [risk list](#risks-and-open-questions)
 already says should be a reachable node, not a prod one.
+
+---
+
+## Correction, 2026-08-06 — slice 5 as landed (job #472)
+
+Appended by job #472, which implemented [slice 5](#slices). Nothing above is
+edited except that slice's State cell, the `Status:` line and the
+`worker-creds` row of [what is true today](#what-is-true-today). **No node was
+touched**: this changes where `build-worker.sh` *expects* the credentials to be
+and what it refuses without them. Prod's nodes are still unreachable from the
+Mini and still run the container.
+
+### What moved, and what did not
+
+| Piece | Before | After |
+| --- | --- | --- |
+| `WORKER_KEYS_DIR` default, **Linux** | `$HOME/chuggernaut-worker/keys` | **`/etc/chuggernaut/keys`**, required to be `root`-owned at mode `700` |
+| `WORKER_KEYS_DIR` default, **macOS** | `$HOME/chuggernaut-worker/keys` | unchanged — the agent runs as the login user, so the boundary has nobody to exclude |
+| `NATS_CREDS`, `WORKER_GIT_KEY` | under that default | under that default; both follow it with no separate knob |
+| `chuggernaut admin worker-creds` | mints at `0600`, prints the path | **unchanged**, exactly as [D5](#decisions) requires — it is local-only and knows nothing about how a node consumes the file |
+| the node-local *artifacts* | — | **already moved in slice 4**: the binary, the channel binary and the refresh script land at `/usr/local/…`, the paths `crates/worker/src/config.rs` already defaults to. The slice line names them; there was nothing left to do |
+
+`/etc/chuggernaut/keys` rather than a new tree of its own because
+`/etc/chuggernaut/worker.env` is already the unit's directory: the run spec and
+the credential it names sit beside each other, at modes that differ for the
+reason they exist — `0644` on the file that carries no secret so [D7](#decisions)'s
+guard can read it back as the login user, `0700` on the directory that does.
+
+### Why it is a finding and not tidiness, restated from the code
+
+The `:ro` bind the container had made the boundary look like "only the daemon
+can read this", and the bind *source* was a directory in the login user's home.
+That user is in the `docker` group — which is how `build-worker.sh` runs
+`docker build` over ssh at all — and is who every deploy authenticates as. So
+the pre-slice arrangement is not merely no better than the mount: going native
+with it would leave the credential readable by everything that user runs, which
+is a **lower** boundary than the one being replaced, on a change whose whole
+argument ([D1](#decisions)) is that container mode is not degraded by it.
+
+The Linux unit is `User=root` (slice 4), so root-owned `0700` is a boundary the
+daemon can be on the right side of and nothing else on the node can. That is the
+first time this credential has had a real one.
+
+### Four refusals, because one message would have been wrong three times
+
+A daemon that cannot read its credential does not come up degraded — it fails to
+start, and `Restart=always` loops the failure on a node the operator has just
+converted, which prod cannot reach from the Mini. So the whole of it is asked in
+**one ssh round trip, before the image build**, with the live daemon running:
+
+| State | Refusal names |
+| --- | --- |
+| directory absent | `sudo install -d -o root -g root -m 0700 <dir>`, and README §6 for the rest |
+| wrong owner or mode | **what it found**, the expected `root`/`700`, the `chown`+`chmod`, and `WORKER_KEYS_DIR_<node>` |
+| `worker.creds` not in it | mint on the Mini, `scp` to staging, `sudo install -o root -g root -m 0600` |
+| **cannot look** | that it could not see the file, and passwordless `sudo` as the remedy |
+
+The fourth is the one worth arguing for. Inside a root-owned `0700` directory
+the login user cannot `test -r` the file **at all**, so "not there" and "not
+allowed to look" are the same failed test — and collapsing them tells an
+operator to re-mint a credential that is already installed correctly. That is
+the same tri-state shape [D7](#decisions)'s run-spec read needed for the same
+reason, and it is why the probe returns owner, mode and a credential *state* as
+data rather than a verdict.
+
+Moving the check **before** the build is new and is deliberate. Nothing it asks
+needs an image, the platform probe already sets the precedent ("a node this
+script cannot supervise refuses in seconds rather than after a ten-minute image
+build"), and a wrong-mode directory is a failure this slice introduces — making
+the operator pay ten minutes to discover it would be a poor trade. The
+`WORKER_GIT_KEY` `/data/keys` refusal moved up with it, since it decides the same
+directory.
+
+### The git key is the same move, and it was the half left behind
+
+The credential and the git key sit in the same directory and follow the same
+default, so "where the creds live" is really two files — and the second one
+carries the move differently. A missing `worker.creds` **stops the daemon**, so
+the guard above catches it on the next deploy. A `WORKER_GIT_KEY` naming the
+wrong path does not: the daemon starts, serves jobs, and only *self-refresh*
+fails, weeks later and quietly. So the git key needs its refusal stated where the
+credential's failure states itself.
+
+Two places said the old path and only one of them is a script:
+
+- **`build-worker.sh`** now refuses, on Linux, a `WORKER_GIT_KEY` that resolves
+  under the node's `$HOME` and **outside** the credential directory. Both harms
+  are real and independent — the `docker` group can read a key in that home
+  ([D5](#decisions)'s own argument), and §6's migration `rm -f`s exactly that
+  file, after which the run spec names a key that is gone. A path *inside* the
+  credential directory is exempt however it was reached: the owner-and-mode guard
+  has already vouched for that directory, so a node whose root-owned `0700`
+  `WORKER_KEYS_DIR` happens to sit under a home is served rather than refused for
+  a boundary it satisfies. macOS is exempt entirely, for the reason the whole
+  boundary is.
+- **`chuggernaut admin worker-git-key`** printed `install both under the node's
+  ~/chuggernaut-worker/keys/`. The **minting** is unchanged — [D5](#decisions)
+  requires that of `worker-creds` and the same reasoning holds here — but the
+  *hint* is the install step, and it is what an operator reads at the moment they
+  have the two files in hand. It now names the credential directory, the `sudo
+  install -o root -g root -m 0600` that `scp` cannot substitute for, macOS's own
+  answer, and §6.
+
+The second is a `code` edit inside a `deploy`-shaped slice. It is in scope
+because the alternative is a CLI that contradicts the runbook in the same commit,
+and because nothing else would have caught it: the pre-build guard checks
+`worker.creds`, never the git key's presence, so following the printed hint
+yields a green deploy and a daemon that starts.
+
+### The migration is manual, and the runbook owns it
+
+`build-worker.sh` does **not** move an existing node's keys. Two reasons, both
+about what a deploy script should not do to a node on its own: the move is
+privileged and irreversible, and it is only half done until the copy in `$HOME`
+is **deleted** — leaving it makes the new layout with the old boundary, which is
+the worst of the three states. So the script refuses and prints the commands,
+and [`deploy/prod/README.md`](../../deploy/prod/README.md) §6 carries the
+procedure: create the directory, `install` each file into it, verify, then
+remove the originals, *before* the run that converts the node.
+
+§6 carries one more step than the file moves, and it is the one a procedure
+would naturally omit: **drop the `WORKER_GIT_KEY` line that named the old path.**
+§6 step 3 used to instruct exactly that declaration, so a node adopted before
+this slice is likely still carrying it on the Mini, pointing at the file the
+migration deletes. The refusal above is the belt to the runbook's braces —
+whichever the operator reaches first, the outcome is not a node that keeps
+serving jobs and silently stops updating.
+
+### A mixed fleet still works, and the reason is that nothing else changed
+
+`worker-refresh.sh` is untouched — its swap still recovers `KEYS_SRC` from
+`docker inspect` and re-creates a container, so a node that has **not** been
+converted refreshes itself exactly as it did before this slice.
+[Slice 6](#slices) owns collapsing that, and the 4→5→6 ordering is why it is not
+collapsed here. The drift guard's `docker inspect` fallback is likewise
+untouched, so the one run that converts a node still compares against the
+container it is replacing and reports the two paths that move.
+
+### Verification
+
+`deploy/prod/build-worker.test.sh` — 56 cases, all passing. Nine are this
+slice's: the default landing at `/etc/chuggernaut/keys` for both the credential
+and the git key and nowhere under `$HOME`; wrong owner and two wrong modes
+refusing with what was found and the remedy; an absent directory refusing with
+the *create* rather than the `chown`; the cannot-look state refusing distinctly
+from a missing file; `WORKER_KEYS_DIR_<node>` moving the directory **and** the
+guard; a `WORKER_GIT_KEY` under the login user's home refusing with the `install`
+that moves it and the declaration to drop; macOS keeping the home path, never
+being asked GNU `stat`, and being told the boundary does not port; and a node
+still running the container converting without its own `/data/keys` values
+refusing anything. A tenth pins the *exemption* rather than a refusal — a git key
+inside a vouched-for `WORKER_KEYS_DIR` that sits under a home is served — and is
+green against the un-fixed script by construction, which is what a
+regression pin is for.
+
+**Each of the nine was run against the un-fixed script and observed red** —
+six of them because it proceeded to a daemon restart (`rc=0`) on a node whose
+credential directory nothing had checked. Not run, and it cannot be from here:
+the composed script has still never executed on a node, so `stat -c`, `sudo -n`
+and `install -d` are all faked. The first real execution is an operator
+converting a node they can reach.

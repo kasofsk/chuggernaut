@@ -591,11 +591,18 @@ skips it, dispatcher starts fine, no restart needed when it returns).
 
 ```sh
 # 1. Mini: mint the daemon's scoped NATS creds (subscribe req.worker.nuc.> only)
+#    UNCHANGED by the native daemon — what moved is where the node keeps it.
 chug admin --keys-dir "$KEYS_DIR" worker-creds --node nuc
-# 2. copy to the node (the daemon reads it off the node; build-worker.sh
-#    REFUSES a deploy that cannot read it, before touching the live daemon)
-ssh worksalot@gumbo-nuc-0 mkdir -p chuggernaut-worker/keys
-scp "$KEYS_DIR/worker-nuc.creds" worksalot@gumbo-nuc-0:chuggernaut-worker/keys/worker.creds
+# 2. install it into the node's ROOT-OWNED 0700 credential directory (design
+#    #440 D5). scp to a staging path the login user owns, then `install` it —
+#    scp CANNOT write into a 0700 root directory, and that is the point.
+scp "$KEYS_DIR/worker-nuc.creds" worksalot@gumbo-nuc-0:/tmp/worker.creds
+ssh worksalot@gumbo-nuc-0 '
+  sudo install -d -o root -g root -m 0700 /etc/chuggernaut/keys
+  sudo install -o root -g root -m 0600 /tmp/worker.creds /etc/chuggernaut/keys/worker.creds
+  rm -f /tmp/worker.creds'
+#    Same for the node's git key when you mint one (`admin worker-git-key`):
+#    worker_git and worker_git-cert.pub, 0600, into the same directory.
 # 3. env (chuggernaut.env): see env.example — worker fleet form. The worker
 #    entry's slot field is a pre-observation fallback, not the node's capacity.
 #    DOCKER_NODES="local|unix:///…/docker.sock|0, nuc|worker|0"
@@ -604,7 +611,7 @@ scp "$KEYS_DIR/worker-nuc.creds" worksalot@gumbo-nuc-0:chuggernaut-worker/keys/w
 #    WORKER_SLOTS_nuc=2                             # the node's FIRST-BOOT value
 #    WORKER_CACHE_DIR_nuc=/var/cache/chuggernaut/sccache
 #    WORKER_REFRESH_GIT_URL=ssh://git@100.116.243.42:2222/<owner>/chuggernaut.git
-#    WORKER_GIT_KEY=/home/worksalot/chuggernaut-worker/keys/worker_git
+#    WORKER_GIT_KEY=/etc/chuggernaut/keys/worker_git   # or drop it: this is the default
 #    (the whole run spec, per node — "The run spec is declared" below)
 # 4. build the images, install the daemon and its unit, start it (also runs on
 #    every CD deploy)
@@ -614,6 +621,76 @@ deploy/prod/build-worker.sh
 #    dispatcher merges it into the live fleet (spec §3.1). Confirm on the
 #    Cluster page, or GET /api/v1/platform/fleet.
 ```
+
+**Where the credentials live, and why it is not the login user's home.**
+
+On **Linux** the daemon's NATS credential and git key live in
+**`/etc/chuggernaut/keys`, owned by `root` at mode `0700`**, beside the unit's
+own environment file and outside any user's home (design
+[#440](../../docs/design/440-native-worker-daemon.md) D5). The unit runs as
+`root`, so the daemon reads them and nothing else on the node does. That is not
+tidiness: the login user this deploy `ssh`s in as is in the `docker` group, so a
+credential file under that user's home is readable by anything that user runs —
+a **weaker** boundary than the read-only bind mount the native daemon replaces,
+and going native must not lower it. `WORKER_KEYS_DIR_<node>` moves the directory;
+`WORKER_GIT_KEY` already defaults to `worker_git` inside it.
+
+`build-worker.sh` checks all of it **before it builds anything**, with the live
+daemon untouched, because a daemon that cannot read its own credential does not
+come up degraded — it **fails to start**, and `Restart=always` loops that on a
+node you have just converted. Four distinct refusals, each naming its own
+remedy: the directory is missing (`sudo install -d …`), it is there with the
+wrong owner or mode (`sudo chown root:root … && sudo chmod 0700 …`, printing
+what it actually found), `worker.creds` is not in it (mint + `sudo install`), or
+the check *cannot look* — the directory is `0700` and the login user has no
+`sudo -n`, which is a third state, not a missing file, and refuses saying so.
+
+On **macOS** the boundary does not port and the script says so on every run: the
+daemon is a `launchd` agent running as the login user in their GUI domain
+(CoreSimulator and the keychain are per-user-session services, #322), so there
+is no user a root-owned directory would exclude. The keys stay at
+`~/chuggernaut-worker/keys` at `0600` per file — the status quo — and cross-task
+secret isolation on that platform remains given up (#322 §7).
+
+**Migrating a node that already has keys under `$HOME` — you do this by hand.**
+
+`build-worker.sh` does **not** move them: moving a credential is privileged and
+irreversible, and the old copy has to be *deleted* or the boundary is nominal —
+neither is something a deploy script should do to a node on its own. It refuses
+and names the commands instead. On a Linux node whose keys are still in the
+login user's home:
+
+```sh
+ssh worksalot@gumbo-nuc-0 '
+  sudo install -d -o root -g root -m 0700 /etc/chuggernaut/keys
+  for f in worker.creds worker_git worker_git-cert.pub; do
+    [ -e "$HOME/chuggernaut-worker/keys/$f" ] &&
+      sudo install -o root -g root -m 0600 "$HOME/chuggernaut-worker/keys/$f" \
+        /etc/chuggernaut/keys/$f
+  done
+  ls -l /etc/chuggernaut/keys                      # verify BEFORE deleting
+  # then, and only then:
+  rm -f "$HOME"/chuggernaut-worker/keys/worker.creds "$HOME"/chuggernaut-worker/keys/worker_git'
+```
+
+**Then drop the `WORKER_GIT_KEY` line that named the old path** — the `rm -f`
+above deletes exactly the file it points at. Step 3 above used to instruct
+`WORKER_GIT_KEY=$HOME/chuggernaut-worker/keys/worker_git`, so a node adopted
+before this slice is likely still declaring it (bare or `_<node>`) in
+`deploy/prod/chuggernaut.env` on the Mini. <!-- runtime --> Delete the line — the
+default is now `/etc/chuggernaut/keys/worker_git` — or repoint it there.
+`build-worker.sh` refuses a Linux node whose `WORKER_GIT_KEY` resolves under the
+login user's home and outside the credential directory, naming both remedies,
+rather than handing the daemon a run spec that names a key the migration just
+deleted: a forgotten line is a loud stop, not a node that keeps serving jobs and
+quietly stops updating.
+
+Do it **before** the run that converts the node, not after: the deploy refuses
+until it is done, and until the home copy is gone the node has the old boundary
+with the new layout. A node still running the **containerized** daemon is
+unaffected by any of this until it is converted — `worker-refresh.sh`'s swap
+still binds whatever `docker inspect` reports, so a mixed fleet keeps working
+(#440 slice 6 collapses that swap).
 
 **The run spec is declared, not inherited.**
 
@@ -643,7 +720,8 @@ WORKER_SLOTS_nuc=2
 WORKER_CACHE_DIR_air=/Users/<you>/chuggernaut-worker/sccache
 WORKER_CACHE_DIR_nuc=/var/cache/chuggernaut/sccache
 WORKER_REFRESH_GIT_URL=ssh://git@100.116.243.42:2222/<owner>/chuggernaut.git
-WORKER_GIT_KEY=/home/worksalot/chuggernaut-worker/keys/worker_git
+WORKER_GIT_KEY_air=/Users/<you>/chuggernaut-worker/keys/worker_git
+# nuc needs no WORKER_GIT_KEY: /etc/chuggernaut/keys/worker_git is the default
 ```
 
 Read a node's **live** values off the node before declaring them — what it is

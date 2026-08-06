@@ -58,8 +58,17 @@ EOF
 #   * the cache-dir provisioning (`mkdir -p '…'`) succeeds unless $FAIL_MKDIR is
 #     set, which models a node where neither the login user nor `sudo -n` can
 #     create the path;
-#   * the NATS credential check (`[ -r …worker.creds ]`) succeeds unless
-#     $FAIL_CREDS is set — a native daemon reads it off the node;
+#   * the CREDENTIAL DIRECTORY probe (`printf 'own=%s mode=%s…`, Linux) answers
+#     with $FAKE_KEYS_OWNER (default root) and $FAKE_KEYS_MODE (default 700), or
+#     with both empty when $FAKE_KEYS_ABSENT is set — the directory is not there.
+#     Its credential half is TRI-STATE for the reason the run-spec read is: in a
+#     root-owned 0700 directory the login user cannot look, so "not there" and
+#     "not allowed to look" are the same failed `test -r`. `creds=readable` by
+#     default, `creds=absent` under $FAIL_CREDS, `creds=unknown` under
+#     $FAKE_KEYS_NOSUDO (a node whose login user has no passwordless sudo);
+#   * the macOS NATS credential check (`[ -r …worker.creds ]`) succeeds unless
+#     $FAIL_CREDS is set — that platform runs the daemon as the login user, so
+#     D5's root-owned directory does not port and the home path is still it;
 #   * the unit-directory check (`command -v systemctl …`) succeeds unless
 #     $FAIL_UNIT_DIR is set, which models NixOS's read-only /etc/systemd/system;
 #   * the macOS binary-directory check (`for d in …`) succeeds unless
@@ -99,6 +108,20 @@ case "\$*" in
     fi
     ;;
   *"mkdir -p '"*)  [ -z "\${FAIL_MKDIR:-}" ] || exit 1 ;;
+  *"own=%s mode=%s"*)
+    if [ -n "\${FAKE_KEYS_ABSENT:-}" ]; then
+      echo "own= mode="
+    else
+      echo "own=\${FAKE_KEYS_OWNER:-root} mode=\${FAKE_KEYS_MODE:-700}"
+    fi
+    if [ -n "\${FAKE_KEYS_NOSUDO:-}" ]; then
+      echo creds=unknown
+    elif [ -n "\${FAIL_CREDS:-}" ]; then
+      echo creds=absent
+    else
+      echo creds=readable
+    fi
+    ;;
   *worker.creds*)  [ -z "\${FAIL_CREDS:-}" ] || exit 1 ;;
   *"command -v systemctl"*) [ -z "\${FAIL_UNIT_DIR:-}" ] || exit 1 ;;
   *"for d in "*)   [ -z "\${FAIL_MAC_DIRS:-}" ] || exit 1 ;;
@@ -161,7 +184,7 @@ if grep -qF -- "docker run -d --restart=always --name chug-worker" "$LOG"; then
 fi
 grep_log "WORKER_CACHE_DIR='/var/cache/chuggernaut/sccache'"
 grep_log "WORKER_REFRESH_GIT_URL='ssh://git@front:2222/acme/chug.git'"
-grep_log "WORKER_GIT_KEY='/home/worksalot/chuggernaut-worker/keys/worker_git'"
+grep_log "WORKER_GIT_KEY='/etc/chuggernaut/keys/worker_git'"
 grep_log "WORKER_NODE='nuc'"
 # A daemon started with no RUST_LOG logs at ERROR only (ticket #270): no "worker
 # up", no refresh relay, so the supervisor's log is silent about the one thing an
@@ -256,10 +279,10 @@ echo "ok: success path bakes + verifies the image label and probes daemon health
 # now, not out of a `:ro` bind at /data/keys.
 EXPECTED_ENV="WORKER_NODE='nuc'
 NATS_URL='nats://10.0.0.1:4222'
-NATS_CREDS='/home/worksalot/chuggernaut-worker/keys/worker.creds'
+NATS_CREDS='/etc/chuggernaut/keys/worker.creds'
 RUST_LOG='info,async_nats=warn'
 WORKER_REFRESH_GIT_URL=''
-WORKER_GIT_KEY='/home/worksalot/chuggernaut-worker/keys/worker_git'"
+WORKER_GIT_KEY='/etc/chuggernaut/keys/worker_git'"
 GOT_ENV="$(env_file)"
 [ "$GOT_ENV" = "$EXPECTED_ENV" ] || fail "a container-only node's environment file must be exactly the run spec.
   expected: $EXPECTED_ENV
@@ -825,7 +848,8 @@ echo "ok: a realise bound outside the launch RPC's budget refuses before the dae
 # ── Case 2q: the node's NATS credential is read off the NODE now ───────────────
 # The `:ro` bind of $HOME/chuggernaut-worker/keys is gone with the container, so
 # a missing credential is a daemon that cannot reach NATS and is restarted into
-# the same failure. Refuse while the live daemon is still running.
+# the same failure. Refuse while the live daemon is still running — and BEFORE
+# the ten-minute image build, since none of what this asks needs an image.
 : > "$LOG"
 set +e
 PATH="$BIN:$PATH" \
@@ -837,9 +861,14 @@ PATH="$BIN:$PATH" \
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "a missing NATS credential must fail the deploy (got rc=0)"
-grep -qF "/home/worksalot/chuggernaut-worker/keys/worker.creds' is not readable" "$WORK/creds.out" \
+grep -qF "'/etc/chuggernaut/keys/worker.creds' is not on worksalot@nuc" "$WORK/creds.out" \
   || fail "the refusal must name the path the daemon will read"
+grep -qF "sudo install -o root -g root -m 0600 <staged> /etc/chuggernaut/keys/worker.creds" \
+  "$WORK/creds.out" || fail "the refusal must name how to install it"
 not_started "a missing NATS credential must not reach the daemon restart"
+if grep -qF "docker build" "$LOG"; then
+  fail "a missing credential must refuse before the images are built"
+fi
 
 # And a WORKER_GIT_KEY still naming the container's mount point is refused: it
 # only ever existed inside chug-worker, so a native daemon would come up and
@@ -857,10 +886,220 @@ set -e
 [ "$rc" -ne 0 ] || fail "a container-path WORKER_GIT_KEY must fail the deploy (got rc=0)"
 grep -qF "names the container's key mount" "$WORK/gitkey.out" \
   || fail "the refusal must say why the path cannot work"
-grep -qF "WORKER_GIT_KEY_nuc=/home/worksalot/chuggernaut-worker/keys/worker_git" "$WORK/gitkey.out" \
+grep -qF "WORKER_GIT_KEY_nuc=/etc/chuggernaut/keys/worker_git" "$WORK/gitkey.out" \
   || fail "the refusal must name the host path to declare instead"
 not_started "a container-path WORKER_GIT_KEY must not reach the daemon restart"
-echo "ok: the node's credentials are read off the node, and the container paths are refused"
+
+# And on Linux a WORKER_GIT_KEY still naming the LOGIN USER's home is refused for
+# the same reason one directory over: §6's migration DELETES that copy, so the
+# daemon would be handed a spec naming a key that is gone — and while it is still
+# there, the `docker` group can read it, which is the boundary this slice raises.
+# macOS is exempt by construction (case 2s): the agent runs as the login user, so
+# its keys live under that home on purpose.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_GIT_KEY=/home/worksalot/chuggernaut-worker/keys/worker_git \
+  sh "$SUT" >"$WORK/gitkeyhome.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a home-path WORKER_GIT_KEY must fail the deploy on Linux (got rc=0)"
+grep -qF "is under the login user's home ('/home/worksalot')" "$WORK/gitkeyhome.out" \
+  || fail "the refusal must name the home it found the key under"
+grep -qF "sudo install -o root -g root -m 0600 /home/worksalot/chuggernaut-worker/keys/worker_git /etc/chuggernaut/keys/worker_git" \
+  "$WORK/gitkeyhome.out" || fail "the refusal must name the command that moves the key"
+grep -qF "drop WORKER_GIT_KEY_nuc" "$WORK/gitkeyhome.out" \
+  || fail "the refusal must name the per-node declaration to drop"
+not_started "a home-path WORKER_GIT_KEY must not reach the daemon restart"
+if grep -qF "docker build" "$LOG"; then
+  fail "a home-path WORKER_GIT_KEY must refuse before the images are built"
+fi
+
+# But a key INSIDE the credential directory is served wherever that directory
+# sits: the owner-and-mode guard has already vouched for it, so a node whose
+# root-owned 0700 WORKER_KEYS_DIR happens to be under the home is not refused for
+# a boundary it already satisfies.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KEYS_DIR_nuc=/home/worksalot/chug-keys \
+  sh "$SUT" >"$WORK/gitkeyin.out" 2>&1
+grep_log "WORKER_GIT_KEY='/home/worksalot/chug-keys/worker_git'"
+grep -qF "REFUSING" "$WORK/gitkeyin.out" \
+  && fail "a git key inside the vouched-for credential directory must not refuse"
+started || fail "a root-owned 0700 credential directory must be served wherever it sits"
+echo "ok: the node's credentials are read off the node, and the container and home paths are refused"
+
+# ── Case 2q1: the credential directory is ROOT-OWNED and 0700 (design #440 D5) ─
+# The default moved out of the login user's home, and that IS the slice: the
+# login user is in the `docker` group and is who this script ssh's in as, so a
+# creds file under that home is readable by anything that user runs — a weaker
+# boundary than the read-only bind the native daemon replaces. The credential
+# path and the git key both follow it.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT" >"$WORK/keysok.out" 2>&1
+grep_log "NATS_CREDS='/etc/chuggernaut/keys/worker.creds'"
+grep_log "WORKER_GIT_KEY='/etc/chuggernaut/keys/worker_git'"
+if grep -qF "/home/worksalot/chuggernaut-worker/keys" "$LOG"; then
+  fail "a Linux node's credentials must not live under the login user's home any more"
+fi
+grep -qF "credential directory /etc/chuggernaut/keys on worksalot@nuc is root-owned at 0700" \
+  "$WORK/keysok.out" || fail "a correct directory must be confirmed out loud"
+started || fail "a root-owned 0700 directory holding the creds must proceed"
+echo "ok: the credential directory defaults to a root-owned 0700 path outside any home"
+
+# ── Case 2q2: a WRONG OWNER or WRONG MODE refuses, naming both and the remedy ──
+# The failure this prevents is a daemon that cannot read its own credential:
+# it does not come up degraded, it fails to START, and Restart=always loops that
+# on a node the operator has just converted. So the refusal names the directory,
+# the expected owner, the expected mode, what was actually found, and the exact
+# command that fixes it.
+for _case in "worksalot 700 owned by 'worksalot' at mode '700'" \
+             "root 755 owned by 'root' at mode '755'" \
+             "root 750 owned by 'root' at mode '750'"; do
+  set -- $_case
+  _owner=$1
+  _mode=$2
+  shift 2
+  : > "$LOG"
+  set +e
+  PATH="$BIN:$PATH" \
+    WORKER_SSH=worksalot@nuc \
+    WORKER_NATS_URL=nats://10.0.0.1:4222 \
+    CHUG_WORKER_NODE=nuc \
+    FAKE_KEYS_OWNER="$_owner" \
+    FAKE_KEYS_MODE="$_mode" \
+    sh "$SUT" >"$WORK/keysbad.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a $_owner:$_mode credential directory must fail the deploy (got rc=0)"
+  grep -qF "'/etc/chuggernaut/keys' on worksalot@nuc is $*" "$WORK/keysbad.out" \
+    || fail "the refusal must name the directory and what it FOUND ($_owner $_mode)"
+  grep -qF "must be owned by 'root' at mode '700'" "$WORK/keysbad.out" \
+    || fail "the refusal must name the expected owner and mode"
+  grep -qF "sudo chown root:root /etc/chuggernaut/keys && sudo chmod 0700 /etc/chuggernaut/keys" \
+    "$WORK/keysbad.out" || fail "the refusal must name the remedy"
+  grep -qF "WORKER_KEYS_DIR_nuc" "$WORK/keysbad.out" \
+    || fail "the refusal must name the knob, per node"
+  not_started "a wrong-owner/mode credential directory must not reach the daemon restart"
+  if grep -qF "docker build" "$LOG"; then
+    fail "the credential-directory refusal must come before the images are built"
+  fi
+done
+echo "ok: a wrong-owner or wrong-mode credential directory refuses, naming owner, mode and remedy"
+
+# ── Case 2q3: the directory is not there at all ⇒ a DIFFERENT, named refusal ───
+# Distinct from a wrong mode: nothing to chown, so the remedy is the create.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  FAKE_KEYS_ABSENT=1 \
+  sh "$SUT" >"$WORK/keysgone.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an absent credential directory must fail the deploy (got rc=0)"
+grep -qF "'/etc/chuggernaut/keys' does not exist on worksalot@nuc" "$WORK/keysgone.out" \
+  || fail "the refusal must name the directory it could not find"
+grep -qF "sudo install -d -o root -g root -m 0700 /etc/chuggernaut/keys" "$WORK/keysgone.out" \
+  || fail "the refusal must name the command that creates it correctly"
+not_started "an absent credential directory must not reach the daemon restart"
+echo "ok: an absent credential directory refuses with the create command, not the chown one"
+
+# ── Case 2q4: "I cannot look" is not "it is not there" ─────────────────────────
+# Inside a root-owned 0700 directory the login user cannot `test -r` the file at
+# all, so a missing credential and an unprivileged check produce the SAME failed
+# test. Collapsing them tells an operator to re-mint a credential that is already
+# installed, which is exactly the cryptic failure this slice must not add.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  FAKE_KEYS_NOSUDO=1 \
+  sh "$SUT" >"$WORK/keysnosudo.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unverifiable credential must fail the deploy (got rc=0)"
+grep -qF "cannot tell whether '/etc/chuggernaut/keys/worker.creds' exists" "$WORK/keysnosudo.out" \
+  || fail "the refusal must say it could not SEE the credential"
+grep -qF "passwordless sudo" "$WORK/keysnosudo.out" || fail "the refusal must name the remedy"
+grep -qF "is not on worksalot@nuc" "$WORK/keysnosudo.out" \
+  && fail "an unverifiable credential must NOT be reported as a missing one"
+not_started "an unverifiable credential must not reach the daemon restart"
+echo "ok: an unreadable-by-the-check credential refuses distinctly from a missing one"
+
+# ── Case 2q5: WORKER_KEYS_DIR_<node> moves it, and the guard follows ───────────
+# The knob resolves per node like every other WORKER_*, and the directory it
+# names is the one checked — so a node that keeps its keys elsewhere is served,
+# and is served under the same rule.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KEYS_DIR_nuc=/var/lib/chuggernaut/keys \
+  sh "$SUT"
+grep_log "NATS_CREDS='/var/lib/chuggernaut/keys/worker.creds'"
+grep_log "WORKER_GIT_KEY='/var/lib/chuggernaut/keys/worker_git'"
+grep_log "stat -c %U '/var/lib/chuggernaut/keys'"
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_KEYS_DIR_nuc=/var/lib/chuggernaut/keys \
+  FAKE_KEYS_OWNER=worksalot \
+  sh "$SUT" >"$WORK/keysmoved.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "the guard must follow WORKER_KEYS_DIR (got rc=0)"
+grep -qF "'/var/lib/chuggernaut/keys' on worksalot@nuc is owned by 'worksalot'" "$WORK/keysmoved.out" \
+  || fail "the refusal must name the declared directory, not the default"
+not_started "a wrong-owner declared keys directory must not reach the daemon restart"
+echo "ok: WORKER_KEYS_DIR_<node> moves the credential directory and the guard with it"
+
+# ── Case 2q6: a node still running the CONTAINER daemon is not stranded ────────
+# The fleet is mixed while the conversion happens, and this run is the one that
+# converts. The live container's own environment names /data/keys — a path that
+# only ever existed inside it — and reading that back must neither refuse nor
+# drop anything: the drift guard reports the two paths that moved and proceeds,
+# and the container is removed in the same install. worker-refresh.sh is
+# untouched by this slice, so an UNCONVERTED node self-refreshes exactly as it
+# did (design #440 slice 6 owns that half).
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  FAKE_LIVE_ENV="WORKER_NODE=nuc
+NATS_CREDS=/data/keys/worker.creds
+WORKER_GIT_KEY=/data/keys/worker_git
+WORKER_REFRESH_GIT_URL=ssh://git@front:2222/acme/chug.git" \
+  sh "$SUT" >"$WORK/convert.out" 2>&1
+grep -qF "REFUSING" "$WORK/convert.out" \
+  && fail "converting a container node must not refuse on the container's own /data/keys"
+grep -qF "run-spec drift checked against the live chug-worker CONTAINER" "$WORK/convert.out" \
+  || fail "the guard must say it read the container side"
+grep -qF "WORKER_GIT_KEY: live '/data/keys/worker_git' -> declared '/etc/chuggernaut/keys/worker_git'" \
+  "$WORK/convert.out" || fail "the key path that MOVED must be reported before it is applied"
+grep_log "docker rm -f chug-worker"
+started || fail "an unconverted container node must still be convertible"
+echo "ok: a node still running the container daemon converts, and its /data/keys values do not refuse"
 
 # ── Case 2r: a node with no writable unit directory refuses ────────────────────
 # On NixOS /etc/systemd/system is a read-only symlink into the store, which is
@@ -907,7 +1146,7 @@ PATH="$BIN:$PATH" \
   WORKER_SLOTS=2 \
   FAKE_NODE_OS=Darwin \
   FAKE_NODE_HOME=/Users/op \
-  sh "$SUT"
+  sh "$SUT" >"$WORK/mac.out" 2>&1
 
 GOT_PLIST="$(plist_file)"
 [ -n "$GOT_PLIST" ] || fail "a macOS node must be given a plist"
@@ -930,9 +1169,19 @@ grep_log "launchctl bootstrap gui/\$(id -u) '/Users/op/Library/LaunchAgents/com.
 grep_log "launchctl bootout gui/\$(id -u)/com.chuggernaut.worker"
 grep_log "plutil -lint"
 # The keys and the run spec follow the node's own $HOME, and nothing systemd is
-# asked of a mac.
+# asked of a mac. Design #440 D5's root-owned 0700 directory deliberately does
+# NOT port here: the agent runs as the login user in their GUI domain (#322), so
+# there is no user a root-owned directory would exclude, and the boundary would
+# be theatre. The script says so rather than pretending, and #322 §7 already
+# lists cross-task secret isolation on macOS under what it gives up.
 grep_log "NATS_CREDS='/Users/op/chuggernaut-worker/keys/worker.creds'"
+grep_log "WORKER_GIT_KEY='/Users/op/chuggernaut-worker/keys/worker_git'"
 grep_log "WORKER_SLOTS='2'"
+grep -qF "design #440 D5's root-owned 0700 boundary does not port to macOS" "$WORK/mac.out" \
+  || fail "a macOS node must be told the boundary does not port, not left to assume it does"
+if grep -qF "stat -c" "$LOG"; then
+  fail "a macOS node must not be asked GNU stat's owner/mode probe"
+fi
 if grep -qF "systemctl" "$LOG"; then
   fail "a macOS node must never be asked for systemctl"
 fi
@@ -1303,7 +1552,7 @@ PATH="$BIN:$PATH" \
 WORKER_SLOTS='2'
 WORKER_CACHE_DIR='/var/cache/chuggernaut/sccache'
 WORKER_REFRESH_GIT_URL='ssh://git@front:2222/acme/chug.git'
-WORKER_GIT_KEY='/home/worksalot/chuggernaut-worker/keys/worker_git'" \
+WORKER_GIT_KEY='/etc/chuggernaut/keys/worker_git'" \
   sh "$SUT" >"$WORK/clean.out" 2>&1
 
 grep -qF "REFUSING" "$WORK/clean.out" && fail "a fully declared spec must not refuse"
@@ -1354,7 +1603,7 @@ PATH="$BIN:$PATH" \
 WORKER_MODES='container'
 WORKER_SLOTS='1'
 WORKER_REFRESH_GIT_URL='ssh://git@front:2222/acme/chug.git'
-WORKER_GIT_KEY='/home/worksalot/chuggernaut-worker/keys/worker_git'" \
+WORKER_GIT_KEY='/etc/chuggernaut/keys/worker_git'" \
   sh "$SUT" >"$WORK/modes-drift.out" 2>&1
 
 grep -qF "does not forward WORKER_MODES" "$WORK/modes-drift.out" \

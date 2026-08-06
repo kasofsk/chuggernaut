@@ -46,9 +46,9 @@ pub enum AdminCmd {
     },
     /// Mint a worker node's read-only git credential (spec §3.1 self-refresh):
     /// generate a keypair, sign a long-lived READ-ONLY cert scoped to the
-    /// platform repo, and write the two files to install under the node's
-    /// `~/chuggernaut-worker/keys/` as `worker_git` + `worker_git-cert.pub`.
-    /// Local-only — reads the `ssh_ca` key, no NATS connection.
+    /// platform repo, and write `worker_git` + `worker_git-cert.pub` for the
+    /// operator to install into the node's credential directory
+    /// (deploy/prod/README.md §6). Local-only — reads the `ssh_ca` key, no NATS.
     WorkerGitKey {
         /// Node name (its DOCKER_NODES entry, `{node}|worker|N`).
         #[arg(long)]
@@ -662,11 +662,10 @@ async fn mint_worker_creds(
 }
 
 /// Mint a worker node's read-only git credential (spec §3.1 self-refresh
-/// enrollment). Generates a keypair, signs a long-lived READ-ONLY cert scoped
-/// to the platform repo (the same repo-scoped pull an eval container gets), and
-/// writes `worker_git` + `worker_git-cert.pub` for the operator to install
-/// under the node's `~/chuggernaut-worker/keys/`. Local-only: signs with the
-/// `ssh_ca` key, no NATS.
+/// enrollment): generate a keypair, sign a long-lived READ-ONLY cert scoped to
+/// the platform repo, and write `worker_git` + `worker_git-cert.pub` for the
+/// operator to install into the node's credential directory
+/// (deploy/prod/README.md §6). Local-only: signs with the `ssh_ca` key, no NATS.
 async fn mint_worker_git_key(
     keys_dir: &std::path::Path,
     node: &str,
@@ -712,8 +711,11 @@ async fn mint_worker_git_key(
     );
     println!("wrote {}", cert_path.display());
     println!(
-        "install both under the node's ~/chuggernaut-worker/keys/, then set on the \
-         worker daemon: WORKER_REFRESH_GIT_URL=ssh://git@<ssh-front>:2222/{project}.git"
+        "install both into the node's credential directory at 0600 — on Linux that is \
+         /etc/chuggernaut/keys, root-owned 0700, so scp to a staging path and then \
+         'sudo install -o root -g root -m 0600 <staged> /etc/chuggernaut/keys/worker_git'; \
+         on macOS it is ~/chuggernaut-worker/keys/ (deploy/prod/README.md §6). Then set on \
+         the worker daemon: WORKER_REFRESH_GIT_URL=ssh://git@<ssh-front>:2222/{project}.git"
     );
     Ok(())
 }
