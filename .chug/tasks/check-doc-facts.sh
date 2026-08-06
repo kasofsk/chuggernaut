@@ -1,6 +1,6 @@
 #!/bin/sh
-# Doc-fact gate — design #415 D6 checks 1, 2, 3 and 4. Four mechanical claims a
-# markdown file makes about THIS tree, all resolved against git and never the
+# Doc-fact gate — design #415 D6 checks 1-4 and D15 check 5. Five mechanical
+# claims the docs make about THIS tree, all resolved against git and never the
 # filesystem, so the verdict cannot depend on whether the caller ran
 # `cargo build` (the reason .chug/tasks/check-modules.sh's header gives for its
 # own shape):
@@ -18,6 +18,8 @@
 #   4. A concept registered in `docs/concepts.md` is defined only in the doc
 #      that owns it — a definitional SHAPE outside the owner is a violation,
 #      while a passing mention is free anywhere, as often as an argument needs.
+#   5. The catalogue in `docs/README.md` and the tracked docs under `docs/`
+#      agree BOTH ways — no doc without a row, no row without a doc.
 #
 # Both were rules 3 and 5 of .chug/tasks/doc-lint.sh and MOVED here whole (slice
 # S1b). What they DECIDE is unchanged — S1a fixed check 1's precision, S1c
@@ -201,7 +203,8 @@ tracked_index="$(mktemp)"
 const_index="$(mktemp)"
 job_index="$(mktemp)"
 term_index="$(mktemp)"
-trap 'rm -f "$tracked_index" "$const_index" "$job_index" "$term_index"' EXIT
+catalogue_index="$(mktemp)"
+trap 'rm -f "$tracked_index" "$const_index" "$job_index" "$term_index" "$catalogue_index"' EXIT
 git ls-files >"$tracked_index" 2>/dev/null || : >"$tracked_index"
 [ -s "$tracked_index" ] || doc_facts_unrunnable \
 	"\`git ls-files\` listed nothing — check 1 has no index to resolve against."
@@ -389,6 +392,93 @@ if [ "$emit_paths" -eq 0 ] && grep -qxF "$concepts_registry" "$tracked_index"; t
 	doc_facts_load_registry
 fi
 
+# --- The catalogue check 5 resolves against ----------------------------------
+# `docs/README.md` carries one row per tracked doc under `docs/` (#415 D15), and
+# check 5 compares the two sets BOTH ways: a doc with no row is reachable only by
+# someone who already knows it exists, and a row naming no tracked doc routes a
+# reader nowhere. It is check-modules.sh's `modules_registry_compare` pointed at
+# a different registry — the same instrument for the same reason, since the
+# module registry is what drifted before that gate existed.
+#
+# The population is every tracked `docs/**/*.md` and nothing wider. `CLAUDE.md`,
+# the root `README.md`, the prose under `.chug/` and the template docs are out
+# because the docs index does not route to them. `docs/README.md` catalogues
+# itself, so the rule carries no exception for an author to remember.
+#
+# AMBIGUITY IS SKIPPED IN SILENCE, which matters more here than anywhere else in
+# this script: check 5 errors in the pre-stage of every job, so a false positive
+# stops the fleet (#415 M7). A row is read only for the markdown link in its
+# FIRST cell, and only when that link is a plain relative `*.md` target — a
+# separator row, a prose row, a heading anchor, an external URL and a link out of
+# `docs/` are all skipped rather than guessed at. Skipping costs nothing: the doc
+# a skipped row meant to name is still reported by the other direction, which is
+# the finding an author can act on anyway.
+docs_catalogue="docs/README.md"
+catalogue_findings=0
+
+# The link target in each catalogue row's first cell, under `## The catalogue`
+# and nowhere else, so the prose around the table cannot be read as a row.
+doc_facts_catalogue_rows() {
+	awk '
+		/^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+		fence { next }
+		/^## / { in_catalogue = ($0 ~ /^## The catalogue/); next }
+		!in_catalogue { next }
+		/^[ \t]*\|/ {
+			if (split($0, cells, "|") < 2) next
+			if (!match(cells[2], /\]\([^)]+\)/)) next
+			print substr(cells[2], RSTART + 2, RLENGTH - 3)
+		}
+	' "$docs_catalogue"
+}
+
+# Both directions, each offender named — and the missing-row message carries the
+# row to paste, because a gate that only says "no" is how the two-file chore of
+# adding a doc gets forgotten a second time.
+doc_facts_catalogue_gate() {
+	_rows="$(doc_facts_catalogue_rows)"
+	[ -n "$_rows" ] || doc_facts_unrunnable \
+		"$docs_catalogue is tracked but no row parsed under \`## The catalogue\` — check 5 would be inert"
+	: >"$catalogue_index"
+	IFS='
+'
+	for _row in $_rows; do
+		case "$_row" in
+		*"#"* | *"://"* | *" "* | *"*"* | *"?"* | *"{"* | *"<"* | *'$'* | *".."* | /* | "~"*) continue ;;
+		esac
+		case "$_row" in
+		*.md) printf 'docs/%s\n' "${_row#./}" >>"$catalogue_index" ;;
+		esac
+	done
+	_docs="$(awk '/^docs\/.*\.md$/' "$tracked_index")"
+	for _doc in $_docs; do
+		grep -qxF "$_doc" "$catalogue_index" && continue
+		echo "!!! check-doc-facts: $docs_catalogue: no catalogue row for $_doc"
+		echo "!!!     Add one under \`## The catalogue\`, in its directory's group:"
+		echo "!!!       | [\`$_doc\`](${_doc#docs/}) | one line on what it is and who reads it |"
+		catalogue_findings=$((catalogue_findings + 1))
+	done
+	unset IFS
+	while IFS= read -r _row; do
+		grep -qxF "$_row" "$tracked_index" && continue
+		echo "!!! check-doc-facts: $docs_catalogue: catalogue row names no tracked doc -> $_row"
+		echo "!!!     Remove the row, or fix its link to the doc it meant to name."
+		catalogue_findings=$((catalogue_findings + 1))
+	done <"$catalogue_index"
+}
+
+doc_facts_catalogue_summary() {
+	echo "!!! check-doc-facts: $catalogue_findings catalogue mismatch(es) in $docs_catalogue."
+	echo "!!!     Every tracked \`docs/**/*.md\` has one row under \`## The catalogue\` and every"
+	echo "!!!     row links a tracked doc — both directions (design #415 D15). Adding a doc is"
+	echo "!!!     two acts, the file and its row; this gate is what keeps the second from being"
+	echo "!!!     the one everyone forgets."
+}
+
+if [ "$emit_paths" -eq 0 ] && grep -qxF "$docs_catalogue" "$tracked_index"; then
+	doc_facts_catalogue_gate
+fi
+
 # --- Select the markdown to check -------------------------------------------
 mode="tree"
 if [ "${1:-}" = "--staged" ]; then
@@ -409,8 +499,9 @@ fi
 
 files="$(printf '%s\n' "$files" | grep -v '^$' || true)"
 if [ -z "$files" ]; then
-	if [ "$registry_findings" -gt 0 ]; then
-		doc_facts_registry_summary
+	if [ "$registry_findings" -gt 0 ] || [ "$catalogue_findings" -gt 0 ]; then
+		[ "$registry_findings" -eq 0 ] || doc_facts_registry_summary
+		[ "$catalogue_findings" -eq 0 ] || doc_facts_catalogue_summary
 		exit 1
 	fi
 	[ "$emit_paths" -eq 1 ] || echo "check-doc-facts: no markdown to check ($mode) — nothing to do"
@@ -769,8 +860,9 @@ if [ "$term_findings" -gt 0 ]; then
 	echo "!!!     opening a sentence are read as definitions, and only for a registered term."
 fi
 [ "$registry_findings" -eq 0 ] || doc_facts_registry_summary
+[ "$catalogue_findings" -eq 0 ] || doc_facts_catalogue_summary
 
-_findings=$((path_findings + const_findings + slice_findings + term_findings + registry_findings))
+_findings=$((path_findings + const_findings + slice_findings + term_findings + registry_findings + catalogue_findings))
 if [ "$_findings" -ne 0 ]; then
 	echo "!!!     Reproduce locally with: .chug/tasks/check-doc-facts.sh"
 	exit 1

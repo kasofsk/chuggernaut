@@ -17,7 +17,7 @@ cite it.
      markdown — with the "written against the tree at `<sha>`" provenance in the
      paragraph *after* it. The platform truncates that line at 120 characters
      and serves it verbatim, so a run-on status renders cut mid-sentence. See
-     [`docs/design-docs.md`](../../docs/design-docs.md).
+     [`docs/reference/docs.md`](../../docs/reference/docs.md#the-header-contract).
    - **Are the alternatives and tradeoffs honest?** A design that argues one
      option while ignoring the obvious competitor, or that lists only upsides,
      is not done. The rejected options and their real costs must be on the page.

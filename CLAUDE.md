@@ -22,6 +22,10 @@ Don't re-derive these — read them:
   audit), `docs/reference/contracts.md` (extracting the dispatcher's interfaces), and
   `docs/design/210-ts-rewrite-plan.md` (the TypeScript dispatcher rewrite). Read before
   module-scoped restructuring work.
+- `docs/reference/docs.md` — the doc policy: the two kinds of doc and their opposite
+  update rules, the mutable head over an append-only body, and which gates are errors
+  versus advisory. Read before writing or changing any doc; `docs/README.md`'s
+  catalogue is the index it requires a row in.
 - `docs/concepts.md` — the concept registry: which doc owns each term's definition.
   A routing table, not a glossary — follow the row rather than restating the term.
 - `docs/implementation-notes.md` — per-module rationale, hoisted out of the comments

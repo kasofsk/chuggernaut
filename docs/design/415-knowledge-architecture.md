@@ -1,6 +1,6 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED IN PART — every slice of the design as decided (S0–S8) has landed; D1–D15 decided, and S9–S12 — appended later by the D13–D15 amendment — are intent.
+Status: IMPLEMENTED IN PART — D1–D15 decided; S0–S10 landed, and S11 and S12 remain intent.
 
 The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
 [D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
@@ -73,7 +73,13 @@ by job #435, written against the tree at `810a91b`; their three measurements wer
 read out of that commit and three claims in the ticket that proposed them did not
 survive it — see the
 [2026-08-05 amendment](#amendment--2026-08-05-job-435-structural-health).
-Nothing in that amendment is implemented.
+S9 and S10 landed on 2026-08-06 (job #461): `docs/reference/docs.md` states the
+policy in the present tense and absorbs `docs/design-docs.md`, which is reduced
+to a pointer rather than deleted; `docs/README.md` carries a catalogue row per
+tracked doc under `docs/`, and check 5 compares the two sets both ways as an
+error in every job's pre-stage. S11 and S12 remain intent, which is why
+`Status:` does not move — see the
+[S9/S10 correction](#correction--2026-08-06-job-461-s9-and-s10-the-policy-doc-and-the-catalogue).
 
 Measured against the tree at `28e5aa1` (2026-08-04). Every number below was read
 out of that commit, not carried over from the brief; the commands are given so a
@@ -114,7 +120,7 @@ what can be checked mechanically is.**
 | **D3** | `docs/concepts.md` is an **index of pointers**, not a glossary — a concept keeps its natural home | [D3](#d3-the-concept-registry-routes-it-does-not-hold)  <!-- intent --> |
 | **D4** | Ban duplicate **definitions**; allow duplicate **mentions** | [D4](#d4-ban-duplicate-definitions-allow-duplicate-mentions) |
 | **D5** | `CLAUDE.md` may **gloss and link**, never define | [D5](#d5-claudemd-may-gloss-never-define) |
-| **D6** | Four mechanical checks in one pure-shell `check-doc-facts.sh`, resolved against **git, not the filesystem** — [D15](#d15-structural-health-index-completeness-and-orphans) adds a fifth | [D6](#d6-four-mechanical-checks) |
+| **D6** | Four mechanical checks in one pure-shell `check-doc-facts.sh`, resolved against **git, not the filesystem** — [D15](#d15-structural-health-index-completeness-and-orphans) adds a fifth, live since job #461 | [D6](#d6-four-mechanical-checks) |
 | **D7** | A **git-derived staleness ledger** marks docs *suspect*, not wrong | [D7](#d7-the-staleness-ledger) |
 | **D8** | ~~Knowledge tags become **pointers, not payload**~~ — **reversed while landing** (job #416, [S8](#slices)): knowledge is delivered as **payload**, and `.chug/tags/` is empty | [D8](#d8-tags-point-they-do-not-carry), superseded by the [2026-08-04 correction](#correction--2026-08-04-job-416-d8-reversed-m1-and-m5-restated)  <!-- absent --> |
 | **D9** | `review-docs-updated` gets **narrow, blocking** teeth | [D9](#d9-the-evaluator-judges-only-what-a-script-cannot) |
@@ -122,8 +128,8 @@ what can be checked mechanically is.**
 | **D11** | A **ratchet, not a flag day** | [D11](#d11-a-ratchet-not-a-flag-day) |
 | **D12** | Every doc lives under `docs/`; the root keeps only `README.md`, `CLAUDE.md` and `wiki/`. `.chug/` prose stays put and every rule reaches it; `wiki/` is diagrams, not knowledge | [D12](#d12-where-everything-lives) |
 | **D13** | A **synthesis page** — a doc that states no new fact and decides nothing — is **reference**, bound by [D5](#d5-claudemd-may-gloss-never-define)'s gloss-and-link rule verbatim. It lives at `docs/overview.md` <!-- intent --> | [D13](#d13-the-synthesis-page-is-a-reference-doc) |
-| **D14** | The doc **policy** is a reference doc (`docs/reference/docs.md` <!-- intent -->, absorbing `docs/design-docs.md`); this document keeps the **argument** | [D14](#d14-the-policy-is-reference-415-is-the-argument) |
-| **D15** | **Structural health** is a second axis, and two mechanisms: **check 5** compares `docs/README.md` <!-- intent -->'s catalogue against the tree both ways (blocking); the ledger reports **inbound-reference count**, zero being a finding (advisory) | [D15](#d15-structural-health-index-completeness-and-orphans) |
+| **D14** | The doc **policy** is a reference doc (`docs/reference/docs.md`, absorbing `docs/design-docs.md`); this document keeps the **argument** | [D14](#d14-the-policy-is-reference-415-is-the-argument) |
+| **D15** | **Structural health** is a second axis, and two mechanisms: **check 5** compares `docs/README.md`'s catalogue against the tree both ways (blocking); the ledger reports **inbound-reference count**, zero being a finding (advisory) | [D15](#d15-structural-health-index-completeness-and-orphans) |
 
 ### The target tree
 
@@ -165,14 +171,15 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | **S6** | The staleness ledger (D7) | **Landed** (job #446) — `.chug/tasks/doc-staleness.sh`, sharing check 1's extractor through a new `--emit-paths` mode; **30 of 61** docs suspect, 7 of them by a day or more. Directory claims are out and the pre-commit block is not built, both on measurement. See the [S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear) |
 | **S7** | `docs-update.md` rewritten around D1/D10; `review-docs-updated` given D9's teeth | **Landed** (job #448) — `docs-update.md` now opens on the reference/design split and makes the D10 head update an author's step; `review-docs-updated.md` is blocking on **three** classes, not two — D10 compliance joined the two D9 names, because check 3 exempts the landing job. See the [S7 correction](#correction--2026-08-05-job-448-s7-the-instructions-and-the-evaluators-teeth) |
 | **S8** | Tags become pointers (D8) — **reversed while landing**: `.chug/tags/` is empty, and the four job types name `docs/reference/style.md` / `docs/README.md` in `knowledge:`, delivered as payload rather than as a pointer | **Landed** (job #416), which replaced job #87 (now Revoked) rather than being it, and did not wait on S3. The reversal is argued in the 2026-08-04 correction at the end of the body; [D8](#d8-tags-point-they-do-not-carry) as written above it is superseded  <!-- absent --> |
-| **S9** | `docs/reference/docs.md` <!-- intent --> — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | S3, S5b |
-| **S10** | `docs/README.md` <!-- intent --> gains a one-line catalogue row per tracked doc; **check 5** compares catalogue ↔ tree both ways, `check-modules.sh`'s shape ([D15](#d15-structural-health-index-completeness-and-orphans)) | S3 |
+| **S9** | `docs/reference/docs.md` — the policy as present-tense rules ([D14](#d14-the-policy-is-reference-415-is-the-argument)); absorbs `docs/design-docs.md`, which the target tree above omits ([M9](#three-more-measurements)) | **Landed** (job #461) — the policy doc states D1–D7, D10 and D15 in the present tense; `docs/design-docs.md` keeps its path as a pointer, because four of its inbound references sit in append-only bodies and in code |
+| **S10** | `docs/README.md` gains a one-line catalogue row per tracked doc; **check 5** compares catalogue ↔ tree both ways, `check-modules.sh`'s shape ([D15](#d15-structural-health-index-completeness-and-orphans)) | **Landed** (job #461) — the catalogue covers every tracked `docs/**/*.md` including itself, and check 5 fails both ways while skipping an unparseable row in silence |
 | **S11** | `docs/overview.md` <!-- intent --> — the synthesis page ([D13](#d13-the-synthesis-page-is-a-reference-doc)); any `wiki/` prose note resolved into it and reduced to a link | S3, S4 |
 | **S12** | The staleness ledger also reports inbound-reference count; zero is a finding ([D15](#d15-structural-health-index-completeness-and-orphans)) | S6 |
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
-**Twelve rows are landed — S0, S1a, S1b, S1c, S2, S3, S4, S5a, S5b, S6, S7 and S8.** The four
-that remain (S9–S12) are intent, marked as such per docs/reference/style.md's doc-claim rule — which this
+**Fourteen rows are landed — S0, S1a, S1b, S1c, S2, S3, S4, S5a, S5b, S6, S7, S8, S9 and S10.**
+The two that remain (S11 and S12) are intent, marked as such per docs/reference/style.md's doc-claim
+rule — which this
 document is partly written to make enforceable. This sentence read *six* and omitted
 S3 until job #444 corrected it, four jobs after S3 merged: a count in the head is
 exactly the class of claim [check 4 cannot own](#what-check-4-cannot-do-and-what-took-its-slot),
@@ -2375,3 +2382,109 @@ second answer — and `.chug/tasks/ci.sh` keeps its stage order. Narrowing the
 gate on the mover side rather than in the extractor is deliberate: check 1
 *should* keep verifying that a link label and a table cell resolve, and that is
 the same records this reads.
+
+## Correction — 2026-08-06, job #461 (S9 and S10: the policy doc, and the catalogue)
+
+[S9](#slices) and [S10](#slices) landed together, as
+[the pairing argument](#the-slices-and-why-they-pair) said S10 and S4 should:
+check 5 is `modules_registry_compare`'s both-directions loop pointed at a third
+registry, and writing it beside check 4 rather than months later is what keeps
+it one instrument instead of two that drift.
+
+What landed:
+
+- **`docs/reference/docs.md`** — the rules in the present tense: D1's two kinds
+  and their opposite update rules, D2's mutable head and append-only body, the
+  absorbed header contract, D3/D4's one-definition line, D5's gloss rule,
+  D15's catalogue, D10's landing-job duty, and a table of the five gates saying
+  which are errors and which report. It states no rule this document does not
+  already decide, and links here for every *why*.
+- **`docs/README.md`'s catalogue** — one row per tracked doc under `docs/`,
+  **40** of them at this commit (`git ls-files -- docs | grep -c '\.md$'`),
+  each a link and a one-line summary.
+- **Check 5**, in `.chug/tasks/check-doc-facts.sh` beside the other four, with
+  cases in its suite for a doc with no row, a row naming no doc, both sides
+  agreeing, and an unparseable row.
+- **The two places an author is told about the row** —
+  `.chug/prompts/work/docs.md` and `.chug/prompts/work/design.md`. A gate that
+  errors in every job's pre-stage over a row nobody was told to write is the
+  two-file chore [D15](#d15-structural-health-index-completeness-and-orphans)
+  set out to avoid; the design prompt also read as *forbidding* the row, since
+  its rule 2 says not to edit unrelated docs.
+
+### Three shape decisions, and the reason each went the way it did
+
+- **The population is `docs/**/*.md`, and the catalogue catalogues itself.**
+  Excluding the index from its own table would have been one exception, in the
+  one place a reader looks to learn the rule; carrying it costs a row. The
+  alternative also puts a filename inside the gate that the gate then has to
+  keep in step with the doc, which is the coupling `check-modules.sh` avoids by
+  deriving both sides.
+- **A row is read for the markdown link in its first cell and nothing else.**
+  Check 5 errors in every job's pre-stage, so [M7](#the-problem-measured)
+  applies with full force: a prose row, a heading anchor, a link out of `docs/`
+  and an external URL are skipped in **silence**. Skipping is safe here in a way
+  it is not in checks 1–4, because the other direction still reports the doc
+  that row meant to name — a skipped row degrades to "this doc has no row",
+  which is a finding an author can act on, not a hole.
+- **A tracked `docs/README.md` with no parsable `## The catalogue` table is a
+  LINTER ERROR**, exactly as the concept registry is (job #449). Renaming that
+  heading would otherwise stand the check down over the whole corpus in silence,
+  and a doc-fact check that cannot run must not read as clean.
+
+### What deviates from D14, and why
+
+[D14](#d14-the-policy-is-reference-415-is-the-argument) says the policy doc
+absorbs `docs/design-docs.md` "as a section rather than deleting it". The
+content is absorbed; **the file stays, reduced to a pointer.** Deleting it would
+have meant rewriting its inbound references, and at this commit four of the
+eight sit where a `docs` job should not reach: three are citations inside
+**append-only design bodies** (#313, #355, #361), where a citation records what
+was read at the time, and one is a comment in `web/src/pages/Designs.tsx` —
+source, which this job type does not edit.
+
+The four references that asserted the page *states* or *defines* the contract
+were repointed, because after the absorption that claim is false: the design
+work prompt, `.chug/tasks/review-design.md`, one line of
+`.chug/tasks/docs-update.md`, and one note in `docs/implementation-notes.md`.
+
+That leaves a pointer page in the catalogue, which is the honest state and says
+so in its own first line. It is also the smallest instance of what
+[S12](#slices) will measure: a doc whose only remaining value is that other
+documents name it.
+
+### And what deviates from the brief, and why
+
+The brief for this job said not to change `.chug/tasks/docs-update.md`'s rules —
+S9 *describes* them and must not restate them as a second definition. **Rule 4
+changed anyway.** It said a new page is wired in by linking it "from
+`docs/README.md` **or** from the page that should reach it"; check 5 makes the
+row mandatory, so as written it told an author to do a thing the same commit's
+gate would then reject in the pre-stage of every job. A rule that contradicts a
+gate is worse than a rule that duplicates one. It now says both — give it a row,
+*and* link it from the page that should reach it. The gate table's
+`check-doc-facts.sh` row also gained checks 4 and 5, which it predated.
+
+Neither edit restates a definition, so [D4](#d4-ban-duplicate-definitions-allow-duplicate-mentions)
+holds and check 4 is unaffected: rule 4 *mentions* the catalogue and routes to
+`docs/reference/docs.md` for its shape, which is where S9 put it. The same
+reasoning covers the two work prompts above — they name the requirement and
+link; they do not define it.
+
+### Two things measured while landing this
+
+- **This document's own `Status:` line was over the bound the header contract it
+  was absorbing states.** It ran to **161** characters against
+  `DOC_STATUS_LEN_MAX`, so the Designs view had been serving it cut
+  mid-sentence; the rewritten line is 83. The head that
+  [D2](#d2-every-design-doc-opens-with-a-mutable-current-state-head) built to
+  bound reading cost was failing the one bound the platform actually enforces —
+  which is [D14](#d14-the-policy-is-reference-415-is-the-argument)'s argument
+  arriving as evidence rather than as prose.
+- **Check 5 costs about 0.02s**: three whole-tree runs took 3.05s before and
+  3.10s after, on 72 tracked `*.md`. It is one `awk` over one file and two
+  set comparisons, which is why it can afford to be unconditional.
+
+`Status:` stays `IMPLEMENTED IN PART`. [S11](#slices) and [S12](#slices) are not
+built, and job #449 argued that case correctly — check 3 now verifies it, so a
+head claiming otherwise over an unlanded row fails its own gate.

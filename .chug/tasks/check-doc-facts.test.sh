@@ -538,6 +538,87 @@ run_concepts docs/other.md
 check "a registry whose table does not parse is a LINTER ERROR" 2 "$RC" "$OUT" \
 	"no row parsed under"
 
+# --- Check 5: the docs catalogue, both directions -----------------------------
+# $CATALOGUE owns a `docs/README.md` catalogue and the docs it is compared
+# against. Check 5 is a set comparison over the whole index, so it runs whatever
+# markdown the caller selected — these cases take the whole-tree default.
+CATALOGUE="$WORK/catalogue"
+mkdir -p "$CATALOGUE/docs/reference"
+git -C "$CATALOGUE" -c init.defaultBranch=main init -q
+write_catalogue_doc() { # <path-under-docs> <line>...
+	name="$1"; shift
+	{ for l in "$@"; do printf '%s\n' "$l"; done; } > "$CATALOGUE/docs/$name"
+	git -C "$CATALOGUE" add "docs/$name" >/dev/null 2>&1 || true
+}
+run_catalogue() { run_in "$CATALOGUE" "$@"; }
+write_catalogue() { # <row>...
+	write_catalogue_doc README.md '# Index' '' '## The catalogue' '' \
+		'| Doc | What it is |' '| --- | --- |' "$@"
+}
+write_catalogue_doc notes.md '# Notes' '' 'Prose.'
+write_catalogue_doc reference/style.md '# Style' '' 'Prose.'
+catalogue_rows() {
+	write_catalogue \
+		'| [`docs/README.md`](README.md) | This index |' \
+		'| [`docs/notes.md`](notes.md) | The notes |' \
+		'| [`docs/reference/style.md`](reference/style.md) | The practices |' "$@"
+}
+
+# 41. Both sides agreeing passes — including the catalogue's row for itself,
+#     which is what keeps the rule free of an exception to remember.
+catalogue_rows
+run_catalogue
+check "a catalogue agreeing with the tree passes" 0 "$RC" "$OUT" "check-doc-facts: clean"
+
+# 42. A row the parser cannot read is SKIPPED IN SILENCE, never failed: check 5
+#     errors in every job's pre-stage, so a shape it did not anticipate must not
+#     stop the fleet. A prose row, a link out of `docs/` and a heading anchor are
+#     all rows that name no doc, and none of them is a finding.
+catalogue_rows \
+	'| the runbooks | a prose row carrying no link |' \
+	'| [the root README](../README.md) | outside docs/ |' \
+	'| [a section](notes.md#prose) | an anchor, not a document |'
+run_catalogue
+check "a malformed catalogue row is skipped, not failed" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 43. Direction one: a tracked doc with no row. The message carries the row to
+#     paste, because a gate that only says no is how the second half of a
+#     two-file act gets forgotten again.
+catalogue_rows
+write_catalogue_doc reference/testing.md '# Testing' '' 'Prose.'
+run_catalogue
+check "a tracked doc with no catalogue row fails, naming the doc" 1 "$RC" "$OUT" \
+	"docs/README.md: no catalogue row for docs/reference/testing.md"
+check "the missing-row finding hands the author the row" 1 "$RC" "$OUT" \
+	'| [`docs/reference/testing.md`](reference/testing.md) |'
+
+# 44. Direction two: a row naming a path the index does not hold — the drift
+#     that leaves a reader clicking into a doc that was deleted or renamed.
+catalogue_rows '| [gone](gone.md) | A doc that is not there |'
+write_catalogue_doc reference/testing.md '# Testing' '' 'Prose.'
+git -C "$CATALOGUE" rm -q --cached docs/reference/testing.md >/dev/null 2>&1
+rm -f "$CATALOGUE/docs/reference/testing.md"
+run_catalogue
+check "a catalogue row naming no tracked doc fails, naming the row" 1 "$RC" "$OUT" \
+	"catalogue row names no tracked doc -> docs/gone.md"
+
+# 45. A catalogue whose table the parser cannot find would stand check 5 down in
+#     silence over every doc in the tree, so it is a LINTER ERROR — the same
+#     verdict the concept registry gets for the same reason.
+write_catalogue_doc README.md '# Index' '' '## Contents' '' \
+	'| Doc | What it is |' '| --- | --- |' \
+	'| [`docs/notes.md`](notes.md) | The notes |'
+run_catalogue
+check "a catalogue whose table does not parse is a LINTER ERROR" 2 "$RC" "$OUT" \
+	"no row parsed under"
+
+# 46. No `docs/README.md` in the tree stands check 5 down whole, which is what
+#     keeps this script usable in a checkout that catalogues nothing.
+git -C "$CATALOGUE" rm -q --cached docs/README.md >/dev/null 2>&1
+run_catalogue
+check "no docs/README.md stands check 5 down" 0 "$RC" "$OUT" "check-doc-facts: clean"
+
 # --- `--emit-paths`: check 1's extractor with the verdict removed -------------
 # The mode the staleness ledger (design #415 D7, S6) reads, so there is one
 # answer in the tree to "what paths does this doc name". It must agree with

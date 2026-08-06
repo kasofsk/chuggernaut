@@ -60,8 +60,8 @@ the head; `docs/design/309-host-native-execution.md` has a dozen). Then:
   corrects)` — and link it from the head so the head stays the one thing a
   reader has to read.
 - The title line and the `Status:` line have a parsed contract (they are what
-  the operator UI's Designs view shows): `docs/design-docs.md` is the page that
-  states it, including the length bound.
+  the operator UI's Designs view shows): `docs/reference/docs.md` is the page
+  that states it, including the length bound.
 
 ### If you implemented a design slice, you update that design doc — in this commit
 
@@ -142,8 +142,10 @@ here — which is why `.chug/tasks/review-docs-updated.md` judges it.
 
 4. **Prefer editing a doc to adding one.** A new page that duplicates an
    existing one is the doc-shaped version of a copy-paste clone. Add a page only
-   when the subject has no home; then link it from `docs/README.md` or from the
-   page that should reach it, or it is an orphan.
+   when the subject has no home; then give it a row in `docs/README.md`'s
+   catalogue — check 5 below requires one for every tracked doc under `docs/`,
+   in both directions — and link it from the page that should reach it, or it is
+   an orphan.
 
 5. **Gloss and link; never define twice.** #415 D4/D5: any doc may *mention* a
    concept as often as its argument needs, but what a term *means* is written
@@ -160,7 +162,7 @@ here — which is why `.chug/tasks/review-docs-updated.md` judges it.
 
 | Gate | Verdict | What it decides |
 | --- | --- | --- |
-| `.chug/tasks/check-doc-facts.sh` | **error**, every job, whole tree | backticked paths resolve (check 1); restated constants match the tree (check 2); a `**Landed** (job #N)` slice row matches a merged `job/N` commit, and `Status: IMPLEMENTED` has no unlanded row (check 3) |
+| `.chug/tasks/check-doc-facts.sh` | **error**, every job, whole tree | backticked paths resolve (check 1); restated constants match the tree (check 2); a `**Landed** (job #N)` slice row matches a merged `job/N` commit, and `Status: IMPLEMENTED` has no unlanded row (check 3); a term `docs/concepts.md` registers is written in definitional shape only in the doc that registry names as its owner (check 4); every tracked doc under `docs/` has a `docs/README.md` catalogue row and every row names a tracked doc (check 5) |
 | `.chug/tasks/check-modules.sh` | **error**, every job | `docs/reference/modules.md` lists every dispatcher/domain module and nothing else |
 | `.chug/tasks/doc-lint.sh` | **error**, `docs` and `design` jobs at stage 1 | markdown well-formedness, relative links resolve, `docs/design/` filename shape |
 | `.chug/tasks/review-docs-updated.md` | **error**, `code` and `web` jobs at stage 0 | the three judgement classes a script cannot reach — cross-doc state claims, behavioural claims about symbols you touched, and D10 above |

@@ -1,4 +1,69 @@
-# Chuggernaut — structural north star
+# Chuggernaut — the docs index and structural north star
+
+Two things live here. [**The catalogue**](#the-catalogue) is the index: every
+document in this tree, one line each, and it is gated in both directions so it
+cannot quietly fall behind. Everything after it is the **structural north
+star** — the target factoring the codebase refactors toward.
+
+New to the tree? Read `docs/spec.md` for what the platform does,
+[`docs/reference/docs.md`](reference/docs.md) for how these documents are
+written and gated, and the catalogue for everything else.
+
+## The catalogue
+
+One row per tracked `docs/**/*.md`, including this page, grouped by directory:
+the root docs, then `reference/`, then `reference/runbooks/`, then `design/` by
+number. It is kept honest by `.chug/tasks/check-doc-facts.sh` check 5, which compares the two
+sets **both ways**: a doc with no row and a row naming no doc are equally a
+finding, and both fail the gate in the pre-stage of every job. **Adding a
+document is two acts, the file and its row** — the gate is what keeps the second
+from being the one everyone forgets (design
+[#415](design/415-knowledge-architecture.md) D15).
+
+| Doc | What it is |
+| --- | --- |
+| [`docs/README.md`](README.md) | This page: the catalogue, and the target factoring the codebase refactors toward |
+| [`docs/concepts.md`](concepts.md) | The concept registry — which doc owns each term's definition, and the criterion for a row |
+| [`docs/design-docs.md`](design-docs.md) | A pointer: the design-doc header contract now lives in the doc policy |
+| [`docs/implementation-notes.md`](implementation-notes.md) | Per-module rationale, hoisted out of the comments the tree no longer carries |
+| [`docs/spec.md`](spec.md) | Normative platform behaviour: the data model, the state machine, the prompts |
+| [`docs/reference/contracts.md`](reference/contracts.md) | Extracting and formalizing the dispatcher's interfaces |
+| [`docs/reference/crates.md`](reference/crates.md) | The crate and module map: what each crate owns, and why |
+| [`docs/reference/design-lifecycle.md`](reference/design-lifecycle.md) | The job lifecycle generalization and its vocabulary |
+| [`docs/reference/docs.md`](reference/docs.md) | The doc policy: the two kinds of doc, the rules each obeys, and what the gates check |
+| [`docs/reference/modules.md`](reference/modules.md) | The module registry jobs are scoped against, one contract line per module |
+| [`docs/reference/structure-assessment.md`](reference/structure-assessment.md) | The 2026-07-23 audit of readiness for module-scoped work |
+| [`docs/reference/style.md`](reference/style.md) | The tiered blessed practices every change is held to |
+| [`docs/reference/testing.md`](reference/testing.md) | The test tiers, what each costs, and where a given test belongs |
+| [`docs/reference/runbooks/adhoc-deploy.md`](reference/runbooks/adhoc-deploy.md) | Runbook: deploying out of band |
+| [`docs/reference/runbooks/chug-node-adoption.md`](reference/runbooks/chug-node-adoption.md) | Runbook: adopting the node modules in a worker host's own repo |
+| [`docs/reference/runbooks/macos-host-supervision-proof.md`](reference/runbooks/macos-host-supervision-proof.md) | Runbook: proving host-task supervision on macOS |
+| [`docs/reference/runbooks/worker-capacity.md`](reference/runbooks/worker-capacity.md) | Runbook: reading a worker node's capacity, changing it, and where each number comes from |
+| [`docs/reference/runbooks/worker-kvm.md`](reference/runbooks/worker-kvm.md) | Runbook: turning KVM on for a worker node |
+| [`docs/design/000-rationale.md`](design/000-rationale.md) | The original v2 rationale: why the platform is shaped the way it is |
+| [`docs/design/169-handoff-continuity.md`](design/169-handoff-continuity.md) | Audit: what one task hands the next, and where continuity breaks |
+| [`docs/design/210-ts-rewrite-plan.md`](design/210-ts-rewrite-plan.md) | The dormant TypeScript dispatcher rewrite plan, kept for its analysis |
+| [`docs/design/215-refactor-plan.md`](design/215-refactor-plan.md) | The incremental Rust restructuring plan — partly executed, now dormant |
+| [`docs/design/238-forge-ingest-crate-boundary.md`](design/238-forge-ingest-crate-boundary.md) | Why forge-ingest stays inside the dispatcher for now |
+| [`docs/design/293-worker-capacity.md`](design/293-worker-capacity.md) | Worker capacity: one source of truth, changeable from the UI |
+| [`docs/design/308-gha-port.md`](design/308-gha-port.md) | Survey: what porting a real GitHub Actions suite onto Chuggernaut would need |
+| [`docs/design/309-host-native-execution.md`](design/309-host-native-execution.md) | Host-native execution: node kind, selector, capabilities, exclusive resources |
+| [`docs/design/310-scheduled-jobs.md`](design/310-scheduled-jobs.md) | Time-triggered job creation |
+| [`docs/design/311-job-inputs.md`](design/311-job-inputs.md) | Job inputs: parameterizing a run without rewriting it |
+| [`docs/design/313-workload-identity-image-builds.md`](design/313-workload-identity-image-builds.md) | Workload identity (an OIDC issuer) and image build/push |
+| [`docs/design/321-job-groups.md`](design/321-job-groups.md) | Job groups: tying a job to the thing it belongs to, derived rather than stored |
+| [`docs/design/322-macos-native-runtime.md`](design/322-macos-native-runtime.md) | A native macOS execution runtime for iOS/Xcode jobs |
+| [`docs/design/323-paste-a-prompt-onboarding.md`](design/323-paste-a-prompt-onboarding.md) | Paste-a-prompt onboarding: standing up an instance and importing a repo |
+| [`docs/design/355-project-task-images.md`](design/355-project-task-images.md) | Project-supplied task images |
+| [`docs/design/361-per-run-placement.md`](design/361-per-run-placement.md) | How a run picks its node, and why that needs no new job-record field |
+| [`docs/design/362-binary-artifacts.md`](design/362-binary-artifacts.md) | Binary artifact handoff between jobs |
+| [`docs/design/367-android-emulator-execution.md`](design/367-android-emulator-execution.md) | Android emulator execution: a container with KVM, not a host runtime |
+| [`docs/design/372-chug-node-modules.md`](design/372-chug-node-modules.md) | NixOS and nix-darwin modules for preparing a worker host |
+| [`docs/design/373-project-toolchains.md`](design/373-project-toolchains.md) | Project-supplied toolchains: nix environments in container mode |
+| [`docs/design/415-knowledge-architecture.md`](design/415-knowledge-architecture.md) | Knowledge architecture: one definition per concept, and prose that cannot go quietly stale |
+| [`docs/design/440-native-worker-daemon.md`](design/440-native-worker-daemon.md) | The natively-supervised worker daemon |
+
+## The target factoring
 
 Companion to `docs/reference/crates.md` (the map as it exists), `docs/reference/structure-assessment.md`
 (the audit that motivated this), `docs/reference/contracts.md` (how the dispatcher's

@@ -25,7 +25,11 @@ Then:
    fit where a reader would look for it, and wire it into navigation (link it
    from a relevant index/page, and link out to related docs) with **relative**
    links. Pitch it at its audience: an operator guide, a contributor reference,
-   and an API note are not written the same way — say who it is for.
+   and an API note are not written the same way — say who it is for. A **new**
+   page also needs its one-line row in `docs/README.md`'s catalogue: check 5 of
+   `.chug/tasks/check-doc-facts.sh` compares that catalogue against every
+   tracked doc under `docs/` in both directions, so a page without a row fails
+   the pre-stage of every job. `docs/reference/docs.md` has the shape.
 2. Keep the change to the page(s) at hand — do not edit code or unrelated docs.
 3. `.chug/tasks/doc-lint.sh` runs on your output: relative links must resolve and the
    markdown must be well-formed (closed code fences, spaced headings).

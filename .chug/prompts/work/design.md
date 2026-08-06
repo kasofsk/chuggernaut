@@ -42,7 +42,7 @@ Then:
    later. When you amend a shipped design, say so in the status and name the
    jobs (`Status: IMPLEMENTED — shipped in jobs #295–#301.`). Full reference,
    including the vocabulary in use and how the document reaches the Designs
-   view: [`docs/design-docs.md`](../../../docs/design-docs.md).
+   view: [`docs/reference/docs.md`](../../../docs/reference/docs.md#the-header-contract).
 3. Keep the change to the design at hand — do not edit code or unrelated docs.
 4. `.chug/tasks/doc-lint.sh` runs on your output: the filename must be
    `{seq}-{slug}.md`, relative links must resolve, and the markdown must be
@@ -50,6 +50,12 @@ Then:
    restated constants are gated harder still — `.chug/tasks/check-doc-facts.sh`
    resolves them against git over the whole tree and **fails** the job, so keep
    them accurate or mark the line (docs/reference/style.md's doc-claim rule).
+   **Your new page also needs its one-line row in `docs/README.md`'s
+   catalogue** — check 5 of that same script compares the catalogue against
+   every tracked doc under `docs/` in both directions, so a design doc without a
+   row fails the pre-stage of every job. That row is part of this change, not an
+   unrelated doc; [`docs/reference/docs.md`](../../../docs/reference/docs.md#every-doc-under-docs-is-catalogued)
+   has the shape.
 5. Commit to the current branch (you are already on the job branch) with a clear
    message, and push. `.githooks/pre-commit` runs the doc lint on your staged
    markdown as an advisory pass — it prints what a `design` job's stage-1 gate
