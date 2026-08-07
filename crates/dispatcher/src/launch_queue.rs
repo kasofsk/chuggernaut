@@ -6,10 +6,17 @@
 //! launch that outwaits [`MAX_QUEUE_WAIT`] escalates with a clear reason — the
 //! genuinely-wedged-fleet backstop. Every launch path queues on capacity
 //! pressure: the command paths (work, evaluator, merge gate, wrap-up) inline,
-//! and agent evaluators via [`Msg::LaunchDeferred`] — the provider erases
-//! `NoCapacity`, so the spawned run signals it back for [`Core::defer_launch`]
-//! (#140). Genuinely-unreachable-node and other launch errors keep today's
+//! and both agent paths — the work agent and the agent evaluator — via
+//! [`Msg::LaunchDeferred`], because the provider erases `NoCapacity`, so the
+//! spawned run signals it back for [`Core::defer_launch`] (#140, #481).
+//! Genuinely-unreachable-node and other launch errors keep today's
 //! fail-the-task semantics.
+//!
+//! The drain resumes each kind through its own launch half, discriminated by the
+//! persisted task's phase: a `Work`-phase agent re-enters `launch_work_container`
+//! (its §3.2 `resume` note re-derived from the branch), an `Evaluation`-phase one
+//! re-enters `spawn_eval_agent`. Both are reachable from the same two drivers a
+//! command resume is — a container exit freeing a slot and the periodic scan.
 //!
 //! Single-writer intact: the queue lives in the actor, the slot-freed signal
 //! rides the existing container-exit fan-in, and every queue mutation happens
@@ -74,11 +81,11 @@ enum ResumeOutcome {
     Discarded,
     /// The fleet is still full; the entry is re-queued unchanged.
     NoCapacity,
-    /// An agent evaluator was re-spawned through the provider (#140). The launch
-    /// is asynchronous — capacity is claimed by the spawned run, whose own
-    /// `NoCapacity` re-defers a fresh entry — so the drain retires this entry and
-    /// stops, treating the freed slot as spoken for. The next freed slot (or the
-    /// periodic scan) drains any remaining entries.
+    /// An agent launch — work or evaluator — was re-spawned through the provider
+    /// (#140, #481). The launch is asynchronous — capacity is claimed by the
+    /// spawned run, whose own `NoCapacity` re-defers a fresh entry — so the drain
+    /// retires this entry and stops, leaving the rest to the next freed slot or
+    /// the periodic scan.
     SpawnedAgent,
 }
 
@@ -218,12 +225,12 @@ impl Core {
         }
     }
 
-    /// An agent evaluator launch came back [`BackendError::NoCapacity`] from the
-    /// provider (which erases the variant), reported via [`Msg::LaunchDeferred`].
-    /// Park and queue it exactly as the command paths do inline (§3.5, #140).
-    /// Runs on the single-writer loop, so it never races the exit handler. A
-    /// no-op if the task already left its launching state (resolved, superseded)
-    /// or the job is no longer active.
+    /// An agent launch — work or evaluator — came back [`BackendError::NoCapacity`]
+    /// from the provider (which erases the variant), reported via
+    /// [`Msg::LaunchDeferred`]: park and queue it exactly as the command paths do
+    /// inline, on the single-writer loop (§3.5, #140, #481). A no-op if the task
+    /// already left its launching state (resolved, superseded) or the job is no
+    /// longer active.
     pub(crate) async fn on_launch_deferred(
         &mut self,
         owner: &str,
@@ -313,6 +320,9 @@ impl Core {
             return Ok(ResumeOutcome::Discarded);
         }
         if let TaskKind::Agent { .. } = &task.kind {
+            if task.phase == TaskPhase::Work {
+                return self.resume_work_agent(owner, project, seq, task).await;
+            }
             let job = self.must_get(owner, project, seq)?.clone();
             let job_type = self.active.get(&key).expect("checked").job_type.clone();
             let Some(evaluator) = job_type
@@ -430,6 +440,36 @@ impl Core {
             monitor,
         )
         .await
+    }
+
+    /// Re-attempt a queued **work** agent launch (#481): flip the record back to
+    /// `Running` and hand it to the same launch half a fresh attempt uses, whose
+    /// own `NoCapacity` re-defers. The §3.2 `resume` note is re-derived from the
+    /// branch rather than carried on the queue entry, because a deferred launch
+    /// ran nothing — the branch still answers what the decision saw, and it keeps
+    /// answering after a restart rebuilds the queue from KV.
+    async fn resume_work_agent(
+        &mut self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        mut task: Task,
+    ) -> Result<ResumeOutcome> {
+        let job = self.must_get(owner, project, seq)?.clone();
+        let Some(base_ref) = job.base_ref.clone() else {
+            return Ok(ResumeOutcome::Discarded);
+        };
+        let resume = self
+            .repos
+            .has_commits_beyond(owner, project, &base_ref, &job.branch)
+            .await?;
+        task.state = TaskState::Running;
+        task.started_at = Some(Utc::now());
+        task.pending_reason = None;
+        self.task_put(&task).await?;
+        self.launch_work_container(owner, project, seq, task, resume)
+            .await?;
+        Ok(ResumeOutcome::SpawnedAgent)
     }
 
     /// Fire one resumed launch: on success flip the task back to `Running` and

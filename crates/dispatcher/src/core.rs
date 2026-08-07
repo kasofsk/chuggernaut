@@ -432,11 +432,12 @@ pub enum Msg {
         task_id: u64,
         container_id: String,
     },
-    /// Posted by an agent launch task (an agent evaluator) when the fleet is at
-    /// capacity: the provider erases [`container::BackendError::NoCapacity`], so
-    /// the spawned task signals it back here for the actor to queue the launch
-    /// through [`Core::defer_launch`] instead of burning `eval_retries` (#140).
-    /// Never posted by anything outside the crate.
+    /// Posted by an agent launch task — a work agent or an agent evaluator —
+    /// when the fleet is at capacity: the provider erases
+    /// [`container::BackendError::NoCapacity`], so the spawned task signals it
+    /// back here for the actor to queue the launch through
+    /// [`Core::defer_launch`] instead of burning `eval_retries` (#140) or
+    /// `work_retries` (#481). Never posted by anything outside the crate.
     LaunchDeferred {
         owner: String,
         project: String,

@@ -354,7 +354,7 @@ impl Core {
     /// credentials and the container env, and hands the run to the provider (an
     /// agent) or the backend (a command). No decision lives here.
     #[allow(clippy::expect_used, clippy::too_many_lines)]
-    async fn launch_work_container(
+    pub(crate) async fn launch_work_container(
         &mut self,
         owner: &str,
         project: &str,
@@ -478,6 +478,20 @@ impl Core {
                                 harvest.dispose(seq, task_id, id).await;
                             }
                             (out.exit_code, usage)
+                        }
+                        Err(agent::AgentError::Backend(container::BackendError::NoCapacity(
+                            reason,
+                        ))) => {
+                            let _ = tx
+                                .send(Msg::LaunchDeferred {
+                                    owner: o,
+                                    project: p,
+                                    seq,
+                                    task_id,
+                                    reason,
+                                })
+                                .await;
+                            return;
                         }
                         Err(e) => {
                             tracing::error!("agent run failed: {e}");

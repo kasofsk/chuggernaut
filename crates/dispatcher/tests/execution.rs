@@ -1960,6 +1960,217 @@ async fn agent_eval_redefer_preserves_queue_time_and_burns_no_retries() {
     assert_invariants_of(&rig.invariants);
 }
 
+/// A **work** agent launch refused with `NoCapacity` queues instead of burning a
+/// `work_retries` attempt (#481, the #477/#480 shape); the provider erases the
+/// variant, so the spawned run signals it back and the actor parks the task
+/// Pending. Freeing a slot relaunches the *same* task, which commits → the job
+/// lands, with no `trigger_scan` here on purpose — the resume must come from the
+/// drain `Core::run` performs after every message, the one a container exit rides.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "TODO(style): oversized tier-2 test — split when this file is next touched."
+)]
+async fn agent_work_queues_on_no_capacity_then_launches_when_freed() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_full(Some(identity), None).await else {
+        return;
+    };
+    let full = Arc::new(AtomicBool::new(true));
+    let f = full.clone();
+    rig.backend.fail_launch_no_capacity_if(move |cfg| {
+        (f.load(Ordering::SeqCst) && cfg.cmd.iter().any(|c| c == "agent"))
+            .then(|| "no free slots on any node".to_string())
+    });
+    commit_work(&rig);
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+
+    let work = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Work && t.state == TaskState::Pending
+    })
+    .await;
+    assert_eq!(
+        work.attempt, 1,
+        "queueing a work agent burns no work_retries"
+    );
+    assert!(
+        work.container_id.is_none(),
+        "a queued task holds no container"
+    );
+    assert!(
+        matches!(work.kind, types::TaskKind::Agent { .. }),
+        "the queued launch is the work agent",
+    );
+    assert_eq!(
+        work.pending_reason,
+        Some(types::PendingReason::QueuedForCapacity),
+        "the park is capacity backpressure, not an operator inbox item",
+    );
+    assert_eq!(
+        rig.store
+            .jobs()
+            .await
+            .unwrap()
+            .get("acme", "api", job.id)
+            .await
+            .unwrap()
+            .unwrap()
+            .state,
+        JobState::Work,
+        "queued, not escalated as work_retries_exhausted",
+    );
+    assert!(
+        event_types(&rig.store)
+            .await
+            .contains(&"task-queued".into()),
+        "a task-queued event surfaces the wait",
+    );
+    let queued_at = work
+        .queued_at
+        .expect("a queued work task carries queued_at");
+
+    full.store(false, Ordering::SeqCst);
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+    assert_invariants_of(&rig.invariants);
+
+    let works: Vec<_> = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Work)
+        .collect();
+    assert_eq!(
+        works.len(),
+        1,
+        "one work task drained from the queue — no retry inflation"
+    );
+    assert_eq!(works[0].state, TaskState::Done);
+    assert_eq!(works[0].attempt, 1);
+    assert_eq!(
+        works[0].pending_reason, None,
+        "a resumed-then-completed work task clears its QueuedForCapacity badge"
+    );
+    assert_eq!(
+        works[0].queued_at,
+        Some(queued_at),
+        "the resume preserved the original queued_at (backstop accumulates)"
+    );
+    assert_invariants_of(&rig.invariants);
+}
+
+/// A starved **work** agent that outwaits the queue escalates with the
+/// `no_free_slots_timeout` reason — never `work_retries_exhausted` (#481). Pins
+/// the work arm of the queue-timeout backstop, and with it that the periodic scan
+/// sees a `Work`-phase queue entry exactly as it sees a finishing-phase one.
+#[tokio::test]
+async fn agent_work_escalates_after_max_wait_not_retry_exhaustion() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_full(Some(identity), Some(Duration::from_millis(100))).await else {
+        return;
+    };
+    rig.backend.fail_launch_no_capacity_if(|cfg| {
+        cfg.cmd
+            .iter()
+            .any(|c| c == "agent")
+            .then(|| "no free slots on any node".to_string())
+    });
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    rig.handle.trigger_scan().await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+    assert_eq!(
+        escalated.escalation.expect("escalation recorded").reason,
+        "no_free_slots_timeout",
+        "a starved work agent escalates on the queue timeout, not work_retries_exhausted",
+    );
+    let work = wait_for_task(&rig.store, job.id, |t| {
+        t.phase == TaskPhase::Work && t.state == TaskState::Failed
+    })
+    .await;
+    assert_eq!(work.attempt, 1, "queue starvation burns no work_retries");
+    let output = match work.result {
+        Some(types::TaskResult::Command { ref output, .. }) => output.clone(),
+        ref other => panic!("expected the queue-timeout Command result, got {other:?}"),
+    };
+    assert!(
+        output.contains("launch queue"),
+        "failure records the queue wait: {output}"
+    );
+    assert_invariants_of(&rig.invariants);
+}
+
+/// The other half of #481: a work agent launch refused for any *non*-capacity
+/// reason keeps today's fail-the-task semantics. A permanently rejected launch
+/// (`BackendError::Launch`) fails each attempt, burns the `work_retries` budget
+/// and escalates as `work_retries_exhausted` — it is never parked as queued.
+#[tokio::test]
+async fn agent_work_non_capacity_launch_error_still_fails_the_task() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_full(Some(identity), None).await else {
+        return;
+    };
+    rig.backend.fail_launch_if(|cfg| {
+        cfg.cmd
+            .iter()
+            .any(|c| c == "agent")
+            .then(|| "no such image".to_string())
+    });
+
+    let job = rig.handle.create_job(req("flaky")).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    assert_invariants_of(&rig.invariants);
+    let escalated = wait_for_state(&rig.store, job.id, JobState::Escalated).await;
+    assert_eq!(
+        escalated.escalation.expect("escalation recorded").reason,
+        "work_retries_exhausted",
+        "a non-capacity launch error still spends the retry budget",
+    );
+
+    let works: Vec<_> = rig
+        .store
+        .tasks()
+        .await
+        .unwrap()
+        .list_for_job("acme", "api", job.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|t| t.phase == TaskPhase::Work && !matches!(t.kind, types::TaskKind::Human { .. }))
+        .collect();
+    assert_eq!(works.len(), 2, "attempt 1 + one retry, both failed");
+    for t in &works {
+        assert_eq!(t.state, TaskState::Failed);
+        assert_eq!(
+            t.pending_reason, None,
+            "a real launch failure is never a capacity park"
+        );
+        assert!(t.queued_at.is_none(), "and never joins the launch queue");
+    }
+    assert!(
+        !event_types(&rig.store)
+            .await
+            .contains(&"task-queued".into()),
+        "no task-queued event: this was a failure, not backpressure",
+    );
+    assert_invariants_of(&rig.invariants);
+}
+
 /// Eval-exhaustion escalation + Retry (#141) resumes at Evaluation: it re-runs
 /// the evaluators against the preserved branch and never launches a fresh work
 /// task. The work attempt counter and cycle are untouched; a fresh eval fan-out
