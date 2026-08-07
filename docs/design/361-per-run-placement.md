@@ -53,8 +53,9 @@ that *do* need doing are already scheduled inside
 | Fleet capacity requires **`platform_admin`** | `crates/api/src/routes.rs` `platform_fleet_capacity_set` → `platform_admin`; `docs/spec.md` §7.5 "Platform-level config" | Shipped |
 | A factory triage **agent** may create jobs from inside a container | `crates/auth/src/nats.rs` `triage_container_permissions` grants `req.jobs.create.{owner}.{project}` | Shipped |
 | Inputs never reach job-type resolution, tier-1 tested | `crates/domain/src/release.rs` — `resolved_job_type_is_equal_for_any_two_input_maps` | Shipped |
-| `NodeCapabilities` on `PingOk`/`WorkerAnnounce`, ingested per node | [#309](309-host-native-execution.md) §4 (P2 slice 5); `crates/types/src/worker.rs`, `crates/worker/src/backend.rs` | Shipped — advertised and visible, read by no placement decision |
-| Capability-aware `choose_placement`, `placement.leases` | [#309](309-host-native-execution.md) §5a, §5b (P2 slice 6, P4) | Designed, not in the tree |
+| `NodeCapabilities` on `PingOk`/`WorkerAnnounce`, ingested per node | [#309](309-host-native-execution.md) §4 (P2 slice 5); `crates/types/src/worker.rs`, `crates/worker/src/backend.rs` | Shipped — advertised, visible, and read by placement's mode predicate (job #484) |
+| Capability-aware `choose_placement` | [#309](309-host-native-execution.md) §5a (P2 slice 6) | Shipped (job #484) — a launch is excluded from every node not advertising its mode |
+| `placement.leases` | [#309](309-host-native-execution.md) §5b (P4) | Designed, not in the tree |
 | **Not one job type in this repo sets `placement`** | `.chug/jobs/*.yaml` — zero matches | The one affinity control ships unused |
 
 That last row is worth pausing on. The platform's existing per-node steering
@@ -158,7 +159,7 @@ axes are bundled into that one bit:
 
 | Axis | What it really is | Chuggernaut's answer | Status |
 | --- | --- | --- | --- |
-| **A. Capability** — needs a host docker daemon, a warm cache, an emulator, macOS | A *requirement*, not a choice | [#309 §5a](309-host-native-execution.md#5a-capability-aware-placement) mode/capability predicate; #309 §9 declared caches; [#322](322-macos-native-runtime.md) for the macOS platform | Designed (P2) |
+| **A. Capability** — needs a host docker daemon, a warm cache, an emulator, macOS | A *requirement*, not a choice | [#309 §5a](309-host-native-execution.md#5a-capability-aware-placement) mode/capability predicate; #309 §9 declared caches; [#322](322-macos-native-runtime.md) for the macOS platform | **Shipped** for the mode predicate (P2 slice 6); the declared caches and the macOS platform are still designed |
 | **B. Load shedding** — "run this one on the cloud today, gumbo is busy" | A *scheduling* decision | `choose_placement` under `Busyness`/`Headroom` already picks the least-loaded node automatically; the §3.5 capacity queue absorbs the rest | **Shipped** |
 | **C. Node health / maintenance** — "don't send work to gumbo at all right now" | A *fleet operator* action | `PUT /api/v1/platform/fleet/{node}/capacity` with `slots: 0` — a full drain, `platform_admin` only | **Shipped** |
 | **D. Cost** — hosted minutes are metered, gumbo is sunk cost | A billing decision | No analogue: every node in the fleet today is owned hardware | Absent, and see [triggers](#what-would-change-this-conclusion) |

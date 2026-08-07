@@ -363,7 +363,8 @@ pub struct Runtime {
 }
 
 /// Which backend serves a job type's tasks (design #309 §3). Both modes are
-/// declarable; placement by mode is #309 P2 and has not landed.
+/// declarable, and since #309 P2 placement routes each launch by the one it
+/// selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -372,8 +373,20 @@ pub enum RuntimeMode {
     #[default]
     Container,
     /// The task runs as a process on a host-capable node (design #309 P0's
-    /// `HostBackend`). The declaration is legal; nothing routes by it yet.
+    /// `HostBackend`). Placement chooses among the nodes advertising it (#309
+    /// §5a).
     Host,
+}
+
+impl RuntimeMode {
+    /// The canonical lowercase name, identical to the serde representation.
+    /// One spelling, so a diagnostic and a `WORKER_MODES` entry cannot drift.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::Host => "host",
+        }
+    }
 }
 
 /// One declared job input (spec §1.1, design #311 Decision 2): a name, a kind,

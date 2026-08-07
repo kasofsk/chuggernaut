@@ -7,9 +7,9 @@
 //! so remote nodes need nothing on disk.
 
 use crate::{
-    BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
-    InjectedFile, LogTail, NodeLoad, NodeStatus, PlacementCandidate, PlacementPolicy,
-    RunningContainer, choose_placement,
+    BackendError, CONTAINER_ONLY_MODES, ContainerBackend, ContainerId, ContainerLaunchConfig,
+    ContainerStatus, InjectedFile, LogTail, ModeWarnings, NodeLoad, NodeStatus, PlacementCandidate,
+    PlacementPolicy, RunningContainer, choose_placement,
 };
 use async_trait::async_trait;
 use bollard::Docker;
@@ -22,6 +22,7 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use types::job_type::RuntimeMode;
 
 /// Label stamped on every container we launch; placement counts by it and the
 /// §3.6 startup sweeps reap by it. It means exactly *"a job container the
@@ -182,6 +183,10 @@ pub struct DockerBackend {
     /// `PLACEMENT_POLICY` via [`with_placement_policy`](DockerBackend::with_placement_policy).
     /// Irrelevant on the single-node dev/worker path (one candidate).
     policy: PlacementPolicy,
+    /// Cadence state for the fleet-wide unadvertised-mode warning (design #309
+    /// §5a). Every node here is container-only, so it fires only for a host
+    /// launch that reached a docker fleet.
+    mode_warnings: ModeWarnings,
 }
 
 impl DockerBackend {
@@ -215,6 +220,7 @@ impl DockerBackend {
             kvm: None,
             nix_store: None,
             policy: PlacementPolicy::default(),
+            mode_warnings: ModeWarnings::default(),
         })
     }
 
@@ -233,6 +239,7 @@ impl DockerBackend {
             kvm: None,
             nix_store: None,
             policy: PlacementPolicy::default(),
+            mode_warnings: ModeWarnings::default(),
         })
     }
 
@@ -426,12 +433,11 @@ impl DockerBackend {
             .collect())
     }
 
-    /// §3.1 placement. Every node is (re-)probed here, which updates its
-    /// in-service flag, so a node that has recovered since startup rejoins
-    /// placement without a dispatcher restart. The decision itself is
-    /// [`choose_placement`] — a pure function over the probed loads under the
-    /// configured [`PlacementPolicy`], honoring the optional `pin`.
-    async fn place(&self, pin: Option<&str>) -> Result<&Node, BackendError> {
+    /// §3.1 placement: every node is (re-)probed here (so one that recovered
+    /// rejoins without a dispatcher restart) and [`choose_placement`] decides.
+    /// Every docker-endpoint node serves [`CONTAINER_ONLY_MODES`] and nothing
+    /// else, so a host launch finds no candidate here (design #309 §5a).
+    async fn place(&self, pin: Option<&str>, required: RuntimeMode) -> Result<&Node, BackendError> {
         let mut candidates = Vec::with_capacity(self.nodes.len());
         for (i, node) in self.nodes.iter().enumerate() {
             let load = self.probe_load(node).await;
@@ -439,9 +445,11 @@ impl DockerBackend {
                 index: i,
                 name: &node.name,
                 load,
+                modes: CONTAINER_ONLY_MODES,
             });
         }
-        let index = choose_placement(self.policy, &candidates, pin)?;
+        self.mode_warnings.observe(&candidates, required);
+        let index = choose_placement(self.policy, &candidates, pin, required)?;
         Ok(&self.nodes[index])
     }
 
@@ -472,7 +480,9 @@ impl DockerBackend {
 #[async_trait]
 impl ContainerBackend for DockerBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
-        let node = self.place(config.node.as_deref()).await?;
+        let node = self
+            .place(config.node.as_deref(), config.required_mode())
+            .await?;
         let image = image_or_refusal(&node.name, &config)?;
         let body = ContainerCreateBody {
             image: Some(image),
@@ -948,6 +958,7 @@ mod tests {
             index,
             name,
             load: free.map(|free| NodeLoad { running: 0, free }),
+            modes: CONTAINER_ONLY_MODES,
         }
     }
 
@@ -961,13 +972,21 @@ mod tests {
             cand("nuc", Some(4), 1),
             cand("aaa", Some(4), 2),
         ];
-        assert_eq!(choose_placement(hr, &nodes, None).unwrap(), 2);
+        assert_eq!(
+            choose_placement(hr, &nodes, None, RuntimeMode::Container).unwrap(),
+            2
+        );
 
         let nodes = [cand("local", Some(2), 0), cand("nuc", None, 1)];
-        assert_eq!(choose_placement(hr, &nodes, None).unwrap(), 0);
+        assert_eq!(
+            choose_placement(hr, &nodes, None, RuntimeMode::Container).unwrap(),
+            0
+        );
 
         let nodes = [cand("local", Some(0), 0), cand("nuc", None, 1)];
-        let err = choose_placement(hr, &nodes, None).unwrap_err().to_string();
+        let err = choose_placement(hr, &nodes, None, RuntimeMode::Container)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("no free slots on any node"), "{err}");
     }
 
@@ -977,22 +996,25 @@ mod tests {
     fn choose_pin_honored_and_never_falls_back() {
         let hr = PlacementPolicy::Headroom;
         let nodes = [cand("local", Some(1), 0), cand("nuc", Some(4), 1)];
-        assert_eq!(choose_placement(hr, &nodes, Some("local")).unwrap(), 0);
+        assert_eq!(
+            choose_placement(hr, &nodes, Some("local"), RuntimeMode::Container).unwrap(),
+            0
+        );
 
         let nodes = [cand("local", Some(0), 0), cand("nuc", Some(4), 1)];
-        let err = choose_placement(hr, &nodes, Some("local"))
+        let err = choose_placement(hr, &nodes, Some("local"), RuntimeMode::Container)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no free slots on node local"), "{err}");
 
         let nodes = [cand("local", None, 0), cand("nuc", Some(4), 1)];
-        let err = choose_placement(hr, &nodes, Some("local"))
+        let err = choose_placement(hr, &nodes, Some("local"), RuntimeMode::Container)
             .unwrap_err()
             .to_string();
         assert!(err.contains("no free slots on node local"), "{err}");
 
         let nodes = [cand("local", Some(1), 0), cand("nuc", Some(4), 1)];
-        let err = choose_placement(hr, &nodes, Some("mini"))
+        let err = choose_placement(hr, &nodes, Some("mini"), RuntimeMode::Container)
             .unwrap_err()
             .to_string();
         assert!(

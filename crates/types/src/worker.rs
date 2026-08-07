@@ -366,8 +366,8 @@ impl NodeCapabilities {
         Self::absent()
     }
 
-    /// Whether this node serves `mode`. The predicate design #309 §5a's
-    /// capability-aware placement is built on; nothing filters by it yet.
+    /// Whether this node serves `mode`. Since design #309 P2 slice 6 placement
+    /// filters candidates on exactly this record's `modes` (spec §3.1).
     pub fn serves(&self, mode: RuntimeMode) -> bool {
         self.modes.contains(&mode)
     }

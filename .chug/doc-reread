@@ -10,3 +10,9 @@ THIS IS A SCRATCH SLATE, NOT A REGISTRY. The gate reads the lines your diff ADDS
 against its base, never the file's contents, so every line below is inert the
 moment it merges and asserts nothing about any later branch. Nothing prunes it
 and nothing has to; rewrite it wholesale if you need it.
+
+Doc-reread: docs/spec.md
+Doc-reread: docs/design/309-host-native-execution.md
+Doc-reread: docs/design/361-per-run-placement.md
+Doc-reread: docs/implementation-notes.md
+Doc-reread: deploy/prod/README.md

@@ -407,7 +407,7 @@
       "additionalProperties": false
     },
     "RuntimeMode": {
-      "description": "Which backend serves a job type's tasks (design #309 §3). Both modes are\ndeclarable; placement by mode is #309 P2 and has not landed.",
+      "description": "Which backend serves a job type's tasks (design #309 §3). Both modes are\ndeclarable, and since #309 P2 placement routes each launch by the one it\nselects.",
       "oneOf": [
         {
           "description": "Today's behavior: the task runs in a container built from `image`.",
@@ -415,7 +415,7 @@
           "const": "container"
         },
         {
-          "description": "The task runs as a process on a host-capable node (design #309 P0's\n`HostBackend`). The declaration is legal; nothing routes by it yet.",
+          "description": "The task runs as a process on a host-capable node (design #309 P0's\n`HostBackend`). Placement chooses among the nodes advertising it (#309\n§5a).",
           "type": "string",
           "const": "host"
         }

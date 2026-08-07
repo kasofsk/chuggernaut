@@ -546,7 +546,9 @@ async fn never_reporting_worker_is_visible_as_seed_sourced() {
 }
 
 /// A stand-in worker that advertises what it can do on its `ping` reply (design
-/// #309 §4) — the authoritative transport, ingested inside `probe_worker`.
+/// #309 §4) — the authoritative transport, ingested inside `probe_worker`. It
+/// also answers `launch` with an id naming itself, so a placement decision is
+/// readable off the launch's return value.
 async fn capable_worker(
     store: &store::NatsStore,
     node: &str,
@@ -557,8 +559,17 @@ async fn capable_worker(
         .await
         .expect("subscribe capable worker");
     store.client().flush().await.expect("flush sub");
+    let name = node.to_string();
     tokio::spawn(async move {
         while let Some(req) = sub.next().await {
+            if req.subject.ends_with(".launch") {
+                let reply = types::worker::WorkerReply::Ok {
+                    value: types::worker::LaunchOk {
+                        id: format!("{name}/placed"),
+                    },
+                };
+                req.respond(serde_json::to_vec(&reply).unwrap()).await;
+            }
             if req.subject.ends_with(".ping") {
                 let reply = types::worker::WorkerReply::Ok {
                     value: types::worker::PingOk {
@@ -716,6 +727,85 @@ async fn docker_endpoint_capabilities_are_synthesized() {
         "a docker endpoint demonstrably enforces cpu/memory"
     );
     assert!(!caps.serves(types::job_type::RuntimeMode::Host));
+}
+
+/// A host launch (no `image`, design #309 §5a) reaches the one node advertising
+/// the mode, past a container-only node the busyness policy would otherwise
+/// prefer — and a container launch on the same fleet still places by load.
+#[tokio::test]
+async fn a_host_launch_is_placed_on_the_node_that_advertises_host() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let mac = capable_worker(&store, "mac", host_capable()).await;
+    let nuc = capable_worker(&store, "nuc", types::worker::NodeCapabilities::absent()).await;
+    let fleet = FleetBackend::new(
+        vec![
+            DockerNodeConfig {
+                name: "mac".into(),
+                endpoint: "worker".into(),
+                slots: 1,
+            },
+            DockerNodeConfig {
+                name: "nuc".into(),
+                endpoint: "worker".into(),
+                slots: 1,
+            },
+        ],
+        store,
+        PlacementPolicy::default(),
+    )
+    .unwrap();
+
+    let mut host = suite::cfg("true");
+    host.image = None;
+    assert_eq!(
+        fleet.launch(host).await.unwrap(),
+        "mac/placed",
+        "only mac advertises host mode"
+    );
+    assert_eq!(
+        fleet.launch(suite::cfg("true")).await.unwrap(),
+        "mac/placed",
+        "a container launch is placed by load alone, and mac ties first by name"
+    );
+    mac.abort();
+    nuc.abort();
+}
+
+/// A fleet no node of which advertises the mode answers the launch with the
+/// configuration-error `NoCapacity` message, not the busy-fleet one (#309 §5a).
+#[tokio::test]
+async fn a_container_only_fleet_names_the_mode_it_cannot_serve() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let nuc = capable_worker(&store, "nuc", types::worker::NodeCapabilities::absent()).await;
+    let fleet = FleetBackend::new(
+        vec![DockerNodeConfig {
+            name: "nuc".into(),
+            endpoint: "worker".into(),
+            slots: 1,
+        }],
+        store,
+        PlacementPolicy::default(),
+    )
+    .unwrap();
+
+    let mut host = suite::cfg("true");
+    host.image = None;
+    let err = fleet.launch(host).await.unwrap_err();
+    assert!(
+        matches!(err, container::BackendError::NoCapacity(_)),
+        "the mode is unserved, not the fleet busy: {err}"
+    );
+    assert!(
+        err.to_string().starts_with("no node advertises host mode"),
+        "{err}"
+    );
+    nuc.abort();
 }
 
 /// Spawn a worker daemon (node `node`, local Docker) with an optional

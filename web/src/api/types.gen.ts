@@ -84,7 +84,8 @@ export type ProjectRole = "viewer" | "member" | "admin";
 export type InputKind = "string" | "enum";
 /**
  * Which backend serves a job type's tasks (design #309 §3). Both modes are
- * declarable; placement by mode is #309 P2 and has not landed.
+ * declarable, and since #309 P2 placement routes each launch by the one it
+ * selects.
  */
 export type RuntimeMode = "container" | "host";
 export type WorkType = "agent" | "command" | "human";

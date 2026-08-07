@@ -67,14 +67,14 @@ Android environment is injected beside the cache env, and
 [`.chug/jobs/android-proof.yaml`](../../.chug/jobs/android-proof.yaml) plus
 [`.chug/tasks/android-proof.sh`](../../.chug/tasks/android-proof.sh) climb the
 ladder on a pinned node. What is still true from the original argument: the work
-is **pinned** with `placement.node`, because no placement decision reads a node's
-capabilities. `NodeCapabilities` itself now exists —
-[#309](309-host-native-execution.md) §4 landed it on both worker transports in
-job #483, which correction 2 below predates — but with `modes`, `platform`,
-`resources_enforced` and `leases` only. A3 is still unbuilt: it is the `features`
-field, plus the `choose_placement` predicate #309 P2 slice 6 and
-[#322](322-macos-native-runtime.md) P1 also want, and it is only needed when a
-second KVM node exists.
+is **pinned** with `placement.node`, because placement can select a node's
+execution *mode* but not the KVM feature this document needs.
+`NodeCapabilities` itself now exists — [#309](309-host-native-execution.md) §4
+landed it on both worker transports in job #483, which correction 2 below
+predates — but with `modes`, `platform`, `resources_enforced` and `leases` only,
+and #309 P2 slice 6 (job #484) filters placement by `modes` alone. A3 is still
+unbuilt: it is the `features` field and the widening of that predicate to read
+it, and it is only needed when a second KVM node exists.
 
 The rows below are the states of [7. Sequencing: what ships first, and what it
 unblocks](#7-sequencing-what-ships-first-and-what-it-unblocks)'s table, which

@@ -995,10 +995,12 @@ Notes:
   W1) — `container` (the default, and what the whole fleet runs) and/or `host`.
   It rides the same `<VAR>_<node>` resolution as `WORKER_SLOTS`, and it survives
   a self-refresh by being written into the node's environment file, not by the
-  swap copying it forward (#440 D6/D7). Declaring `host` does **not** make host jobs runnable:
-  a job type may declare `runtime.mode: host` since #309 P1 (job #478), but #309
-  P2 — which would put a node's modes on the wire — has not landed, so the
-  dispatcher never sees them and places by node, not by mode. It **is** additive
+  swap copying it forward (#440 D6/D7). Declaring `host` now **routes** work: since
+  #309 P2 (jobs #483, #484) a node's modes ride its ping and announce, and the
+  dispatcher places a host launch — one carrying no image — only onto a node
+  advertising `host`, with no pin needed. What still gates real host work is
+  that no node in this fleet names it and no job type declares
+  `runtime.mode: host`; both are operator steps, not code. It **is** additive
   since #309 P1 (job #479): a node naming both constructs both backends and
   routes each launch by whether it carries an image, and one naming only `host`
   needs no Docker and refuses any launch that carries one. What every node naming

@@ -10,7 +10,10 @@ pub mod k8s;
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant};
 use thiserror::Error;
+use types::job_type::RuntimeMode;
 
 pub type ContainerId = String;
 
@@ -82,6 +85,10 @@ pub struct NodeLoad {
     pub free: i64,
 }
 
+/// The modes a node serves when it has advertised nothing (design #309 §4):
+/// container only. The fail-closed reading, and every docker-endpoint node's.
+pub const CONTAINER_ONLY_MODES: &[RuntimeMode] = &[RuntimeMode::Container];
+
 /// A probed node for the placement decision. `load` is `None` when the node is
 /// out of service (unreachable / failed its ping), which excludes it from
 /// unpinned placement and fails a pin onto it.
@@ -89,20 +96,40 @@ pub struct PlacementCandidate<'a> {
     pub index: usize,
     pub name: &'a str,
     pub load: Option<NodeLoad>,
+    /// The execution modes the node advertises (design #309 §4/§5a), as of the
+    /// same probe that produced `load`. A node advertising nothing reads as
+    /// [`CONTAINER_ONLY_MODES`].
+    pub modes: &'a [RuntimeMode],
 }
 
-/// The §3.1 placement decision, factored out of backend I/O so both policies are
-/// unit-tested without a daemon. Returns the chosen candidate's `index`.
-///
-/// - Unpinned: the winning in-service node under `policy` (see [`PlacementPolicy`]).
-///   Out-of-service (`load: None`) and full/0-slot (`free <= 0`) nodes are never
-///   chosen — the #60 rule holds under both policies. `NoCapacity("no free slots
-///   on any node")` if none is eligible (transient — the dispatcher queues and
-///   retries, §3.5).
-/// - Pinned: the named node or an error — never a fallback. A full or
-///   out-of-service pin yields the same `NoCapacity` "no free slots" shape as
-///   the unpinned case; an unknown pin is a hard `Launch` error naming the
-///   known nodes.
+impl PlacementCandidate<'_> {
+    /// Whether this node serves `mode` — the design #309 §5a capability
+    /// predicate placement filters candidates on.
+    pub fn serves(&self, mode: RuntimeMode) -> bool {
+        self.modes.contains(&mode)
+    }
+}
+
+fn mode_list(modes: &[RuntimeMode]) -> String {
+    modes
+        .iter()
+        .map(RuntimeMode::as_str)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn fleet_modes(candidates: &[PlacementCandidate<'_>]) -> String {
+    candidates
+        .iter()
+        .map(|c| format!("{} serves {}", c.name, mode_list(c.modes)))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// The spec §3.1 placement decision — pure, so both policies and the design
+/// #309 §5a capability predicate are unit-tested without a daemon. Its
+/// postcondition is `docs/implementation-notes.md`'s `fn choose_placement`
+/// entries; the returned `usize` is the chosen candidate's `index`.
 #[allow(
     clippy::expect_used,
     reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
@@ -111,6 +138,7 @@ pub fn choose_placement(
     policy: PlacementPolicy,
     candidates: &[PlacementCandidate<'_>],
     pin: Option<&str>,
+    required: RuntimeMode,
 ) -> Result<usize, BackendError> {
     if let Some(name) = pin {
         let Some(c) = candidates.iter().find(|c| c.name == name) else {
@@ -121,14 +149,31 @@ pub fn choose_placement(
             )));
         };
         return match c.load {
+            Some(_) if !c.serves(required) => Err(BackendError::Launch(format!(
+                "placement pinned to node {name}, which serves {} and not {} mode; a pin never \
+                 falls back, so this needs a config change on the node or the job type",
+                mode_list(c.modes),
+                required.as_str()
+            ))),
             Some(load) if load.free > 0 => Ok(c.index),
             _ => Err(BackendError::NoCapacity(format!(
                 "no free slots on node {name}"
             ))),
         };
     }
+    if !candidates.is_empty() && !candidates.iter().any(|c| c.serves(required)) {
+        return Err(BackendError::NoCapacity(format!(
+            "no node advertises {} mode: no fleet node serves it, so this launch cannot be placed \
+             until one declares it in WORKER_MODES ({})",
+            required.as_str(),
+            fleet_modes(candidates)
+        )));
+    }
     let mut best: Option<&PlacementCandidate> = None;
     for c in candidates {
+        if !c.serves(required) {
+            continue;
+        }
         let Some(load) = c.load else { continue };
         if load.free <= 0 {
             continue;
@@ -158,6 +203,51 @@ pub fn choose_placement(
     match best {
         Some(c) => Ok(c.index),
         None => Err(BackendError::NoCapacity("no free slots on any node".into())),
+    }
+}
+
+/// Bounded cadence for the fleet-wide unadvertised-mode warning, following
+/// design #293 §8's never-observed warning: one line per mode per interval.
+pub const MODE_WARN_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+/// Is the fleet-wide unadvertised-mode warning due? Pure over its inputs, so
+/// the cadence is unit-tested without a fleet or a fifteen-minute wait.
+pub fn mode_warning_due(last_warned: Option<Instant>, now: Instant) -> bool {
+    match last_warned {
+        None => true,
+        Some(at) => now.duration_since(at) >= MODE_WARN_INTERVAL,
+    }
+}
+
+/// A placing backend's record of when it last warned that work requires a mode
+/// no node advertises (design #309 §5a). Held beside the fleet, because the
+/// finding is fleet-wide and the trigger is one launch.
+#[derive(Default)]
+pub struct ModeWarnings(Mutex<Option<(RuntimeMode, Instant)>>);
+
+impl ModeWarnings {
+    /// Warn — at most once per [`MODE_WARN_INTERVAL`] per mode — when a launch
+    /// requires a mode no candidate advertises. A mode nothing asks for is
+    /// never warned about, which is what keeps this off a container-only fleet.
+    pub fn observe(&self, candidates: &[PlacementCandidate<'_>], required: RuntimeMode) {
+        if candidates.is_empty() || candidates.iter().any(|c| c.serves(required)) {
+            return;
+        }
+        let now = Instant::now();
+        let mut last = self.0.lock().unwrap_or_else(PoisonError::into_inner);
+        let previous = last.filter(|(mode, _)| *mode == required).map(|(_, at)| at);
+        if !mode_warning_due(previous, now) {
+            return;
+        }
+        *last = Some((required, now));
+        tracing::warn!(
+            mode = required.as_str(),
+            "a job type requires {} mode but no fleet node advertises it — a configuration \
+             error, not a busy fleet: its launches queue until a node declares the mode in \
+             WORKER_MODES (design #309 §5a). Fleet: {}",
+            required.as_str(),
+            fleet_modes(candidates)
+        );
     }
 }
 
@@ -417,6 +507,18 @@ pub struct ContainerLaunchConfig {
     pub runtime_env: Option<String>,
 }
 
+impl ContainerLaunchConfig {
+    /// The execution mode this launch requires (design #309 §5a), read off the
+    /// same `image` selector every backend routes on. One selector, so
+    /// placement and the node it places onto cannot disagree.
+    pub fn required_mode(&self) -> RuntimeMode {
+        match self.image {
+            Some(_) => RuntimeMode::Container,
+            None => RuntimeMode::Host,
+        }
+    }
+}
+
 /// Injected via the backend's file API (Docker put-archive / k8s equivalent)
 /// after create, before start. No host bind-mounts — works identically on
 /// remote fleet nodes (spec §3.1).
@@ -552,7 +654,178 @@ mod tests {
             index,
             name,
             load: Some(NodeLoad { running, free }),
+            modes: CONTAINER_ONLY_MODES,
         }
+    }
+
+    const HOST_AND_CONTAINER: &[RuntimeMode] = &[RuntimeMode::Container, RuntimeMode::Host];
+
+    fn host_cand<'a>(
+        name: &'a str,
+        running: i64,
+        free: i64,
+        index: usize,
+    ) -> PlacementCandidate<'a> {
+        PlacementCandidate {
+            modes: HOST_AND_CONTAINER,
+            ..cand(name, running, free, index)
+        }
+    }
+
+    /// A host launch takes the one node advertising the mode, even where the
+    /// policy would otherwise prefer an incapable node (design #309 §5a) — and
+    /// the same fleet places container work by load alone.
+    #[test]
+    fn capable_node_wins_over_an_incapable_one() {
+        for policy in [PlacementPolicy::Busyness, PlacementPolicy::Headroom] {
+            let nodes = [cand("air", 0, 4, 0), host_cand("nuc", 1, 1, 1)];
+            assert_eq!(
+                choose_placement(policy, &nodes, None, RuntimeMode::Host).unwrap(),
+                1,
+                "{policy:?}"
+            );
+            assert_eq!(
+                choose_placement(policy, &nodes, None, RuntimeMode::Container).unwrap(),
+                0,
+                "{policy:?}"
+            );
+        }
+    }
+
+    /// The two `NoCapacity` messages are distinct (#309 §5a): a capable fleet
+    /// with no free slot is the transient one, and a fleet no node of which
+    /// serves the mode reads as the configuration error it is.
+    #[test]
+    fn full_capable_fleet_and_no_capable_node_read_differently() {
+        let full = [cand("air", 4, 0, 0), host_cand("nuc", 1, 0, 1)];
+        let err = choose_placement(PlacementPolicy::Busyness, &full, None, RuntimeMode::Host)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "no free slots on any node");
+
+        let incapable = [cand("air", 0, 4, 0), cand("mini", 0, 2, 1)];
+        let err = choose_placement(
+            PlacementPolicy::Busyness,
+            &incapable,
+            None,
+            RuntimeMode::Host,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.starts_with("no node advertises host mode")
+                && err.contains("air serves container")
+                && !err.contains("no free slots"),
+            "{err}"
+        );
+    }
+
+    /// An empty fleet is still the transient "no free slots" answer, never the
+    /// configuration error: zero nodes is a fleet that has not registered yet
+    /// (spec §3.1 zero-seed boot), not one that refuses the mode.
+    #[test]
+    fn empty_fleet_is_not_a_capability_error() {
+        let err = choose_placement(PlacementPolicy::Busyness, &[], None, RuntimeMode::Host)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "no free slots on any node");
+    }
+
+    /// A pin onto a live node that cannot serve the mode is a hard `Launch`
+    /// error whether or not it has a free slot, because only a config change
+    /// clears it; a pin onto a node that is merely down or full stays transient.
+    #[test]
+    fn pin_to_an_incapable_live_node_is_a_hard_error() {
+        let by = PlacementPolicy::Busyness;
+        let nodes = [cand("air", 0, 4, 0), host_cand("nuc", 0, 1, 1)];
+        let err = choose_placement(by, &nodes, Some("air"), RuntimeMode::Host)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("launch failed: placement pinned to node air")
+                && err.contains("serves container and not host mode"),
+            "{err}"
+        );
+        assert_eq!(
+            choose_placement(by, &nodes, Some("nuc"), RuntimeMode::Host).unwrap(),
+            1
+        );
+
+        let full = [cand("air", 4, 0, 0)];
+        let err = choose_placement(by, &full, Some("air"), RuntimeMode::Host)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with("launch failed: placement pinned to node air")
+                && err.contains("serves container and not host mode"),
+            "{err}"
+        );
+        assert_eq!(
+            choose_placement(by, &full, Some("air"), RuntimeMode::Container)
+                .unwrap_err()
+                .to_string(),
+            "no free slots on node air"
+        );
+
+        let down = [PlacementCandidate {
+            index: 0,
+            name: "air",
+            load: None,
+            modes: CONTAINER_ONLY_MODES,
+        }];
+        let err = choose_placement(by, &down, Some("air"), RuntimeMode::Host)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "no free slots on node air");
+    }
+
+    /// The fleet-wide warning is bounded to one line per interval, and the
+    /// first observation always fires (design #309 §5a, #293 §8's shape).
+    #[test]
+    fn mode_warning_is_bounded_to_one_per_interval() {
+        let now = Instant::now();
+        assert!(mode_warning_due(None, now));
+        assert!(!mode_warning_due(Some(now), now));
+        assert!(mode_warning_due(now.checked_sub(MODE_WARN_INTERVAL), now));
+    }
+
+    /// The warning is silent on a fleet that serves the mode and on one with no
+    /// nodes at all — only a fleet that answers and cannot serve is a finding.
+    #[test]
+    fn mode_warning_observes_only_an_incapable_fleet() {
+        let warnings = ModeWarnings::default();
+        warnings.observe(&[], RuntimeMode::Host);
+        assert!(warnings.0.lock().unwrap().is_none());
+
+        let capable = [host_cand("nuc", 0, 1, 0)];
+        warnings.observe(&capable, RuntimeMode::Host);
+        assert!(warnings.0.lock().unwrap().is_none());
+
+        let incapable = [cand("air", 0, 4, 0)];
+        warnings.observe(&incapable, RuntimeMode::Host);
+        assert_eq!(
+            warnings.0.lock().unwrap().map(|(mode, _)| mode),
+            Some(RuntimeMode::Host)
+        );
+    }
+
+    /// A container launch requires container mode and a host launch requires
+    /// host mode, read off `image` — the selector the backends route on (#479).
+    #[test]
+    fn required_mode_follows_the_image_selector() {
+        let mut config = ContainerLaunchConfig {
+            image: Some("img".into()),
+            cmd: vec!["run".into()],
+            env: HashMap::new(),
+            files: vec![],
+            cpu_limit: None,
+            memory_limit: None,
+            node: None,
+            runtime_env: None,
+        };
+        assert_eq!(config.required_mode(), RuntimeMode::Container);
+        config.image = None;
+        assert_eq!(config.required_mode(), RuntimeMode::Host);
     }
 
     /// Busyness (the default, §3.1): fewest running wins outright — an idle
@@ -563,9 +836,18 @@ mod tests {
     fn busyness_idle_small_beats_busy_big() {
         let by = PlacementPolicy::Busyness;
         let nodes = [cand("air", 1, 3, 0), cand("nuc", 0, 2, 1)];
-        assert_eq!(choose_placement(by, &nodes, None).unwrap(), 1);
         assert_eq!(
-            choose_placement(PlacementPolicy::Headroom, &nodes, None).unwrap(),
+            choose_placement(by, &nodes, None, RuntimeMode::Container).unwrap(),
+            1
+        );
+        assert_eq!(
+            choose_placement(
+                PlacementPolicy::Headroom,
+                &nodes,
+                None,
+                RuntimeMode::Container
+            )
+            .unwrap(),
             0
         );
     }
@@ -575,9 +857,15 @@ mod tests {
     fn busyness_ties_break_by_free_then_name() {
         let by = PlacementPolicy::Busyness;
         let nodes = [cand("air", 2, 2, 0), cand("nuc", 2, 4, 1)];
-        assert_eq!(choose_placement(by, &nodes, None).unwrap(), 1);
+        assert_eq!(
+            choose_placement(by, &nodes, None, RuntimeMode::Container).unwrap(),
+            1
+        );
         let nodes = [cand("nuc", 2, 3, 0), cand("air", 2, 3, 1)];
-        assert_eq!(choose_placement(by, &nodes, None).unwrap(), 1);
+        assert_eq!(
+            choose_placement(by, &nodes, None, RuntimeMode::Container).unwrap(),
+            1
+        );
     }
 
     /// The #60 rule holds under both policies: a 0-slot (or full) node is never
@@ -588,7 +876,7 @@ mod tests {
         for policy in [PlacementPolicy::Busyness, PlacementPolicy::Headroom] {
             let nodes = [cand("zero", 0, 0, 0), cand("nuc", 3, 1, 1)];
             assert_eq!(
-                choose_placement(policy, &nodes, None).unwrap(),
+                choose_placement(policy, &nodes, None, RuntimeMode::Container).unwrap(),
                 1,
                 "{policy:?}"
             );
@@ -598,17 +886,18 @@ mod tests {
                     index: 0,
                     name: "down",
                     load: None,
+                    modes: CONTAINER_ONLY_MODES,
                 },
                 cand("nuc", 1, 1, 1),
             ];
             assert_eq!(
-                choose_placement(policy, &nodes, None).unwrap(),
+                choose_placement(policy, &nodes, None, RuntimeMode::Container).unwrap(),
                 1,
                 "{policy:?}"
             );
 
             let nodes = [cand("full", 4, 0, 0)];
-            let err = choose_placement(policy, &nodes, None)
+            let err = choose_placement(policy, &nodes, None, RuntimeMode::Container)
                 .unwrap_err()
                 .to_string();
             assert!(

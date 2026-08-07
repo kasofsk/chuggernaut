@@ -28,8 +28,8 @@
 //! no ordering key, the `ping` reply is authoritative, and an announce applies
 //! only while no ping has answered for the node. A docker-endpoint node can
 //! answer neither, so [`FleetBackend::node_capabilities`] synthesizes its
-//! capabilities from the node kind. Nothing places by them yet — the
-//! capability-aware `choose_placement` predicate is #309 P2 slice 6.
+//! capabilities from the node kind. Placement reads their `modes`: a launch is
+//! placed only on a node serving the mode its `image` selects (#309 §5a).
 
 use async_trait::async_trait;
 use container::docker::{DockerBackend, DockerNodeConfig};
@@ -41,6 +41,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use store::NatsStore;
 use store::worker::{MAX_COPY_FILE_BYTES, WorkerRpc, WorkerRpcError};
+use types::job_type::RuntimeMode;
 use types::worker::{
     FileSource, RefreshOutcome, WireFile, WireStatus, WorkerError, WorkerLaunchRequest, b64_decode,
     b64_encode,
@@ -157,6 +158,10 @@ pub struct FleetBackend {
     /// serializing them is free at our scale and makes the reservation
     /// authoritative rather than merely narrowing the race window.
     place_lock: tokio::sync::Mutex<()>,
+    /// Cadence state for the fleet-wide unadvertised-mode warning (design #309
+    /// §5a), so a job type requiring a mode the whole fleet lacks is a logged
+    /// configuration error rather than a silently queueing launch.
+    mode_warnings: container::ModeWarnings,
 }
 
 /// The precedence decision for one announce against the current roster (spec
@@ -194,6 +199,19 @@ fn worker_handle(store: NatsStore, name: &str, seed_slots: u32) -> NodeHandle {
         version_warned: AtomicBool::new(false),
         last_version: Mutex::new(None),
         last_refresh: Mutex::new(None),
+    }
+}
+
+/// What one node handle reads as being capable of (design #309 §4): a worker's
+/// observation, or the synthesis a docker-endpoint node has no wire path to
+/// advertise. The single resolution site, so placement and the snapshot agree.
+fn handle_capabilities(handle: &NodeHandle) -> types::worker::NodeCapabilities {
+    match handle {
+        NodeHandle::Docker { .. } => types::worker::NodeCapabilities::docker_endpoint(),
+        NodeHandle::Worker { capabilities, .. } => capabilities
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .effective(),
     }
 }
 
@@ -364,6 +382,7 @@ impl FleetBackend {
             store,
             policy,
             place_lock: tokio::sync::Mutex::new(()),
+            mode_warnings: container::ModeWarnings::default(),
         })
     }
 
@@ -387,13 +406,7 @@ impl FleetBackend {
         self.snapshot()
             .into_iter()
             .find(|n| n.name == node)
-            .map(|n| match &n.handle {
-                NodeHandle::Docker { .. } => types::worker::NodeCapabilities::docker_endpoint(),
-                NodeHandle::Worker { capabilities, .. } => capabilities
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .effective(),
-            })
+            .map(|n| handle_capabilities(&n.handle))
     }
 
     /// §3.6 startup as a fleet-level property (spec §3.1): probe every node,
@@ -525,28 +538,34 @@ impl FleetBackend {
         }
     }
 
-    /// §3.1 placement across the fleet under the configured [`PlacementPolicy`].
-    /// Out-of-service workers are skipped, full/0-slot nodes never chosen (#60).
-    /// Pinned (`pin`): that node or an error — never a fallback (full/out-of-
-    /// service → `NoCapacity` "no free slots on node {name}", queued and retried
-    /// by the dispatcher; unknown → a hard `Launch` naming the known nodes). The
-    /// decision itself is [`choose_placement`].
+    /// §3.1 placement across the fleet under the configured [`PlacementPolicy`],
+    /// probing every node for the load and capabilities the decision reads. The
+    /// decision itself is [`choose_placement`], whose postcondition — pinned and
+    /// unpinned — is `docs/implementation-notes.md`.
     async fn place(
         &self,
         pin: Option<&str>,
+        required: RuntimeMode,
     ) -> Result<(Arc<FleetNode>, Reservation), BackendError> {
         let _guard = self.place_lock.lock().await;
         let nodes = self.snapshot();
-        let mut candidates = Vec::with_capacity(nodes.len());
-        for (i, node) in nodes.iter().enumerate() {
+        let mut probed = Vec::with_capacity(nodes.len());
+        for node in nodes.iter() {
             let load = self.node_load(node).await?;
-            candidates.push(PlacementCandidate {
-                index: i,
-                name: node.name.as_str(),
-                load,
-            });
+            probed.push((load, handle_capabilities(&node.handle)));
         }
-        let index = choose_placement(self.policy, &candidates, pin)?;
+        let candidates: Vec<PlacementCandidate<'_>> = probed
+            .iter()
+            .enumerate()
+            .map(|(i, (load, capabilities))| PlacementCandidate {
+                index: i,
+                name: nodes[i].name.as_str(),
+                load: *load,
+                modes: &capabilities.modes,
+            })
+            .collect();
+        self.mode_warnings.observe(&candidates, required);
+        let index = choose_placement(self.policy, &candidates, pin, required)?;
         let node = nodes[index].clone();
         node.reserved.fetch_add(1, Ordering::SeqCst);
         Ok((node.clone(), Reservation { node }))
@@ -759,7 +778,9 @@ fn to_wire(config: &ContainerLaunchConfig) -> WorkerLaunchRequest {
 #[async_trait]
 impl ContainerBackend for FleetBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
-        let (node, _reservation) = self.place(config.node.as_deref()).await?;
+        let (node, _reservation) = self
+            .place(config.node.as_deref(), config.required_mode())
+            .await?;
         match &node.handle {
             NodeHandle::Docker { backend } => backend.launch(config).await,
             NodeHandle::Worker { rpc, .. } => {

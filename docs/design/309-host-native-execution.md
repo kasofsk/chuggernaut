@@ -2,15 +2,18 @@
 
 Status: PROPOSED; **P0 landed 2026-08-05 (job #434)** — `HostBackend`,
 `WORKER_MODES` routing and the `slots: 1` enforcement, off on every node — and
-**P1 landed 2026-08-07 (jobs #401, #478, #479)**: `runtime.mode: host` is a legal
-declaration that nothing places by yet
+**P1 landed 2026-08-07 (jobs #401, #478, #479)**: `runtime.mode: host` became a
+legal declaration that nothing placed by
 ([P1 as landed](#p1-as-landed-2026-08-07--the-host-rows-field-rules-job-478)),
 and a dual-mode node now routes each launch by its declared mode
 ([P1 as landed, per-launch routing](#p1-as-landed-2026-08-07--per-launch-mode-routing-job-479))
-— and **P2 slice 5 landed 2026-08-07 (job #483)**: `NodeCapabilities` rides both
-worker transports and is ingested in `probe_worker`, with no placement decision
-reading it yet
-([the 2026-08-07 note](#note-2026-08-07--slice-5-landed-runtimemode-not-execmode-job-483)).
+— and **P2 landed 2026-08-07 (jobs #483, #484)**: `NodeCapabilities` rides both
+worker transports and is ingested in `probe_worker`
+([the 2026-08-07 note](#note-2026-08-07--slice-5-landed-runtimemode-not-execmode-job-483)),
+and `choose_placement` now filters candidates by the mode a launch requires, so
+host work is **routable** — a host job type placed by capability rather than by
+a pin
+([the 2026-08-07 note on slice 6](#note-2026-08-07--slice-6-landed-host-work-is-routable-job-484)).
 §1's recommendation had already shipped before P0 started; see
 [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed)
 and its addendum on `remove` racing its own reaper.
@@ -58,7 +61,7 @@ and deleted the refusal, with no epoch bump, and job #479 carried the resolved
 mode to the worker: `image` is `Option<String>` on both the launch config and
 the wire (`WORKER_RPC_VERSION` 2), a node constructs exactly the backends its
 `WORKER_MODES` names, and one naming both routes each launch by the image's
-presence. **P2 is half-landed.** Its slice 5 shipped in job #483 now that its
+presence. **P2 is landed.** Its slice 5 shipped in job #483 now that its
 gate — [#293](293-worker-capacity.md) job 3 — is in: `NodeCapabilities` is a
 wire record on both
 `PingOk` and `WorkerAnnounce` (`crates/types/src/worker.rs`), additive and so
@@ -67,9 +70,12 @@ and the dispatcher ingests it inside `probe_worker` on the reply path with the
 `ping`-wins precedence §4 argues for (`crates/worker/src/backend.rs`). Its
 modes are `types::job_type::RuntimeMode`, not the `ExecMode` §4 sketches — see
 [the 2026-08-07 note](#note-2026-08-07--slice-5-landed-runtimemode-not-execmode-job-483).
-So a host job type is still **well-formed and unroutable**: a node's
-capabilities are now *visible*, but nothing filters by them, because that is P2
-slice 6. Everything from P3 on is unstarted.
+Its slice 6 shipped in job #484: `choose_placement` takes the mode the launch's
+`image` selects, excludes every candidate not advertising it, and separates
+"no node advertises this mode" from "every capable node is full" — see
+[the 2026-08-07 note on slice 6](#note-2026-08-07--slice-6-landed-host-work-is-routable-job-484).
+So a host job type is now **well-formed and routable**, on any node that
+advertises the mode and with no pin. Everything from P3 on is unstarted.
 [#440](440-native-worker-daemon.md) is the design for the native-supervision
 prerequisite P0 named and left unowned.
 
@@ -82,7 +88,7 @@ is the same work sliced by contract, not a second plan.
 | --- | --- | --- |
 | **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed) |
 | **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch; **Landed** (job #479) for §1's per-launch routing and the `WORKER_RPC_VERSION` bump it needed |
-| **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | **Landed** (job #483) for slice 5 — the record on both transports, additive, ingested in `probe_worker` with ping authoritative and docker-endpoint nodes synthesized; slice 6 (capability-aware `choose_placement`) Proposed, now gated on nothing but itself |
+| **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | **Landed** (job #483) for slice 5 — the record on both transports, additive, ingested in `probe_worker` with ping authoritative and docker-endpoint nodes synthesized; **Landed** (job #484) for slice 6 — `choose_placement` takes the required mode, excludes the nodes that do not serve it, and answers "no node advertises it" differently from "every capable node is full". P2 is complete: host work is routable |
 | **P3** | Per-task users; `resources_enforced`; transient scopes | Proposed — gated on P2 |
 | **P4** | Device leases | Proposed — only when a host node must run a second, non-device-bound task concurrently |
 | **P5** | Declared caches + GC roots + warm set | Proposed — gated on P1, independent of P2–P4 |
@@ -1055,7 +1061,7 @@ What can be prototyped on one node with nothing migrated:
 | --- | --- | --- | --- |
 | **P0** | Backend polymorphism ([1](#1-backend-polymorphism)) + a `HostBackend` ([2](#2-the-traits-container-assumptions)), on one node with `WORKER_MODES=container,host`, routed by `placement.node`, `slots: 1` | nothing else | **No schema change, no epoch bump, no capability wire, no placement change.** The job type still declares `image:` and that node simply ignores it. This is deliberately a lie and must never leave the prototype node — but it answers the only question that matters: *which of the ten methods is actually hard* |
 | **P1** | The `runtime:` selector, the `CONFIG_SCHEMA_EPOCH` bump, the `min_dispatcher` requirement, the validate rule ([3](#3-the-host-mode-selector)) | P0 | Still pinned; `image` stops lying. **Half-landed ahead of P0** — see the note below |
-| **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` ([4](#4-capability-advertisement), [5a](#5a-capability-aware-placement)) | P1, **and #293 job 3** | Unpins host work |
+| **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` ([4](#4-capability-advertisement), [5a](#5a-capability-aware-placement)) | P1, **and #293 job 3** | Unpins host work — **Landed** (jobs #483, #484) |
 | **P3** | Per-task users ([8](#8-secrets-on-a-shared-host)); `resources_enforced` ([7](#7-resource-limits)); transient scopes ([6](#6-drain)) | P2 | The isolation and bounding story; the scope work is Linux-only |
 | **P4** | Device leases ([5b](#5b-exclusive-resources-device-leases)) | P2 | Only when the host node must run a second, non-device-bound task concurrently |
 | **P5** | Declared caches + GC roots + warm set ([9](#9-environment-and-state)) | P1 | Independent of P2–P4 |
@@ -1092,7 +1098,7 @@ of too many unbuilt things.
 | 3 | `docs` — spec §3.1 amendment: the host node kind, the selector, capability advertisement, the mode filter in placement; fix the stale trait listing (correction 3) | spec §3.1, §1.1 field-rules matrix | 2 |
 | 4 | `code` — `runtime:` block, field rules, the per-level mode precedence rule and the narrowing of the evaluator `image` requirement, the `CONFIG_SCHEMA_EPOCH` bump (#401 spent 3→4), the `min_dispatcher` requirement | job-type schema epoch (§14.1); `Evaluator`/`wrap_up` image resolution | 3 |
 | 5 | `code` — `NodeCapabilities` on `PingOk` + `WorkerAnnounce`; ingest inside `probe_worker` | two wire records (additive, no `WORKER_RPC_VERSION` bump) | 4, **#293 job 3** |
-| 6 | `code` — `choose_placement` capability predicate + the two distinct `NoCapacity` messages; the fleet-wide "no node advertises" warning | `choose_placement` postcondition; §3.1 placement | 5 |
+| 6 | `code` — `choose_placement` capability predicate + the two distinct `NoCapacity` messages; the fleet-wide "no node advertises" warning — **Landed** (job #484) | `choose_placement` postcondition; §3.1 placement | 5 |
 | 7 | `code` — `placement.leases` (+ the "leases require a pin" rule), the actor lease table, release in `on_task_exited` **and** on the revoke path, §3.6 rebuild | `Placement` schema (nested, breaking); `on_task_exited` postcondition; `revoke_job` postcondition; §3.6 reconciliation | 6 |
 
 Test placement per [docs/reference/testing.md](../reference/testing.md): the selector field rules, the
@@ -1528,3 +1534,84 @@ last-writer-wins and deliberately so: once the pull transport has spoken, a
 stale or malicious announce cannot reclassify the node, and a node that genuinely
 changes its `WORKER_MODES` is corrected at the next placement probe — which is
 the self-healing property §4 argues the pull path buys.
+
+---
+
+## Note, 2026-08-07 — slice 6 landed, host work is routable (job #484)
+
+Appended by the job that implemented P2 slice 6, which completes P2. Nothing
+above is edited beyond the status rows [§5a](#5a-capability-aware-placement)
+claims; this is the record of the decisions it had to make.
+
+**The required mode is read off `image`, not threaded as a resolved mode.**
+`ContainerLaunchConfig::required_mode()` (`crates/container/src/lib.rs`) answers
+`container` for a launch carrying an image and `host` for one carrying none —
+the *same* selector [P1's per-launch
+routing](#p1-as-landed-2026-08-07--per-launch-mode-routing-job-479) made every
+backend route on. The alternative — threading `JobType::resolved_mode()` down
+from the dispatcher — was rejected because it creates a second answer to one
+question: a job type is `mode: host` while its `ci` evaluator level carries an
+explicit `image` and is container work, so the job type's mode is *not* the
+launch's mode, and a placement that believed it would route a container
+evaluator onto a host-only node. `resolved_mode()` stays where it is, deciding
+the field rules; the launch's own image decides where it goes. One selector,
+so placement and the node's own refusal cannot disagree — which is what makes
+`HostBackend`/`DockerBackend`'s wrong-mode refusals unreachable rather than
+merely unlikely.
+
+**The postcondition, which the slice table names as this slice's contract.**
+`choose_placement(policy, candidates, pin, required)` is still pure — no clock,
+no I/O, no logging — and now returns, for a non-empty candidate set:
+
+- **Pinned, unknown name** → `Launch` naming the known nodes (unchanged).
+- **Pinned, out of service** → `NoCapacity("no free slots on node {n}")`
+  (unchanged). Checked *before* capability, deliberately: a node that has never
+  answered a probe advertises nothing and reads container-only, so a hard
+  failure there would condemn a host node that is merely still booting.
+- **Pinned, in service, does not serve the mode** → `Launch` naming the node,
+  what it serves and what was required — **whether or not it has a free slot**,
+  so this is the one case the capability verdict is reached *before* the full
+  check. §5b's "a pin routes but does not exclude" cuts both ways: the pin is a
+  routing statement, not an exemption, and the node's own backend would refuse
+  the launch by name anyway. It is `Launch` rather than `NoCapacity` for the
+  reason [tenancy](#are-host-nodes-single-tenant) gives for
+  `WORKER_HOST_PROJECTS`: only a config change clears it, so queueing it is a
+  30-minute silence with a known answer — and a *full* incapable node has
+  already given its live answer, so waiting out the slot only arrives at this
+  same error later.
+- **Pinned, in service, serves the mode, full** → `NoCapacity("no free slots on
+  node {n}")` (unchanged).
+- **Unpinned, no candidate serves the mode** → `NoCapacity("no node advertises
+  {mode} mode: …")`, listing what each node does serve.
+- **Unpinned, otherwise** → the busyness/headroom winner among the candidates
+  that serve the mode; `NoCapacity("no free slots on any node")` when none of
+  *those* is eligible. The mode filter runs before the `free <= 0` and
+  out-of-service checks, so the two diagnoses never collapse into one.
+
+An **empty** candidate set keeps the "no free slots on any node" answer rather
+than the capability one: zero nodes is spec §3.1's zero-seed boot, a fleet that
+has not registered yet, not one that refuses the mode.
+
+**A container-only fleet is bit-for-bit unchanged.** Every node reads
+`modes: [container]` — advertised, absent or synthesized — and every launch in
+the tree carries an image, so the predicate admits every candidate it used to
+and both messages are the ones that shipped. The tier-1 tests that pinned the
+two policies and the ticket #60 rule now pass `RuntimeMode::Container` and
+assert the same choices.
+
+**The fleet-wide warning follows [#293](293-worker-capacity.md) §8's shape, not
+a new one.** `container::ModeWarnings` is a pure `mode_warning_due` predicate
+plus one cell of cadence state, bounded to one line per mode per fifteen
+minutes, held by the placing backend and fired from `place()` — not from
+`choose_placement`, which stays pure. It is placement-triggered rather than
+scan-triggered because the dispatcher has no fleet-wide list of the modes its
+job types require: it learns a mode is *wanted* only when a launch requiring it
+arrives, and that is exactly the moment the finding becomes actionable.
+
+**Nothing was flipped to host mode.** No node's `WORKER_MODES` and no job type
+in `.chug/jobs/` changed, so the tree's behaviour is identical today; what
+changed is that declaring either is now sufficient. End to end, a job type
+declaring `mode: host` on a fleet where exactly one node advertises `host`
+places every host launch on that node without a pin, queues them behind each
+other at its one slot, and sends the same job type's container `ci` evaluator
+wherever the policy prefers.
