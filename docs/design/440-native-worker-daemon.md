@@ -1,6 +1,6 @@
 # Design — the natively-supervised worker daemon
 
-Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away**, and no node runs a native daemon from this tree: nothing was applied, and `runtime.mode: host` is still refused (#401, #309 P1).
+Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away**, and no node runs a native daemon from this tree: nothing was applied, and no node advertises `host` (#309 P1 made `runtime.mode: host` a legal declaration in job #478; placing by it is P2).
 
 **The first conversion of a real node, on 2026-08-06, found two things this
 design got wrong for macOS** — [D6](#decisions)'s extracted binary is an ELF file
@@ -17,8 +17,9 @@ a daemon an operator built **by hand** and is not converted by this tree.
 ([`docs/reference/docs.md`](../reference/docs.md)), and it is worth saying what it does
 not claim. Every slice is in the tree; the daemon is buildable and supervisable
 natively on both platforms; and the fleet is exactly where it was — two nodes
-still running the containerized daemon, no `WORKER_MODES` naming `host`, and the
-`runtime.mode: host` refusal untouched. The last slice's own half is the sharpest
+still running the containerized daemon, no `WORKER_MODES` naming `host`, and no
+job type declaring `runtime.mode: host` (which #309 P1 has since made legal to
+declare, in job #478, without making it routable). The last slice's own half is the sharpest
 case of this: `nix/chug-node/` declares the unit, **nothing in this repo's CI
 evaluates that module** (#372 §2.3), and no node has ever been given it. The
 slices landed as — 3 as

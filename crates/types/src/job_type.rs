@@ -350,8 +350,8 @@ const XCODE_ENV_PREFIX: &str = "xcode:";
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 pub struct Runtime {
-    /// `container` (default) or `host`. Host mode parses but is refused by
-    /// [`JobType::validate`] until design #309 P0/P1 land.
+    /// `container` (default) or `host`. Host mode disallows the top-level
+    /// `image` and requires `env` ([`JobType::validate`]).
     #[serde(default)]
     pub mode: RuntimeMode,
     /// An opaque environment reference the node resolves — `nix:<flake-ref>#<attr>`
@@ -362,8 +362,8 @@ pub struct Runtime {
     pub env: Option<String>,
 }
 
-/// Which backend serves a job type's tasks (design #309 §3). Only
-/// [`RuntimeMode::Container`] is implemented; see [`JobType::validate`].
+/// Which backend serves a job type's tasks (design #309 §3). Both modes are
+/// declarable; placement by mode is #309 P2 and has not landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
@@ -371,8 +371,8 @@ pub enum RuntimeMode {
     /// Today's behavior: the task runs in a container built from `image`.
     #[default]
     Container,
-    /// The task runs as a process on a host-capable node (design #309). Not
-    /// implemented — declaring it is a validation refusal, not a launch.
+    /// The task runs as a process on a host-capable node (design #309 P0's
+    /// `HostBackend`). The declaration is legal; nothing routes by it yet.
     Host,
 }
 
@@ -496,14 +496,6 @@ pub enum FieldRuleError {
         context: String,
         reason: String,
     },
-    /// A declaration this schema accepts and this dispatcher cannot serve —
-    /// refused because the feature is unbuilt, not because the config is wrong.
-    #[error("field '{field}' is not supported by this dispatcher for {context}: {reason}")]
-    Unsupported {
-        field: &'static str,
-        context: String,
-        reason: String,
-    },
 }
 
 impl JobType {
@@ -523,12 +515,7 @@ impl JobType {
 
         match self.work.r#type {
             WorkType::Agent => {
-                if self.image.is_none() {
-                    errs.push(FieldRuleError::Required {
-                        field: "image",
-                        context: ctx(WorkType::Agent),
-                    });
-                }
+                errs.extend(self.validate_top_level_image(ctx(WorkType::Agent)));
                 if self.work.prompt.is_none() {
                     errs.push(FieldRuleError::Required {
                         field: "work.prompt",
@@ -559,12 +546,7 @@ impl JobType {
                 }
             }
             WorkType::Command => {
-                if self.image.is_none() {
-                    errs.push(FieldRuleError::Required {
-                        field: "image",
-                        context: ctx(WorkType::Command),
-                    });
-                }
+                errs.extend(self.validate_top_level_image(ctx(WorkType::Command)));
                 if self.work.run.is_none() {
                     errs.push(FieldRuleError::Required {
                         field: "work.run",
@@ -681,6 +663,7 @@ impl JobType {
             if matches!(e.r#type, EvaluatorType::Command | EvaluatorType::Agent)
                 && e.image.is_none()
                 && self.image.is_none()
+                && self.resolved_mode() == RuntimeMode::Container
             {
                 errs.push(FieldRuleError::Required {
                     field: "image",
@@ -738,7 +721,10 @@ impl JobType {
                     context: "wrap_up.type: none".into(),
                 });
             }
-            if wrap.image.is_none() && self.image.is_none() {
+            if wrap.image.is_none()
+                && self.image.is_none()
+                && self.resolved_mode() == RuntimeMode::Container
+            {
                 errs.push(FieldRuleError::Required {
                     field: "wrap_up.image",
                     context: wctx,
@@ -833,23 +819,49 @@ impl JobType {
         errs
     }
 
+    /// Which backend this job type's own tasks resolve to (design #309 §3).
+    /// A level carrying its own `image` is a container task regardless — see
+    /// [`JobType::validate_top_level_image`].
+    fn resolved_mode(&self) -> RuntimeMode {
+        self.runtime
+            .as_ref()
+            .map_or(RuntimeMode::Container, |r| r.mode)
+    }
+
+    /// The top-level `image` rule, which the resolved mode inverts (design
+    /// #309 §3): a container task always needs a root filesystem, and a host
+    /// task has no image at all.
+    ///
+    /// Per-level `image` stays legal under `mode: host` and is how that level
+    /// opts back into container mode — `.chug/jobs/_defaults.yaml` appends the
+    /// `ci` evaluator with an explicit image to *every* job type, so a host job
+    /// type is host work, container CI, one job.
+    fn validate_top_level_image(&self, context: String) -> Option<FieldRuleError> {
+        match (self.resolved_mode(), self.image.is_some()) {
+            (RuntimeMode::Container, false) => Some(FieldRuleError::Required {
+                field: "image",
+                context,
+            }),
+            (RuntimeMode::Host, true) => Some(FieldRuleError::Disallowed {
+                field: "image",
+                context,
+            }),
+            _ => None,
+        }
+    }
+
     /// The `runtime:` block's field rules (spec §1.1, design #309 §3, #373
-    /// Decision 2). Only the container row is implemented, and a job type with
-    /// no `runtime:` produces no errors from here.
+    /// Decision 2). A job type with no `runtime:` produces no errors from here.
     fn validate_runtime(&self) -> Vec<FieldRuleError> {
         let mut errs = Vec::new();
         let Some(runtime) = self.runtime.as_ref() else {
             return errs;
         };
         let ctx = format!("job type '{}'", self.name);
-        if runtime.mode == RuntimeMode::Host {
-            errs.push(FieldRuleError::Unsupported {
-                field: "runtime.mode",
-                context: ctx.clone(),
-                reason: "mode 'host' is not implemented yet: design #309 P0 (the HostBackend \
-                         prototype) and P1 (host placement) have not landed, so no node can \
-                         serve it — the declaration itself is well-formed"
-                    .into(),
+        if runtime.mode == RuntimeMode::Host && runtime.env.is_none() {
+            errs.push(FieldRuleError::Required {
+                field: "runtime.env",
+                context: format!("{ctx} (runtime.mode: host)"),
             });
         }
         if let Some(env) = runtime.env.as_deref() {
@@ -2057,16 +2069,28 @@ min_dispatcher: 5
         );
     }
 
-    /// An agent job type carrying `block` as its `runtime:` section, with the
-    /// `min_dispatcher` a declared `runtime:` requires already set — so each
-    /// test below asserts about its own rule and nothing else.
-    fn jt_with_runtime(block: &str) -> JobType {
+    /// An agent job type carrying `image_line` verbatim and `block` as its
+    /// `runtime:` section, with the `min_dispatcher` a declared `runtime:`
+    /// requires already set — so each test below asserts about its own rule
+    /// and nothing else.
+    fn jt_with_image_and_runtime(image_line: &str, block: &str) -> JobType {
         JobType::parse(&format!(
-            "name: mobile\nimage: img:latest\nmin_dispatcher: {}\n\
+            "name: mobile\n{image_line}min_dispatcher: {}\n\
              work:\n  type: agent\n  prompt: p.md\nruntime:\n{block}",
             crate::version::RUNTIME_SCHEMA_EPOCH
         ))
         .expect("runtime block should parse")
+    }
+
+    fn jt_with_runtime(block: &str) -> JobType {
+        jt_with_image_and_runtime("image: img:latest\n", block)
+    }
+
+    /// A host-mode agent job type with no top-level `image`, carrying `extra`
+    /// as further `runtime:` lines — the shape design #309 §3's host row
+    /// specifies.
+    fn jt_host(extra: &str) -> JobType {
+        jt_with_image_and_runtime("", &format!("  mode: host\n{extra}"))
     }
 
     #[test]
@@ -2142,33 +2166,99 @@ min_dispatcher: 5
     }
 
     #[test]
-    fn host_mode_is_refused_as_unbuilt_not_as_invalid() {
-        let jt = jt_with_runtime("  mode: host\n  env: \"nix:.#chug-mobile\"\n");
+    fn a_well_formed_host_declaration_validates_clean() {
+        let jt = jt_host("  env: \"nix:.#chug-mobile\"\n");
         assert_eq!(jt.runtime.as_ref().unwrap().mode, RuntimeMode::Host);
-        let errs = jt.validate();
-        let refusal = errs
-            .iter()
-            .find(|e| matches!(e, FieldRuleError::Unsupported { .. }))
-            .unwrap_or_else(|| panic!("host mode must be refused: {errs:?}"));
-        assert!(matches!(
-            refusal,
-            FieldRuleError::Unsupported {
-                field: "runtime.mode",
-                ..
-            }
-        ));
-        let rendered = refusal.to_string();
-        assert!(rendered.contains("not implemented"), "{rendered}");
-        assert!(rendered.contains("#309 P0"), "{rendered}");
+        assert_eq!(jt.validate(), vec![]);
+    }
+
+    #[test]
+    fn top_level_image_is_disallowed_under_host_mode() {
+        let disallowed = FieldRuleError::Disallowed {
+            field: "image",
+            context: "work.type: agent".into(),
+        };
         assert!(
-            !errs.iter().any(|e| matches!(
+            jt_with_runtime("  mode: host\n  env: \"nix:.#chug-mobile\"\n")
+                .validate()
+                .contains(&disallowed),
+            "a host task has no image"
+        );
+        let command = format!(
+            "name: mobile\nimage: img:latest\nmin_dispatcher: {}\nwork:\n  type: command\n  \
+             run: ./go.sh\nruntime:\n  mode: host\n  env: \"nix:.#chug-mobile\"\n",
+            crate::version::RUNTIME_SCHEMA_EPOCH
+        );
+        assert_eq!(
+            JobType::parse(&command).unwrap().validate(),
+            vec![FieldRuleError::Disallowed {
+                field: "image",
+                context: "work.type: command".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn host_mode_requires_a_declared_environment() {
+        let errs = jt_host("").validate();
+        assert!(
+            errs.iter().any(|e| matches!(
                 e,
-                FieldRuleError::Invalid {
-                    field: "runtime.mode",
+                FieldRuleError::Required {
+                    field: "runtime.env",
                     ..
                 }
             )),
-            "an unbuilt mode is not an invalid declaration: {errs:?}"
+            "a host task with no declared environment runs against the node's bare PATH: {errs:?}"
+        );
+    }
+
+    #[test]
+    fn an_evaluator_resolves_its_own_mode_under_a_host_job_type() {
+        let yaml = |image: &str| {
+            format!(
+                "name: mobile\nmin_dispatcher: {}\nwork:\n  type: agent\n  prompt: p.md\n\
+                 runtime:\n  mode: host\n  env: \"nix:.#chug-mobile\"\n\
+                 eval:\n  - name: ci\n    type: command\n    run: ./.chug/tasks/ci.sh\n{image}",
+                crate::version::RUNTIME_SCHEMA_EPOCH
+            )
+        };
+        assert_eq!(
+            JobType::parse(&yaml("    image: chuggernaut/agent-rust:prod\n"))
+                .unwrap()
+                .validate(),
+            vec![],
+            "an explicit image resolves that evaluator to container mode: host work, \
+             container CI, one job"
+        );
+        assert_eq!(
+            JobType::parse(&yaml("")).unwrap().validate(),
+            vec![],
+            "an evaluator with no image of its own inherits host mode and needs none"
+        );
+    }
+
+    #[test]
+    fn a_wrap_up_resolves_its_own_mode_under_a_host_job_type() {
+        let yaml = |image: &str| {
+            format!(
+                "name: mobile\nmin_dispatcher: {}\nwork:\n  type: agent\n  prompt: p.md\n\
+                 runtime:\n  mode: host\n  env: \"nix:.#chug-mobile\"\n\
+                 wrap_up:\n  run: ./publish.sh\n{image}",
+                crate::version::RUNTIME_SCHEMA_EPOCH
+            )
+        };
+        assert_eq!(
+            JobType::parse(&yaml("")).unwrap().validate(),
+            vec![],
+            "a wrap_up with no image of its own inherits host mode and needs none"
+        );
+        assert_eq!(
+            JobType::parse(&yaml("  image: chuggernaut/agent-rust:prod\n"))
+                .unwrap()
+                .validate(),
+            vec![],
+            "an explicit image resolves that wrap_up to container mode"
         );
     }
 
@@ -2226,20 +2316,15 @@ min_dispatcher: 5
     #[test]
     fn host_mode_requires_the_min_dispatcher_declaration_too() {
         let errs = JobType::parse(
-            "name: mobile\nimage: img:latest\nwork:\n  type: agent\n  prompt: p.md\n\
-             runtime:\n  mode: host\n",
+            "name: mobile\nwork:\n  type: agent\n  prompt: p.md\n\
+             runtime:\n  mode: host\n  env: \"nix:.#chug-mobile\"\n",
         )
         .unwrap()
         .validate();
-        assert!(
-            errs.contains(&expected_runtime_epoch_error()),
-            "a host declaration keeping 'image' is invisible to an N-1 dispatcher unless it \
-             declares the epoch: {errs:?}"
-        );
-        assert!(
-            errs.iter()
-                .any(|e| matches!(e, FieldRuleError::Unsupported { .. })),
-            "{errs:?}"
+        assert_eq!(
+            errs,
+            vec![expected_runtime_epoch_error()],
+            "the declared epoch is the only signal that crosses the skew boundary"
         );
     }
 
@@ -2265,16 +2350,10 @@ min_dispatcher: 5
             )),
             "{errs:?}"
         );
-        let hosted = jt_with_runtime("  mode: host\n  env: \"xcode:16.2\"\n");
-        assert!(
-            !hosted.validate().iter().any(|e| matches!(
-                e,
-                FieldRuleError::Invalid {
-                    field: "runtime.env",
-                    ..
-                }
-            )),
-            "the scheme rule must not fire under host mode, which is refused on its own"
+        assert_eq!(
+            jt_host("  env: \"xcode:16.2\"\n").validate(),
+            vec![],
+            "the scheme rule must not fire under host mode, which is where Xcode belongs"
         );
     }
 

@@ -101,10 +101,10 @@ Declarative YAML, one file per job type, lives under `.chug/jobs/` in the repo a
 name: string                   # required; unique within the repo (the file stem — the wire identifier)
 display_name: string           # optional; human-facing name for the library and the create-form type picker; falls back to name
 description: string            # optional; one-line summary shown alongside the display name in the type picker
-image: string                  # required for agent/command work; disallowed at top level for human work (container evaluators must declare their own image; see eval.image)
+image: string                  # required for agent/command work in container mode; disallowed at top level for human work, and under runtime.mode: host (container evaluators must declare their own image; see eval.image)
 
 runtime:                       # optional; where this type's tasks run and against which toolchain. Absent = mode: container with no declared environment, which is every job type that predates the block
-  mode: container | host       # optional; default container. `host` PARSES AND IS REFUSED by validate() — the mode is designed but unbuilt (design #309 P0/P1), so the refusal is a "not supported by this dispatcher" field-rule error, never a launch that queues for a node that cannot exist
+  mode: container | host       # optional; default container. `host` is a legal declaration (design #309 P1): top-level image disallowed, env required. It selects nothing yet — placement by mode is #309 P2, so no node is chosen for advertising host
   env: string                  # optional in container mode, where it layers a project-supplied toolchain over the image's userland (design #373); an opaque environment reference the node resolves — `nix:<flake-ref>#<attr>` in either mode, `xcode:<version>` in host mode only (Xcode cannot be containerized, §322 design). A declared env requires min_dispatcher >= the runtime epoch (§14.2)
 
 work:                          # required
@@ -142,7 +142,7 @@ wrap_up:                       # optional; the job's third step (work → evalua
   type: merge | none           # default merge: squash-merge the job branch through the merge queue/gate. none: eval-pass goes straight to Done — for jobs whose effect is external (deploys, reports); the job branch is scratch and is deleted unmerged
   run: string                  # optional; post-merge command (§3.2). Runs in the WrapUp phase AFTER the squash lands on the default branch, against the merged main content (the container clones the default branch). Ships the merged result (e.g. a web job publishing its built UI); never runs if the job is revoked/escalated before landing. Requires type: merge. A non-zero exit escalates the job — the merge is NOT undone. Must be idempotent (a restart may re-launch it, §3.6)
   name: string                 # optional; human-facing label for the wrap-up task, validated like an evaluator name ([A-Za-z0-9._-]+). Unset → derived from the mode: a command wrap-up takes its script's basename (.chug/tasks/web-publish.sh → web-publish). Stamped onto the task record's `label` so the UI reads `Command · publish`, not a bare `Command`
-  image: string                # optional; image for the run container; falls back to top-level image (required when run is set and the job type has no top-level image). Disallowed without run
+  image: string                # optional; image for the run container; falls back to top-level image (required when run is set and the job type has no top-level image, in container mode only — under runtime.mode: host a wrap-up with no image of its own is a host task and needs none). Disallowed without run
   secrets: [string]            # optional; secrets injected into the run container; not inherited from work.secrets. Disallowed without run
   workload_identities: [string] # optional; cloud identities (§8.3) the run container may exchange a workload token for; not inherited from work.workload_identities. Disallowed without run
 
@@ -163,7 +163,7 @@ eval:                          # optional; omit or leave empty for auto-pass
     prompt: string             # path to prompt file in repo (resolved from base_ref)
 
     # type: command or agent
-    image: string              # optional; falls back to top-level image; one of the two is required
+    image: string              # optional; falls back to top-level image; one of the two is required in container mode — not under runtime.mode: host, where an evaluator with no image of its own is a host task (see note 2)
     secrets: [string]          # evaluator-specific secrets; not inherited from top-level
     workload_identities: [string] # evaluator-specific cloud identities (§8.3); not inherited from work.workload_identities. Disallowed for a human evaluator (no container)
 
@@ -191,7 +191,7 @@ inputs:                        # optional; the values a job of this type accepts
 
 | Field | `agent` | `command` | `human` |
 |---|---|---|---|
-| `image` | required | required | disallowed |
+| `image` | required³ | required³ | disallowed |
 | `resources` | optional | optional | disallowed¹ |
 | `work_retries` | optional | optional | disallowed |
 | `eval_retries` | optional | optional | optional |
@@ -205,6 +205,8 @@ inputs:                        # optional; the values a job of this type accepts
 | `run` | disallowed | required | disallowed |
 
 ¹ `resources` is disallowed for `human` work because no container is launched. `job_deadline` is top-level and applies to all work types including `human`.
+
+³ Required in container mode, **disallowed** under `runtime.mode: host` — a host task has no image (see the `runtime` rules below).
 
 **Field rules by evaluator subtype:**
 
@@ -221,17 +223,16 @@ inputs:                        # optional; the values a job of this type accepts
 | `required` | optional | optional | optional |
 | `stage` | optional | optional | optional |
 
-² Falls back to the job's top-level `image`. Required per-evaluator when the job declares no top-level image (`work.type: human`).
+² Falls back to the job's top-level `image`. Required per-evaluator when the job declares no top-level image (`work.type: human`) — but **not** under `runtime.mode: host`, where an evaluator with no `image` of its own is a host task and needs none.
 
-**Field rules for `runtime`** (design #309 §3, #373 Decision 2 — the whole table
-is declared, only the container row is implemented):
+**Field rules for `runtime`** (design #309 §3, #373 Decision 2):
 
 | Rule | Detail |
 |---|---|
 | `mode: container` (and an absent `runtime`) | `image` required for agent/command work exactly as before — a container always needs a root filesystem, so `container + env + no image` is not coherent. `env` optional |
-| `mode: host` | **Refused** by `validate()` as not supported by this dispatcher: the mode is designed (top-level `image` disallowed, `env` required) and unbuilt, and the refusal stands in for design #309 P0 until it lands. The host row's own field rules — and the narrowing of the evaluator-image requirement they need — arrive with it |
+| `mode: host` | Top-level `image` **disallowed** — a host task has no image — and `runtime.env` **required**, because a host task with no declared environment runs against whatever the node's bare `PATH` holds. A **level** carrying its own `image` (an evaluator, `wrap_up`) is a container task regardless and does not inherit `runtime`, which is what makes the `ci` evaluator `.chug/jobs/_defaults.yaml` appends to every job type stay a container task: host work, container CI, one job. The evaluator and `wrap_up` image requirements are narrowed to match — under host, a level with no `image` of its own needs none. **The declaration selects nothing yet**: placement by mode is design #309 P2 and has not landed, so a host job type is well-formed and unroutable |
 | Scheme | `nix:<flake-ref>#<attr>` is legal in either mode. `xcode:<version>` requires `mode: host`, so it is a field rule rather than a launch failure — Xcode cannot be containerized. A declared `env` must be non-empty |
-| Skew | Any `runtime:` beyond a bare `mode: container` — a declared `env`, or any non-container `mode` — requires `min_dispatcher >=` the epoch the block landed in (§14.2). The gate is structural, not left to authorship: an N−1 dispatcher tolerates the whole unknown `runtime:` field, keeps the still-present `image`, and would run the job containerized against the image's toolchain rather than as declared — a silently dropped constraint. The declaration is the only signal that crosses the skew boundary, because an N−1 dispatcher never runs the new field rules at all. A container-mode `runtime:` with no `env` is ungated: it drops nothing |
+| Skew | Any `runtime:` beyond a bare `mode: container` — a declared `env`, or any non-container `mode` — requires `min_dispatcher >=` the epoch the block landed in (§14.2). The gate is structural, not left to authorship: an N−1 dispatcher tolerates the whole unknown `runtime:` field, keeps the still-present `image`, and would run the job containerized against the image's toolchain rather than as declared — a silently dropped constraint. The declaration is the only signal that crosses the skew boundary, because an N−1 dispatcher never runs the new field rules at all; a host job type has no top-level `image` for that dispatcher to keep, so it parks the type outright (§14.2) rather than mis-running it, and the declared epoch is what makes that park legible. A container-mode `runtime:` with no `env` is ungated: it drops nothing |
 
 **Field rules for `inputs`** (all enforced at parse, so release validation and
 `chuggernaut validate` reject them offline):
@@ -1000,7 +1001,7 @@ The `refresh` op returns as soon as the daemon accepts (reporting the version it
 
 **Drain guarantee.** Refreshing must never interrupt in-flight job containers, and the daemon must not replace itself **between accepting a launch and the container existing**. The build phase runs with launches flowing normally (it takes minutes); only the brief **swap window quiesces**: the daemon refuses new launches with the transient no-capacity signal (queued and retried by the dispatcher, never a task failure) and waits for any accepted-but-not-yet-created launch to finish before it swaps. If the build or drain fails, the daemon reopens launches and stays on the old image — drift is surfaced, not an outage. Per-node worker version is exposed in the platform config snapshot (`WorkerNode.version`) so the UI can show fleet versions and spot drift.
 
-**What that guarantee covers, and what it does not.** It is unconditional for a task that is a **container** and conditional for a task that is a **host process** (`runtime.mode: host`, §1.1): a container task is the daemon's *sibling* on the node's docker, so no restart of the daemon can reach it, while a host task is the daemon's *child* and survives only while a mechanism keeps it out of the daemon's teardown set. The host half is stated because the mode is designed, not because it is available — `validate()` refuses `runtime.mode: host` (§1.1) and no node advertises it. Case by case (design [#440](design/440-native-worker-daemon.md) §3, [#309](design/309-host-native-execution.md) §6):
+**What that guarantee covers, and what it does not.** It is unconditional for a task that is a **container** and conditional for a task that is a **host process** (`runtime.mode: host`, §1.1): a container task is the daemon's *sibling* on the node's docker, so no restart of the daemon can reach it, while a host task is the daemon's *child* and survives only while a mechanism keeps it out of the daemon's teardown set. The host half is stated because the mode is declarable, not because it is reachable — `validate()` accepts `runtime.mode: host` (§1.1) but nothing places by it (design #309 P2), and no node advertises it. Case by case (design [#440](design/440-native-worker-daemon.md) §3, [#309](design/309-host-native-execution.md) §6):
 
 - **Container tasks, across any restart of the daemon — guaranteed, unconditionally.** The daemon has no mechanism by which it could end a sibling container's life, and the dispatcher's `wait` is an inspect poll, so it re-attaches to a container that kept running (§3.6). This holds however the daemon is deployed.
 - **Host tasks, across a restart of the daemon's own supervision unit — guaranteed.** A host task is held **outside** the daemon's own supervision unit, by whichever mechanism the node's platform gives for that (#440 D3, which owns it per platform), so restarting or replacing the daemon leaves the task running and its exit status still lands. Proven on both platforms on 2026-08-06: on Linux through the shipped launch path, where all thirteen tests of `crates/container/tests/host_backend.rs` passed with no skips on a systemd 260 node; on macOS 26.5.1, where `deploy/prod/macos-host-supervision-proof.sh` survived a `launchctl kickstart -k` of the agent that launched the task (`docs/reference/runbooks/macos-host-supervision-proof.md`).

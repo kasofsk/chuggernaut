@@ -83,8 +83,8 @@ export type ProjectRole = "viewer" | "member" | "admin";
  */
 export type InputKind = "string" | "enum";
 /**
- * Which backend serves a job type's tasks (design #309 §3). Only
- * [`RuntimeMode::Container`] is implemented; see [`JobType::validate`].
+ * Which backend serves a job type's tasks (design #309 §3). Both modes are
+ * declarable; placement by mode is #309 P2 and has not landed.
  */
 export type RuntimeMode = "container" | "host";
 export type WorkType = "agent" | "command" | "human";

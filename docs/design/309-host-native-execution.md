@@ -1,8 +1,11 @@
 # Design — Host-native execution (node kind, selector, capabilities, exclusive resources)
 
 Status: PROPOSED; **P0 landed 2026-08-05 (job #434)** — `HostBackend`,
-`WORKER_MODES` routing and the `slots: 1` enforcement, off on every node. §1's
-recommendation had already shipped before P0 started; see
+`WORKER_MODES` routing and the `slots: 1` enforcement, off on every node — and
+**P1 landed 2026-08-07 (jobs #401, #478)**: `runtime.mode: host` is a legal
+declaration that nothing places by yet
+([P1 as landed](#p1-as-landed-2026-08-07--the-host-rows-field-rules-job-478)).
+§1's recommendation had already shipped before P0 started; see
 [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed)
 and its addendum on `remove` racing its own reaper.
 
@@ -38,13 +41,17 @@ rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument and its dated corrections,
 never edited into the prose above them.*
 
-One phase has landed and one landed early and out of order. P0 is in the tree
+Two phases have landed, one of them early and out of order. P0 is in the tree
 (`crates/container/src/host.rs`, `WORKER_MODES`) and is **off on every node** —
-no node advertises `host`, and `runtime.mode: host` is still refused by
-`validate()`. P1's schema half arrived ahead of it in job #401, driven by
-[#373](373-project-toolchains.md); what P1 still owes is the host row's own
-field rules and the deletion of that refusal. Everything from P2 on is
-unstarted: no `NodeCapabilities` record exists in the tree.
+no node advertises `host`. P1 is complete: its schema half arrived ahead of P0
+in job #401, driven by [#373](373-project-toolchains.md), and job #478 landed
+the host row's own field rules (`crates/types/src/job_type.rs` — top-level
+`image` disallowed, `runtime.env` required, the evaluator-image requirement
+narrowed by the [Coexistence](#coexistence-on-a-mixed-fleet) precedence rule)
+and deleted the refusal, with no epoch bump. So a host job type is now
+**well-formed and unroutable**: nothing places by mode, because that is P2 and
+P2 is gated on #293 job 3. Everything from P2 on is unstarted: no
+`NodeCapabilities` record exists in the tree.
 [#440](440-native-worker-daemon.md) is the design for the native-supervision
 prerequisite P0 named and left unowned.
 
@@ -56,7 +63,7 @@ is the same work sliced by contract, not a second plan.
 | Phase | What | State |
 | --- | --- | --- |
 | **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed) |
-| **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) in part — the block and the epoch shipped for #373; the host row's field rules and the unsupported-refusal deletion are open |
+| **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch |
 | **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | Proposed — gated on P1 and #293 job 3 |
 | **P3** | Per-task users; `resources_enforced`; transient scopes | Proposed — gated on P2 |
 | **P4** | Device leases | Proposed — only when a host node must run a second, non-device-bound task concurrently |
@@ -1338,3 +1345,44 @@ Two things generalize past this backend:
    found by reading while the third needed a loaded machine. P1 should assume
    the remaining §2 "trivial" verdicts are about the *writing*, not the getting
    right.
+
+## P1 as landed, 2026-08-07 — the host row's field rules (job #478)
+
+P1 is complete. Job #401 had already landed the block and the epoch for
+[#373](373-project-toolchains.md); this job landed the half that was still open
+— the host row's own field rules in `crates/types/src/job_type.rs` — and deleted
+the refusal §Phasing above describes as "only the container row validates". That
+sentence, and every claim in this document's body that `mode: host` is refused,
+is history as of this section.
+
+What the rules are, exactly as [§3](#3-the-host-mode-selector) specified them:
+
+- **Top-level `image` is disallowed** under `runtime.mode: host` and required
+  under container mode — one rule with the resolved mode as its discriminant
+  (`JobType::validate_top_level_image`), shared by the `agent` and `command` arms.
+  Job types validated the old way are untouched: absent `runtime:` resolves to
+  container.
+- **`runtime.env` is required** under `mode: host`. #322 argues the toolchain
+  case; the plainer one is that a host task with no declared environment runs
+  against whatever the node's bare `PATH` holds, which is the
+  non-reproducibility [#322](322-macos-native-runtime.md) exists to remove.
+- **The evaluator and `wrap_up` image requirements are narrowed** to levels
+  whose resolved mode is container, per
+  [Coexistence](#coexistence-on-a-mixed-fleet). Without that narrowing the
+  requirement fires on *every* host job type, which is the deeper reason the
+  blanket refusal was there: a host job type could not satisfy the top-level ban
+  and the fallback requirement at once. `wrap_up` is narrowed alongside the
+  evaluators because §3 names all three levels, not two.
+- **No epoch bump.** `RUNTIME_SCHEMA_EPOCH` stays 4 — #401 spent it, and the
+  `min_dispatcher` requirement it installed already covers any declared
+  non-container mode. A host job type carries no top-level `image`, so an N−1
+  dispatcher rejects the config and parks the type (§14.2) instead of running it
+  containerized; the declared epoch is what makes that park legible rather than
+  mysterious.
+
+What did **not** change, and is still P2: nothing routes by mode. No
+`NodeCapabilities` record exists, `choose_placement` cannot see a node's modes,
+and no node advertises `host`. A host job type is therefore **well-formed and
+unroutable** — it validates, and the platform has nowhere to put it. P2 stays
+gated on [#293](293-worker-capacity.md) job 3. No job type in this repo declares
+`mode: host`, deliberately: nothing serves one.

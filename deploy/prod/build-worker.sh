@@ -586,8 +586,9 @@ fi
 # DECLARES it and nothing verifies it — no probe for a toolchain, an interpreter,
 # a nix daemon or anything else, here or in the daemon — and nothing on the wire
 # reads it yet (#309 P2 owns NodeCapabilities). Declaring `host` therefore makes
-# host jobs runnable on exactly no node: #401 refuses `runtime.mode: host` as
-# unsupported.
+# host jobs runnable on exactly no node: `runtime.mode: host` validates since
+# #309 P1 (job #478), but nothing places by it, so the declaration selects no
+# node.
 #
 # What it DOES do is the reason the guard below exists. P0 has no per-request
 # selector (crates/worker/src/daemon.rs `backend_kind`), so a node naming `host`

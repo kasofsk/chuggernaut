@@ -44,6 +44,11 @@ under a 45-second ceiling. The finding that motivated it stands: clock 3 belongs
 in container mode on dedicated nodes, and warming is a scheduled job rather than
 a platform mechanism — so there is no third slice and none is planned.
 
+One claim about a sibling has since gone stale: [C7](#c7-rule-4s-n1-fail-safe-holds-for-neither-row)
+calls the top-level `image` ban under `runtime.mode: host` unlanded debt, and
+[#309](309-host-native-execution.md) P1 landed it in job #478 without changing
+C7's N−1 conclusion ([C8](#c8-the-image-ban-c7-called-unlanded-debt-has-landed-and-c7s-conclusion-is-unchanged)).
+
 The rows below are the states of [Sequencing](#sequencing)'s table, which keeps
 each slice's full argument and its dependency.
 
@@ -841,6 +846,25 @@ it and not a field ban is the gate. Shipped in #401 with the block.
 The `deny_unknown_fields` half of rule 4 is not worthless — it is what makes
 `mdoe: host` a hard parse error on an **N** dispatcher, which is what #309 §3's
 option-A table actually claimed. It is simply not the N−1 property.
+
+### C8. The `image` ban C7 called unlanded debt has landed, and C7's conclusion is unchanged
+
+[C7](#c7-rule-4s-n1-fail-safe-holds-for-neither-row)'s `mode: host` bullet reads
+the ban on a top-level `image` under `runtime.mode: host` as "P0/P1 debt that
+job #401 did not land". [#309](309-host-native-execution.md) P1 landed it in
+job #478, where `mode: host` validates, the top-level `image` is **disallowed**
+under it, and `runtime.env` is required. So the bullet's second clause — a host
+declaration that keeps `image:` — describes a config an **N** dispatcher now
+rejects outright rather than one it silently runs containerized.
+
+The bullet's conclusion survives intact, because it never rested on the ban:
+*"even with the ban, a new rule the N−1 dispatcher never executes cannot make it
+park."* That is still the whole of the N−1 story, and `min_dispatcher` is still
+the only signal that crosses the boundary. What the ban adds is the **N** side —
+a host job type has no top-level `image` for an N−1 dispatcher to keep, which is
+why #309 P1 needed no epoch of its own: the `min_dispatcher >=
+RUNTIME_SCHEMA_EPOCH` rule this section argues for already covers any declared
+non-container mode.
 
 ## What this makes wrong elsewhere
 

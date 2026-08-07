@@ -64,8 +64,11 @@ container scope; W5 is keyed on the node's mode rather than on its OS, so a
 macOS host node inherits the refusal without a line of macOS code. What remains
 is entirely macOS: the `/workspace` rebase (`CHUG_WORKSPACE` is not in the
 tree), the `simctl`-scoped teardown, Xcode discovery and the runbook. No node in
-the fleet runs macOS host tasks; `runtime.mode: host` is still refused by
-`validate()`.
+the fleet runs macOS host tasks. `runtime.mode: host` **validates** since
+[#309](309-host-native-execution.md) P1 (job #478) landed the host row's field
+rules — the top-level `image` ban and the required `env` this document's N2 also
+asks for; N2's own `mode: host` requires `work.type: command` rule did not land
+with them, and nothing places by mode either, which is #309 P2.
 
 The rows below are the states of [Phased implementation
 sketch](#phased-implementation-sketch)'s table, which keeps each phase's full
@@ -77,7 +80,7 @@ argument and its dependency.
 | **W2** | The host backend **including the rebase**, on one Mac at `slots: 1` | **Landed** (job #434) in part — the backend, the task dir under `WORKER_HOST_ROOT` and the exit-status wrapper exist and are Linux-proven; the `CHUG_WORKSPACE` indirection, the total `/workspace` mapping, the credential-tree teardown and the agent-shaped-launch refusal are not |
 | **W3** | macOS hardening: symlink containment, `simctl`-scoped teardown, the retention sweep | Proposed — nothing macOS-specific is in the tree |
 | **N1** | `docs/spec.md`: the host column, the host node kind, `/workspace` as a logical path | Proposed |
-| **N2** | The `runtime: { mode, env }` schema, its field rules, the epoch bump and both validate rules | **Landed** (job #401) for #373's container-mode need; the host row's own field rules are #309 P1's remainder |
+| **N2** | The `runtime: { mode, env }` schema, its field rules, the epoch bump and both validate rules | **Landed** (job #401) for #373's container-mode need and (job #478) for the host row's own field rules, as #309 P1; N2's own `mode: host` requires `work.type: command` rule did not land with either |
 | **W4** | Node-side env-ref resolution: Xcode discovery, `xcode:<version>` → `DEVELOPER_DIR` | Proposed — the `xcode:`-is-host-only *validate* rule shipped with N2; no resolution exists |
 | **W5** | Refresh precondition: decline a refresh while a host task runs | **Landed** (job #460) generically, as [#440](440-native-worker-daemon.md) slice 3 — §6's phase-1 mitigation, plus a swap-boundary re-check that phase never asked for |
 | **N3** | The macOS node runbook in `deploy/prod/README.md` | Proposed |

@@ -948,9 +948,9 @@ Notes:
   It rides the same `<VAR>_<node>` resolution as `WORKER_SLOTS`, and it survives
   a self-refresh by being written into the node's environment file, not by the
   swap copying it forward (#440 D6/D7). Declaring `host` does **not** make host jobs runnable:
-  #401 refuses `runtime.mode: host` as unsupported, and #309 P2 — which would
-  put a node's modes on the wire — has not landed, so the dispatcher never sees
-  them. It is also **not additive**: P0 has no per-request selector, so a node
+  a job type may declare `runtime.mode: host` since #309 P1 (job #478), but #309
+  P2 — which would put a node's modes on the wire — has not landed, so the
+  dispatcher never sees them and places by node, not by mode. It is also **not additive**: P0 has no per-request selector, so a node
   naming `host` runs *every* launch as a host process, ignoring the image, and
   refuses to boot below `WORKER_SLOTS=1` + `WORKER_SLOTS_MAX=1` (one host task
   per node). `build-worker.sh` refuses the capacity half it can see and names
