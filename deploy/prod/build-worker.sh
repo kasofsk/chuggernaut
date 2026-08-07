@@ -553,11 +553,22 @@ fi
 # so after a swap the node reports this boot value until the dispatcher reconciles
 # the recorded intent back onto it (one scan tick). Set it to something the node
 # can serve (prod runs air and nuc at 2 each); empty when unset ⇒ the daemon's
-# documented default of 4. The ceiling is a separate knob, `WORKER_SLOTS_MAX`,
-# which this script does not pass — add it to the node's environment file by hand
-# on a node whose CPU count overstates what it can serve.
+# documented default of 4.
+#
+# The CEILING that boot value is clamped to, and that every later `set_slots`
+# is validated against (`WORKER_SLOTS_MAX`, spec §3.1), rides beside it in the
+# same shape — bare or per node, and unset stays UNSET so a node that declares
+# nothing gets the daemon's own default, its CPU count, exactly as before this
+# line existed. It is first-boot only in the same sense: it bounds what the
+# operator UI may raise a node to, and it never changes a registered node's live
+# capacity. Forwarding it is what lets a lowered ceiling — or the
+# WORKER_SLOTS_MAX=1 a host node must boot with (below) — survive a deploy
+# instead of being re-added to the node by hand after each one.
 if [ -n "${WORKER_SLOTS:-}" ]; then
   spec_line WORKER_SLOTS "$WORKER_SLOTS"
+fi
+if [ -n "${WORKER_SLOTS_MAX:-}" ]; then
+  spec_line WORKER_SLOTS_MAX "$WORKER_SLOTS_MAX"
 fi
 # ── the docker engine the daemon dials: only the LINE is composed here ──────
 # The value was resolved and both its refusals answered far above, beside the
@@ -595,11 +606,16 @@ fi
 # by whether it carries an image, so the mode is per task rather than per node —
 # but any node naming `host` still refuses to start unless WORKER_SLOTS and
 # WORKER_SLOTS_MAX are both 1, node-wide, because two host tasks cannot both own
-# /workspace — #309 §2's collision, taken as option (iii). Only the first of
-# those is forwardable from here (WORKER_SLOTS_MAX is the one knob no script
-# passes, env.example says so), so this refuses the half it can see and names the
-# half it cannot, rather than replacing a working daemon with one the supervisor
-# boot-loops on `Restart=always` (systemd) or `KeepAlive` (launchd).
+# /workspace — #309 §2's collision, taken as option (iii). Both numbers are
+# forwarded above, so the guard checks both, against exactly what
+# `enforce_host_capacity` demands (crates/worker/src/daemon.rs), and names
+# whichever one is wrong — rather than replacing a working daemon with one the
+# supervisor boot-loops on `Restart=always` (systemd) or `KeepAlive` (launchd).
+#
+# An UNSET ceiling is refused with the rest, and that is not the same rule as
+# "unset stays unset" below: the daemon defaults it to the node's own CPU count,
+# which is 1 on no node this fleet has and is a number nothing here can read. A
+# host node therefore has to say WORKER_SLOTS_MAX=1 out loud.
 #
 # Unset stays UNSET rather than becoming the daemon's `container` default: a node
 # that declared nothing must produce the run it produced before this knob existed,
@@ -647,9 +663,23 @@ if [ -n "$MODES" ]; then
     esac
     MODES_SEEN="$MODES_SEEN,$_mode"
   done
-  if [ -n "$MODES_HOST" ] && [ "${WORKER_SLOTS:-}" != "1" ]; then
-    echo "build-worker: WORKER_MODES='$MODES' names host, which the daemon serves only at WORKER_SLOTS=1 (one host task per node — design #309 §2 option (iii)), but WORKER_SLOTS is '${WORKER_SLOTS:-<unset: daemon default 4>}' on $NODE; REFUSING daemon restart (live daemon untouched). Declare WORKER_SLOTS_$NODE=1 too — and note the daemon also demands WORKER_SLOTS_MAX=1, which NO script forwards (env.example), so a host node needs that line added to $ENV_FILE by hand." >&2
-    exit 1
+  if [ -n "$MODES_HOST" ]; then
+    CAP_BAD=""
+    if [ "${WORKER_SLOTS:-}" != "1" ]; then
+      CAP_BAD="WORKER_SLOTS is '${WORKER_SLOTS:-<unset: daemon default 4>}'"
+    fi
+    if [ "${WORKER_SLOTS_MAX:-}" != "1" ]; then
+      CAP_MAX="WORKER_SLOTS_MAX is '${WORKER_SLOTS_MAX:-<unset: daemon default is this node's CPU count>}'"
+      if [ -n "$CAP_BAD" ]; then
+        CAP_BAD="$CAP_BAD and $CAP_MAX"
+      else
+        CAP_BAD="$CAP_MAX"
+      fi
+    fi
+    if [ -n "$CAP_BAD" ]; then
+      echo "build-worker: WORKER_MODES='$MODES' names host, which the daemon serves only at WORKER_SLOTS=1 AND WORKER_SLOTS_MAX=1 (one host task per node — design #309 §2 option (iii), crates/worker/src/daemon.rs \`enforce_host_capacity\`), but $CAP_BAD on $NODE; REFUSING daemon restart (live daemon untouched). Declare WORKER_SLOTS_$NODE=1 and WORKER_SLOTS_MAX_$NODE=1 in deploy/prod/chuggernaut.env — this script forwards both into $ENV_FILE, so neither is added to the node by hand." >&2
+      exit 1
+    fi
   fi
   spec_line WORKER_MODES "$MODES"
 fi
@@ -1142,9 +1172,9 @@ fi
 #
 # The comparison is against $SPEC_ENV, not against the shell's variables, because
 # only $SPEC_ENV knows what will actually be written: a knob this script does not
-# forward (WORKER_SLOTS_MAX is the documented one) is dropped no matter what
-# chuggernaut.env says about it, and a check that read the env would call that
-# clean. Presence decides the refusal; the VALUE comparison is informational
+# forward (the daemon reads more WORKER_* than the composition above renders —
+# WORKER_HOST_ROOT is one) is dropped no matter what chuggernaut.env says about
+# it, and a check that read the env would call that clean. Presence decides the refusal; the VALUE comparison is informational
 # only, so a quoted value this cannot parse costs a noisy line and never a
 # wrong verdict.
 #
@@ -1202,7 +1232,7 @@ $_key="*) _passed=1 ;;
       _dropped="$_dropped $_key"
       eval "_declared=\${$_key:-}"
       if [ -n "$_declared" ]; then
-        echo "build-worker: run-spec DRIFT on $NODE: the live daemon runs $_key=$_live and it IS declared, but build-worker.sh does not forward $_key — recreating the daemon DROPS it (env.example says so for WORKER_SLOTS_MAX)" >&2
+        echo "build-worker: run-spec DRIFT on $NODE: the live daemon runs $_key=$_live and it IS declared, but build-worker.sh does not forward $_key — recreating the daemon DROPS it" >&2
       else
         echo "build-worker: run-spec DRIFT on $NODE: the live daemon runs $_key=$_live and nothing declares it — recreating the daemon DROPS it" >&2
       fi
@@ -1232,7 +1262,7 @@ $_key="*) _passed=1 ;;
 }
 build_worker_run_spec_drift || exit 1
 
-echo "build-worker: run spec for $NODE: WORKER_SLOTS=${WORKER_SLOTS:-<unset: daemon default 4>} WORKER_CACHE_DIR=${WORKER_CACHE_DIR:-<unset: caching OFF>} WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-<unset: cannot self-refresh>} WORKER_GIT_KEY=$GIT_KEY WORKER_DOCKER_ENDPOINT=${DOCKER_ENDPOINT:-<unset: daemon default $DOCKER_ENDPOINT_DEFAULT>}"
+echo "build-worker: run spec for $NODE: WORKER_SLOTS=${WORKER_SLOTS:-<unset: daemon default 4>} WORKER_SLOTS_MAX=${WORKER_SLOTS_MAX:-<unset: daemon default is the node CPU count>} WORKER_CACHE_DIR=${WORKER_CACHE_DIR:-<unset: caching OFF>} WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-<unset: cannot self-refresh>} WORKER_GIT_KEY=$GIT_KEY WORKER_DOCKER_ENDPOINT=${DOCKER_ENDPOINT:-<unset: daemon default $DOCKER_ENDPOINT_DEFAULT>}"
 echo "build-worker: supervising $NODE natively on $NODE_OS — $UNIT_PATH over $ENV_FILE (design #440 D2)"
 ssh "$WORKER_SSH" "$REMOTE" < /dev/null
 

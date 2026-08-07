@@ -889,7 +889,8 @@ the mac-side path never appears at all.
 - `build-worker.sh` compares the node's own environment file with the run it is
   about to compose and **refuses**, live daemon untouched, when the new run
   would drop a setting the node is running — including one this script never
-  forwards (`WORKER_SLOTS_MAX`). Declare it, or pass `WORKER_SPEC_DROP_OK=1` to
+  forwards (the daemon reads more `WORKER_*` than the run spec composes;
+  `WORKER_HOST_ROOT` is one). Declare it, or pass `WORKER_SPEC_DROP_OK=1` to
   drop it on purpose. Both are loud; neither is silent. A node that still runs
   the container daemon has no environment file yet, so the live container's
   environment is read instead — the conversion is exactly the recreate this
@@ -969,7 +970,9 @@ Notes:
   After a swap the node reports that boot value until the dispatcher reconciles
   its recorded intent back onto it — one scan tick, seconds of small over- or
   under-cap. `WORKER_SLOTS_MAX` (default: the node's CPU count) is the ceiling a
-  capacity command is validated against.
+  capacity command is validated against; it rides the same `<VAR>_<node>`
+  resolution and is written into the node's environment file beside
+  `WORKER_SLOTS`, so a lowered ceiling survives deploys.
 
   A **fresh** install writes `|worker|0` above because its dispatcher and its
   daemons are built from the same SHA, so observed capacity is arriving from the
@@ -1000,9 +1003,11 @@ Notes:
   routes each launch by whether it carries an image, and one naming only `host`
   needs no Docker and refuses any launch that carries one. What every node naming
   `host` still pays is capacity — it refuses to boot below `WORKER_SLOTS=1` +
-  `WORKER_SLOTS_MAX=1`, node-wide, one task at a time of either kind.
-  `build-worker.sh` refuses the capacity half it can see and names
-  the `WORKER_SLOTS_MAX` half no script forwards.
+  `WORKER_SLOTS_MAX=1`, node-wide, one task at a time of either kind. Both are
+  declared in `chuggernaut.env` and forwarded by `build-worker.sh`, which refuses
+  the deploy — live daemon untouched — when either is anything else, naming the
+  one that is wrong. An unset ceiling is refused with them: the daemon defaults
+  it to the node's CPU count.
 - **Per-task nix GC roots are the same shape of per-node opt-in** (spec §3.1,
   [the runbook §7](../../docs/reference/runbooks/worker-kvm.md)). `WORKER_NIX_GCROOTS_DIR`
   turns them on; `build-worker.sh` provisions the directory and checks the node

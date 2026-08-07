@@ -23,6 +23,12 @@ was drained —
 takes the channel binary out of the worker image on both platforms and asks each
 binary the question **its own executor** asks.
 
+**The run spec carries `WORKER_SLOTS_MAX` since job #477** —
+[the correction](#correction-2026-08-07--worker_slots_max-is-forwarded-now-job-477)
+— which supersedes slice 6's parenthetical calling it the one knob no script
+forwards. The swap still copies nothing forward; the ceiling survives because it
+is written down, which is [D7](#decisions) working as intended.
+
 `IMPLEMENTED` is a claim about the slices and nothing more
 ([`docs/reference/docs.md`](../reference/docs.md)), and it is worth saying what it does
 not claim. Every slice is in the tree; the daemon is buildable and supervisable
@@ -3299,3 +3305,33 @@ surfaces four job escalations later as "the evaluator produced no output".
   and on the nuc — where the same image feeds the same injected artifact and
   #478's tasks reported `"connected"`. The new pre-flight is what turns that
   reasoning into a check on the node itself.
+
+---
+
+## Correction, 2026-08-07 — `WORKER_SLOTS_MAX` is forwarded now (job #477)
+
+[Slice 6's correction](#correction-2026-08-06--slice-6-as-landed-job-473) argued
+that no carry-forward the swap deleted had a second purpose, and named
+`WORKER_SLOTS_MAX` as the one knob no script forwards. The argument holds — it
+was never in the swap, and the swap still copies nothing forward. **The
+parenthetical does not.** Job #477 renders `WORKER_SLOTS_MAX` through
+`spec_line` beside `WORKER_SLOTS`, so a node's ceiling is declared in
+`deploy/prod/chuggernaut.env` (bare or as `WORKER_SLOTS_MAX_<node>`) and written <!-- runtime -->
+into the environment file the supervisor hands the daemon — which is what makes
+it survive a deploy and a self-refresh, exactly as [D7](#decisions) intends.
+
+Unset still renders nothing, so a node that declares no ceiling produces a
+byte-identical run spec and gets the daemon's own default, its CPU count.
+
+The knob that motivated it is [#309](./309-host-native-execution.md) P0's: a
+`host` node must boot at `WORKER_SLOTS=1` **and** `WORKER_SLOTS_MAX=1`
+(`enforce_host_capacity`), and until this the deploy could only check the first
+and tell the operator to add the second to the node by hand. `build-worker.sh`
+now checks both and refuses the deploy, live daemon untouched, naming whichever
+is wrong — an unset ceiling included, since the daemon then defaults it to a CPU
+count nothing in the deploy can read.
+
+The drift guard is unchanged and still needed: the daemon reads more `WORKER_*`
+than the run spec composes (`WORKER_HOST_ROOT`, `WORKER_CHANNEL_BINARY`,
+`WORKER_REFRESH_SCRIPT`), and a live daemon carrying one of those is still a
+refusal.

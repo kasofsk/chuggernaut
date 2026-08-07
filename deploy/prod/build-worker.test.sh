@@ -391,7 +391,49 @@ PATH="$BIN:$PATH" \
 
 grep_log "WORKER_SLOTS='2'"
 grep_log "WORKER_NODE='air'"
-echo "ok: the env file carries WORKER_SLOTS when set"
+# The ceiling stays out of a spec that never named it: unset is the daemon's own
+# default (the node's CPU count), and rendering one would make every node carry a
+# number it never chose.
+if grep -qF "WORKER_SLOTS_MAX" "$LOG"; then
+  fail "WORKER_SLOTS_MAX must not be passed when unset (daemon default applies)"
+fi
+echo "ok: the env file carries WORKER_SLOTS when set, and no ceiling when none is declared"
+
+# ── Case 2c0: the node's CEILING reaches the daemon too (WORKER_SLOTS_MAX) ─────
+# The ceiling every `set_slots` is validated against (spec §3.1) is a first-boot
+# knob exactly like WORKER_SLOTS, and one this script did not forward — so a node
+# whose CPU count overstates what it serves had it re-added by hand after each
+# deploy, and a host node (which must boot at 1/1) could not be declared at all.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_SLOTS=2 \
+  WORKER_SLOTS_MAX=2 \
+  sh "$SUT"
+
+grep_log "WORKER_SLOTS_MAX='2'"
+echo "ok: the env file carries WORKER_SLOTS_MAX when set"
+
+# ── Case 2c0a: the ceiling is a per-node property like every other one ────────
+# One env file declares a FLEET, and the ceiling is exactly the knob that differs
+# between nodes — air's colima VM reports 6 CPUs and sustains 2 concurrent Rust
+# builds. It rides the derived <VAR>_<node> resolution with no second path.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_SLOTS_MAX=8 \
+  WORKER_SLOTS_MAX_air=2 \
+  sh "$SUT"
+
+grep_log "WORKER_SLOTS_MAX='2'"
+if grep -qF "WORKER_SLOTS_MAX='8'" "$LOG"; then
+  fail "a per-node WORKER_SLOTS_MAX_air must win over the bare WORKER_SLOTS_MAX"
+fi
+echo "ok: WORKER_SLOTS_MAX_<node> wins over the bare WORKER_SLOTS_MAX"
 
 # ── Case 2c1: the runtimes the node offers reach the daemon (WORKER_MODES) ─────
 # #434 gave the daemon the knob and nothing in the deploy path could set it, so
@@ -408,6 +450,7 @@ PATH="$BIN:$PATH" \
   CHUG_WORKER_NODE=nuc \
   WORKER_MODES="container, host" \
   WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
   sh "$SUT"
 
 case "$(env_file)" in
@@ -428,6 +471,7 @@ PATH="$BIN:$PATH" \
   WORKER_MODES=container \
   WORKER_MODES_air=container,host \
   WORKER_SLOTS_air=1 \
+  WORKER_SLOTS_MAX_air=1 \
   sh "$SUT"
 
 grep_log "WORKER_MODES='container,host'"
@@ -457,14 +501,43 @@ rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "host mode without WORKER_SLOTS=1 must fail the deploy (got rc=0)"
 grep -qF "WORKER_SLOTS_air=1" "$WORK/modes-slots.out" || fail "the refusal must name the fix, per node"
-# The half this script cannot forward has to be said out loud too, or the next
-# attempt destroys the daemon and the replacement still refuses to boot.
-grep -qF "WORKER_SLOTS_MAX=1" "$WORK/modes-slots.out" \
-  || fail "the refusal must name the WORKER_SLOTS_MAX half no script forwards"
+# Both halves are forwarded now, so the remedy is a declaration on the dispatcher
+# host — per node, like every other one — and the refusal names both.
+grep -qF "WORKER_SLOTS_MAX_air=1" "$WORK/modes-slots.out" \
+  || fail "the refusal must name the WORKER_SLOTS_MAX half too, per node"
 grep -qF "/etc/chuggernaut/worker.env" "$WORK/modes-slots.out" \
-  || fail "the refusal must name the file that half has to be added to by hand"
+  || fail "the refusal must name the file both halves are written to"
+grep -qF "WORKER_SLOTS is '2'" "$WORK/modes-slots.out" \
+  || fail "the refusal must name the value that is wrong"
 not_started "host mode without the capacity it needs must not reach the daemon restart"
 echo "ok: host mode without WORKER_SLOTS=1 refuses before the daemon is replaced"
+
+# ── Case 2c2c: the CEILING half refuses on its own, and is named on its own ────
+# `enforce_host_capacity` (crates/worker/src/daemon.rs) demands both numbers, so
+# WORKER_SLOTS=1 with a ceiling above 1 is a daemon that refuses to boot and a
+# supervisor that loops the refusal. An UNSET ceiling is refused with it: the
+# daemon then defaults to the node's CPU count, which nothing here can read.
+for _max in 4 ""; do
+  : > "$LOG"
+  set +e
+  PATH="$BIN:$PATH" \
+    WORKER_SSH=worksalot@air \
+    WORKER_NATS_URL=nats://10.0.0.1:4222 \
+    CHUG_WORKER_NODE=air \
+    WORKER_MODES=container,host \
+    WORKER_SLOTS=1 \
+    WORKER_SLOTS_MAX="$_max" \
+    sh "$SUT" >"$WORK/modes-max.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "host mode with WORKER_SLOTS_MAX='$_max' must fail the deploy (got rc=0)"
+  grep -qF "WORKER_SLOTS_MAX is " "$WORK/modes-max.out" \
+    || fail "the refusal must name WORKER_SLOTS_MAX as the half that is wrong"
+  grep -qF "WORKER_SLOTS is " "$WORK/modes-max.out" \
+    && fail "WORKER_SLOTS is already 1 — the refusal must not name it"
+  not_started "a ceiling above 1 must not reach the daemon restart"
+done
+echo "ok: host mode names the WORKER_SLOTS_MAX half alone when that is the wrong one"
 
 # ── Case 2c3: a mode the daemon cannot parse is refused BEFORE the restart ────
 # An unknown name is a hard config error (crates/worker/src/config.rs), so
@@ -2048,12 +2121,33 @@ started || fail "a declared spec must proceed to the daemon restart"
 echo "ok: a declared spec proceeds, reporting what the deploy changes"
 
 # ── Case 7d: a knob this script does not FORWARD is a drop, declared or not ───
-# WORKER_SLOTS_MAX is the documented one (env.example): nothing forwards it, so
-# every daemon recreation drops it whatever chuggernaut.env says. Comparing
-# against the composed environment file rather than against the environment is
-# what keeps this from reading as clean.
+# The daemon reads more WORKER_* than this script composes — WORKER_HOST_ROOT
+# (crates/worker/src/config.rs) is one — so a node carrying one loses it on every
+# recreation whatever chuggernaut.env says. Comparing against the composed
+# environment file rather than against the environment is what keeps this from
+# reading as clean.
 : > "$LOG"
 set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_HOST_ROOT=/var/lib/chuggernaut/host \
+  FAKE_LIVE_ENV_FILE="WORKER_NODE='nuc'
+WORKER_HOST_ROOT='/var/lib/chuggernaut/host'" \
+  sh "$SUT" >"$WORK/unforwarded.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unforwarded live setting must fail the deploy (got rc=0)"
+grep -qF "build-worker.sh does not forward WORKER_HOST_ROOT" "$WORK/unforwarded.out" \
+  || fail "the refusal must say the value is declared but never forwarded"
+echo "ok: a declared-but-unforwarded setting is reported as the drop it is"
+
+# ── Case 7d1: the CEILING round-trips instead of being dropped ────────────────
+# It used to be the documented example of case 7d: a node given a lowered ceiling
+# by hand had it dropped by the next deploy, so keeping one meant re-adding the
+# line after every deploy with WORKER_SPEC_DROP_OK=1. Declared, it now survives.
+: > "$LOG"
 PATH="$BIN:$PATH" \
   WORKER_SSH=worksalot@nuc \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
@@ -2061,13 +2155,20 @@ PATH="$BIN:$PATH" \
   WORKER_SLOTS_MAX=2 \
   FAKE_LIVE_ENV_FILE="WORKER_NODE='nuc'
 WORKER_SLOTS_MAX='2'" \
-  sh "$SUT" >"$WORK/unforwarded.out" 2>&1
-rc=$?
-set -e
-[ "$rc" -ne 0 ] || fail "an unforwarded live setting must fail the deploy (got rc=0)"
-grep -qF "build-worker.sh does not forward WORKER_SLOTS_MAX" "$WORK/unforwarded.out" \
-  || fail "the refusal must say the value is declared but never forwarded"
-echo "ok: a declared-but-unforwarded setting is reported as the drop it is"
+  sh "$SUT" >"$WORK/max-roundtrip.out" 2>&1
+
+grep -qF "does not forward WORKER_SLOTS_MAX" "$WORK/max-roundtrip.out" \
+  && fail "WORKER_SLOTS_MAX is forwarded — the drift guard must not call it a drop"
+grep -qF "REFUSING" "$WORK/max-roundtrip.out" \
+  && fail "a declared, forwarded WORKER_SLOTS_MAX must not refuse the deploy"
+grep -qF "WORKER_SLOTS_MAX: live" "$WORK/max-roundtrip.out" \
+  && fail "an unchanged ceiling must round-trip silently"
+case "$(env_file)" in
+  *"WORKER_SLOTS_MAX='2'"*) ;;
+  *) fail "the round-tripped WORKER_SLOTS_MAX must be written back byte-identically" ;;
+esac
+started || fail "a forwarded WORKER_SLOTS_MAX must proceed to the daemon restart"
+echo "ok: WORKER_SLOTS_MAX round-trips through the environment file"
 
 # ── Case 7e: WORKER_MODES round-trips through the environment file ────────────
 # The regression test for the bug #439 closed, re-asserted over the new
@@ -2082,6 +2183,7 @@ PATH="$BIN:$PATH" \
   CHUG_WORKER_NODE=air \
   WORKER_MODES=container,host \
   WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
   WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
   FAKE_LIVE_ENV_FILE="WORKER_NODE='air'
 WORKER_MODES='container'
@@ -2107,6 +2209,7 @@ PATH="$BIN:$PATH" \
   CHUG_WORKER_NODE=air \
   WORKER_MODES="container, host" \
   WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
   FAKE_LIVE_ENV_FILE="WORKER_NODE='air'
 WORKER_MODES='container, host'" \
   sh "$SUT" >"$WORK/modes-roundtrip.out" 2>&1

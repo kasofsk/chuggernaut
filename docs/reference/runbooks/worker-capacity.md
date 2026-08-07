@@ -26,8 +26,8 @@ snapshot — never the dispatcher's env.
 | --- | --- | --- |
 | **observed `slots`** | the daemon's live capacity cell (`crates/worker/src/capacity.rs`), reported on both the ~15s announce and every `ping` reply | **the only number placement reads** |
 | **desired `slots`** (intent) | the dispatcher's `platform` bucket, key `fleet.capacity` | recorded, and commanded to the node. Never reads back into placement — the dispatcher asserts this (`crates/dispatcher/src/capacity.rs`) |
-| `WORKER_SLOTS` | the daemon container's env, set at node creation | the node's **first-boot value only**. Not how you change capacity |
-| `WORKER_SLOTS_MAX` | the daemon container's env | the node's **ceiling**. A request above it is refused, with a reason. Default: the node's CPU count |
+| `WORKER_SLOTS` | the node's environment file, set at node creation | the node's **first-boot value only**. Not how you change capacity |
+| `WORKER_SLOTS_MAX` | the node's environment file, from `chuggernaut.env` via `build-worker.sh` | the node's **ceiling**. A request above it is refused, with a reason. Default: the node's CPU count |
 | the `DOCKER_NODES` slot field | the dispatcher's `chuggernaut.env` | for a `worker` endpoint: membership seed, plus a **pre-observation fallback** that can never win once the node has reported. For a `unix://`/`tcp://` endpoint it is still the owner |
 | the daemon's built-in default `4` | nobody sets it | last resort for a node brought up with no `WORKER_SLOTS` at all |
 
@@ -109,7 +109,7 @@ The states, and what each is telling you:
 | --- | --- |
 | `converged` | the node reports what you asked for. Nothing to do |
 | `pending` | commanded, not yet observed. Normal for about a second |
-| `rejected` | the node refused the value — above its `slots_max`. **Terminal**: the dispatcher stops re-pushing and waits for you. `capacity_note` carries the daemon's reason. Lower the request, or raise `WORKER_SLOTS_MAX` on the node and recreate its daemon |
+| `rejected` | the node refused the value — above its `slots_max`. **Terminal**: the dispatcher stops re-pushing and waits for you. `capacity_note` carries the daemon's reason. Lower the request, or raise `WORKER_SLOTS_MAX` for the node in `chuggernaut.env` and re-run `build-worker.sh` |
 | `unacknowledged` | recorded and pushed, but the node is not converging after three minutes — an old build that ignores `set_slots`, or one that adopts and reverts |
 
 ---
@@ -257,19 +257,22 @@ Two consequences worth knowing before they surprise you:
   to match the steady-state number, recreate the daemon with the new
   `WORKER_SLOTS`; nothing is broken if you don't.
 
-**The ceiling, `WORKER_SLOTS_MAX`, is a daemon env var that neither
-`deploy/prod/build-worker.sh` nor `deploy/prod/worker-refresh.sh` writes.** Unset
-it defaults to the node's own CPU count, which is right unless the CPU count
-overstates what the node can serve — dev-air's colima VM has 6 CPUs but two
-concurrent Rust builds is what it actually sustains. To lower it you must put
-`WORKER_SLOTS_MAX=<n>` into the daemon's environment by hand — and know that the
-swap forwards nothing at all, and no script writes this var into the node's
-environment file, so **the next deploy drops it** and the ceiling reverts to the
-CPU count. Setting it in `chuggernaut.env`
-does nothing at all. It is no longer silent, at least: `build-worker.sh` refuses
-to rebuild a daemon carrying one, naming it as a value nothing forwards
-(`WORKER_SPEC_DROP_OK=1` proceeds, and you re-add the flag by hand). Until that passthrough is added, treat a lowered ceiling as
-per-creation, not durable.
+**The ceiling, `WORKER_SLOTS_MAX`, is declared the same way and travels the same
+road.** Unset it defaults to the node's own CPU count, which is right unless the
+CPU count overstates what the node can serve — dev-air's colima VM has 6 CPUs but
+two concurrent Rust builds is what it actually sustains. To lower it, put
+`WORKER_SLOTS_MAX_<node>=<n>` in `deploy/prod/chuggernaut.env` and run <!-- runtime -->
+`build-worker.sh`: it renders the line into the node's environment file beside
+`WORKER_SLOTS`, so the ceiling survives the next deploy and every self-refresh
+rather than reverting to the CPU count. Changing it still is not how you change
+a node's capacity — §2's stepper is — but it is not inert either: it is the
+standing bound every `set_slots` is checked against, in force for the daemon's
+whole life. So lowering it below what the node is running now brings the daemon
+back **at or below the ceiling** (the boot `WORKER_SLOTS` is clamped to it, so
+the node returns at whichever of the two is smaller —
+`crates/worker/src/capacity.rs`), and the intent the dispatcher has recorded
+above it is then refused **terminally** — §3's `rejected`, which it stops
+re-pushing — rather than reconciled away. Lower the intent first, or expect to.
 
 ---
 
@@ -364,7 +367,7 @@ boot, so nothing else has to be undone.
 | Symptom | What it means | What to do |
 | --- | --- | --- |
 | `capacity_source: "seed"`, `capacity_observed_at` null, node answers pings | The node's RPC works but its announce does not — the signature of a denied `event.worker.announce` publish grant. The number in force is the boot seed | Re-mint the node's creds (`chug admin --keys-dir "$KEYS_DIR" worker-creds --node <name>`) and recreate the daemon. A placement probe will also self-correct it once one happens |
-| `capacity_state: "rejected"` | The value is above the node's `slots_max`. The dispatcher has stopped re-pushing it, on purpose | Lower the request, or set `WORKER_SLOTS_MAX` on the node and recreate its daemon |
+| `capacity_state: "rejected"` | The value is above the node's `slots_max`. The dispatcher has stopped re-pushing it, on purpose | Lower the request, or set `WORKER_SLOTS_MAX` for the node in `chuggernaut.env` and re-run `build-worker.sh` |
 | `capacity_state: "unacknowledged"` for minutes | Intent recorded and pushed, node not converging — an old daemon build that ignores `set_slots` | Refresh the node's daemon (a deploy, or `deploy/prod/build-worker.sh`) |
 | Node shows `3 / 2` | Over cap, draining. Expected after lowering below live occupancy | Nothing. It takes nothing new and drops under the cap as tasks finish |
 | Jobs queue with the fleet apparently idle | Every node is at 0 slots — drained, or nothing has reported yet | Check `capacity_source` per node. Raise a node from the Cluster page. Remember the 30-minute queue clock is still running |
