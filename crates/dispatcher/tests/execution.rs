@@ -3699,7 +3699,7 @@ async fn triage_on_escalated_job_records_assessment_and_leaves_escalated() {
     assert_eq!(job_now.state, JobState::Escalated);
 
     let last = rig.provider.runs().pop().unwrap();
-    assert_eq!(last.image, "triage:latest");
+    assert_eq!(last.image.as_deref(), Some("triage:latest"));
     assert!(
         last.mcp_servers.is_empty(),
         "triage runs without the channel MCP"

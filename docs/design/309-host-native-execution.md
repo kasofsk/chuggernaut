@@ -2,9 +2,11 @@
 
 Status: PROPOSED; **P0 landed 2026-08-05 (job #434)** — `HostBackend`,
 `WORKER_MODES` routing and the `slots: 1` enforcement, off on every node — and
-**P1 landed 2026-08-07 (jobs #401, #478)**: `runtime.mode: host` is a legal
+**P1 landed 2026-08-07 (jobs #401, #478, #479)**: `runtime.mode: host` is a legal
 declaration that nothing places by yet
-([P1 as landed](#p1-as-landed-2026-08-07--the-host-rows-field-rules-job-478)).
+([P1 as landed](#p1-as-landed-2026-08-07--the-host-rows-field-rules-job-478)),
+and a dual-mode node now routes each launch by its declared mode
+([P1 as landed, per-launch routing](#p1-as-landed-2026-08-07--per-launch-mode-routing-job-479)).
 §1's recommendation had already shipped before P0 started; see
 [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed)
 and its addendum on `remove` racing its own reaper.
@@ -44,11 +46,15 @@ never edited into the prose above them.*
 Two phases have landed, one of them early and out of order. P0 is in the tree
 (`crates/container/src/host.rs`, `WORKER_MODES`) and is **off on every node** —
 no node advertises `host`. P1 is complete: its schema half arrived ahead of P0
-in job #401, driven by [#373](373-project-toolchains.md), and job #478 landed
+in job #401, driven by [#373](373-project-toolchains.md), job #478 landed
 the host row's own field rules (`crates/types/src/job_type.rs` — top-level
 `image` disallowed, `runtime.env` required, the evaluator-image requirement
 narrowed by the [Coexistence](#coexistence-on-a-mixed-fleet) precedence rule)
-and deleted the refusal, with no epoch bump. So a host job type is now
+and deleted the refusal, with no epoch bump, and job #479 carried the resolved
+mode to the worker: `image` is `Option<String>` on both the launch config and
+the wire (`WORKER_RPC_VERSION` 2), a node constructs exactly the backends its
+`WORKER_MODES` names, and one naming both routes each launch by the image's
+presence. So a host job type is now
 **well-formed and unroutable**: nothing places by mode, because that is P2 and
 P2 is gated on #293 job 3. Everything from P2 on is unstarted: no
 `NodeCapabilities` record exists in the tree.
@@ -63,7 +69,7 @@ is the same work sliced by contract, not a second plan.
 | Phase | What | State |
 | --- | --- | --- |
 | **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed) |
-| **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch |
+| **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch; **Landed** (job #479) for §1's per-launch routing and the `WORKER_RPC_VERSION` bump it needed |
 | **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | Proposed — gated on P1 and #293 job 3 |
 | **P3** | Per-task users; `resources_enforced`; transient scopes | Proposed — gated on P2 |
 | **P4** | Device leases | Proposed — only when a host node must run a second, non-device-bound task concurrently |
@@ -1386,3 +1392,69 @@ and no node advertises `host`. A host job type is therefore **well-formed and
 unroutable** — it validates, and the platform has nowhere to put it. P2 stays
 gated on [#293](293-worker-capacity.md) job 3. No job type in this repo declares
 `mode: host`, deliberately: nothing serves one.
+
+## P1 as landed, 2026-08-07 — per-launch mode routing (job #479)
+
+**P0's node-level backend choice was a shortfall against [§1](#1-backend-polymorphism), not a
+decision this document made.** §1 says a daemon whose `WORKER_MODES` includes
+`host` "constructs both backends and routes each launch by the request's
+declared mode", and [Coexistence](#coexistence-on-a-mixed-fleet) says "mode
+resolves per launched task". What P0 shipped instead was `backend_kind`: one
+`Arc<dyn ContainerBackend>` picked at boot, any mention of `host` winning. So
+`WORKER_MODES=container,host` made a node **host-only** — every ordinary
+`code`/`docs`/`web` job placed there would have run as a host process against
+the machine's bare `PATH`, and the `ci` evaluator would have ignored its image,
+which is precisely the case Coexistence works through. P0's own log line called
+that "deliberately a lie that must never leave the prototype node". This job
+closes it; the P0 correction's description of that behaviour, and the Phasing
+table's P0 row, are history as of this section.
+
+**The mode reaches the worker as the image's absence.** P0 could not route
+because the worker could not be *told*: `ContainerLaunchConfig.image` and
+`WorkerLaunchRequest.image` were both `String`, and a host launch has no image
+to send. Both are now `Option<String>`, all the way from the dispatcher's
+`command_launch_config` / `AgentRunConfig`. Image *presence* is the selector
+rather than a separate `mode` field, because §3's precedence rule already makes
+it one — a level carrying an image is a container task regardless of the job
+type's mode — and a mode field beside a mandatory `image` would leave a
+meaningless `""` on every host launch and let the two disagree.
+
+**`WORKER_RPC_VERSION` moves 1 → 2**, in the same commit, per the rule its own
+doc comment states: an additive op does not bump it, a breaking change to an
+existing op's shape does. The break is one-directional and small — a v1 daemon
+rejects an image-less launch as an unparseable payload, and a container launch
+serializes byte-for-byte what v1 sent (the field is `skip_serializing_if =
+"Option::is_none"`) — but it is a break, and the alternative (an additive `mode`
+field) was rejected above. The fleet's three nodes deploy from one SHA, workers
+before the dispatcher, so no mixed-version window can carry a host launch; none
+could anyway, since placement by mode is P2.
+
+**Each node constructs exactly what it declares.** `local_backend` builds the
+docker backend iff the node serves `container` and the host backend iff it
+serves `host`; a node naming both gets `worker::route::RoutedBackend` over the
+two. A container-only daemon is byte-for-byte what ships today — it is handed
+the `DockerBackend` directly, with no wrapper — and a host-only node never
+constructs a `DockerBackend`, which is the point on a Mac that has no Docker.
+Every op after the launch routes on the id the launch minted
+(`container::host::names_host_task`, the `host-` prefix a docker id cannot
+collide with); the two listings are the union, so the node's occupancy is the
+node's.
+
+**A wrong-mode launch is refused by name, in both directions.** `HostBackend`
+refuses a launch declaring an image and `DockerBackend` refuses one carrying
+none, each naming the node and the mode it serves, both as `BackendError::Launch`
+— a hard failure, not the transient `NoCapacity` a placement bug would retry
+forever. Neither backend falls back to the other: silently serving the wrong
+mode is what P0 did.
+
+**`enforce_host_capacity` stays node-wide, deliberately.** #309 §2 option (iii)
+exists because two concurrent host tasks cannot both own `HOST_WORKSPACE`, and
+the daemon has no per-mode slot accounting to express a narrower rule with. So a
+dual-mode node runs **one task at a time, of either kind** — strictly more than
+the host-only node P0's shortcut made of it, and a cap on concurrent *host*
+tasks only is recorded here as follow-up rather than guessed at.
+
+What did **not** change: placement. Nothing dispatcher-side routes jobs to nodes
+by mode, no `NodeCapabilities` record exists, and no node advertises `host`.
+That is still P2, still gated on [#293](293-worker-capacity.md) job 3. What this
+job removes is the reason a node could not honestly advertise both.

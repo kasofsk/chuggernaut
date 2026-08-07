@@ -14,8 +14,10 @@
 //! exclusion is **enforced here**, not assumed: a launch arriving while another
 //! task is live is refused as `NoCapacity`.
 //!
-//! The declared `image` is ignored. #309 P0 calls that "deliberately a lie that
-//! must never leave the prototype node", so every launch says so in the log.
+//! A launch **declaring an image is refused** (#309 §1, P1): the image's absence
+//! is what selects this backend, so one that carries an image was misrouted and
+//! saying so is the only answer that cannot run a container task against the
+//! machine's own toolchain.
 //!
 //! Each task is launched into its own **supervision unit** ([`Supervision`],
 //! design #440 D3) rather than the daemon's, so the restart that swaps the
@@ -59,6 +61,11 @@ const OUTPUT_LOG: &str = "output.log";
 const META_JSON: &str = "meta.json";
 const EXIT_CODE: &str = "exit_code";
 const EXIT_CODE_TMP: &str = "exit_code.tmp";
+
+/// Prefix every host task id carries, so a node serving both runtimes can tell
+/// which of its two backends owns an id without asking either (see
+/// [`names_host_task`]). A docker id is hex and can never collide with it.
+pub const TASK_PREFIX: &str = "host-";
 
 /// Prefix for a task tree detached by [`ContainerBackend::remove`] and not yet
 /// deleted. The leading dot is what makes [`is_task_id`] reject it, so a
@@ -393,9 +400,9 @@ pub struct TaskMeta {
     pub scope: Option<ScopeManager>,
 }
 
-/// Host-process execution on one node (design #309 P0). Serves every launch
-/// routed to the node — P0 has no per-request mode selector, which is why the
-/// declared `image` is ignored rather than honored.
+/// Host-process execution on one node (design #309 P0). Serves the launches
+/// that carry no image and refuses the rest, so a node offering both runtimes
+/// routes to it per launch ([`names_host_task`]).
 pub struct HostBackend {
     node: String,
     root: PathBuf,
@@ -513,11 +520,19 @@ impl HostBackend {
             .filter(|s| !s.is_empty())
     }
 
-    /// Whether this node may take the launch, and the two things P0 is lying
-    /// about if it does. The exclusion is #309 §2 option (iii) **enforced**:
+    /// Whether this node may take the launch: it must be a host launch, and it
+    /// must be the only one. The exclusion is #309 §2 option (iii) **enforced**:
     /// `NoCapacity` is transient, so the dispatcher queues and retries (§3.5)
     /// rather than spending the job's retry budget.
     async fn admit(&self, config: &ContainerLaunchConfig) -> Result<(), BackendError> {
+        if let Some(image) = config.image.as_deref() {
+            return Err(BackendError::Launch(format!(
+                "node {} serves host mode and this launch declares image {image:?} — a container \
+                 task routed to a host backend is a placement bug (design #309 §1: mode is the \
+                 image's presence), refused rather than run against the machine's own toolchain",
+                self.node
+            )));
+        }
         if let Some(held) = self.list_managed_running().await?.first() {
             return Err(BackendError::NoCapacity(format!(
                 "host node {} runs one task at a time (#309 P0 takes §2 option iii, which is \
@@ -527,12 +542,6 @@ impl HostBackend {
                 held.id
             )));
         }
-        tracing::warn!(
-            node = %self.node,
-            image = %config.image,
-            "host launch IGNORES the declared image (#309 P0: deliberately a lie that must never \
-             leave the prototype node)"
-        );
         if config.cpu_limit.is_some() || config.memory_limit.is_some() {
             tracing::warn!(
                 node = %self.node,
@@ -563,6 +572,14 @@ impl HostBackend {
             ))
         })
     }
+}
+
+/// Whether a `{node}/{task}` id names a host task rather than a container
+/// (design #309 §1). The routing question a dual-mode node asks of every id it
+/// is handed after the launch that minted it.
+pub fn names_host_task(id: &ContainerId) -> bool {
+    id.split_once('/')
+        .is_some_and(|(_, task)| task.starts_with(TASK_PREFIX) && is_task_id(task))
 }
 
 /// Task ids are minted by [`HostBackend`] alone and address a directory, so the
@@ -1013,7 +1030,7 @@ impl ContainerBackend for HostBackend {
         self.reclaim_workspace()?;
 
         let task = format!(
-            "host-{:x}-{:x}",
+            "{TASK_PREFIX}{:x}-{:x}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())

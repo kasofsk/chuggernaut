@@ -125,8 +125,10 @@ pub fn config_requires_dispatcher(yaml: &str, dispatcher_epoch: u32) -> Option<u
 /// The worker-node RPC protocol version ([`crate::worker`] ops, spec §3.1).
 /// The daemon logs-and-fallbacks on an unknown op rather than crashing, so an
 /// additive op does not bump this; a breaking change to an existing op's shape
-/// does, in the same commit.
-pub const WORKER_RPC_VERSION: u32 = 1;
+/// does, in the same commit — **2** is design #309 P1 making
+/// [`crate::worker::WorkerLaunchRequest::image`] optional, which a v1 daemon
+/// rejects as an unparseable payload.
+pub const WORKER_RPC_VERSION: u32 = 2;
 
 /// The channel MCP ↔ dispatcher protocol version (spec §4.2). Additive request
 /// kinds degrade gracefully on the old side; bump only for a breaking change.

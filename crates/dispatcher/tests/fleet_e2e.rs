@@ -130,7 +130,7 @@ fn labeled_sleep(project: &str, job: u64, task: u64) -> ContainerLaunchConfig {
     env.insert("JOB_ID".into(), job.to_string());
     env.insert("CHUG_TASK_ID".into(), task.to_string());
     ContainerLaunchConfig {
-        image: "alpine:3".into(),
+        image: Some("alpine:3".into()),
         cmd: vec!["sh".into(), "-c".into(), "sleep 120".into()],
         env,
         files: vec![],

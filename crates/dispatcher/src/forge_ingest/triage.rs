@@ -162,7 +162,7 @@ impl Core {
             .await?;
 
         let config = AgentRunConfig {
-            image,
+            image: Some(image),
             prompt,
             model,
             system_prompt: None,

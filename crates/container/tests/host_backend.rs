@@ -72,7 +72,7 @@ fn backend(root: &std::path::Path) -> HostBackend {
 
 fn cfg(script: &str) -> ContainerLaunchConfig {
     ContainerLaunchConfig {
-        image: "chuggernaut/agent-rust:prod".into(),
+        image: None,
         cmd: vec!["sh".into(), "-c".into(), script.into()],
         env: HashMap::from([
             ("JOB_PROJECT".to_string(), "acme/chug".to_string()),
@@ -225,6 +225,43 @@ async fn one_host_task_at_a_time() {
     let second = backend.launch(cfg("true")).await.unwrap();
     assert_ne!(second, first, "each launch mints its own task");
     assert_eq!(settle(&backend, &second).await, 0);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// #309 §1: mode is the image's presence, so a launch declaring one was
+/// misrouted here. It is refused as a hard `Launch` error naming the node and
+/// the mode it serves — never run against the machine's own toolchain, and
+/// never the transient shape a placement bug would retry forever.
+#[tokio::test]
+async fn an_image_carrying_launch_is_refused() {
+    let root = temp_root("wrong-mode");
+    let backend = backend(&root);
+
+    let err = backend
+        .launch(ContainerLaunchConfig {
+            image: Some("chuggernaut/agent-rust:prod".into()),
+            ..cfg("true")
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, container::BackendError::Launch(_)),
+        "a wrong-mode launch is a placement bug, not capacity pressure: {err}"
+    );
+    let text = err.to_string();
+    for named in ["w1", "host mode", "chuggernaut/agent-rust:prod"] {
+        assert!(text.contains(named), "the refusal names {named}: {text}");
+    }
+    assert!(
+        backend.list_managed_running().await.unwrap().is_empty(),
+        "a refused launch leaves no task behind"
+    );
+
+    assert_eq!(
+        settle(&backend, &backend.launch(cfg("true")).await.unwrap()).await,
+        0,
+        "the refusal claimed nothing — the next host launch still runs"
+    );
     std::fs::remove_dir_all(&root).unwrap();
 }
 

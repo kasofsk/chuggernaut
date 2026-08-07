@@ -1861,8 +1861,7 @@ impl Core {
             .wrap_up
             .image
             .clone()
-            .or_else(|| job_type.image.clone())
-            .unwrap_or_default();
+            .or_else(|| job_type.image.clone());
         let mut config = self
             .command_launch_config(
                 owner,

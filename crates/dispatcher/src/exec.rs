@@ -443,7 +443,7 @@ impl Core {
                 let audit = workload.merge_into(&mut env, &mut files);
                 self.record_workload_identities(&mut task, audit).await?;
                 let config = AgentRunConfig {
-                    image: job_type.image.clone().unwrap_or_default(),
+                    image: job_type.image.clone(),
                     prompt,
                     model: job
                         .model
@@ -515,7 +515,7 @@ impl Core {
                         &job.branch,
                         &job_type,
                         &job_type.work.secrets,
-                        job_type.image.clone().unwrap_or_default(),
+                        job_type.image.clone(),
                         run,
                         ChannelRole::Work { task_id },
                         work_timeout,
@@ -2157,12 +2157,11 @@ pub(crate) fn rework_context_block(
     block
 }
 
-pub(crate) fn eval_image(job_type: &JobType, evaluator: &Evaluator) -> String {
-    evaluator
-        .image
-        .clone()
-        .or_else(|| job_type.image.clone())
-        .unwrap_or_default()
+/// The image an evaluator's task runs, `None` when neither level declares one
+/// — which under `runtime.mode: host` is the host task the absence selects
+/// (design #309 §1), and which validation refuses in container mode.
+pub(crate) fn eval_image(job_type: &JobType, evaluator: &Evaluator) -> Option<String> {
+    evaluator.image.clone().or_else(|| job_type.image.clone())
 }
 
 #[cfg(test)]

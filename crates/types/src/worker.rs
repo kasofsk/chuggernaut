@@ -49,7 +49,12 @@ pub struct WireFile {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerLaunchRequest {
-    pub image: String,
+    /// The image a container task runs, and the **mode selector** (design #309
+    /// §1): `None` is a host task, which has no image at all. Absent from the
+    /// wire when `None`, so a container launch is byte-for-byte what
+    /// [`crate::version::WORKER_RPC_VERSION`] 1 sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
     pub cmd: Vec<String>,
     pub env: HashMap<String, String>,
     pub files: Vec<WireFile>,
@@ -735,7 +740,7 @@ mod tests {
     #[test]
     fn launch_request_round_trips() {
         let req = WorkerLaunchRequest {
-            image: "chuggernaut/agent-rust:prod".into(),
+            image: Some("chuggernaut/agent-rust:prod".into()),
             cmd: vec!["sh".into(), "-c".into(), "true".into()],
             env: HashMap::from([("JOB_ID".into(), "7".into())]),
             files: vec![
@@ -776,11 +781,45 @@ mod tests {
                         "cpu_limit":null,"memory_limit":null}"#;
         let req: WorkerLaunchRequest = serde_json::from_str(older).unwrap();
         assert_eq!(req.runtime_env, None);
+        assert_eq!(req.image.as_deref(), Some("img"));
 
         let json = serde_json::to_string(&req).unwrap();
         assert!(
             !json.contains("runtime_env"),
             "an undeclared environment must not appear on the wire: {json}"
+        );
+    }
+
+    /// The mode selector (#309 §1, RPC version 2): a host launch carries no
+    /// `image` key at all, and a container launch is byte-for-byte what version
+    /// 1 sent — which is why the version bump is the only thing an N-1 daemon
+    /// needs to notice.
+    #[test]
+    fn a_host_launch_carries_no_image_and_a_container_launch_is_unchanged() {
+        let host = WorkerLaunchRequest {
+            image: None,
+            cmd: vec!["true".into()],
+            env: HashMap::new(),
+            files: vec![],
+            cpu_limit: None,
+            memory_limit: None,
+            runtime_env: None,
+        };
+        let json = serde_json::to_string(&host).unwrap();
+        assert!(!json.contains("image"), "{json}");
+        assert_eq!(
+            serde_json::from_str::<WorkerLaunchRequest>(&json).unwrap(),
+            host
+        );
+
+        let container = WorkerLaunchRequest {
+            image: Some("img:latest".into()),
+            ..host
+        };
+        assert!(
+            serde_json::to_string(&container)
+                .unwrap()
+                .contains(r#""image":"img:latest""#)
         );
     }
 

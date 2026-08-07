@@ -437,10 +437,11 @@ fi
 echo "ok: WORKER_MODES_<node> wins over the bare WORKER_MODES"
 
 # ── Case 2c2b: host without the capacity it needs REFUSES, before the restart ──
-# `host` is not additive — #309 P0 has no per-request selector, so a node naming
-# it runs EVERY launch as a host process, and the daemon refuses to start unless
-# WORKER_SLOTS and WORKER_SLOTS_MAX are both 1 (two host tasks cannot both own
-# /workspace, #309 §2 option (iii)). Prod's nodes run at 2, so a `host` line
+# `host` is additive since #309 P1 (job #479) — a node naming both routes each
+# launch by the mode it declares — but it still costs capacity: the daemon
+# refuses to start unless WORKER_SLOTS and WORKER_SLOTS_MAX are both 1, node-wide
+# (two host tasks cannot both own /workspace, #309 §2 option (iii)). Prod's nodes
+# run at 2, so a `host` line
 # added to chuggernaut.env without the capacity beside it would replace a working
 # daemon with one the supervisor boot-loops out of the fleet.
 : > "$LOG"

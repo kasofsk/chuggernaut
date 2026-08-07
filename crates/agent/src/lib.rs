@@ -93,7 +93,10 @@ pub enum PermissionProfile {
 
 #[derive(Debug, Clone)]
 pub struct AgentRunConfig {
-    pub image: String,
+    /// The image the run's container needs, `None` for a host task — the mode
+    /// selector [`container::ContainerLaunchConfig::image`] carries (design
+    /// #309 §1).
+    pub image: Option<String>,
     /// Resolved prompt content, never a path. Delivered via a temp file
     /// injected into the created container at `/chuggernaut/prompt.md` (spec §4.3).
     pub prompt: String,

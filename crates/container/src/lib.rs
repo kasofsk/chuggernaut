@@ -391,7 +391,11 @@ pub struct RunningContainer {
 
 #[derive(Debug, Clone)]
 pub struct ContainerLaunchConfig {
-    pub image: String,
+    /// The image a container task runs, and the mode selector every backend
+    /// routes on (design #309 §1): `None` is a host task, which has no image.
+    /// A backend that cannot serve the mode it selects refuses the launch —
+    /// silently serving the other one would hide a placement bug.
+    pub image: Option<String>,
     pub cmd: Vec<String>,
     pub env: HashMap<String, String>,
     /// Written into the created container before start (MCP binaries, prompt,

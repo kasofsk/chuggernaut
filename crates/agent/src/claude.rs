@@ -359,7 +359,7 @@ mod tests {
 
     fn config() -> AgentRunConfig {
         AgentRunConfig {
-            image: "img:latest".into(),
+            image: Some("img:latest".into()),
             prompt: "do the thing".into(),
             model: Some("claude-sonnet-4-6".into()),
             system_prompt: Some("KO facts".into()),

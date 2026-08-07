@@ -895,7 +895,7 @@ mod tests {
 
     fn cfg() -> ContainerLaunchConfig {
         ContainerLaunchConfig {
-            image: "test:latest".into(),
+            image: Some("test:latest".into()),
             cmd: vec!["true".into()],
             env: HashMap::new(),
             files: vec![],

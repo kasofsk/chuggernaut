@@ -473,8 +473,9 @@ impl DockerBackend {
 impl ContainerBackend for DockerBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
         let node = self.place(config.node.as_deref()).await?;
+        let image = image_or_refusal(&node.name, &config)?;
         let body = ContainerCreateBody {
-            image: Some(config.image.clone()),
+            image: Some(image),
             cmd: Some(config.cmd.clone()),
             env: Some(config.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
             labels: Some(managed_labels(&config)),
@@ -800,6 +801,19 @@ fn read_only_bind(host_dir: &Path, container_path: &str) -> Mount {
     }
 }
 
+/// The image a container task runs, or the refusal for a launch that carries
+/// none (design #309 §1). An absent image *is* a host task, so one arriving at
+/// a docker backend was misrouted: refused loudly and named, never defaulted.
+fn image_or_refusal(node: &str, config: &ContainerLaunchConfig) -> Result<String, BackendError> {
+    config.image.clone().ok_or_else(|| {
+        BackendError::Launch(format!(
+            "node {node} serves container mode and this launch carries no image, which is how a \
+             host task is spelled (design #309 §1) — a placement bug, refused rather than \
+             defaulted"
+        ))
+    })
+}
+
 /// Labels for a launch: the managed marker plus the `(project, job, task)`
 /// identity, lifted from the env the dispatcher already stamps
 /// (`JOB_PROJECT`/`JOB_ID`/`CHUG_TASK_ID`). The identity labels let the §3.6
@@ -989,7 +1003,7 @@ mod tests {
 
     fn launch_config() -> ContainerLaunchConfig {
         ContainerLaunchConfig {
-            image: "img".into(),
+            image: Some("img".into()),
             cmd: vec!["run".into()],
             env: HashMap::new(),
             files: vec![],
@@ -998,6 +1012,25 @@ mod tests {
             node: None,
             runtime_env: None,
         }
+    }
+
+    /// A container launch is unchanged by #309 §1 — it names its image and
+    /// runs — while an image-less one, which is how a host task is spelled, is
+    /// refused with the node named rather than launched against a default.
+    #[test]
+    fn an_image_less_launch_is_refused_and_named() {
+        assert_eq!(image_or_refusal("nuc", &launch_config()).unwrap(), "img");
+
+        let err = image_or_refusal(
+            "nuc",
+            &ContainerLaunchConfig {
+                image: None,
+                ..launch_config()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, BackendError::Launch(_)), "{err}");
+        assert!(err.to_string().contains("node nuc"), "{err}");
     }
 
     /// The dispatcher's backend (no node properties) adds NO devices, binds or

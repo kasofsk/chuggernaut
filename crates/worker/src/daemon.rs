@@ -232,10 +232,10 @@ struct WorkerState {
     /// `platform-ops`'s `dispose` drives — drops exactly that task's root.
     /// Bounded by [`NIX_ROOTED_MAX`]; the reaper covers anything a crash loses.
     nix_rooted: std::sync::Mutex<HashMap<ContainerId, String>>,
-    /// This node serves its launches as host processes (`WORKER_MODES`, #309
-    /// P0), which is what makes them die with the daemon a refresh replaces
-    /// (design #440 D4). False ⇒ a container node, whose work survives the swap
-    /// by construction and whose refresh path is untouched.
+    /// This node can serve a launch as a host process (`WORKER_MODES`, #309
+    /// §1), which is what makes such a task die with the daemon a refresh
+    /// replaces (design #440 D4). False ⇒ a container-only node, whose work
+    /// survives the swap by construction and whose refresh path is untouched.
     host_mode: bool,
     /// Node-local build+swap script for self-refresh (spec §3.1); `None` ⇒
     /// refresh requests are rejected as unconfigured.
@@ -458,7 +458,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         kvm,
         nix: nix.clone(),
         nix_rooted: std::sync::Mutex::new(HashMap::new()),
-        host_mode: backend_kind(&config.modes) == WorkerMode::Host,
+        host_mode: serves_host(&config.modes),
         refresh_script: config.refresh_script.clone(),
         refresh_git_url: config.refresh_git_url.clone(),
         refresh_git_key: config.refresh_git_key.clone(),
@@ -525,21 +525,25 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     Ok(())
 }
 
-/// Which local runtime serves this node's launches (design #309 P0). P0 has no
-/// per-request selector — routing is `placement.node` plus `WORKER_MODES` — so a
-/// node that names `host` at all serves **every** launch as a host process.
-fn backend_kind(modes: &[WorkerMode]) -> WorkerMode {
-    if modes.contains(&WorkerMode::Host) {
-        WorkerMode::Host
-    } else {
-        WorkerMode::Container
-    }
+/// Whether this node offers host execution at all (design #309 §1). Not a
+/// choice of backend: a node naming both runtimes constructs both and routes
+/// each launch ([`crate::route::RoutedBackend`]).
+fn serves_host(modes: &[WorkerMode]) -> bool {
+    modes.contains(&WorkerMode::Host)
+}
+
+/// Whether this node offers container execution. A node declaring nothing
+/// serves containers, which is what every node in the fleet does today.
+fn serves_container(modes: &[WorkerMode]) -> bool {
+    modes.contains(&WorkerMode::Container) || !serves_host(modes)
 }
 
 /// The `/workspace` collision #309 §2(a) names is dodged by option (iii) — one
 /// host task per node — so a host node's capacity is **enforced** here rather
-/// than left to an operator's `WORKER_SLOTS`. The ceiling too: `set_slots` could
-/// otherwise raise a 1-slot node back into the collision at runtime.
+/// than left to an operator's `WORKER_SLOTS` or a runtime `set_slots` raise.
+/// Deliberately **node-wide** even on a dual-mode node (#309 P1), which has no
+/// per-mode slot accounting to narrow it with: one task at a time, of either
+/// kind.
 fn enforce_host_capacity(slots: u32, slots_max: u32) -> Result<(), WorkerRunError> {
     if slots == 1 && slots_max == 1 {
         return Ok(());
@@ -564,31 +568,55 @@ async fn enforce_host_supervision(
         .map_err(|reason| WorkerRunError::Config(container::host::host_refusal(node, &reason)))
 }
 
-/// Build the backend for the runtimes the node declares (design #322 W1, #309
-/// P0) — the one construction site, so the docker backend's inherent
-/// `with_cache_dir` / `ping_all` wiring happens here and nowhere else. A node
-/// never advertises a runtime it cannot serve, which is why the host branch
-/// refuses the capacity that runtime cannot honor.
+/// Build exactly the backends the node's runtimes declare (design #322 W1, #309
+/// §1), so a container-only node never touches [`container::host`] and a
+/// host-only node never needs a docker daemon. A node declaring both gets
+/// [`crate::route::RoutedBackend`] over the two, so the mode resolves per
+/// launched task rather than per node.
 async fn local_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
-    if backend_kind(&config.modes) == WorkerMode::Host {
-        enforce_host_capacity(config.slots, config.slots_max)?;
-        let supervision = enforce_host_supervision(&config.node).await?;
-        tracing::warn!(
-            node = %config.node,
-            host_root = %config.host_root.display(),
-            workspace = %container::host::HOST_WORKSPACE,
-            supervision = ?supervision,
-            "WORKER_MODES names host: this node runs every launch as a HOST PROCESS and ignores \
-             the declared image — #309 P0 calls that deliberately a lie that must never leave the \
-             prototype node"
-        );
-        let backend = container::host::HostBackend::new(
-            config.node.clone(),
-            config.host_root.clone(),
-            supervision,
-        )?;
-        return Ok(Arc::new(backend));
+    let host: Option<Arc<dyn ContainerBackend>> = if serves_host(&config.modes) {
+        Some(host_backend(config).await?)
+    } else {
+        None
+    };
+    if !serves_container(&config.modes) {
+        return host.ok_or_else(|| {
+            WorkerRunError::Config(format!("node {} declares no runtime", config.node))
+        });
     }
+    let container = docker_backend(config).await?;
+    Ok(match host {
+        Some(host) => Arc::new(crate::route::RoutedBackend::new(container, host)),
+        None => container,
+    })
+}
+
+/// The node's host backend, and the two boot-time refusals a node advertising
+/// `host` has to survive first: the capacity rule #309 §2 option (iii) needs,
+/// and the supervision #440 D3 needs.
+async fn host_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
+    enforce_host_capacity(config.slots, config.slots_max)?;
+    let supervision = enforce_host_supervision(&config.node).await?;
+    tracing::info!(
+        node = %config.node,
+        host_root = %config.host_root.display(),
+        workspace = %container::host::HOST_WORKSPACE,
+        supervision = ?supervision,
+        modes = ?config.modes,
+        "host execution enabled — launches carrying no image run as host processes here"
+    );
+    Ok(Arc::new(container::host::HostBackend::new(
+        config.node.clone(),
+        config.host_root.clone(),
+        supervision,
+    )?))
+}
+
+/// The node's local docker backend, wired with everything the node's own config
+/// turns on (cache, KVM grant, nix store) and pinged before it is used.
+async fn docker_backend(
+    config: &WorkerConfig,
+) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
     let mut backend = DockerBackend::new(vec![DockerNodeConfig {
         name: config.node.clone(),
         endpoint: config.docker_endpoint.clone(),
@@ -1826,26 +1854,38 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    /// The golden assertion for #309 P0: a node that does not name `host` picks
-    /// the docker variant whatever else it declares, and no host rule can reach
-    /// it — a container-only daemon is what ships today, byte for byte.
+    /// The golden assertion for #309 §1: a node that does not name `host`
+    /// constructs the docker backend and nothing else, and no host rule can
+    /// reach it — a container-only daemon is what ships today, byte for byte.
     #[test]
     fn a_container_only_node_is_unchanged() {
-        assert_eq!(backend_kind(&[]), WorkerMode::Container);
-        assert_eq!(
-            backend_kind(&[WorkerMode::Container]),
-            WorkerMode::Container
-        );
-        assert_eq!(
-            crate::config::WorkerMode::Container,
-            backend_kind(&crate::config::default_modes()),
-            "the WORKER_MODES default and the backend choice cannot drift"
+        for modes in [vec![], vec![WorkerMode::Container]] {
+            assert!(serves_container(&modes), "{modes:?}");
+            assert!(!serves_host(&modes), "{modes:?}");
+        }
+        assert!(
+            serves_container(&crate::config::default_modes())
+                && !serves_host(&crate::config::default_modes()),
+            "the WORKER_MODES default and the backends constructed cannot drift"
         );
     }
 
-    /// P0 has no per-request selector, so naming `host` at all makes the node a
-    /// host node — and one whose capacity is not exactly 1 refuses to boot,
-    /// which is #309 §2 option (iii) enforced rather than assumed.
+    /// #309 §1's routing rule at the construction site: a node naming both
+    /// serves both, and one naming only `host` constructs no docker backend —
+    /// a Mac without Docker must not be made to need one.
+    #[test]
+    fn a_declared_mode_is_a_backend_constructed() {
+        let both = vec![WorkerMode::Container, WorkerMode::Host];
+        assert!(serves_container(&both) && serves_host(&both));
+        assert!(serves_container(&[WorkerMode::Host, WorkerMode::Container]));
+
+        assert!(!serves_container(&[WorkerMode::Host]));
+        assert!(serves_host(&[WorkerMode::Host]));
+    }
+
+    /// A node offering `host` — alone or beside `container` — whose capacity is
+    /// not exactly 1 refuses to boot, which is #309 §2 option (iii) enforced
+    /// rather than assumed, and stays node-wide on a dual-mode node.
     #[test]
     fn host_mode_is_one_slot_or_no_boot() {
         for modes in [
@@ -1853,7 +1893,7 @@ mod tests {
             vec![WorkerMode::Container, WorkerMode::Host],
             vec![WorkerMode::Host, WorkerMode::Container],
         ] {
-            assert_eq!(backend_kind(&modes), WorkerMode::Host, "{modes:?}");
+            assert!(serves_host(&modes), "{modes:?}");
         }
 
         assert!(enforce_host_capacity(1, 1).is_ok());

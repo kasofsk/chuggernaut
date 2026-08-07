@@ -96,7 +96,7 @@ impl Core {
         branch: &str,
         job_type: &JobType,
         secrets: &[String],
-        image: String,
+        image: Option<String>,
         run: String,
         role: ChannelRole,
         timeout: Duration,
@@ -352,7 +352,7 @@ impl Core {
             TaskPhase::Work => (
                 job.branch.clone(),
                 job_type.work.secrets.clone(),
-                job_type.image.clone().unwrap_or_default(),
+                job_type.image.clone(),
                 ChannelRole::Work { task_id },
                 self.active.get(&key).expect("checked").work_timeout(),
                 MonitorKind::Logs,
@@ -390,8 +390,7 @@ impl Core {
                     .wrap_up
                     .image
                     .clone()
-                    .or_else(|| job_type.image.clone())
-                    .unwrap_or_default(),
+                    .or_else(|| job_type.image.clone()),
                 ChannelRole::Work { task_id },
                 task_timeout(&job_type),
                 MonitorKind::Logs,

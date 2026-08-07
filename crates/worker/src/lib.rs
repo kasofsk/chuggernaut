@@ -14,6 +14,7 @@ pub mod capacity;
 pub mod config;
 pub mod daemon;
 pub mod nix;
+pub mod route;
 
 pub use backend::FleetBackend;
 pub use config::{WorkerConfig, WorkerMode};

@@ -590,11 +590,12 @@ fi
 # #309 P1 (job #478), but nothing places by it, so the declaration selects no
 # node.
 #
-# What it DOES do is the reason the guard below exists. P0 has no per-request
-# selector (crates/worker/src/daemon.rs `backend_kind`), so a node naming `host`
-# at all runs EVERY launch as a host process and ignores the declared image, and
-# the daemon refuses to start unless WORKER_SLOTS and WORKER_SLOTS_MAX are both 1
-# — #309 §2's /workspace collision, taken as option (iii). Only the first of
+# What it DOES do is the reason the guard below exists. Since #309 P1 (job #479)
+# a node naming `container,host` constructs both backends and routes each launch
+# by whether it carries an image, so the mode is per task rather than per node —
+# but any node naming `host` still refuses to start unless WORKER_SLOTS and
+# WORKER_SLOTS_MAX are both 1, node-wide, because two host tasks cannot both own
+# /workspace — #309 §2's collision, taken as option (iii). Only the first of
 # those is forwardable from here (WORKER_SLOTS_MAX is the one knob no script
 # passes, env.example says so), so this refuses the half it can see and names the
 # half it cannot, rather than replacing a working daemon with one the supervisor

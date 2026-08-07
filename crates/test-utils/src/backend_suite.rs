@@ -37,7 +37,7 @@ pub fn docker_available() -> bool {
 
 pub fn cfg(cmd: &str) -> ContainerLaunchConfig {
     ContainerLaunchConfig {
-        image: "alpine:3".into(),
+        image: Some("alpine:3".into()),
         cmd: vec!["sh".into(), "-c".into(), cmd.into()],
         env: HashMap::new(),
         files: vec![],

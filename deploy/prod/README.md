@@ -995,10 +995,13 @@ Notes:
   swap copying it forward (#440 D6/D7). Declaring `host` does **not** make host jobs runnable:
   a job type may declare `runtime.mode: host` since #309 P1 (job #478), but #309
   P2 — which would put a node's modes on the wire — has not landed, so the
-  dispatcher never sees them and places by node, not by mode. It is also **not additive**: P0 has no per-request selector, so a node
-  naming `host` runs *every* launch as a host process, ignoring the image, and
-  refuses to boot below `WORKER_SLOTS=1` + `WORKER_SLOTS_MAX=1` (one host task
-  per node). `build-worker.sh` refuses the capacity half it can see and names
+  dispatcher never sees them and places by node, not by mode. It **is** additive
+  since #309 P1 (job #479): a node naming both constructs both backends and
+  routes each launch by whether it carries an image, and one naming only `host`
+  needs no Docker and refuses any launch that carries one. What every node naming
+  `host` still pays is capacity — it refuses to boot below `WORKER_SLOTS=1` +
+  `WORKER_SLOTS_MAX=1`, node-wide, one task at a time of either kind.
+  `build-worker.sh` refuses the capacity half it can see and names
   the `WORKER_SLOTS_MAX` half no script forwards.
 - **Per-task nix GC roots are the same shape of per-node opt-in** (spec §3.1,
   [the runbook §7](../../docs/reference/runbooks/worker-kvm.md)). `WORKER_NIX_GCROOTS_DIR`

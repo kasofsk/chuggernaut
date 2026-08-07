@@ -68,7 +68,11 @@ the fleet runs macOS host tasks. `runtime.mode: host` **validates** since
 [#309](309-host-native-execution.md) P1 (job #478) landed the host row's field
 rules — the top-level `image` ban and the required `env` this document's N2 also
 asks for; N2's own `mode: host` requires `work.type: command` rule did not land
-with them, and nothing places by mode either, which is #309 P2.
+with them, and nothing places by mode either, which is #309 P2. §[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)'s
+"what is true today" is superseded on one point: `ContainerLaunchConfig.image`
+and `WorkerLaunchRequest.image` are **`Option<String>`** since #309 P1
+(job #479), and their absence is what selects host mode, so a dual-mode node
+routes each launch rather than serving them all one way.
 
 The rows below are the states of [Phased implementation
 sketch](#phased-implementation-sketch)'s table, which keeps each phase's full
