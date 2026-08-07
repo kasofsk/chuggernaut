@@ -51,6 +51,10 @@ EOF
 #   * the docker-context probe (`docker context inspect`, Darwin only) echoes
 #     $FAKE_DOCKER_CONTEXT, the endpoint the node's own docker CLI uses, and the
 #     socket check (`[ -S …`) succeeds unless $FAIL_DOCKER_SOCKET is set;
+#   * the CONTAINER-PLATFORM probe (`docker version --format`, Darwin only)
+#     echoes $FAKE_DOCKER_PLATFORM, default `arm64/linux` — what colima on the
+#     air answers, and what the injected channel binary must be built for. Set it
+#     empty to model a node whose docker is not running;
 #   * the native daemon build (`… build --release --locked …`) is a no-op that
 #     is logged, so the assertions can read back exactly what was compiled;
 #   * the image-label inspect (`...chug.git.sha...`) echoes $FAKE_LABEL, default
@@ -109,6 +113,7 @@ case "\$*" in
     ;;
   *"build --release --locked"*) ;;
   *"docker context inspect"*) printf '%s\n' "\${FAKE_DOCKER_CONTEXT-unix:///Users/op/.colima/default/docker.sock}" ;;
+  *"docker version --format"*) printf '%s\n' "\${FAKE_DOCKER_PLATFORM-arm64/linux}" ;;
   *chug.git.sha*)  echo "\${FAKE_LABEL:-deadbeefcafe}" ;;
   *is-active*)
     if [ -n "\${FAKE_STALE_LOG:-}" ]; then
@@ -1252,8 +1257,8 @@ echo "ok: an unwritable /usr/local refuses on macOS, before anything is extracte
 # design #440 D6 extracts the binary from the worker image, and that image is a
 # LINUX container: on the air (2026-08-06) it installed as `ELF 64-bit LSB pie
 # executable, ARM aarch64` and launchd looped `cannot execute binary file`. So a
-# mac builds its own from the same context, with the node's own cargo, and the
-# three artifacts come out of that tree instead of out of a `docker cp`.
+# mac builds its DAEMON from the same context, with the node's own cargo, and
+# that one artifact comes out of that tree instead of out of a `docker cp`.
 : > "$LOG"
 PATH="$BIN:$PATH" \
   WORKER_SSH=op@air \
@@ -1266,9 +1271,11 @@ PATH="$BIN:$PATH" \
 grep_log "CHUG_GIT_SHA='deadbeefcafe' CARGO_TARGET_DIR='/Users/op/chuggernaut-worker/build/target' '/opt/homebrew/bin/cargo' build --release --locked --bin chuggernaut --bin chuggernaut-channel"
 grep_log "install -m 0755 '/Users/op/chuggernaut-worker/build/target/release/chuggernaut' \"\$STAGE/chuggernaut\""
 grep_log "install -m 0755 '/Users/op/chuggernaut-worker/build/src/deploy/prod/worker-refresh.sh' \"\$STAGE/worker-refresh.sh\""
-# The Linux extraction must NOT happen on this node — a binary out of that image
-# is exactly what crash-looped.
-if grep -qF -- "docker create chuggernaut/worker" "$LOG"; then
+# The DAEMON must not come out of that image — an ELF under launchd is exactly
+# what crash-looped. The channel binary is the opposite case and has its own
+# case below; what is asserted here is that the daemon is not one of the files
+# lifted out of the container.
+if grep -qF -- '"$CID:/usr/local/bin/chuggernaut"' "$LOG"; then
   fail "a Darwin node must not extract its daemon binary from the Linux worker image"
 fi
 # The target directory is kept and the source tree is replaced: a cold workspace
@@ -1281,6 +1288,32 @@ fi
 grep_log "WORKER_CARGO='/opt/homebrew/bin/cargo'"
 grep_log "WORKER_BUILD_DIR='/Users/op/chuggernaut-worker/build'"
 echo "ok: a Darwin node compiles its own daemon and installs that, not the image's Linux binary"
+
+# ── Case 2s2b: …and its CHANNEL binary comes out of the image, not the tree ────
+# The two binaries have OPPOSITE platform requirements and #440's 2026-08-07
+# correction generalised over both. The daemon runs ON the mac; the channel
+# binary never does — the daemon injects it into every agent container
+# (crates/worker/src/daemon.rs, `FileSource::LocalArtifact`), which is Linux. The
+# mac's own build is a Mach-O, so Claude Code's chuggernaut-channel MCP server
+# stayed `pending` for every task on the air and the evaluators had no
+# `submit_eval` at all (#477, #478). The image is built by the node's own docker,
+# so its copy is already linux/<the node's container arch>.
+grep_log "docker create chuggernaut/worker:prod"
+grep_log '"$CID:/usr/local/lib/chuggernaut/chuggernaut-channel"'
+if grep -qF -- "install -m 0755 '/Users/op/chuggernaut-worker/build/target/release/chuggernaut-channel'" "$LOG"; then
+  fail "a Darwin node must not inject the Mach-O channel binary its own cargo built"
+fi
+# The refresh script is /bin/sh and has no platform at all, so it stays on the
+# source-file path — the same bytes the image would have handed back.
+if grep -qF -- '"$CID:/usr/local/lib/chuggernaut/worker-refresh.sh"' "$LOG"; then
+  fail "the refresh script is platform-agnostic and stays on the source-file path"
+fi
+# Extracted BEFORE the install, like everything else the node is handed.
+chan_cp_line="$(line_of '"$CID:/usr/local/lib/chuggernaut/chuggernaut-channel"')"
+chan_put_line="$(line_of "chug_put 0755 \"\$STAGE/chuggernaut-channel\" '/usr/local/lib/chuggernaut/chuggernaut-channel'")"
+[ -n "$chan_cp_line" ] && [ -n "$chan_put_line" ] || fail "expected both the channel extraction and its install in the log"
+[ "$chan_cp_line" -lt "$chan_put_line" ] || fail "the channel binary must be extracted before it is installed"
+echo "ok: a Darwin node injects the image's LINUX channel binary, not its own Mach-O one"
 
 # ── Case 2s2a: the conversion NOTE says where THIS node's binary comes from ────
 # It is the only place the operator is told what their node's self-refresh does,
@@ -1560,6 +1593,124 @@ put_line="$(line_of "chug_put 0755 \"\$STAGE/chuggernaut\" '/usr/local/bin/chugg
 [ -n "$probe_line" ] && [ -n "$put_line" ] || fail "expected both the exec check and the install in the log"
 [ "$probe_line" -le "$put_line" ] || fail "the staged binary must be run BEFORE it is installed"
 echo "ok: the staged daemon binary is required to exec on the node before it is installed"
+
+# ── Case 2s5a: the CHANNEL binary is asked the question its own executor asks ───
+# On Linux the node IS the container's platform, so the question is the same one:
+# does this exec here. `chuggernaut-channel` has no `--version` (it is an MCP
+# server that reads its job context out of the environment), so what is asked is
+# whether the kernel would load it at all — 126/127 — and it is asked before the
+# first chug_put.
+grep_log "\"\$STAGE/chuggernaut-channel\" < /dev/null"
+grep_log "CHAN_RC\" = 126"
+chan_probe_line="$(line_of "\"\$STAGE/chuggernaut-channel\" < /dev/null")"
+chan_put_line="$(line_of "chug_put 0755 \"\$STAGE/chuggernaut-channel\" '/usr/local/lib/chuggernaut/chuggernaut-channel'")"
+[ -n "$chan_probe_line" ] && [ -n "$chan_put_line" ] || fail "expected both the channel exec check and its install in the log"
+[ "$chan_probe_line" -lt "$chan_put_line" ] || fail "the staged channel binary must be checked BEFORE it is installed"
+# And the Linux STAGING is untouched by all of this: all three artifacts still
+# come out of the one image, which is the platform-coincidence D6 rests on.
+grep_log "docker create chuggernaut/worker:prod"
+grep_log '"$CID:/usr/local/bin/chuggernaut"'
+grep_log '"$CID:/usr/local/lib/chuggernaut/chuggernaut-channel"'
+grep_log '"$CID:/usr/local/lib/chuggernaut/worker-refresh.sh"'
+# A Linux node is never asked for its container platform: it is the node's own.
+if grep -qF -- "docker version --format" "$LOG"; then
+  fail "a Linux node's container platform is its own — no probe belongs on that path"
+fi
+echo "ok: the Linux path is unchanged and its channel binary must exec on the node"
+
+# ── Case 2s6: on DARWIN the channel binary is judged as a CONTAINER binary ─────
+# Asking it to run on the mac would be exactly backwards — the right answer there
+# is that it does not. So the guard reads its object header: ELF magic, and the
+# e_machine of the architecture THIS NODE'S DOCKER runs, derived rather than
+# assumed. The guard's own two functions are lifted out of the remote script and
+# run here against fixtures, so what is tested is the logic the node executes.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  sh "$SUT" > "$WORK/macguard.out" 2>&1
+
+# A 20-byte ELF header is all the guard reads: magic, then e_machine as two
+# little-endian bytes at offset 18 (aarch64 = 0xb7, x86-64 = 0x3e). The Mach-O
+# fixture is what a mac's own `cargo build` leaves at that path.
+elf_header() {
+  printf '\177ELF\002\001\001\000'
+  printf '\000\000\000\000\000\000\000\000'
+  printf '\003\000'
+  printf '%b' "$1"
+}
+elf_header '\267\000' > "$WORK/chan-linux-arm64"
+elf_header '\076\000' > "$WORK/chan-linux-amd64"
+printf '\317\372\355\376\014\000\000\001\002\000\000\000\020\000\000\000\330\005\000\000' \
+  > "$WORK/chan-macho-arm64"
+
+guard_src="$({ grep -m 1 '^chug_magic() {' "$LOG"; grep -m 1 '^chug_channel_ok() {' "$LOG"; } || true)"
+case "$guard_src" in
+  *chug_magic*chug_channel_ok*) ;;
+  *) fail "the Darwin install script must carry the channel guard's own functions" ;;
+esac
+eval "$guard_src"
+guard_refuses() {
+  if chug_channel_ok "$1" "$2"; then fail "$3"; fi
+}
+chug_channel_ok "$WORK/chan-linux-arm64" b700 \
+  || fail "the guard must ACCEPT a linux/arm64 ELF — that is what the image carries"
+guard_refuses "$WORK/chan-macho-arm64" b700 \
+  "the guard must REFUSE a Mach-O: no agent container can exec it"
+guard_refuses "$WORK/chan-linux-amd64" b700 \
+  "the guard must REFUSE an ELF for another architecture"
+# Derived from the node's docker, not assumed: a linux/amd64 colima wants the
+# other e_machine and the arm64 ELF is then the wrong one.
+chug_channel_ok "$WORK/chan-linux-amd64" 3e00 \
+  || fail "the guard must ACCEPT a linux/amd64 ELF on a node whose docker runs amd64"
+guard_refuses "$WORK/chan-linux-arm64" 3e00 \
+  "the guard must REFUSE an arm64 ELF on a node whose docker runs amd64"
+echo "ok: the Darwin channel guard accepts the container's ELF and refuses a Mach-O"
+
+# ── Case 2s6a: the refusal NAMES the node's container platform, and is early ───
+# An injected binary that cannot exec produces no error the operator ever sees:
+# the MCP server stays `pending`, the agent loses submit_eval, and it surfaces
+# four job escalations later as "the evaluator produced no output". So the
+# refusal has to carry the whole chain, and the platform it measured against.
+grep_log "chug_channel_ok \"\$STAGE/chuggernaut-channel\" b700"
+grep_log "this node's docker runs arm64/linux containers"
+grep_log "a Mach-O built for this mac"
+grep_log "REFUSING (live daemon untouched, nothing installed)"
+guard_line="$(line_of "chug_channel_ok \"\$STAGE/chuggernaut-channel\" b700")"
+mac_put_line="$(line_of "chug_put 0755 \"\$STAGE/chuggernaut\" '/usr/local/bin/chuggernaut'")"
+[ -n "$guard_line" ] && [ -n "$mac_put_line" ] || fail "expected both the channel guard and the install in the log"
+[ "$guard_line" -lt "$mac_put_line" ] || fail "the channel guard must refuse BEFORE anything is installed"
+# The platform the run measured against is reported, not left implicit.
+grep -qF "air runs arm64/linux containers" "$WORK/macguard.out" \
+  || fail "the operator must be told which container platform the channel binary was judged against"
+echo "ok: the Darwin refusal names the container platform and comes before the install"
+
+# ── Case 2s6b: a node whose docker cannot answer REFUSES; it does not guess ────
+# Assuming arm64 because the mac is one is how a linux/amd64 colima would ship
+# the same silent failure with a green deploy.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  FAKE_DOCKER_PLATFORM= \
+  sh "$SUT" > "$WORK/noplat.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Darwin node whose docker platform is unreadable must fail the deploy (got rc=0)"
+grep -qF "cannot read the container platform" "$WORK/noplat.out" \
+  || fail "the refusal must say what it could not read"
+not_started "a node with no derivable container platform must not reach the agent bootstrap"
+if grep -qF "chug_put 0755" "$LOG"; then
+  fail "the platform refusal must come before anything is installed"
+fi
+echo "ok: an underivable container platform refuses instead of guessing"
 
 # ── Case 2t: a platform this script cannot supervise refuses, before building ──
 : > "$LOG"

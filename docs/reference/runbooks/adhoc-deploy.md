@@ -103,6 +103,14 @@ Linux node**, extracts the daemon binary from the new `worker` image. A
 instead, because the worker image is a Linux container and what `docker cp`
 lifts out of it is an ELF file launchd loops on (#440's
 [2026-08-07 correction](../../design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)).
+**Only the daemon splits.** `chuggernaut-channel` is injected into agent
+containers and never runs on the node, so it comes out of the worker image on
+both platforms — a mac's own Mach-O copy leaves every agent's MCP server
+`pending` and its evaluators without `submit_eval` (#440's
+[2026-08-08 correction](../../design/440-native-worker-daemon.md#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)),
+which is why a Darwin deploy also reads the node's container architecture off
+`docker version --format '{{.Server.Arch}}/{{.Server.Os}}'` and refuses a staged
+binary that does not match it.
 Either way it installs the binary with an environment
 file and a systemd unit (Linux) or launchd agent (macOS), and asks the
 supervisor to restart it (design
@@ -122,7 +130,10 @@ own build by name** and stays on the SHA it has; re-apply its spec with
 `build-worker.sh`, which resolves the toolchain and writes both halves. A mac
 converted before 2026-08-07 must be re-converted **before the next prod deploy**
 — it holds a pre-correction `worker-refresh.sh` whose swap still installs the
-image's Linux binary over its working daemon. The refusal moved to the other
+image's Linux binary over its working daemon. One converted before 2026-08-08 is
+injecting a Mach-O `chuggernaut-channel` into every agent container meanwhile,
+which fails silently and takes every agent evaluator on that node with it —
+re-converting fixes both. The refusal moved to the other
 side: a node **nobody has
 converted** — one still running the `chug-worker` container — refuses its own
 swap (`this daemon is running INSIDE a container … REFUSING swap`) and its

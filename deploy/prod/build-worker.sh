@@ -853,26 +853,44 @@ elif [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
   echo "build-worker: WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS' grants project-declared toolchains, but WORKER_NIX_GCROOTS_DIR is unset — a realised environment with no GC root is collectable mid-task, so the daemon realises nothing and refuses every launch declaring runtime.env; REFUSING (live daemon untouched). Set WORKER_NIX_GCROOTS_DIR, or unset WORKER_NIX_PROJECTS." >&2
   exit 1
 fi
-# ── what gets installed, and who supervises it (design #440 D2, D6) ──────────
-# On LINUX the daemon binary is EXTRACTED from the image just built rather than
-# compiled on the node: that keeps its build environment byte-identical to
-# today's, needs no Rust toolchain as a node machine fact, and leaves the pinned
-# Dockerfile the single definition of how the binary is produced (#440 D6). The
-# channel binary and the refresh script ride out of the same image, into the
-# paths crates/worker/src/config.rs already defaults to.
+# ── what gets installed, and WHO EXECUTES IT (design #440 D2, D6) ────────────
+# Three artifacts, and the platform question each one answers is not "which
+# machine staged this" but "which kernel execs it". THE DAEMON RUNS ON THE NODE,
+# under its supervisor. THE CHANNEL BINARY NEVER RUNS ON THE NODE AT ALL: the
+# daemon reads it off the disk at startup and injects it into every agent
+# CONTAINER (crates/worker/src/daemon.rs, `FileSource::LocalArtifact`), and a
+# container is Linux on both platforms. The refresh script is /bin/sh either way.
 #
-# On DARWIN all three come out of the tree compiled above, for the reason stated
-# where that build is: an image built for Linux holds a binary a mac cannot exec
-# (#440's 2026-08-07 correction). The refresh script is the source file rather
-# than the image's copy of it — the same bytes, since the image gets it by COPY.
+# On LINUX the two executors coincide, so all three come out of the image just
+# built rather than a compile on the node: that keeps the build environment
+# byte-identical to today's, needs no Rust toolchain as a node machine fact, and
+# leaves the pinned Dockerfile the single definition of how the binary is
+# produced (#440 D6). They land in the paths crates/worker/src/config.rs already
+# defaults to.
 #
-# EITHER WAY THE STAGED BINARY MUST RUN ON THIS NODE, and that is asked before a
-# single byte is installed. It is the generalisation of the finding, not a mac
-# special case: a binary whose provenance is a foreign platform installs
-# perfectly and then loops under the supervisor, and `--version` is the cheapest
-# question that distinguishes the two. It is a real question on Linux too — the
-# image is bookworm and a NixOS node has no /lib64 dynamic loader — which is a
-# prediction this check turns into a named refusal rather than a crash loop.
+# On DARWIN the two executors DIVERGE, and #440's 2026-08-07 correction
+# generalised over both when it holds for only one. The DAEMON does come out of
+# the tree compiled above, because an image built for Linux holds a binary a mac
+# cannot exec. The CHANNEL BINARY comes out of the IMAGE, because the mac's own
+# build produces a Mach-O the LINUX CONTAINER cannot exec — the inverse defect,
+# and a silent one: Claude Code launches it as the chuggernaut-channel MCP
+# server, the exec fails, the server stays `pending` forever, and the agent
+# simply has no `update_status` and no `submit_eval`. Jobs #477 and #478 paid for
+# that in four "produced no output" escalations. The image is built by the node's
+# OWN docker (colima on the air), so its copy is already linux/<the node's
+# container arch>. The refresh script is the source file rather than the image's
+# copy of it — the same bytes, since the image gets it by COPY.
+#
+# SO EACH BINARY IS ASKED THE QUESTION ITS OWN EXECUTOR WILL ASK, before a single
+# byte is installed. For the daemon that is `--version`, on both platforms: a
+# binary whose provenance is a foreign platform installs perfectly and then loops
+# under the supervisor, and this is a real question on Linux too — the image is
+# bookworm and a NixOS node has no /lib64 dynamic loader. For the channel binary
+# it is the same question asked of the CONTAINER's platform, which on Linux is
+# "does it run here" and on Darwin is "is it a Linux ELF for the architecture
+# this node's docker actually runs", derived from that docker rather than
+# assumed — a linux/amd64 colima on an arm mac would be just as wrong and just as
+# silent.
 #
 # Every write is "unprivileged first, `sudo -n` as the fallback" — the shape the
 # cache-dir provisioning above already uses. The binaries go to /usr/local on
@@ -890,10 +908,56 @@ docker cp \"\$CID:/usr/local/bin/chuggernaut\" \"\$STAGE/chuggernaut\"
 docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel\"
 docker cp \"\$CID:/usr/local/lib/chuggernaut/worker-refresh.sh\" \"\$STAGE/worker-refresh.sh\"
 docker rm \"\$CID\" >/dev/null"
+  # The container's platform IS the node's, so the cheapest question is the one
+  # the container will ask: does this file exec here at all. `chuggernaut-channel`
+  # takes no `--version` — it is an MCP server that reads its job context out of
+  # the environment and then speaks JSON-RPC on stdin — so a run with no context
+  # exits non-zero either way, and 126/127 is the only answer that means the
+  # kernel would not load it (the `cannot execute binary file` the air's daemon
+  # took, one artifact over).
+  REMOTE_CHANNEL_CHECK="if \"\$STAGE/chuggernaut-channel\" < /dev/null > /dev/null 2>&1; then CHAN_RC=0; else CHAN_RC=\$?; fi
+if [ \"\$CHAN_RC\" = 126 ] || [ \"\$CHAN_RC\" = 127 ]; then
+  echo \"build-worker: the staged chuggernaut-channel binary cannot be executed on this node (exit \$CHAN_RC: a foreign architecture, a missing dynamic loader, or a broken build) — the daemon injects THIS FILE into every agent container, where a binary that cannot exec produces no error the operator ever sees: Claude Code reports the chuggernaut-channel MCP server as pending forever, the agent silently loses update_status and submit_eval, and it surfaces four job escalations later as the evaluator produced no output (#477, #478). REFUSING (live daemon untouched, nothing installed).\" >&2
+  exit 1
+fi"
 else
+  # The architecture the injected binary must be built for, read off the node's
+  # OWN docker rather than assumed from its `uname -m`: colima is a Linux VM and
+  # its arch is the operator's choice, so `arm64/linux` on the air is an answer
+  # and not a constant. Underivable is a refusal, because the alternative is
+  # installing an unchecked binary — which is exactly the state this fixes.
+  NODE_DOCKER_PLATFORM="$(ssh "$WORKER_SSH" "docker version --format '{{.Server.Arch}}/{{.Server.Os}}' 2> /dev/null || true" < /dev/null | tr -d '[:space:]')"
+  case "$NODE_DOCKER_PLATFORM" in
+    arm64/linux | aarch64/linux) CHANNEL_ELF_MACHINE=b700 ;;
+    amd64/linux | x86_64/linux) CHANNEL_ELF_MACHINE=3e00 ;;
+    *)
+      echo "build-worker: cannot read the container platform of $WORKER_SSH's docker — 'docker version --format {{.Server.Arch}}/{{.Server.Os}}' answered '${NODE_DOCKER_PLATFORM:-<nothing>}', and this deploy needs it to tell a usable chuggernaut-channel binary from one no agent container can exec (the daemon injects that file into every container; a mac's own build is a Mach-O and fails silently, #477/#478); REFUSING (live daemon untouched, nothing installed). Start the node's docker (on a mac, 'colima start') and re-run." >&2
+      exit 1
+      ;;
+  esac
+  echo "build-worker: $NODE runs $NODE_DOCKER_PLATFORM containers — the injected chuggernaut-channel binary comes out of chuggernaut/worker:$TAG, which that same docker built, and the daemon binary comes out of the native tree build"
   REMOTE_STAGE="install -m 0755 '$BUILD_DIR/target/release/chuggernaut' \"\$STAGE/chuggernaut\"
-install -m 0755 '$BUILD_DIR/target/release/chuggernaut-channel' \"\$STAGE/chuggernaut-channel\"
-install -m 0755 '$BUILD_DIR/src/deploy/prod/worker-refresh.sh' \"\$STAGE/worker-refresh.sh\""
+install -m 0755 '$BUILD_DIR/src/deploy/prod/worker-refresh.sh' \"\$STAGE/worker-refresh.sh\"
+CID=\$(docker create chuggernaut/worker:$TAG)
+docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel\"
+docker rm \"\$CID\" >/dev/null"
+  # Asking this binary to run HERE would be exactly backwards — the right answer
+  # on a mac is that it does not. So the question is asked of its object header
+  # instead: ELF magic, and the e_machine the node's containers run. `od` is
+  # POSIX and on both platforms; e_machine is two little-endian bytes at file
+  # offset 18, so aarch64 (0xb7) reads back `b700` and x86-64 (0x3e) `3e00`.
+  REMOTE_CHANNEL_CHECK="chug_magic() { od -A n -v -t x1 -j \"\$2\" -N \"\$3\" \"\$1\" 2> /dev/null | tr -d '[:space:]'; }
+chug_channel_ok() { [ \"\$(chug_magic \"\$1\" 0 4)\" = 7f454c46 ] && [ \"\$(chug_magic \"\$1\" 18 2)\" = \"\$2\" ]; }
+if ! chug_channel_ok \"\$STAGE/chuggernaut-channel\" $CHANNEL_ELF_MACHINE; then
+  CHAN_MAGIC=\$(chug_magic \"\$STAGE/chuggernaut-channel\" 0 4)
+  case \"\$CHAN_MAGIC\" in
+    cffaedfe | cefaedfe | feedfacf | feedface | cafebabe | bebafeca) CHAN_KIND='a Mach-O built for this mac' ;;
+    7f454c46) CHAN_KIND=\"an ELF whose e_machine is \$(chug_magic \"\$STAGE/chuggernaut-channel\" 18 2) and not $CHANNEL_ELF_MACHINE\" ;;
+    *) CHAN_KIND=\"unreadable as an executable object (leading bytes \${CHAN_MAGIC:-none})\" ;;
+  esac
+  echo \"build-worker: the staged chuggernaut-channel binary is \$CHAN_KIND, and it NEVER RUNS ON THIS MAC — the daemon injects it into every agent container, and this node's docker runs $NODE_DOCKER_PLATFORM containers, so it must be a Linux ELF for that architecture. An injected binary that cannot exec produces no error the operator ever sees: Claude Code reports the chuggernaut-channel MCP server as pending forever, the agent silently loses update_status and submit_eval, and it surfaces four job escalations later as the evaluator produced no output (#477, #478). REFUSING (live daemon untouched, nothing installed). The right bytes are already on the node, in chuggernaut/worker:$TAG at /usr/local/lib/chuggernaut/chuggernaut-channel.\" >&2
+  exit 1
+fi"
 fi
 REMOTE_INSTALL="set -e
 chug_dir() { mkdir -p \"\$1\" 2>/dev/null || sudo -n mkdir -p \"\$1\"; }
@@ -905,6 +969,7 @@ if ! \"\$STAGE/chuggernaut\" --version > /dev/null 2>&1; then
   echo 'build-worker: the staged daemon binary does not run on this node (chuggernaut --version failed: a foreign architecture, a missing dynamic loader, or a broken build) — installing it would leave the supervisor restarting a binary that cannot exec, which is the crash loop the air took on 2026-08-06; REFUSING (live daemon untouched, nothing installed)' >&2
   exit 1
 fi
+$REMOTE_CHANNEL_CHECK
 chug_dir '$BIN_DIR'
 chug_dir '$LIB_DIR'
 chug_dir '$ENV_DIR'

@@ -1,6 +1,6 @@
 # Design — the natively-supervised worker daemon
 
-Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away**, and no node runs a native daemon from this tree: nothing was applied, and no node advertises `host` (#309 P1 made `runtime.mode: host` a legal declaration in job #478; placing by it is P2).
+Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away and on 2026-08-08 for the one artifact that correction over-reached onto**, and no node runs a native daemon from this tree: nothing was applied, and no node advertises `host` (#309 P1 made `runtime.mode: host` a legal declaration in job #478; placing by it is P2).
 
 **The first conversion of a real node, on 2026-08-06, found two things this
 design got wrong for macOS** — [D6](#decisions)'s extracted binary is an ELF file
@@ -12,6 +12,16 @@ a Darwin node **compiles** its own daemon from a declared toolchain, the
 endpoint is derived from the node's own docker context, and every staged binary
 must prove it runs on the node before it is installed. `gumbo-air-0` is running
 a daemon an operator built **by hand** and is not converted by this tree.
+
+**That correction then generalised one artifact too far.** It sent all three
+staged artifacts down the native-build path on Darwin, and
+`chuggernaut-channel` is the *inverse* case: it never runs on the mac, it is
+injected into every agent **container**, so a Mach-O is what breaks it. Jobs #477
+and #478 paid for that in four "produced no output" escalations before the air
+was drained —
+[the 2026-08-08 correction](#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)
+takes the channel binary out of the worker image on both platforms and asks each
+binary the question **its own executor** asks.
 
 `IMPLEMENTED` is a claim about the slices and nothing more
 ([`docs/reference/docs.md`](../reference/docs.md)), and it is worth saying what it does
@@ -120,7 +130,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | **D3** | **Host tasks run in their own supervision unit, not the daemon's** — Linux: a transient systemd scope per task; macOS: the process group `spawn_task` already creates — **proven on both, 2026-08-06**: macOS 26.5.1 (Darwin) on `gumbo-air-0` against the mechanism itself, `sh deploy/prod/macos-host-supervision-proof.sh` at tree `c8a8354` ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and Linux through the shipped path on `gumbo-nuc-0` (NixOS, systemd, cgroup v2), `cargo test -p container --test host_backend` at trees `186beeb` and `af9f74e`, with `XDG_RUNTIME_DIR=/run/user/1000` set in the invoking environment ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)). | It is the same mechanism #309 §6, §7 and §2 each independently need, and it is the only way `systemctl restart chug-worker` can stop killing in-flight work. |
 | **D4** | **And the daemon declines a `refresh` while any host task is live**, naming the task — evaluated **twice: at accept, and again at the swap boundary** beside `RefreshGate::drained`. | D3 covers a unit restart; it does not cover a reboot or a rebuild that restarts more than the unit, and the self-refresh is the only restart the platform performs *automatically* — a loud refusal there is cheap and unconditional. The accept check is the fast, informative one; the swap-boundary check is the one that is actually load-bearing, because the build phase runs between them. |
 | **D5** | **Credentials move to a root-owned `0700` directory named by the unit, not the login user's home.** `chuggernaut admin worker-creds` is unchanged; the install step in `deploy/prod/README.md` §6 changes. | The login user is in the `docker` group and is who `build-worker.sh` ssh's in as, so a creds file under that user's home is readable by anything that user runs — a strictly worse boundary than the one the mount was pretending to give. |
-| **D6** | **`build-worker.sh` renders and installs a unit + environment file; `worker-refresh.sh`'s swap collapses to "install the binary, ask the supervisor to restart".** The daemon binary is extracted from the worker image the build phase already produces — **on Linux only**: the image is a Linux container, so a **Darwin** node compiles its own from a declared `WORKER_CARGO`, and both platforms must prove the staged binary runs on the node before installing it ([the correction](#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476), measured on `gumbo-air-0` 2026-08-06). | Every mount, device and `docker inspect` carry-forward in the swap phase exists only because the daemon is a container that must be re-composed; extracting the binary keeps its build environment byte-identical to today's and needs no host Rust toolchain — an argument whose premise is that the image's platform *is* the node's, which is false on a mac and buys nothing there. |
+| **D6** | **`build-worker.sh` renders and installs a unit + environment file; `worker-refresh.sh`'s swap collapses to "install the binary, ask the supervisor to restart".** The daemon binary is extracted from the worker image the build phase already produces — **on Linux only**: the image is a Linux container, so a **Darwin** node compiles its own from a declared `WORKER_CARGO`, and both platforms must prove the staged binary runs on the node before installing it ([the correction](#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476), measured on `gumbo-air-0` 2026-08-06). The split is **per artifact, by who execs it**: `chuggernaut-channel` rides out of the image on *both* platforms, because agent containers exec it and a mac never does ([the 2026-08-08 correction](#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)). | Every mount, device and `docker inspect` carry-forward in the swap phase exists only because the daemon is a container that must be re-composed; extracting the binary keeps its build environment byte-identical to today's and needs no host Rust toolchain — an argument whose premise is that the image's platform *is* the node's, which is false on a mac and buys nothing there. |
 | **D7** | **#390's drift guard keeps its meaning and gains reach**: presence-decides-refusal over the same `WORKER_*` key set, comparing the live unit's environment against the composed environment file. | The comparison was never about docker — it is about what a recreate would drop — and a declaration that is a file on the node is legible without `docker inspect`. |
 | **D8** | **Of #309 P0's three known holes, two get worse and one gets better.** Environment inheritance (§10) and `/proc/<pid>/environ` (§8) get worse and stop being P3; the `setsid()` escape (§2) is closed on Linux by D3's scope — **proven in execution on 2026-08-06**, on `gumbo-nuc-0` (NixOS, systemd 260 (260.2), cgroup v2) at tree `692656e` under `cargo test -p container --test host_backend`, where `a_kill_reaches_a_setsid_escapee_through_the_scope` reached and passed its assertion for the first time on any machine, alongside all twelve of its siblings and with no skips ([D8 in execution](#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466)). **Not for free**, twice over: `kill` has to address the cgroup and not only the process group ([the correction](#d8-is-confirmed-on-linux-and-it-needed-one-line-of-code)), and `scope_args` has to pass `--expand-environment=no`, without which a systemd v258-or-later client rewrites the task's own argv before exec'ing it ([the client rewriting the command](#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462)). Its premise is separately asserted, and **passing**, by `a_setsid_escapee_is_staged_outside_the_task_process_group`, which measures the *opposite* half — that a process-group signal cannot reach the escapee — so the two are complementary and both are needed; `a_setsid_escapee_is_staged_under_a_scope_as_well` is that same premise under a scope. On **macOS** the hole is unchanged and still leaks. | Blast radius is what changes: a task inheriting a *native* daemon's environment inherits the node, not a container that happens to hold a socket. |
 
@@ -3180,3 +3190,112 @@ the same warning beside their drain-first instruction.
   to compile with the node's cargo (declared as `WORKER_CARGO_air`, whose
   directory then leads the agent's `PATH`), and to end at `worker up node=air
   slots=2`.
+
+## Correction, 2026-08-08 — the correction above generalised over two binaries with opposite platforms (job #480)
+
+The 2026-08-07 correction narrowed D6 from "the binary comes out of the image"
+to "the binary comes out of the image **on Linux**". It got the scope right for
+the *daemon* and then applied the same verdict to everything `build-worker.sh`
+stages, in one sentence:
+
+> On DARWIN all three come out of the tree compiled above, for the reason stated
+> where that build is: an image built for Linux holds a binary a mac cannot exec.
+
+Three artifacts, one verdict. But `chuggernaut-channel` is not the daemon's
+platform problem in miniature — it is its **inverse**. The daemon runs **on** the
+node. The channel binary never does: the worker reads it at startup and injects
+it into every agent **container** (`crates/worker/src/daemon.rs`,
+`FileSource::LocalArtifact`), which is Linux on both platforms. So on the air a
+`Mach-O 64-bit executable arm64` was installed at
+`/usr/local/lib/chuggernaut/chuggernaut-channel` and shipped into `linux/arm64`
+containers. Right architecture, wrong OS.
+
+### The failure had no symptom of its own
+
+Claude Code launches that binary as the `chuggernaut-channel` MCP server, the
+exec fails, and the server stays `status: "pending"` forever — so
+`mcp__chuggernaut-channel__update_status` and `mcp__chuggernaut-channel__submit_eval`
+simply **do not exist** in the agent's toolset. Nothing errors. Observed in
+jobs #477 and #478: every task placed on the air reported
+`"mcp_servers":[{"name":"chuggernaut-channel","status":"pending"}]` while #478's
+tasks on the nuc reported `"connected"`. The evaluators behaved correctly —
+searched for the tool by name and by keyword, got `"matches":[]`, and wrote the
+verdict in prose. The platform recorded four "exited without producing any
+output" failures and escalated both jobs. **Work tasks limp** (they lose
+`update_status`; the diff still lands); **agent evaluators fail outright**, every
+time, on that node. The air was drained to 0 slots as mitigation.
+
+### The rule that was missing
+
+The platform question an artifact answers is not *which machine staged it* but
+**which kernel execs it**:
+
+| Artifact | Executed by | Darwin source | Linux source |
+| --- | --- | --- | --- |
+| `chuggernaut` | the node, under its supervisor | the native tree build | the worker image |
+| `chuggernaut-channel` | every agent **container** | **the worker image** | the worker image |
+| `worker-refresh.sh` | `/bin/sh`, either | the source file | the worker image |
+
+The right bytes were already on the node. `build-worker.sh` builds
+`chuggernaut/worker:$TAG` unconditionally on both platforms using the **node's
+own** Docker — colima on the air — so the image's
+`/usr/local/lib/chuggernaut/chuggernaut-channel` is already
+`linux/<the node's container arch>`. The Darwin branch now takes it out of that
+image with the same `docker create` / `docker cp` / `docker rm` the Linux branch
+uses, and keeps the daemon on the native-build path. `worker-refresh.sh`'s
+launchd swap did the same thing on the self-refresh path and got the same
+treatment; its Linux swap is unchanged.
+
+### Each binary is now asked the question its own executor asks
+
+The 2026-08-07 correction's pre-flight — *the staged binary must run on this
+node* — is right for the daemon and would be exactly **backwards** for the
+channel binary on Darwin, where the correct answer is that it does **not** run
+here. So the guard is split, and it refuses before anything is installed:
+
+- **Linux**, both binaries: it must exec on the node. `chuggernaut-channel` takes
+  no `--version` (it is an MCP server that reads its job context out of the
+  environment), so what is asked is whether the kernel would load it at all —
+  exit 126/127 is the refusal.
+- **Darwin**, the channel binary: it must be a Linux ELF for the architecture
+  **this node's docker reports**, read as ELF magic plus the `e_machine` at file
+  offset 18. The architecture is derived from
+  `docker version --format '{{.Server.Arch}}/{{.Server.Os}}'` rather than assumed
+  from the mac — a `linux/amd64` colima would be just as wrong and just as
+  silent — and a docker that cannot answer is a refusal, not a guess.
+
+The refusal names the node's container platform and the whole chain the operator
+would otherwise have to reconstruct, because there is no other signal: this
+surfaces four job escalations later as "the evaluator produced no output".
+
+### Where it is checked
+
+- `sh deploy/prod/build-worker.test.sh` — five cases added and one narrowed: the
+  Darwin path stages the channel binary from the image and the daemon from the
+  tree; the refresh script stays on the source-file path; the guard's own two
+  shell functions are lifted out of the rendered install script and run here
+  against ELF and Mach-O fixtures, in both architectures; the refusal names
+  `arm64/linux` and precedes the first `chug_put`; an underivable container
+  platform refuses before anything is installed; and the Linux staging is
+  asserted unchanged, with no platform probe on that path. The case that read
+  "a Darwin node must not `docker create`" now reads "must not extract its
+  *daemon*" — the Darwin path does create a container, for the other artifact.
+- `sh deploy/prod/worker-refresh.test.sh` — four cases added: the launchd swap
+  extracts the channel binary from the image and reports its separate
+  provenance; a Mach-O refuses it, naming `arm64/linux`; an arm64 ELF refuses on
+  a node whose docker runs `amd64/linux`, and an unanswerable docker refuses too;
+  and on Linux a channel binary that cannot exec refuses that swap, with the
+  three-artifact extraction otherwise untouched.
+- Every one of those cases was run against the **unfixed** scripts and fails
+  there.
+- **No Rust changed.** `crates/worker` is correct: it injects the bytes it is
+  given.
+- **Not run, and it cannot be from here:** anything on a mac, and any real
+  `docker`. The claim that the image carries a `linux/arm64` channel binary rests
+  on `deploy/prod/Dockerfile.worker` (one `cargo build --release --bin
+  chuggernaut --bin chuggernaut-channel` in a `rust:1.96-bookworm` stage, copied
+  to `/usr/local/lib/chuggernaut/chuggernaut-channel`), on `build-worker.sh`
+  building that image over ssh with the node's own Docker and no `--platform`,
+  and on the nuc — where the same image feeds the same injected artifact and
+  #478's tasks reported `"connected"`. The new pre-flight is what turns that
+  reasoning into a check on the node itself.

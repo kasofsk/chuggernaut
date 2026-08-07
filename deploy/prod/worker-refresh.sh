@@ -593,20 +593,36 @@ swap)
   done
 
   # ── extract (or stage), then install (design #440 D6) ────────────────────────
-  # ON A LINUX NODE the binary comes OUT OF THE IMAGE the build phase just made,
-  # never from a compile on the node: that keeps its build environment
-  # byte-identical to the containerized daemon's, needs no Rust toolchain as a
-  # node machine fact, and leaves deploy/prod/Dockerfile.worker the single
-  # definition of how the binary is produced. This is the same `docker create` +
-  # `docker cp` pair build-worker.sh runs over ssh — one extraction, two callers.
+  # Which source each artifact comes from is decided by WHO EXECUTES IT, not by
+  # which machine staged it. THE DAEMON runs on this node, under this
+  # supervisor. THE CHANNEL BINARY never runs on this node at all: the daemon
+  # reads it off the disk and injects it into every agent CONTAINER
+  # (crates/worker/src/daemon.rs, `FileSource::LocalArtifact`), and a container
+  # is Linux on both platforms. This script is /bin/sh either way.
   #
-  # ON DARWIN THE IMAGE IS THE WRONG PLATFORM (#440 D6, corrected 2026-08-07):
-  # it is a Linux container, so what `docker cp` lifts out of it is an ELF file
-  # launchd loops on. That node's build phase compiled a Mach-O daemon instead
-  # and left it beside the tree it built from; this installs THAT. The staged
-  # SHA is checked against the image's own label rather than trusted: a staging
-  # directory from an earlier refresh is indistinguishable from this one's by
-  # existence alone, and installing it would silently take the node BACKWARDS.
+  # ON A LINUX NODE the two executors coincide, so all three come OUT OF THE
+  # IMAGE the build phase just made and never from a compile on the node: that
+  # keeps the build environment byte-identical to the containerized daemon's,
+  # needs no Rust toolchain as a node machine fact, and leaves
+  # deploy/prod/Dockerfile.worker the single definition of how the binary is
+  # produced. This is the same `docker create` + `docker cp` pair
+  # build-worker.sh runs over ssh — one extraction, two callers.
+  #
+  # ON DARWIN THEY DIVERGE, and #440's 2026-08-07 correction generalised over
+  # both when it holds for only one. The DAEMON cannot come out of that image:
+  # it is a Linux container, so what `docker cp` lifts out is an ELF launchd
+  # loops on, and the build phase compiled a Mach-O beside the tree instead. The
+  # CHANNEL BINARY is the opposite — a Mach-O is what no agent container can
+  # exec, silently: Claude Code reports the chuggernaut-channel MCP server as
+  # `pending` forever and the agent loses `update_status` and `submit_eval`
+  # (#477, #478). So it rides out of the image here too, which the node's own
+  # docker built and is therefore already linux/<this node's container arch>.
+  #
+  # The staged SHA is checked against the image's own label rather than trusted:
+  # a staging directory from an earlier refresh is indistinguishable from this
+  # one's by existence alone, and installing it would silently take the node
+  # BACKWARDS. That check now also ties the two halves together — the daemon off
+  # the tree and the channel binary out of the image are the same generation.
   refresh_phase "swap-extract"
   SWAP_STAGE="$(mktemp -d)"
   SWAP_CID=""
@@ -624,9 +640,13 @@ swap)
       exit 1
     fi
     cp "$BUILD_DIR/target/release/chuggernaut" "$SWAP_STAGE/chuggernaut"
-    cp "$BUILD_DIR/target/release/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
     cp "$BUILD_DIR/src/deploy/prod/worker-refresh.sh" "$SWAP_STAGE/worker-refresh.sh"
+    SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
+    docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
+    docker rm "$SWAP_CID" > /dev/null
+    SWAP_CID=""
     SWAP_FROM="the native build staged at $BUILD_DIR for $SWAP_STAGED_SHA"
+    SWAP_CHANNEL_FROM="chuggernaut/worker:$TAG"
   else
     SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
     docker cp "$SWAP_CID:/usr/local/bin/chuggernaut" "$SWAP_STAGE/chuggernaut"
@@ -635,6 +655,7 @@ swap)
     docker rm "$SWAP_CID" > /dev/null
     SWAP_CID=""
     SWAP_FROM="chuggernaut/worker:$TAG"
+    SWAP_CHANNEL_FROM="chuggernaut/worker:$TAG"
   fi
   for f in chuggernaut chuggernaut-channel worker-refresh.sh; do
     if [ ! -s "$SWAP_STAGE/$f" ]; then
@@ -651,6 +672,43 @@ swap)
   if ! "$SWAP_STAGE/chuggernaut" --version > /dev/null 2>&1; then
     echo "worker-refresh: the daemon binary from $SWAP_FROM does not run on this node (chuggernaut --version failed: a foreign architecture, a missing dynamic loader, or a broken build) — installing it would leave the supervisor restarting a binary that cannot exec; REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
     exit 1
+  fi
+
+  # And the CHANNEL BINARY is asked the question ITS executor asks, which is a
+  # different one: it is injected into agent containers, so on a mac the right
+  # answer is that it does NOT run here. `chuggernaut-channel` takes no
+  # `--version` either — it is an MCP server that reads its job context out of
+  # the environment — so on Linux what is asked is whether the kernel would load
+  # it at all (126/127), and on Darwin its object header is read instead: ELF
+  # magic, and the e_machine of the architecture THIS NODE'S DOCKER runs, derived
+  # from that docker rather than assumed. This refusal has no visible symptom to
+  # fall back on: an injected binary that cannot exec leaves the MCP server
+  # `pending` and the agent without `submit_eval`, which surfaces jobs later as
+  # "the evaluator produced no output" (#477, #478).
+  chmod +x "$SWAP_STAGE/chuggernaut-channel"
+  if [ "$SUPERVISOR" = launchd ]; then
+    swap_magic() { od -A n -v -t x1 -j "$2" -N "$3" "$1" 2> /dev/null | tr -d '[:space:]'; }
+    SWAP_DOCKER_PLATFORM="$(docker version --format '{{.Server.Arch}}/{{.Server.Os}}' 2> /dev/null | tr -d '[:space:]' || true)"
+    case "$SWAP_DOCKER_PLATFORM" in
+      arm64/linux | aarch64/linux) SWAP_ELF_MACHINE=b700 ;;
+      amd64/linux | x86_64/linux) SWAP_ELF_MACHINE=3e00 ;;
+      *)
+        echo "worker-refresh: cannot read this node's container platform ('docker version --format {{.Server.Arch}}/{{.Server.Os}}' answered '${SWAP_DOCKER_PLATFORM:-<nothing>}') — the swap needs it to tell a usable chuggernaut-channel binary from one no agent container can exec, and guessing is how a Mach-O reached the air in the first place (#477, #478); REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
+        exit 1
+        ;;
+    esac
+    SWAP_CHAN_MAGIC="$(swap_magic "$SWAP_STAGE/chuggernaut-channel" 0 4)"
+    SWAP_CHAN_MACHINE="$(swap_magic "$SWAP_STAGE/chuggernaut-channel" 18 2)"
+    if [ "$SWAP_CHAN_MAGIC" != 7f454c46 ] || [ "$SWAP_CHAN_MACHINE" != "$SWAP_ELF_MACHINE" ]; then
+      echo "worker-refresh: the chuggernaut-channel binary from $SWAP_CHANNEL_FROM is not a Linux ELF for $SWAP_DOCKER_PLATFORM (magic ${SWAP_CHAN_MAGIC:-none}, e_machine ${SWAP_CHAN_MACHINE:-none}; wanted 7f454c46 / $SWAP_ELF_MACHINE) — this mac never execs that file, it injects it into every agent container, where a binary that cannot exec leaves the chuggernaut-channel MCP server pending forever and the agent without update_status or submit_eval (#477, #478); REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
+      exit 1
+    fi
+  else
+    if "$SWAP_STAGE/chuggernaut-channel" < /dev/null > /dev/null 2>&1; then SWAP_CHAN_RC=0; else SWAP_CHAN_RC=$?; fi
+    if [ "$SWAP_CHAN_RC" = 126 ] || [ "$SWAP_CHAN_RC" = 127 ]; then
+      echo "worker-refresh: the chuggernaut-channel binary from $SWAP_CHANNEL_FROM cannot be executed on this node (exit $SWAP_CHAN_RC: a foreign architecture, a missing dynamic loader, or a broken build) — the daemon injects that file into every agent container, where it would leave the chuggernaut-channel MCP server pending forever and the agent without update_status or submit_eval (#477, #478); REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
+      exit 1
+    fi
   fi
 
   # Installed by RENAME, and that is load-bearing twice over: writing over
@@ -672,7 +730,7 @@ swap)
   swap_install "$SWAP_STAGE/chuggernaut" "$DAEMON_BIN"
   swap_install "$SWAP_STAGE/chuggernaut-channel" "$CHANNEL_BIN"
   swap_install "$SWAP_STAGE/worker-refresh.sh" "$REFRESH_SCRIPT"
-  echo "worker-refresh: installed $DAEMON_BIN, $CHANNEL_BIN and $REFRESH_SCRIPT from $SWAP_FROM"
+  echo "worker-refresh: installed $DAEMON_BIN and $REFRESH_SCRIPT from $SWAP_FROM, and $CHANNEL_BIN from $SWAP_CHANNEL_FROM (the agent containers exec that one, not this node)"
 
   # The staging dir is dead the moment the three renames land, and it must go
   # HERE rather than in the trap: the restart below kills this shell's cgroup,

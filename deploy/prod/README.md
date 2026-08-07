@@ -579,6 +579,18 @@ binary launchd loops on with `cannot execute binary file`, and a Darwin node
 instead **compiles** its own daemon on the node from a declared `WORKER_CARGO`
 (#440's [2026-08-07 correction](../../docs/design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476),
 measured on the air; "Converting a mac" below).
+**That split is per artifact, decided by who execs it.** The daemon runs on the
+node; `chuggernaut-channel` never does — the daemon injects it into every agent
+**container** — so it rides out of the worker image on **both** platforms, and a
+mac's own Mach-O copy is the one that breaks (#440's
+[2026-08-08 correction](../../docs/design/440-native-worker-daemon.md#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480),
+jobs #477/#478). `worker-refresh.sh` is the source file either way. Each staged
+binary is asked the question **its own executor** asks before anything is
+installed: the daemon must exec on the node, and the channel binary must exec in
+a container — on Darwin that is read off its object header against the
+architecture `docker version --format '{{.Server.Arch}}/{{.Server.Os}}'` reports,
+because a binary that cannot exec inside a container produces no error the
+operator ever sees.
 **A node's own configuration may own the supervision half instead**, which is
 what slice 7 added: a NixOS node declares the unit with
 `chug.node.daemon.enable` ([`nix/chug-node/`](../../nix/chug-node/), off by
@@ -598,7 +610,8 @@ when the daemon was itself a container. **Converting a node is what puts it back
 on the self-refresh path:** since
 [#440](../../docs/design/440-native-worker-daemon.md) slice 6 the swap installs
 the daemon binary out of the image the build phase just made — on a **mac**, out
-of the Mach-O daemon that node compiled in its own build phase — and asks the
+of the Mach-O daemon that node compiled in its own build phase, while
+`chuggernaut-channel` still comes out of the image there too — and asks the
 supervisor to restart, so a converted node updates itself again. A converted mac
 whose run spec carries no reachable `WORKER_CARGO` (or whose cargo cannot find
 `rustc` on the agent's `PATH`) **refuses its own build by name** and stays on the
@@ -677,11 +690,14 @@ is no user a root-owned directory would exclude. The keys stay at
 `~/chuggernaut-worker/keys` at `0600` per file — the status quo — and cross-task
 secret isolation on that platform remains given up (#322 §7).
 
-**Converting a mac: two things it needs that a Linux node does not, and it is
+**Converting a mac: three things it needs that a Linux node does not, and it is
 one-way.**
 
-Measured on `gumbo-air-0`, 2026-08-06 (#440's
-[2026-08-07 correction](../../docs/design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)):
+The first two measured on `gumbo-air-0`, 2026-08-06 (#440's
+[2026-08-07 correction](../../docs/design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)),
+the third from its
+[2026-08-08 narrowing](../../docs/design/440-native-worker-daemon.md#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)
+(jobs #477/#478); all three are refusals in the script today:
 
 1. **A Rust toolchain on the node.** The worker image is a Linux container, so
    the binary `docker cp` lifts out of it is an ELF file — the air installed one
@@ -728,12 +744,32 @@ Measured on `gumbo-air-0`, 2026-08-06 (#440's
    change the node's docker context afterwards and the daemon keeps dialling the
    old socket until the node is re-converted.
 
+3. **That docker must be *running*, because it stages one of the artifacts.**
+   `chuggernaut-channel` is injected into agent containers and never runs on the
+   mac, so it comes out of the worker image the node's own docker just built —
+   not out of the native compile, whose Mach-O copy is what left every agent on
+   the air without `update_status` or `submit_eval` (#440's
+   [2026-08-08 correction](../../docs/design/440-native-worker-daemon.md#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)).
+   The deploy also reads the container architecture off that docker to check the
+   staged file against it:
+
+   ```sh
+   ssh <node> "docker version --format '{{.Server.Arch}}/{{.Server.Os}}'"
+   # colima on an arm mac answers: arm64/linux
+   ```
+
+   An empty or non-Linux answer **refuses the deploy** rather than installing an
+   unchecked binary — guessing `arm64` because the mac is one is how a
+   `linux/amd64` colima would ship the same silent failure with a green deploy.
+
 **And a conversion is one-way.** #440 slice 6 deleted the `docker run` path, so
 there is no scripted way back to a container daemon: a conversion that fails
 leaves the node out of the fleet until it is fixed forward. Everything that can
 refuse now refuses *before* the live daemon is touched — the toolchain, the
-credential directory, the endpoint, the write permissions, and the staged binary
-itself, which must run on the node (`chuggernaut --version`) before it is
+credential directory, the endpoint, the container platform, the write
+permissions, and the staged binaries themselves — the daemon must run on the
+node (`chuggernaut --version`) and the channel binary must be one an agent
+container can exec — before anything is
 installed — but the window between the supervisor bootout and the health probe
 is real. **Drain the node first**
 ([`worker-capacity.md`](../../docs/reference/runbooks/worker-capacity.md) §4.1:
@@ -748,6 +784,15 @@ ELF file over its working Mach-O daemon and kickstarts launchd, which is exactly
 the 2026-08-06 failure. This applies to `gumbo-air-0`, whose daemon was built by
 hand. Re-convert it (the command above), or drain it and `launchctl bootout
 gui/$(id -u)/com.chuggernaut.worker` until you can.
+
+**And a mac converted before 2026-08-08 is injecting a Mach-O
+`chuggernaut-channel` into every agent container right now.** The exec fails
+silently: Claude Code reports the `chuggernaut-channel` MCP server as `pending`
+forever, so work tasks lose `update_status` and **agent evaluators fail
+outright** — jobs #477 and #478 escalated on four "produced no output" failures
+before the air was drained to 0 slots. Re-converting the node is the fix; the
+next `build-worker.sh` run installs the image's `linux/<arch>` copy and refuses
+if it is not one.
 
 **Migrating a node that already has keys under `$HOME` — you do this by hand.**
 

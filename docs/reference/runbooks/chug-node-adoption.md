@@ -269,13 +269,15 @@ the module's defaults against `build-worker.sh`'s — text over text. A green
 Chuggernaut job means the two renderings agree; **your `nixos-rebuild build` is
 still the only thing that has ever evaluated the module.**
 
-## 4b. Converting a mac — two node facts, and no way back
+## 4b. Converting a mac — three node facts, and no way back
 
 A nix-darwin node declares no agent (§4a), so its conversion is entirely
-`deploy/prod/build-worker.sh`'s. Two things it needs that a NixOS node does not,
-both measured on `gumbo-air-0` on 2026-08-06 and both refusals in the script
-today (design [#440](../../design/440-native-worker-daemon.md)'s
-[2026-08-07 correction](../../design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)):
+`deploy/prod/build-worker.sh`'s. Three things it needs that a NixOS node does
+not, the first two measured on `gumbo-air-0` on 2026-08-06 and all three
+refusals in the script today (design
+[#440](../../design/440-native-worker-daemon.md)'s
+[2026-08-07 correction](../../design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)
+and its [2026-08-08 narrowing](../../design/440-native-worker-daemon.md#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)):
 
 1. **A Rust toolchain the deploy's ssh shell can see.** The worker image is a
    Linux container, so the binary extracted from it is an ELF file launchd loops
@@ -332,6 +334,25 @@ today (design [#440](../../design/440-native-worker-daemon.md)'s
    until the node is re-converted — the same failure, with the node looking
    healthy.
 
+3. **A *running* docker, because it stages the injected artifact.** Only the
+   daemon binary is the mac's to compile. `chuggernaut-channel` never runs on
+   the node — the daemon injects it into every agent **container** — so it comes
+   out of the worker image that node's own docker just built, and the mac's
+   Mach-O copy is the one that breaks. It breaks with no error anyone sees:
+   Claude Code reports the MCP server as `pending`, work tasks lose
+   `update_status`, and **agent evaluators fail outright** (jobs #477/#478, four
+   "produced no output" escalations). The deploy reads the container
+   architecture off that same docker and checks the staged file against it:
+
+   ```sh
+   ssh <node> "docker version --format '{{.Server.Arch}}/{{.Server.Os}}'"
+   # colima on an arm mac answers: arm64/linux
+   ```
+
+   An empty or non-Linux answer refuses the deploy. It is derived rather than
+   assumed because a `linux/amd64` colima on an arm mac would fail exactly as
+   silently.
+
 **Converting is one-way.** #440 slice 6 deleted the `docker run` path, so there
 is no scripted way back to a container daemon: a failed conversion strands the
 node until it is fixed *forward*. Every check above refuses with the live daemon
@@ -348,6 +369,13 @@ its working daemon and kickstarts launchd, which is the 2026-08-06 failure
 again. `gumbo-air-0` is in exactly that state: re-convert it before the next
 deploy, or drain it and `launchctl bootout gui/$(id -u)/com.chuggernaut.worker`
 until you can. Re-converting is what replaces the installed script.
+
+**A mac converted before 2026-08-08 is already failing, quietly.** Its
+`/usr/local/lib/chuggernaut/chuggernaut-channel` is a Mach-O, injected into
+every `linux/arm64` agent container, where it cannot exec — so every agent
+evaluator on that node produces no output and every work task runs blind. The
+same re-conversion fixes it, and the deploy now refuses rather than installing
+one.
 
 ---
 

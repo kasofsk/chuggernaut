@@ -63,6 +63,20 @@ cat > "$BIN/docker" <<EOF
 #!/bin/sh
 cat >/dev/null 2>&1 || true
 echo "docker \$*" >> "$LOG"
+# A 20-byte object header, which is all the launchd swap's channel guard reads:
+# ELF magic then e_machine as two little-endian bytes at offset 18 (aarch64 =
+# 0xb7, x86-64 = 0x3e), or the Mach-O a mac's own cargo would have left.
+chug_header() {
+  case "\$1" in
+    macho) printf '\\317\\372\\355\\376\\014\\000\\000\\001\\002\\000\\000\\000\\020\\000\\000\\000\\330\\005\\000\\000' ;;
+    *)
+      printf '\\177ELF\\002\\001\\001\\000'
+      printf '\\000\\000\\000\\000\\000\\000\\000\\000'
+      printf '\\003\\000'
+      case "\$1" in elf-amd64) printf '\\076\\000' ;; *) printf '\\267\\000' ;; esac
+      ;;
+  esac
+}
 case "\$*" in
   # The swap extracts the daemon out of the image the build just made
   # (design #440 D6): \`docker create\` hands back a container id and each
@@ -73,6 +87,12 @@ case "\$*" in
   # exactly that of the staged daemon before installing it; \$FAKE_BAD_BINARY is
   # the other node, whose extracted binary is for a foreign platform (the air's
   # ELF-under-launchd crash loop, 2026-08-06).
+  #
+  # The CHANNEL binary is asked a different question, because a different kernel
+  # execs it: the Linux swap RUNS it (so the default runnable script is what that
+  # path needs), while the launchd swap reads its OBJECT HEADER — a mac never
+  # execs the file it injects into containers. \$FAKE_CHANNEL_KIND stages that
+  # header: elf-arm64, elf-amd64, or the macho a mac's own cargo produces.
   create*) echo fakecid ;;
   cp*)
     shift
@@ -81,9 +101,17 @@ case "\$*" in
     elif [ -n "\${FAKE_BAD_BINARY:-}" ]; then
       printf 'NOT-A-BINARY-FOR-THIS-PLATFORM\n' > "\$2"
     else
-      printf '#!/bin/sh\nexit 0\n' > "\$2"
+      case "\$2:\${FAKE_CHANNEL_KIND:-}" in
+        *chuggernaut-channel:noexec) printf '#!/chug/no/such/interpreter\n' > "\$2" ;;
+        *chuggernaut-channel:?*) chug_header "\${FAKE_CHANNEL_KIND}" > "\$2" ;;
+        *) printf '#!/bin/sh\nexit 0\n' > "\$2" ;;
+      esac
     fi
     ;;
+  # The node's CONTAINER platform, which the launchd swap derives rather than
+  # assumes — a linux/amd64 colima would be as wrong and as silent as a Mach-O.
+  # Empty models a docker that is not running.
+  version*) printf '%s\n' "\${FAKE_DOCKER_PLATFORM-arm64/linux}" ;;
   # Image-label read-back for the retag-swap guard: echo \$FAKE_LABEL (default
   # abc123, the requested SHA in the success cases) so the assert passes unless a
   # case forces a mismatch (the stale-image-label case).
@@ -915,6 +943,7 @@ PATH="$MACBIN:$BIN:$PATH" \
   WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
   WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
   WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  FAKE_CHANNEL_KIND=elf-arm64 \
   sh "$SUT" swap prod > "$OUT" 2>&1
 
 grep_log "launchctl print gui/$(id -u)/com.chuggernaut.worker"
@@ -922,13 +951,105 @@ grep_log "launchctl kickstart -k gui/$(id -u)/com.chuggernaut.worker"
 [ -x "$DAEMON_BIN" ] || fail "the macOS swap installs the same three artifacts"
 grep -qF "# staged worker-refresh.sh" "$NODE_SCRIPT" \
   || fail "the macOS swap must install the node's OWN build, not the image's copy"
-if grep -qF "docker create chuggernaut/worker" "$LOG"; then
+if grep -qF "cp fakecid:/usr/local/bin/chuggernaut " "$LOG"; then
   fail "a Darwin node must not extract its daemon from the Linux worker image"
 fi
 if grep -qF "systemctl" "$LOG"; then
   fail "a Darwin node must not be asked to drive systemd"
 fi
 echo "ok: a macOS node installs the daemon it compiled and kickstarts its launchd agent"
+
+# ── Case 3g0: …and its CHANNEL binary comes out of the image, not the tree ─────
+# The inverse artifact. The daemon runs on the mac; the channel binary never
+# does — the daemon injects it into every agent container, which is Linux — so
+# the mac's own Mach-O is the wrong one and the image's copy, built by the
+# node's own docker, is the right one. On the air the Mach-O left Claude Code's
+# chuggernaut-channel MCP server `pending` for every task, so the evaluators had
+# no `submit_eval` at all and the platform recorded "produced no output"
+# (#477, #478).
+grep_log "cp fakecid:/usr/local/lib/chuggernaut/chuggernaut-channel"
+cmp -s "$MAC_BUILD_DIR/target/release/chuggernaut-channel" "$CHANNEL_BIN" \
+  && fail "a Darwin node must not inject the Mach-O channel binary its own cargo built"
+grep -qF "and $CHANNEL_BIN from chuggernaut/worker:prod" "$OUT" \
+  || fail "the swap must report the channel binary's separate provenance"
+# It is judged against the platform the node's docker reports, not an assumption.
+grep_log "version --format {{.Server.Arch}}/{{.Server.Os}}"
+echo "ok: a macOS self-refresh injects the image's LINUX channel binary, not its own Mach-O one"
+
+# ── Case 3g0a: a Mach-O channel binary REFUSES the swap, naming the platform ───
+# The guard exists because this failure has no visible symptom of its own: the
+# MCP server stays pending, the agent silently loses update_status and
+# submit_eval, and it surfaces four job escalations later as "the evaluator
+# produced no output". Driven by staging the header a mac's own build produces.
+: > "$LOG"
+native_swap_reset
+mac_build_stage abc123
+set +e
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  FAKE_CHANNEL_KIND=macho \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Mach-O channel binary must refuse the swap"
+grep_out "is not a Linux ELF for arm64/linux"
+grep_out "REFUSING swap"
+[ -e "$CHANNEL_BIN" ] && fail "a refused swap must install nothing"
+[ -e "$DAEMON_BIN" ] && fail "a refused swap must install nothing"
+if grep -qF "launchctl kickstart" "$LOG"; then
+  fail "the refusal must come before the restart"
+fi
+echo "ok: a Mach-O channel binary refuses the macOS swap, naming the node's container platform"
+
+# ── Case 3g0b: the guard follows the node's docker, and refuses to guess ───────
+# A linux/amd64 colima on an arm mac would be just as wrong and just as silent,
+# so the architecture is derived; a docker that cannot answer is a refusal rather
+# than an assumption.
+: > "$LOG"
+native_swap_reset
+mac_build_stage abc123
+set +e
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  FAKE_CHANNEL_KIND=elf-arm64 \
+  FAKE_DOCKER_PLATFORM=amd64/linux \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an arm64 ELF must refuse on a node whose docker runs amd64 containers"
+grep_out "is not a Linux ELF for amd64/linux"
+[ -e "$CHANNEL_BIN" ] && fail "a refused swap must install nothing"
+
+: > "$LOG"
+native_swap_reset
+mac_build_stage abc123
+set +e
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  FAKE_CHANNEL_KIND=elf-arm64 \
+  FAKE_DOCKER_PLATFORM= \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a docker that cannot report its platform must refuse the swap"
+grep_out "cannot read this node's container platform"
+[ -e "$CHANNEL_BIN" ] && fail "a refused swap must install nothing"
+echo "ok: the macOS channel guard derives the container architecture and refuses to guess"
 
 # ── Case 3g1: a staging directory from ANOTHER generation refuses ──────────────
 # Existence is not evidence: a native build left over from an earlier refresh
@@ -981,6 +1102,40 @@ if grep -qF "systemctl restart" "$LOG"; then
   fail "the refusal must come before the restart"
 fi
 echo "ok: a staged daemon that cannot exec here refuses before it is installed"
+
+# ── Case 3g2a: and so does a CHANNEL binary that cannot exec, on Linux ─────────
+# There the node IS the container's platform, so the question is the same one —
+# and it has to be asked separately, because the daemon binary passing says
+# nothing about the file the daemon INJECTS. The Linux staging is otherwise
+# untouched: all three artifacts still come out of the one image.
+: > "$LOG"
+native_swap_reset
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  FAKE_CHANNEL_KIND=noexec \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a channel binary that cannot exec must refuse the swap"
+grep_out "cannot be executed on this node"
+grep_out "REFUSING swap"
+[ -e "$CHANNEL_BIN" ] && fail "a refused swap must install nothing"
+[ -e "$DAEMON_BIN" ] && fail "a refused swap must install nothing"
+if grep -qF "systemctl restart" "$LOG"; then
+  fail "the refusal must come before the restart"
+fi
+grep_log "cp fakecid:/usr/local/bin/chuggernaut "
+grep_log "cp fakecid:/usr/local/lib/chuggernaut/chuggernaut-channel"
+grep_log "cp fakecid:/usr/local/lib/chuggernaut/worker-refresh.sh"
+if grep -qF "version --format" "$LOG"; then
+  fail "a Linux node's container platform is its own — no probe belongs on that path"
+fi
+echo "ok: a staged channel binary that cannot exec refuses the Linux swap too"
 
 # ── Case 3h: no supervisor to drive ⇒ refuse, install nothing ─────────────────
 # A node whose daemon cannot reach its own supervisor cannot be restarted, so
