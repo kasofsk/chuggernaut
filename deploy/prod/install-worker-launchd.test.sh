@@ -101,7 +101,7 @@ MAC_PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/
 sed -n '/^  PLIST_TEXT="<?xml/,/^<\/plist>"$/p' "$BUILDER" |
 	sed -e '1s|^  PLIST_TEXT="||' -e '$s|"$||' -e 's|\\"|"|g' \
 		-e 's|\$AGENT_LABEL|com.chuggernaut.worker|g' \
-		-e "s|\${WORKER_PATH:-[^}]*}|$MAC_PATH|g" \
+		-e "s|\$AGENT_PATH|$MAC_PATH|g" \
 		-e "s|\$ENV_FILE|$ENV_FILE|g" \
 		-e "s|\$BIN_DIR/chuggernaut|$BINARY|g" \
 		-e "s|\$WORKER_LOG_PATH|$HOME_DIR/Library/Logs/chuggernaut/worker.log|g" \
@@ -117,6 +117,28 @@ grep -q "plutil -lint" "$LOG" || fail "the rendered plist must be linted before 
 	-lt "$(grep -n 'launchctl bootstrap' "$LOG" | cut -d: -f1 | head -n 1)" ] ||
 	fail "the old agent must be booted out before the new one is bootstrapped"
 echo "ok: the installer and build-worker.sh render one launchd agent"
+
+# ── Case 1a: the run spec's toolchain reaches the agent's PATH ─────────────────
+# This agent's PATH is the one the daemon's own self-refresh compiles under, and
+# cargo resolves `rustc` through it (#440's 2026-08-07 correction) — so a node
+# whose WORKER_CARGO lives somewhere the default PATH does not name would refuse
+# every refresh with the toolchain sitting right there in its run spec.
+rm -f "$PLIST"
+printf "WORKER_NODE='air'\nWORKER_CARGO='/etc/profiles/per-user/op/bin/cargo'\n" > "$ENV_FILE"
+run
+[ "$rc" -eq 0 ] || fail "a run spec declaring WORKER_CARGO must still install: $(cat "$WORK/out")"
+grep -qF "<key>PATH</key><string>/etc/profiles/per-user/op/bin:$MAC_PATH</string>" "$PLIST" ||
+	fail "the toolchain directory must lead the agent's PATH:
+$(grep -F '<key>PATH</key>' "$PLIST")"
+
+# A toolchain already on that PATH is not prepended twice.
+rm -f "$PLIST"
+printf "WORKER_NODE='air'\nWORKER_CARGO='/usr/local/bin/cargo'\n" > "$ENV_FILE"
+run
+grep -qF "<key>PATH</key><string>$MAC_PATH</string>" "$PLIST" ||
+	fail "a toolchain already on the agent's PATH must not be prepended again"
+printf "WORKER_NODE='air'\n" > "$ENV_FILE"
+echo "ok: the run spec's WORKER_CARGO directory leads the agent's PATH, once"
 
 # ── Case 2: it cannot be installed on the Mini ────────────────────────────────
 # Job #467's finding: install-launchd.sh globs its template directory, so a
@@ -170,7 +192,21 @@ chmod -x "$BINARY"
 run
 refused "an agent without its daemon binary must be refused"
 chmod +x "$BINARY"
-echo "ok: a missing run spec or binary refuses before anything is installed"
+
+# Present, 0755, and unable to run: the exact state the air was left in on
+# 2026-08-06, because the binary had been extracted from the LINUX worker image
+# (#440 D6 holds on Linux only). Executable is not runnable, and only the second
+# question distinguishes an install from a KeepAlive loop.
+printf 'NOT-A-BINARY-FOR-THIS-PLATFORM\n' > "$BINARY"
+chmod +x "$BINARY"
+run
+refused "a daemon binary that cannot exec here must be refused"
+grep -q "does not run on this mac" "$WORK/out" || fail "the refusal must say the binary cannot run, not that it is missing"
+grep -q "WORKER_CARGO" "$WORK/out" || fail "the refusal must name how a mac gets a daemon it can run"
+[ ! -f "$PLIST" ] || fail "a refused install must write no plist"
+printf '#!/bin/sh\n' > "$BINARY"
+chmod +x "$BINARY"
+echo "ok: a missing run spec, a missing binary, or one that cannot exec here all refuse first"
 
 # ── Case 4: not a mac, and the uninstall ──────────────────────────────────────
 run FAKE_OS=Linux

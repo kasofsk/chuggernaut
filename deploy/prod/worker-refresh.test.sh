@@ -5,7 +5,10 @@
 # on PATH that just log their invocations, then asserts the build phase builds
 # the three node images and the swap phase EXTRACTS THE BINARY FROM THE IMAGE IT
 # JUST BUILT, INSTALLS IT AND ASKS THE SUPERVISOR TO RESTART (design #440 D6) —
-# with no detached process and no carry-forward of any kind. This locks the
+# with no detached process and no carry-forward of any kind. On a DARWIN node
+# that extraction is wrong by construction (the image is a Linux container), so
+# there the build phase compiles a native daemon and the swap installs that;
+# both platforms must prove the staged binary RUNS before installing it. This locks the
 # script's contract — the phase split, the three images, the install-and-restart
 # shape and every refusal in front of it — without any real infrastructure.
 #
@@ -65,11 +68,21 @@ case "\$*" in
   # (design #440 D6): \`docker create\` hands back a container id and each
   # \`docker cp\` materialises the file the script is about to install.
   # \$FAKE_CP_EMPTY models an extraction that produced nothing — a stale or
-  # broken image — which must refuse before anything is installed.
+  # broken image — which must refuse before anything is installed. What it
+  # materialises otherwise is a binary that RUNS, because the swap now demands
+  # exactly that of the staged daemon before installing it; \$FAKE_BAD_BINARY is
+  # the other node, whose extracted binary is for a foreign platform (the air's
+  # ELF-under-launchd crash loop, 2026-08-06).
   create*) echo fakecid ;;
   cp*)
     shift
-    [ -n "\${FAKE_CP_EMPTY:-}" ] && : > "\$2" || echo "FAKE-BINARY" > "\$2"
+    if [ -n "\${FAKE_CP_EMPTY:-}" ]; then
+      : > "\$2"
+    elif [ -n "\${FAKE_BAD_BINARY:-}" ]; then
+      printf 'NOT-A-BINARY-FOR-THIS-PLATFORM\n' > "\$2"
+    else
+      printf '#!/bin/sh\nexit 0\n' > "\$2"
+    fi
     ;;
   # Image-label read-back for the retag-swap guard: echo \$FAKE_LABEL (default
   # abc123, the requested SHA in the success cases) so the assert passes unless a
@@ -153,6 +166,97 @@ exit 0
 EOF
 chmod +x "$MACBIN/launchctl"
 
+# The macOS half of the toolchain, and it is only in $MACBIN: a Linux case that
+# saw a `cargo` would pass a script that had started compiling on a node whose
+# daemon must come out of the image (design #440 D6, which holds there).
+#
+# Fake cargo materialises what a real one would leave in CARGO_TARGET_DIR — two
+# binaries that RUN, because the swap refuses to install one that does not.
+# Fake tar unpacks nothing (fake `git archive` emits no real tar) and instead
+# lays down the one file the swap copies out of the tree, so the extraction is
+# still assertable end to end.
+cat > "$MACBIN/cargo" <<EOF
+#!/bin/sh
+case "\$1" in --version) echo "cargo 1.95.0 (fake)"; exit \${FAKE_DEAD_CARGO:-0} ;; esac
+echo "cargo \$* [CHUG_GIT_SHA=\${CHUG_GIT_SHA:-} CARGO_TARGET_DIR=\${CARGO_TARGET_DIR:-} PWD=\$PWD PATH=\$PATH]" >> "$LOG"
+[ -z "\${FAIL_CARGO:-}" ] || exit 101
+mkdir -p "\$CARGO_TARGET_DIR/release"
+for b in chuggernaut chuggernaut-channel; do
+  if [ -n "\${FAKE_BAD_BINARY:-}" ]; then
+    printf 'NOT-A-BINARY-FOR-THIS-PLATFORM\n' > "\$CARGO_TARGET_DIR/release/\$b"
+  else
+    printf '#!/bin/sh\nexit 0\n' > "\$CARGO_TARGET_DIR/release/\$b"
+  fi
+  chmod +x "\$CARGO_TARGET_DIR/release/\$b"
+done
+exit 0
+EOF
+cat > "$MACBIN/tar" <<EOF
+#!/bin/sh
+echo "tar \$*" >> "$LOG"
+_dir=
+while [ \$# -gt 0 ]; do
+  [ "\$1" != "-C" ] || { _dir="\$2"; shift; }
+  shift
+done
+[ -n "\$_dir" ] || exit 0
+mkdir -p "\$_dir/deploy/prod"
+printf '#!/bin/sh\n# fetched worker-refresh.sh\n' > "\$_dir/deploy/prod/worker-refresh.sh"
+exit 0
+EOF
+# `rustc` BESIDE cargo, because that is the whole point: cargo resolves its
+# compiler through PATH, so the build phase asks for it under the PATH the
+# compile will actually run with rather than trusting WORKER_CARGO alone.
+cat > "$MACBIN/rustc" <<'EOF'
+#!/bin/sh
+exit 0
+EOF
+chmod +x "$MACBIN/cargo" "$MACBIN/tar" "$MACBIN/rustc"
+
+# The same toolchain MINUS rustc — a nix-darwin or rustup cargo declared by
+# absolute path while its own directory is on no PATH either end has.
+NORUSTCBIN="$WORK/norustcbin"
+mkdir -p "$NORUSTCBIN"
+cp "$MACBIN/uname" "$MACBIN/cargo" "$MACBIN/tar" "$NORUSTCBIN/"
+
+# The guard asks a REAL `command -v rustc`, and this suite's own host may have a
+# toolchain (CI runs it in the agent-rust image) — so a case modelling a node
+# without one has to strip every PATH entry that holds a rustc, or it would find
+# the harness's and the case would assert nothing.
+strip_rustc_path() {
+  _out=""
+  _rest="$1"
+  while [ -n "$_rest" ]; do
+    case "$_rest" in
+      *:*) _d="${_rest%%:*}"; _rest="${_rest#*:}" ;;
+      *)   _d="$_rest"; _rest="" ;;
+    esac
+    [ -n "$_d" ] || continue
+    [ ! -x "$_d/rustc" ] || continue
+    _out="${_out:+$_out:}$_d"
+  done
+  printf '%s\n' "$_out"
+}
+NO_RUSTC_PATH="$(strip_rustc_path "$PATH")"
+
+# Where a converted mac keeps the tree it compiles and the target dir it keeps
+# between refreshes (WORKER_BUILD_DIR, written into the run spec by
+# build-worker.sh). Under $WORK so the test writes nothing outside its temp dir.
+MAC_BUILD_DIR="$WORK/nativebuild"
+mac_build_reset() { rm -rf "$MAC_BUILD_DIR"; mkdir -p "$MAC_BUILD_DIR"; }
+# A staging directory as the build phase leaves it: the two binaries, the tree's
+# copy of this script, and the SHA the swap checks against the image's label.
+mac_build_stage() {
+  mac_build_reset
+  mkdir -p "$MAC_BUILD_DIR/target/release" "$MAC_BUILD_DIR/src/deploy/prod"
+  for b in chuggernaut chuggernaut-channel; do
+    printf '#!/bin/sh\nexit 0\n' > "$MAC_BUILD_DIR/target/release/$b"
+    chmod +x "$MAC_BUILD_DIR/target/release/$b"
+  done
+  printf '#!/bin/sh\n# staged worker-refresh.sh\n' > "$MAC_BUILD_DIR/src/deploy/prod/worker-refresh.sh"
+  printf '%s\n' "${1:-abc123}" > "$MAC_BUILD_DIR/native.sha"
+}
+
 # Fake install/mv: log the argv, then do the real thing. They exist so the
 # install-by-RENAME discipline is assertable — writing over the running daemon
 # binary in place is ETXTBSY, and truncating this very script under the shell
@@ -223,6 +327,10 @@ if [ "$(id -u)" -eq 0 ]; then
 fi
 
 grep_log() { grep -qF -- "$1" "$LOG" || fail "expected in log: $1"; }
+# Line number of the first log entry containing $1, for the ORDER assertions —
+# a daemon compiled after the images are already live is a generation the node
+# cannot install.
+line_of() { grep -nF -- "$1" "$LOG" | head -n 1 | cut -d: -f1; }
 # Combined stdout+stderr of the run under test — the daemon streams exactly this
 # into the deploy leg, so the disk story is asserted on it.
 OUT="$WORK/out.txt"
@@ -428,6 +536,130 @@ if grep -qE "docker (build|tag)" "$LOG"; then
   fail "missing git key must be rejected before any docker mutation (images untouched)"
 fi
 echo "ok: build with a missing git key is rejected before any docker mutation"
+
+# ── Case 2c: a Darwin node COMPILES its daemon in the build phase ──────────────
+# Design #440 D6 has the swap lift the binary out of the worker image, and that
+# image is a LINUX container: on a mac it installs as an ELF file launchd loops
+# on with `cannot execute binary file` (the air, 2026-08-06). So the mac builds
+# a Mach-O daemon here, where minutes are affordable, and BEFORE the retag-swap
+# — a compile that fails leaves the whole previous generation, images included.
+: > "$LOG"
+mac_build_reset
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  WORKER_CARGO="$MACBIN/cargo" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1
+
+grep_log "cargo build --release --locked --bin chuggernaut --bin chuggernaut-channel [CHUG_GIT_SHA=abc123 CARGO_TARGET_DIR=$MAC_BUILD_DIR/target PWD=$MAC_BUILD_DIR/src PATH=$MACBIN:"
+[ -x "$MAC_BUILD_DIR/target/release/chuggernaut" ] || fail "the build phase must leave a daemon binary staged"
+[ "$(cat "$MAC_BUILD_DIR/native.sha")" = abc123 ] || fail "the staged build must record the SHA it was built for"
+grep_out "phase build-daemon"
+cargo_line="$(line_of "cargo build --release")"
+tag_line="$(line_of "docker tag chuggernaut/worker:prod-refresh")"
+[ -n "$cargo_line" ] && [ -n "$tag_line" ] || fail "expected both the compile and the retag in the log"
+[ "$cargo_line" -lt "$tag_line" ] || fail "the daemon must be compiled BEFORE the images are retag-swapped"
+echo "ok: a Darwin node compiles its own daemon before the retag-swap"
+
+# ── Case 2c0: the toolchain is a DIRECTORY, and the two halves it needs ────────
+# Cargo resolves `rustc` through PATH, and this daemon's PATH is the launchd
+# agent's — where a nix-darwin profile directory is not. So a cargo declared by
+# absolute path passes `command -v` and then fails MID-BUILD, with the images
+# already replaced, which is the one place this file refuses to fail. Both
+# questions therefore belong in the validate-first block.
+: > "$LOG"
+mac_build_reset
+set +e
+PATH="$NORUSTCBIN:$BIN:$NO_RUSTC_PATH" \
+  WORKER_NODE=air \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  WORKER_CARGO="$NORUSTCBIN/cargo" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Darwin node whose cargo cannot find rustc must refuse the build"
+grep_out "cargo resolves its compiler THROUGH PATH"
+if grep -qE "docker (build|tag)" "$LOG"; then
+  fail "the rustc refusal must come before any docker mutation, not mid-compile"
+fi
+
+# A cargo that is on PATH and does not RUN — a rustup shim with no default
+# toolchain — is the same shape one step earlier.
+: > "$LOG"
+mac_build_reset
+set +e
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  WORKER_CARGO="$MACBIN/cargo" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  FAKE_DEAD_CARGO=1 \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Darwin node whose cargo does not run must refuse the build"
+grep_out "rustup shim with no default toolchain"
+if grep -qE "docker (build|tag)" "$LOG"; then
+  fail "a cargo that does not exec must refuse before any docker mutation"
+fi
+echo "ok: the compile's PATH carries the toolchain directory, and both halves refuse before the images move"
+
+# ── Case 2c1: a compile that fails leaves the live generation alone ────────────
+: > "$LOG"
+mac_build_reset
+set +e
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  WORKER_CARGO="$MACBIN/cargo" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  FAIL_CARGO=1 \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a failed native compile must fail the build phase"
+if grep -qF "docker tag" "$LOG"; then
+  fail "a failed compile must not reach the retag-swap (live images stay intact)"
+fi
+echo "ok: a failed native compile leaves the live images untouched"
+
+# ── Case 2c2: a converted mac with no reachable cargo refuses, by name ─────────
+# The state the air was left in: converted, running, and with no toolchain in the
+# run spec. A refusal here is a failed deploy leg on a node that keeps serving;
+# installing the image's binary instead is the node out of the fleet.
+: > "$LOG"
+mac_build_reset
+set +e
+PATH="$NOLCBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  WORKER_CARGO="$WORK/absent-cargo" \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Darwin node with no cargo must refuse the build"
+grep_out "build-worker.sh"
+if grep -qE "docker (build|tag)" "$LOG"; then
+  fail "the toolchain refusal must come before any docker mutation (images untouched)"
+fi
+# And a Linux node is never asked for one: its daemon comes out of the image.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1
+if grep -qF "cargo build" "$LOG"; then
+  fail "a Linux node must not compile the daemon (design #440 D6 holds there)"
+fi
+echo "ok: a mac with no cargo refuses the build by name; a Linux node is never asked for one"
 
 # ── Case 2c: a build that fails mid-way never retag-swaps the live tag ─────────
 # FAIL_BUILD makes the agent-rust build fail after worker+agent already built to
@@ -665,27 +897,90 @@ if grep -qF "systemctl restart" "$LOG"; then
 fi
 echo "ok: an empty extraction refuses instead of installing a daemon that cannot run"
 
-# ── Case 3g: macOS asks launchd, with the same shape ──────────────────────────
+# ── Case 3g: macOS asks launchd, and installs the daemon IT COMPILED ──────────
 # The other supervisor (design #440 D2): a GUI-domain agent, restarted with the
 # `launchctl kickstart -k` the macOS D3 proof exercised firsthand
-# (docs/reference/runbooks/macos-host-supervision-proof.md).
+# (docs/reference/runbooks/macos-host-supervision-proof.md). And the other
+# PROVENANCE (#440 D6, corrected 2026-08-07): the worker image is a Linux
+# container, so on a mac `docker cp` yields an ELF file launchd loops on with
+# `cannot execute binary file` — the air, 2026-08-06. The build phase compiled a
+# Mach-O daemon instead and this installs that.
 : > "$LOG"
 native_swap_reset
+mac_build_stage abc123
 PATH="$MACBIN:$BIN:$PATH" \
   WORKER_NODE=air \
   WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
   WORKER_DAEMON_BIN="$DAEMON_BIN" \
   WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
   WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
   sh "$SUT" swap prod > "$OUT" 2>&1
 
 grep_log "launchctl print gui/$(id -u)/com.chuggernaut.worker"
 grep_log "launchctl kickstart -k gui/$(id -u)/com.chuggernaut.worker"
 [ -x "$DAEMON_BIN" ] || fail "the macOS swap installs the same three artifacts"
+grep -qF "# staged worker-refresh.sh" "$NODE_SCRIPT" \
+  || fail "the macOS swap must install the node's OWN build, not the image's copy"
+if grep -qF "docker create chuggernaut/worker" "$LOG"; then
+  fail "a Darwin node must not extract its daemon from the Linux worker image"
+fi
 if grep -qF "systemctl" "$LOG"; then
   fail "a Darwin node must not be asked to drive systemd"
 fi
-echo "ok: a macOS node installs and kickstarts its launchd agent"
+echo "ok: a macOS node installs the daemon it compiled and kickstarts its launchd agent"
+
+# ── Case 3g1: a staging directory from ANOTHER generation refuses ──────────────
+# Existence is not evidence: a native build left over from an earlier refresh
+# looks exactly like this one's, and installing it takes the node BACKWARDS with
+# nothing to say so. The image's own chug.git.sha label is the second opinion.
+: > "$LOG"
+native_swap_reset
+mac_build_stage deadbeef
+set +e
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a stale native staging directory must refuse the swap"
+grep_out "REFUSING swap"
+[ -e "$DAEMON_BIN" ] && fail "a refused swap must install nothing"
+if grep -qF "launchctl kickstart" "$LOG"; then
+  fail "the refusal must come before the restart"
+fi
+echo "ok: a native build staged for another SHA refuses instead of taking the node backwards"
+
+# ── Case 3g2: a staged binary that cannot RUN here refuses, on either platform ─
+# The generalisation of the finding (#309 P0 finding 6): provenance from a
+# foreign platform installs perfectly and then loops under the supervisor. Driven
+# on the Linux path deliberately — the image is bookworm and a node whose loader
+# it does not match is the same failure with a different cause.
+: > "$LOG"
+native_swap_reset
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  FAKE_BAD_BINARY=1 \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a staged binary that cannot exec must refuse the swap"
+grep_out "does not run on this node"
+[ -e "$DAEMON_BIN" ] && fail "a refused swap must install nothing"
+if grep -qF "systemctl restart" "$LOG"; then
+  fail "the refusal must come before the restart"
+fi
+echo "ok: a staged daemon that cannot exec here refuses before it is installed"
 
 # ── Case 3h: no supervisor to drive ⇒ refuse, install nothing ─────────────────
 # A node whose daemon cannot reach its own supervisor cannot be restarted, so

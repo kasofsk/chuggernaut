@@ -75,7 +75,18 @@ if [ ! -r "$ENV_FILE" ]; then
 fi
 
 if [ ! -x "$BINARY" ]; then
-  echo "install-worker-launchd: no executable daemon at '$BINARY' — it is extracted from the worker image by the deploy (design #440 D6), not built here; REFUSING (nothing installed). Run deploy/prod/build-worker.sh against this node, or point WORKER_BINARY at the binary it installed." >&2
+  echo "install-worker-launchd: no executable daemon at '$BINARY' — the deploy puts it there (design #440 D6: compiled on a mac, extracted from the worker image on Linux), it is not built here; REFUSING (nothing installed). Run deploy/prod/build-worker.sh against this node, or point WORKER_BINARY at the binary it installed." >&2
+  exit 1
+fi
+
+# Executable is not the same question as runnable, and on THIS platform the
+# difference is the whole finding: the worker image is a Linux container, so a
+# binary extracted from it is `ELF … ARM aarch64` — 0755, present, and answered
+# by launchd with `cannot execute binary file` on repeat under KeepAlive (the
+# air, 2026-08-06; #440's 2026-08-07 correction). Ask the binary itself, before
+# an agent is written that would loop on it.
+if ! "$BINARY" --version > /dev/null 2>&1; then
+  echo "install-worker-launchd: the daemon at '$BINARY' does not run on this mac ('$BINARY --version' failed) — a binary extracted from the LINUX worker image installs perfectly here and then loops under KeepAlive with 'cannot execute binary file' (design #440 D6 holds on Linux only); REFUSING (nothing installed). Re-run deploy/prod/build-worker.sh against this node: on Darwin it compiles the daemon with the node's own cargo (WORKER_CARGO)." >&2
   exit 1
 fi
 
@@ -96,6 +107,33 @@ if [ -z "${CHUG_WORKER_SKIP_DOCKER_CHECK:-}" ] && ! docker info > /dev/null 2>&1
   fi
   echo "install-worker-launchd: cannot tell whether this node still runs the containerized chug-worker — $WHY. A stopped '--restart=always' container comes back when dockerd does, and two daemons on one WORKER_NODE is the state worker-refresh.sh refuses its swap over (#440 §1); REFUSING (nothing installed). Start docker and re-run, or run 'docker rm -f chug-worker' yourself, or set CHUG_WORKER_SKIP_DOCKER_CHECK=1 to say this mac has never run one." >&2
   exit 1
+fi
+
+# The toolchain directory rides ahead of the rest, out of the run spec this
+# agent is about to source. A converted mac's SELF-refresh compiles under
+# exactly this PATH (#440's 2026-08-07 correction), and cargo resolves `rustc`
+# through it — so an agent without the directory leaves the node one that
+# refuses every refresh, whatever WORKER_CARGO says.
+# Read with the shell's own parameter expansion rather than sed or awk: a run
+# spec is one `NAME='value'` per line by construction (build-worker.sh's
+# `spec_line`, which refuses a value carrying a quote of its own), so no parser
+# is warranted for it.
+SPEC_CARGO=""
+while IFS= read -r _line; do
+  case "$_line" in
+    WORKER_CARGO=*)
+      SPEC_CARGO="${_line#WORKER_CARGO=}"
+      SPEC_CARGO="${SPEC_CARGO#\'}"
+      SPEC_CARGO="${SPEC_CARGO%\'}"
+      ;;
+  esac
+done < "$ENV_FILE"
+if [ -n "$SPEC_CARGO" ]; then
+  SPEC_CARGO_DIR="$(dirname "$SPEC_CARGO")"
+  case ":$AGENT_PATH:" in
+    *":$SPEC_CARGO_DIR:"*) ;;
+    *) AGENT_PATH="$SPEC_CARGO_DIR:$AGENT_PATH" ;;
+  esac
 fi
 
 mkdir -p "$LA" "$(dirname "$LOG")"

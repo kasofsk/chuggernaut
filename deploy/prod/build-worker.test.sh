@@ -40,8 +40,19 @@ EOF
 # assertions can inspect the remote command strings — including the multi-line
 # install script that writes the environment file and the unit. It also answers
 # the probes the script runs over ssh:
-#   * the node platform probe (`uname -s` + $HOME) echoes $FAKE_NODE_OS (default
-#     Linux) and $FAKE_NODE_HOME, which is what selects systemd or launchd;
+#   * the node platform probe (`uname -s` + $HOME + the toolchain) echoes
+#     $FAKE_NODE_OS (default Linux) and $FAKE_NODE_HOME, which is what selects
+#     systemd or launchd, then the three toolchain answers only a Darwin node
+#     needs (its daemon binary is compiled ON the node, because the worker image
+#     is Linux): $FAKE_NODE_CARGO, $FAKE_NODE_RUSTC — where `rustc` resolves
+#     with cargo's own directory on PATH, which is the question the COMPILE asks
+#     — and $FAKE_NODE_CARGO_RUNS, whether that cargo execs at all. Set any of
+#     them EMPTY to model a mac the deploy cannot compile on;
+#   * the docker-context probe (`docker context inspect`, Darwin only) echoes
+#     $FAKE_DOCKER_CONTEXT, the endpoint the node's own docker CLI uses, and the
+#     socket check (`[ -S …`) succeeds unless $FAIL_DOCKER_SOCKET is set;
+#   * the native daemon build (`… build --release --locked …`) is a no-op that
+#     is logged, so the assertions can read back exactly what was compiled;
 #   * the image-label inspect (`...chug.git.sha...`) echoes $FAKE_LABEL, default
 #     the SHA fake-git reports, so the label assert passes unless a case forces a
 #     mismatch (the stale-image-label case);
@@ -91,7 +102,13 @@ cat >/dev/null 2>&1 || true
 echo "ssh \$*" >> "$LOG"
 case "\$*" in
   *CHUG_WORKER_ENV*) ;;
-  *uname*)         printf '%s\n%s\n' "\${FAKE_NODE_OS:-Linux}" "\${FAKE_NODE_HOME:-/home/worksalot}" ;;
+  *uname*)
+    printf '%s\n%s\n%s\n%s\n%s\n' "\${FAKE_NODE_OS:-Linux}" "\${FAKE_NODE_HOME:-/home/worksalot}" \
+      "\${FAKE_NODE_CARGO-/opt/homebrew/bin/cargo}" \
+      "\${FAKE_NODE_RUSTC-/opt/homebrew/bin/rustc}" "\${FAKE_NODE_CARGO_RUNS-ok}"
+    ;;
+  *"build --release --locked"*) ;;
+  *"docker context inspect"*) printf '%s\n' "\${FAKE_DOCKER_CONTEXT-unix:///Users/op/.colima/default/docker.sock}" ;;
   *chug.git.sha*)  echo "\${FAKE_LABEL:-deadbeefcafe}" ;;
   *is-active*)
     if [ -n "\${FAKE_STALE_LOG:-}" ]; then
@@ -137,6 +154,7 @@ case "\$*" in
   *Config.Env*)    [ -z "\${FAKE_LIVE_ENV:-}" ] || printf '%s\n' "\${FAKE_LIVE_ENV}" ;;
   *"[ -d '/nix/store' ]"*) [ -z "\${FAIL_NIX_PRECHECK:-}" ] || exit 1 ;;
   *"readlink -f"*) [ -z "\${FAIL_SDK_PRECHECK:-}" ] || exit 1 ;;
+  *"[ -S '"*)      [ -z "\${FAIL_DOCKER_SOCKET:-}" ] || exit 1 ;;
 esac
 exit 0
 EOF
@@ -1229,6 +1247,319 @@ if grep -qF "for d in '/usr/local/bin'" "$LOG"; then
   fail "a Linux node must not be asked the macOS binary-directory check"
 fi
 echo "ok: an unwritable /usr/local refuses on macOS, before anything is extracted"
+
+# ── Case 2s2: a Darwin node COMPILES its daemon; it cannot extract one ─────────
+# design #440 D6 extracts the binary from the worker image, and that image is a
+# LINUX container: on the air (2026-08-06) it installed as `ELF 64-bit LSB pie
+# executable, ARM aarch64` and launchd looped `cannot execute binary file`. So a
+# mac builds its own from the same context, with the node's own cargo, and the
+# three artifacts come out of that tree instead of out of a `docker cp`.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  sh "$SUT" > "$WORK/macbuild.out" 2>&1
+
+grep_log "CHUG_GIT_SHA='deadbeefcafe' CARGO_TARGET_DIR='/Users/op/chuggernaut-worker/build/target' '/opt/homebrew/bin/cargo' build --release --locked --bin chuggernaut --bin chuggernaut-channel"
+grep_log "install -m 0755 '/Users/op/chuggernaut-worker/build/target/release/chuggernaut' \"\$STAGE/chuggernaut\""
+grep_log "install -m 0755 '/Users/op/chuggernaut-worker/build/src/deploy/prod/worker-refresh.sh' \"\$STAGE/worker-refresh.sh\""
+# The Linux extraction must NOT happen on this node — a binary out of that image
+# is exactly what crash-looped.
+if grep -qF -- "docker create chuggernaut/worker" "$LOG"; then
+  fail "a Darwin node must not extract its daemon binary from the Linux worker image"
+fi
+# The target directory is kept and the source tree is replaced: a cold workspace
+# compile on a mac is tens of minutes, and the self-refresh builds in the same
+# place — which is why both coordinates ride in the run spec.
+grep_log "rm -rf '/Users/op/chuggernaut-worker/build/src'"
+if grep -qF -- "rm -rf '/Users/op/chuggernaut-worker/build/target'" "$LOG"; then
+  fail "the node's cargo target directory must survive between deploys"
+fi
+grep_log "WORKER_CARGO='/opt/homebrew/bin/cargo'"
+grep_log "WORKER_BUILD_DIR='/Users/op/chuggernaut-worker/build'"
+echo "ok: a Darwin node compiles its own daemon and installs that, not the image's Linux binary"
+
+# ── Case 2s2a: the conversion NOTE says where THIS node's binary comes from ────
+# It is the only place the operator is told what their node's self-refresh does,
+# and it is printed at the moment the node is converted. Saying "out of the
+# worker image" to a mac's operator is the belief this correction exists to fix.
+grep -qF "compiles its own daemon binary with /opt/homebrew/bin/cargo in /Users/op/chuggernaut-worker/build" "$WORK/macbuild.out" \
+  || fail "the NOTE must tell a mac's operator their node COMPILES its next daemon, with which cargo and where"
+if grep -qF "self-refresh installs the daemon binary out of the worker image" "$WORK/macbuild.out"; then
+  fail "the NOTE must not tell a mac's operator their self-refresh extracts from the Linux worker image"
+fi
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT" > "$WORK/linuxnote.out" 2>&1
+grep -qF "installs the daemon binary out of the worker image (design #440 D6)" "$WORK/linuxnote.out" \
+  || fail "a Linux node's NOTE is unchanged — D6 holds there"
+echo "ok: the conversion NOTE names the binary's provenance per platform"
+
+# ── Case 2s3: a mac with no reachable cargo REFUSES, before anything is built ──
+# The strategy needs something this node lacks, so it says which thing and how to
+# declare it — rather than installing a binary that cannot exec and timing out on
+# the health probe sixty seconds later with the container daemon already gone.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  FAKE_NODE_CARGO= \
+  sh "$SUT" > "$WORK/nocargo.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Darwin node with no cargo must fail the deploy (got rc=0)"
+grep -qF "WORKER_CARGO_air=" "$WORK/nocargo.out" || fail "the refusal must name the per-node declaration"
+grep -qF "cannot execute binary file" "$WORK/nocargo.out" || fail "the refusal must name what the image's binary does on a mac"
+not_started "a mac with no toolchain must not reach the agent bootstrap"
+if grep -qF "docker build" "$LOG"; then
+  fail "the toolchain refusal must come BEFORE the image builds"
+fi
+# And a Linux node is never asked for one: its binary comes out of the image.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  FAKE_NODE_CARGO= \
+  sh "$SUT"
+started || fail "a Linux node needs no cargo (design #440 D6 holds there)"
+if grep -qF "build --release --locked" "$LOG"; then
+  fail "a Linux node must not compile the daemon on the node"
+fi
+echo "ok: a mac with no reachable cargo refuses by name; a Linux node is never asked for one"
+
+# ── Case 2s3a: the toolchain is a DIRECTORY, and both other halves refuse ──────
+# `command -v cargo` is not the question the compile asks. Cargo resolves `rustc`
+# THROUGH PATH — and an absolute WORKER_CARGO is declared precisely because the
+# bare name is not on the ssh shell's PATH — so a node with cargo and no rustc
+# passes a `command -v` guard and dies mid-compile, after three image builds.
+# A rustup shim with no default toolchain is the same shape one step earlier.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  FAKE_NODE_RUSTC= \
+  sh "$SUT" > "$WORK/norustc.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Darwin node whose cargo cannot find rustc must fail the deploy (got rc=0)"
+grep -qF "cargo resolves its compiler THROUGH PATH" "$WORK/norustc.out" \
+  || fail "the refusal must say why an absolute WORKER_CARGO is not enough"
+not_started "a mac with no rustc must not reach the agent bootstrap"
+if grep -qF "docker build" "$LOG"; then
+  fail "the rustc refusal must come BEFORE the image builds, not mid-compile"
+fi
+
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  FAKE_NODE_CARGO_RUNS= \
+  sh "$SUT" > "$WORK/deadcargo.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Darwin node whose cargo does not run must fail the deploy (got rc=0)"
+grep -qF "rustup shim with no default toolchain" "$WORK/deadcargo.out" \
+  || fail "the refusal must name the state it is describing"
+not_started "a mac whose cargo does not exec must not reach the agent bootstrap"
+echo "ok: a mac with cargo but no rustc, and one whose cargo does not run, each refuse before the builds"
+
+# ── Case 2s3b: the toolchain DIRECTORY is carried, to both compilers ───────────
+# The remote compile and the daemon's OWN self-refresh each run with a PATH that
+# is not the operator's interactive one: the first is the ssh shell's, the second
+# is the launchd agent's. A nix-darwin profile directory is on neither, so
+# WORKER_CARGO alone buys nothing once cargo goes looking for rustc.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  FAKE_NODE_CARGO=/etc/profiles/per-user/op/bin/cargo \
+  FAKE_NODE_RUSTC=/etc/profiles/per-user/op/bin/rustc \
+  sh "$SUT" > /dev/null 2>&1
+grep_log "PATH='/etc/profiles/per-user/op/bin':\"\$PATH\""
+GOT_PLIST="$(plist_file)"
+case "$GOT_PLIST" in
+  *"<key>PATH</key><string>/etc/profiles/per-user/op/bin:/opt/homebrew/bin:"*) ;;
+  *) fail "the launchd agent's PATH must carry the toolchain directory — it is the PATH the daemon's own refresh compiles under" ;;
+esac
+# And the marker both writers of the staging directory maintain: the swap refuses
+# when it disagrees with the image's label, which only works if a conversion
+# leaves it describing what it just built.
+grep_log "'deadbeefcafe' > '/Users/op/chuggernaut-worker/build/native.sha'"
+# A directory already on the agent's PATH is not prepended twice.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  sh "$SUT" > /dev/null 2>&1
+GOT_PLIST="$(plist_file)"
+case "$GOT_PLIST" in
+  *"<key>PATH</key><string>/opt/homebrew/bin:/opt/homebrew/sbin:"*) ;;
+  *) fail "a toolchain already on the agent's PATH must not be prepended again" ;;
+esac
+echo "ok: the toolchain directory reaches the remote compile and the agent's PATH, and native.sha is written"
+
+# ── Case 2s4: WORKER_DOCKER_ENDPOINT reaches the run spec (the second gap) ─────
+# The setting has existed in crates/worker/src/config.rs all along and NOTHING
+# rendered it, because its default was correct while the daemon was a container
+# with /var/run/docker.sock bind-mounted in. Natively on a mac colima listens
+# somewhere else, and the converted air answered every launch with `backend
+# unavailable: Socket not found: /var/run/docker.sock`. Derived from the node's
+# own docker context so a mac does not have to notice and declare it.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_SLOTS=2 \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  sh "$SUT" > "$WORK/endpoint.out" 2>&1
+grep_log "WORKER_DOCKER_ENDPOINT='unix:///Users/op/.colima/default/docker.sock'"
+grep -qF "derived from op@air" "$WORK/endpoint.out" \
+  || fail "a derived endpoint must be announced — it is a SNAPSHOT of the node's context"
+# The whole macOS run spec as a golden, for case 2a's reason: this is the file
+# the agent sources, and the two lines a conversion adds are the ones the air
+# needed by hand.
+EXPECTED_MAC_ENV="WORKER_NODE='air'
+NATS_URL='nats://10.0.0.1:4222'
+NATS_CREDS='/Users/op/chuggernaut-worker/keys/worker.creds'
+RUST_LOG='info,async_nats=warn'
+WORKER_REFRESH_GIT_URL=''
+WORKER_GIT_KEY='/Users/op/chuggernaut-worker/keys/worker_git'
+WORKER_SLOTS='2'
+WORKER_DOCKER_ENDPOINT='unix:///Users/op/.colima/default/docker.sock'
+WORKER_CARGO='/opt/homebrew/bin/cargo'
+WORKER_BUILD_DIR='/Users/op/chuggernaut-worker/build'"
+GOT_MAC_ENV="$(env_file)"
+[ "$GOT_MAC_ENV" = "$EXPECTED_MAC_ENV" ] || fail "a converted mac's environment file must be exactly the composed run spec.
+  expected: $EXPECTED_MAC_ENV
+  got:      $GOT_MAC_ENV"
+# A LINUX node is byte-identical to what it was: nothing derives, nothing is
+# asked, and no line is added (case 2a's golden is the other half of this).
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT"
+if grep -qF "docker context inspect" "$LOG"; then
+  fail "a Linux node must not be asked for its docker context"
+fi
+if grep -qF "WORKER_DOCKER_ENDPOINT" "$LOG"; then
+  fail "WORKER_DOCKER_ENDPOINT must not be passed when unset (daemon default applies)"
+fi
+echo "ok: a mac's docker endpoint is derived into the run spec; a Linux node's spec is unchanged"
+
+# ── Case 2s4a: a DECLARED endpoint rides on either platform, per node ──────────
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_DOCKER_ENDPOINT_nuc=unix:///run/podman/podman.sock \
+  sh "$SUT"
+grep_log "WORKER_DOCKER_ENDPOINT='unix:///run/podman/podman.sock'"
+echo "ok: a declared endpoint reaches the daemon, and is per-node like every other knob"
+
+# ── Case 2s4b: a DERIVED endpoint equal to the daemon's default is not written ─
+# Deriving must not make a node that declared nothing carry a line it never
+# chose — a mac whose docker really is at /var/run/docker.sock gets the run spec
+# it would have got before any of this existed.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  FAKE_DOCKER_CONTEXT=unix:///var/run/docker.sock \
+  sh "$SUT" > /dev/null 2>&1
+if grep -qF "WORKER_DOCKER_ENDPOINT" "$LOG"; then
+  fail "a derived endpoint equal to the daemon's own default must stay unset"
+fi
+echo "ok: a derived endpoint equal to the default is dropped, not written"
+
+# ── Case 2s4c: an endpoint the node cannot answer at REFUSES, before the swap ──
+# Two different failures, and neither is a daemon that comes up degraded: an
+# unsupported scheme is a start-time refusal the supervisor would loop, and a
+# socket that is not there is a node that announces its slots and fails EVERY
+# launch — which is what the air did after its binary was fixed.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_DOCKER_ENDPOINT=ssh://worksalot@nuc \
+  sh "$SUT" > "$WORK/ep-scheme.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an endpoint scheme the daemon rejects must fail the deploy (got rc=0)"
+grep -qF "neither unix:// nor tcp://" "$WORK/ep-scheme.out" || fail "the refusal must name the shapes"
+not_started "an unparseable endpoint must not reach the daemon restart"
+
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  FAIL_DOCKER_SOCKET=1 \
+  sh "$SUT" > "$WORK/ep-sock.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an endpoint whose socket is absent must fail the deploy (got rc=0)"
+grep -qF "backend unavailable: Socket not found" "$WORK/ep-sock.out" \
+  || fail "the refusal must name the error the node would otherwise report per launch"
+not_started "a missing docker socket must not reach the daemon restart"
+echo "ok: an unparseable endpoint and an absent socket both refuse, live daemon untouched"
+
+# ── Case 2s5: the staged binary must RUN on the node before it is installed ────
+# The generalisation of the whole finding (#309 P0 finding 6): a binary whose
+# provenance is a foreign platform installs perfectly and then loops under the
+# supervisor. `--version` is the cheapest question that separates the two, it is
+# asked on BOTH platforms — the image is bookworm and a NixOS node has no /lib64
+# loader — and it is asked BEFORE the first chug_put, so a refusal leaves the
+# node exactly as it was.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT"
+grep_log "\"\$STAGE/chuggernaut\" --version"
+probe_line="$(line_of "\"\$STAGE/chuggernaut\" --version")"
+put_line="$(line_of "chug_put 0755 \"\$STAGE/chuggernaut\" '/usr/local/bin/chuggernaut'")"
+[ -n "$probe_line" ] && [ -n "$put_line" ] || fail "expected both the exec check and the install in the log"
+[ "$probe_line" -le "$put_line" ] || fail "the staged binary must be run BEFORE it is installed"
+echo "ok: the staged daemon binary is required to exec on the node before it is installed"
 
 # ── Case 2t: a platform this script cannot supervise refuses, before building ──
 : > "$LOG"

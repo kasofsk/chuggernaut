@@ -269,6 +269,86 @@ the module's defaults against `build-worker.sh`'s — text over text. A green
 Chuggernaut job means the two renderings agree; **your `nixos-rebuild build` is
 still the only thing that has ever evaluated the module.**
 
+## 4b. Converting a mac — two node facts, and no way back
+
+A nix-darwin node declares no agent (§4a), so its conversion is entirely
+`deploy/prod/build-worker.sh`'s. Two things it needs that a NixOS node does not,
+both measured on `gumbo-air-0` on 2026-08-06 and both refusals in the script
+today (design [#440](../../design/440-native-worker-daemon.md)'s
+[2026-08-07 correction](../../design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)):
+
+1. **A Rust toolchain the deploy's ssh shell can see.** The worker image is a
+   Linux container, so the binary extracted from it is an ELF file launchd loops
+   on with `cannot execute binary file`. A mac compiles its own daemon instead,
+   and the compiler has to be reachable **non-interactively** — a nix-darwin
+   `cargo` in `/etc/profiles/per-user/<you>/bin` or `/run/current-system/sw/bin`
+   often is not, because that shell sources neither the login nor the
+   interactive profile:
+
+   ```sh
+   ssh <node> 'command -v cargo'      # the exact question the deploy asks
+   ```
+
+   Empty, but `cargo` works when you log in? Declare the absolute path on the
+   Mini, in `deploy/prod/chuggernaut.env`: <!-- runtime -->
+
+   ```sh
+   WORKER_CARGO_air=/etc/profiles/per-user/<you>/bin/cargo
+   ```
+
+   **`rustc` has to be in that same directory** — the deploy asks that as a
+   separate question, and refuses separately, because cargo resolves its
+   compiler through `PATH` rather than from its own location. Declaring an
+   absolute `WORKER_CARGO` makes `command -v` pass while the compile still
+   fails, which is the failure mode this guard exists for:
+
+   ```sh
+   ssh <node> 'PATH=/etc/profiles/per-user/<you>/bin:$PATH; command -v rustc'
+   ```
+
+   A rustup or nix-darwin toolchain installs both together, so this is normally
+   automatic. A `cargo` that does not exec at all — a rustup shim with no
+   default toolchain — is a third named refusal.
+
+   Making the toolchain visible in the host configuration instead is the more
+   durable fix and is yours — `environment.systemPackages` reaches an ssh
+   command shell through `/run/current-system/sw/bin`. Either way the value ends
+   up in the node's run spec **and its directory leads the launchd agent's
+   `PATH`**, because the node's own self-refresh compiles too and runs with the
+   agent's environment. `WORKER_BUILD_DIR_<node>` moves the tree and target
+   directory it builds in (default `~/chuggernaut-worker/build`); it is kept
+   between deploys so a rebuild is incremental, and it wants a few GB.
+
+2. **The docker endpoint the mac actually has.** The daemon defaults to
+   `/var/run/docker.sock` — true while it was a container with that bind mount,
+   false natively, where colima answers at `~/.colima/default/docker.sock`. The
+   deploy derives it from the node's own `docker context inspect` and writes
+   `WORKER_DOCKER_ENDPOINT` into the run spec, so an ordinary mac declares
+   nothing; `WORKER_DOCKER_ENDPOINT_<node>` overrides it, and a socket that is
+   not there refuses the deploy rather than producing a node that announces its
+   slots and fails every launch with `backend unavailable: Socket not found`.
+   **The value is a snapshot.** If you later `colima delete`, rename the
+   profile, or switch to Docker Desktop, the daemon keeps dialling the old path
+   until the node is re-converted — the same failure, with the node looking
+   healthy.
+
+**Converting is one-way.** #440 slice 6 deleted the `docker run` path, so there
+is no scripted way back to a container daemon: a failed conversion strands the
+node until it is fixed *forward*. Every check above refuses with the live daemon
+untouched, and the staged binary must run on the node (`chuggernaut --version`)
+before it is installed — but the window between `launchctl bootout` and a
+healthy probe is real. **Drain first** ([`worker-capacity.md`](worker-capacity.md)
+§4.1) and convert a node you can afford to lose for the length of a build.
+
+**A mac converted before 2026-08-07 has a deadline, not a choice.** The daemon
+executes the `worker-refresh.sh` **installed on the node**, and a copy written
+by a pre-correction conversion still extracts the Linux binary out of the worker
+image — so the next prod deploy that asks it to refresh renames an ELF file over
+its working daemon and kickstarts launchd, which is the 2026-08-06 failure
+again. `gumbo-air-0` is in exactly that state: re-convert it before the next
+deploy, or drain it and `launchctl bootout gui/$(id -u)/com.chuggernaut.worker`
+until you can. Re-converting is what replaces the installed script.
+
 ---
 
 ## 5. The one coupled edit: delete your own `label!=` filter

@@ -1,6 +1,17 @@
 # Design — the natively-supervised worker daemon
 
-Status: IMPLEMENTED — all eight slices landed, and **no node runs a native daemon**: nothing was applied, and `runtime.mode: host` is still refused (#401, #309 P1).
+Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away**, and no node runs a native daemon from this tree: nothing was applied, and `runtime.mode: host` is still refused (#401, #309 P1).
+
+**The first conversion of a real node, on 2026-08-06, found two things this
+design got wrong for macOS** — [D6](#decisions)'s extracted binary is an ELF file
+a mac cannot exec, and `WORKER_DOCKER_ENDPOINT` was never rendered by anything,
+so the daemon dialled a socket that is not there. Both are
+[#309](./309-host-native-execution.md) P0 finding 6 again, and both are fixed in
+[the correction](#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476):
+a Darwin node **compiles** its own daemon from a declared toolchain, the
+endpoint is derived from the node's own docker context, and every staged binary
+must prove it runs on the node before it is installed. `gumbo-air-0` is running
+a daemon an operator built **by hand** and is not converted by this tree.
 
 `IMPLEMENTED` is a claim about the slices and nothing more
 ([`docs/reference/docs.md`](../reference/docs.md)), and it is worth saying what it does
@@ -108,7 +119,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | **D3** | **Host tasks run in their own supervision unit, not the daemon's** — Linux: a transient systemd scope per task; macOS: the process group `spawn_task` already creates — **proven on both, 2026-08-06**: macOS 26.5.1 (Darwin) on `gumbo-air-0` against the mechanism itself, `sh deploy/prod/macos-host-supervision-proof.sh` at tree `c8a8354` ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and Linux through the shipped path on `gumbo-nuc-0` (NixOS, systemd, cgroup v2), `cargo test -p container --test host_backend` at trees `186beeb` and `af9f74e`, with `XDG_RUNTIME_DIR=/run/user/1000` set in the invoking environment ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)). | It is the same mechanism #309 §6, §7 and §2 each independently need, and it is the only way `systemctl restart chug-worker` can stop killing in-flight work. |
 | **D4** | **And the daemon declines a `refresh` while any host task is live**, naming the task — evaluated **twice: at accept, and again at the swap boundary** beside `RefreshGate::drained`. | D3 covers a unit restart; it does not cover a reboot or a rebuild that restarts more than the unit, and the self-refresh is the only restart the platform performs *automatically* — a loud refusal there is cheap and unconditional. The accept check is the fast, informative one; the swap-boundary check is the one that is actually load-bearing, because the build phase runs between them. |
 | **D5** | **Credentials move to a root-owned `0700` directory named by the unit, not the login user's home.** `chuggernaut admin worker-creds` is unchanged; the install step in `deploy/prod/README.md` §6 changes. | The login user is in the `docker` group and is who `build-worker.sh` ssh's in as, so a creds file under that user's home is readable by anything that user runs — a strictly worse boundary than the one the mount was pretending to give. |
-| **D6** | **`build-worker.sh` renders and installs a unit + environment file; `worker-refresh.sh`'s swap collapses to "install the binary, ask the supervisor to restart".** The daemon binary is extracted from the worker image the build phase already produces. | Every mount, device and `docker inspect` carry-forward in the swap phase exists only because the daemon is a container that must be re-composed; extracting the binary keeps its build environment byte-identical to today's and needs no host Rust toolchain. |
+| **D6** | **`build-worker.sh` renders and installs a unit + environment file; `worker-refresh.sh`'s swap collapses to "install the binary, ask the supervisor to restart".** The daemon binary is extracted from the worker image the build phase already produces — **on Linux only**: the image is a Linux container, so a **Darwin** node compiles its own from a declared `WORKER_CARGO`, and both platforms must prove the staged binary runs on the node before installing it ([the correction](#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476), measured on `gumbo-air-0` 2026-08-06). | Every mount, device and `docker inspect` carry-forward in the swap phase exists only because the daemon is a container that must be re-composed; extracting the binary keeps its build environment byte-identical to today's and needs no host Rust toolchain — an argument whose premise is that the image's platform *is* the node's, which is false on a mac and buys nothing there. |
 | **D7** | **#390's drift guard keeps its meaning and gains reach**: presence-decides-refusal over the same `WORKER_*` key set, comparing the live unit's environment against the composed environment file. | The comparison was never about docker — it is about what a recreate would drop — and a declaration that is a file on the node is legible without `docker inspect`. |
 | **D8** | **Of #309 P0's three known holes, two get worse and one gets better.** Environment inheritance (§10) and `/proc/<pid>/environ` (§8) get worse and stop being P3; the `setsid()` escape (§2) is closed on Linux by D3's scope — **proven in execution on 2026-08-06**, on `gumbo-nuc-0` (NixOS, systemd 260 (260.2), cgroup v2) at tree `692656e` under `cargo test -p container --test host_backend`, where `a_kill_reaches_a_setsid_escapee_through_the_scope` reached and passed its assertion for the first time on any machine, alongside all twelve of its siblings and with no skips ([D8 in execution](#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466)). **Not for free**, twice over: `kill` has to address the cgroup and not only the process group ([the correction](#d8-is-confirmed-on-linux-and-it-needed-one-line-of-code)), and `scope_args` has to pass `--expand-environment=no`, without which a systemd v258-or-later client rewrites the task's own argv before exec'ing it ([the client rewriting the command](#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462)). Its premise is separately asserted, and **passing**, by `a_setsid_escapee_is_staged_outside_the_task_process_group`, which measures the *opposite* half — that a process-group signal cannot reach the escapee — so the two are complementary and both are needed; `a_setsid_escapee_is_staged_under_a_scope_as_well` is that same premise under a scope. On **macOS** the hole is unchanged and still leaks. | Blast radius is what changes: a task inheriting a *native* daemon's environment inherits the node, not a container that happens to hold a socket. |
 
@@ -2878,3 +2889,293 @@ follow-up and is named here so it is not rediscovered.
   first real execution of either half is an operator on a node they can reach,
   which the [risk list](#risks-and-open-questions) already says should not be a
   prod node.
+
+---
+
+## Correction, 2026-08-07 — D6 holds on Linux only, and the endpoint was never rendered (job #476)
+
+The first real conversion of a node happened on 2026-08-06, against
+`gumbo-air-0`, and it produced two failures this design did not predict. Both
+are the same mistake in two places, and the mistake is
+[#309](./309-host-native-execution.md) P0 finding 6 for the third time:
+**macOS was reasoned about for supervision and inherited from the container for
+everything else.** [D2](#decisions) was designed for that platform and its proof
+passed. The binary's *provenance* and the engine's *address* were not
+re-derived at all — they were carried over from a daemon that was a Linux
+container holding a bind-mounted socket, where both were true by construction.
+
+### What happened, in order
+
+`WORKER_SSH=worksalot@dev-air.tail20c474.ts.net CHUG_WORKER_NODE=air
+deploy/prod/build-worker.sh`, on an idle fleet:
+
+1. **It refused, correctly.** `WORKER_GIT_KEY=/data/keys/worker_git` names the
+   container's mount, and [slice 5](#correction-2026-08-06--slice-5-as-landed-job-472)'s
+   guard caught it. Nothing here changes that.
+2. **It installed the agent, and the agent crash-looped.**
+   `/usr/local/bin/chuggernaut` was an `ELF 64-bit LSB pie executable, ARM
+   aarch64` — a **Linux** binary — and launchd reported `cannot execute binary
+   file` on repeat. The health probe timed out at 60s and the script reported
+   FAILED, with the container daemon already removed.
+3. **After a native rebuild by hand, a second failure:** `backend unavailable:
+   Socket not found: /var/run/docker.sock`.
+
+The air now runs a Mach-O daemon built with its own `cargo` and a
+`WORKER_DOCKER_ENDPOINT` line appended to its `worker.env` by hand. Neither step
+was reproducible by any script in this tree, which is what this correction fixes.
+
+### D6's sentence, split by platform
+
+> the daemon binary is extracted from the worker image the build phase already
+> produces … so its build environment stays byte-identical to today's and needs
+> no host Rust toolchain.
+
+That argument is sound **on Linux**, where the image's platform and the node's
+platform are the same thing, and it is unsalvageable **on Darwin**, where the
+image is a Linux container and the host is not. It is not a bug in the sentence;
+it is a premise that silently stopped holding. The correction is therefore
+narrow: D6 is a **Linux** decision, and a Darwin node needs its own answer.
+
+**Every place that sentence is asserted is split with it**, including the one
+place it is said *to an operator*: the `NOTE` `build-worker.sh` prints at the
+moment a node is converted, which is where someone learns what their node will
+do on the next deploy. On Darwin it now names the compile, its cargo and its
+build directory; on Linux it is unchanged and still cites D6. A claim corrected
+in the docs and left standing in the console is corrected for the wrong reader.
+
+### The three ways to a Mach-O daemon, and why the node compiles
+
+| Option | What it costs | Verdict |
+| --- | --- | --- |
+| **Compile on the node** | D6's "no host Rust toolchain" promise dies on that platform, the build environment becomes the node's rather than the pinned image's, and build time moves onto the node | **Chosen** |
+| **Cross-compile on the builder** | keeps the promise, and needs a Darwin target, the macOS SDK and a Darwin linker on the builder — i.e. a mac. The builder is the node itself here (`build-worker.sh` builds *over ssh, on the node*), so this is the chosen option with extra steps unless a second mac appears | Refused |
+| **Ship a prebuilt artifact** | keeps the promise and needs somewhere to put it — a registry or artifact store, which is [#313](./313-workload-identity-image-builds.md) gap 11 and does not exist | Refused, for now |
+
+The deciding argument is that only the first needs nothing the platform does not
+have. It is also the option the third row eventually replaces: when #313 gap 11
+lands somewhere to publish a signed artifact, a mac fetching one is strictly
+better than a mac compiling one, and this becomes the fallback rather than the
+path.
+
+**The cost is stated rather than hidden.** A Darwin node's daemon is built by
+*that node's* cargo, not by `deploy/prod/Dockerfile.worker`'s pinned
+`rust:1.96-bookworm`, so two nodes in one fleet can be built by two compilers.
+Three things narrow it: the build is `--locked`, so the dependency graph is the
+tree's `Cargo.lock` and not whatever resolves that day; `CHUG_GIT_SHA` is passed
+exactly as the image passes it, so the fleet's version column keeps meaning the
+same thing; and the node is refused outright when it has no cargo the deploy can
+reach, rather than being given a binary from the wrong platform. What is *not*
+claimed is byte-identity: it is gone on that platform, and no wording recovers it.
+
+### Where the toolchain is declared, and why the run spec carries it
+
+`build-worker.sh` asks the node for its toolchain in the **same round trip**
+that asks `uname -s` and `$HOME` — before anything is built, so a mac that
+cannot compile refuses in seconds with the live daemon untouched, naming
+`WORKER_CARGO_<node>` as the declaration to add. The ssh shell is not the
+interactive one an operator sees, and a nix-darwin or rustup cargo is routinely
+absent from it; that is why the override exists and why the refusal quotes the
+exact question it asked.
+
+**The toolchain is a directory, not a binary, and `command -v cargo` is not the
+question the compile asks.** Cargo resolves `rustc` through `PATH` — `RUSTC`,
+then `build.rustc`, then a plain lookup — and an absolute `WORKER_CARGO` is
+declared *precisely because* the bare name is not on the `PATH` in question. So
+a guard that asks only `command -v "$WORKER_CARGO"` passes on the exact node it
+was written for and the compile then dies half-way, after three image builds.
+Three answers come back instead of one, and each is its own named refusal:
+where `cargo` is, whether `rustc` resolves **with cargo's own directory
+prepended**, and whether that cargo runs at all (a rustup shim with no default
+toolchain is on `PATH`, execs, and compiles nothing). Everything that compiles
+then runs with that directory prepended — the remote build, and
+`worker-refresh.sh`'s own.
+
+`WORKER_CARGO` and `WORKER_BUILD_DIR` ride **in the run spec**, and the
+toolchain's **directory** rides in the launchd agent's `PATH`. That pair is what
+keeps the node self-refreshing: `worker-refresh.sh` runs as the daemon, whose
+`PATH` is the agent's, so the declaration alone buys nothing once cargo goes
+looking for its compiler. With both, a converted mac's refresh compiles in its
+build phase (where minutes are affordable, and before the retag-swap) and its
+swap installs what it compiled. A Linux node gets neither line, no `PATH`
+change, and keeps extracting from the image.
+
+`build-worker.sh`'s own compile also writes `native.sha` into the staging
+directory, as `worker-refresh.sh`'s does. Two writers share that directory and
+the swap refuses when the marker disagrees with the image's `chug.git.sha`
+label; leaving it stale after a conversion would make that second opinion true
+only by call ordering rather than by construction.
+
+### `WORKER_DOCKER_ENDPOINT` — a setting nothing had ever rendered
+
+`crates/worker/src/config.rs` has read `WORKER_DOCKER_ENDPOINT` since long
+before this design, defaulting to `unix:///var/run/docker.sock`. **Nothing in
+this repo ever wrote it into a run spec**, and nothing needed to: the daemon was
+a container with that exact socket bind-mounted in, so the default was true by
+construction. This design's own equivalence table says so in the row that reads
+*"nothing — the daemon opens `unix:///var/run/docker.sock` on the node, which is
+`WORKER_DOCKER_ENDPOINT`'s default already"* — and that row is right about Linux
+and wrong about a mac, where colima listens at `~/.colima/default/docker.sock`.
+
+It is now rendered on `WORKER_MODES`'s terms: forwarded, per-node overridable,
+**unset stays unset** so a Linux node's environment file is byte-identical to
+what it was. Two guards, because the two failures are different:
+
+- **An unsupported scheme is refused** — `DockerBackend::new` rejects anything
+  that is not `unix://` or `tcp://` / `http://`
+  (`crates/container/src/docker.rs`), which is a start-time error the supervisor
+  would loop.
+- **A `unix://` socket that is not there is refused** — that one is *not* a
+  daemon that fails to boot. It is a node that comes up, announces its slots,
+  and fails every launch with `backend unavailable: Socket not found`. The air
+  spent a window in exactly that state.
+
+### Deriving it, and what a changed context does
+
+On a Darwin node with nothing declared, the value is **derived** from
+`docker context inspect --format '{{.Endpoints.docker.Host}}'` on the node —
+the same engine that just built the node's images, asked of the same CLI. A mac
+therefore needs no declaration at all in the ordinary case, and the derived
+value is announced on the deploy leg rather than applied quietly.
+
+**A derived value is a snapshot, and this is what happens when the context
+changes under a running node:** nothing, until the daemon next starts — at which
+point it reads the environment file it was given and dials the socket that was
+true at conversion time. A node whose colima was replaced by Docker Desktop (or
+whose colima profile was renamed) keeps announcing itself healthy and fails
+every launch, exactly as the air did. That is the same durability every other
+line in that file has, and the same remedy: re-run `build-worker.sh`, or edit
+the file and kickstart the agent. It is not made self-healing on purpose — a
+daemon that re-derived its engine at each start would silently follow an
+operator's `docker context use` onto a different machine's engine, which is a
+larger surprise than a loud failure. A **derived** value equal to the daemon's
+own default is dropped rather than written, so deriving cannot give a node a
+line it never chose.
+
+### The generalisation, because there will be a fourth instance
+
+The class is: **a fact that was true by construction inside the container, still
+being assumed after the daemon left it.** Both failures here are that, and the
+container was doing the work in both cases — it made the binary's platform match
+the node's, and it made the socket path correct. Slice 4 audited the `docker
+run` flags one by one (the equivalence table above) and that audit was *good*;
+what it could not see was the two premises that were never flags.
+
+The check that generalises is in both scripts now, on both platforms: **the
+staged binary must run on this node before it is installed** (`chuggernaut
+--version`, before the first `install`). It is not a mac special case. The next
+instance is predicted, unmeasured, and follows from the same reasoning: the
+worker image is `debian:bookworm-slim`, and **a NixOS node has no
+`/lib64/ld-linux-x86-64.so.2`** — so D6's extracted binary may well fail to exec
+on `gumbo-nuc-0` too, which is the node slice 7 was written for. Nobody has
+tried; the point is that when it happens it is now a named refusal with the live
+daemon untouched, rather than a crash loop and a 60s health-probe timeout.
+
+### Restore-ability: there is no way back, and that is the trade
+
+[Slice 6](#correction-2026-08-06--slice-6-as-landed-job-473) deleted the
+`docker run` path, so when the air's native daemon failed there was no scripted
+way back to a container daemon and the node was down for the window. That is a
+deliberate consequence of [D1](#decisions) — one daemon per node, and a second
+supported shape is a second thing to keep working — and this correction does not
+reverse it. What it does is make the window much harder to enter: every failure
+above is now a refusal *before* the live daemon is touched, and the one
+remaining unguarded window is between the supervisor bootout and the health
+probe.
+
+It is acceptable **only because an operator is told before they convert**, which
+is the half that was missing. `deploy/prod/README.md` §6 and
+[the adoption runbook](../reference/runbooks/chug-node-adoption.md) §4b now say
+it in the place a conversion is read from: converting a node is one-way, a
+failed conversion strands it, and the way back is forward — fix what the
+refusal names and re-run. Drain the node first (`worker-capacity.md` §4.1) and
+convert one you can afford to lose for the length of a build.
+
+### The air must be re-converted BEFORE the next prod deploy, not at leisure
+
+This is a precondition, not a preference, and nothing in this change can enforce
+it. **The daemon executes the `worker-refresh.sh` installed on the node** —
+`resolve_refresh_script` in `crates/worker/src/config.rs` resolves
+`/usr/local/lib/chuggernaut/worker-refresh.sh`, the copy the 2026-08-06
+conversion wrote — not this tree's. That copy **predates this correction**: its
+build phase has no Darwin branch, and its swap is the unconditional `docker
+create` + `docker cp` out of `chuggernaut/worker:$TAG`.
+
+So the first prod deploy after this merges asks the air to self-refresh, its
+build phase succeeds happily on colima, and its swap renames the **ELF** binary
+over the operator's Mach-O one and kickstarts launchd — undoing the hand fix and
+taking the node out of the fleet, which is the 2026-08-06 outcome again. A
+re-conversion is what replaces that installed script; until it happens the air
+is one deploy away from the failure this correction describes.
+
+The remedy is the operator verification below, run **first**. Draining the node
+and booting its agent out is the alternative if a conversion cannot be scheduled
+before the next deploy. `deploy/prod/README.md` §6 and
+[the adoption runbook](../reference/runbooks/chug-node-adoption.md) §4b carry
+the same warning beside their drain-first instruction.
+
+### What this does not do
+
+- **Nothing was applied to any node.** The air is untouched by this change: it
+  is healthy and serving on the operator's hand-built daemon. It is *not*
+  indefinitely safe, for the reason directly above — the deadline is the next
+  prod deploy, not the operator's leisure. The nuc is untouched and unconverted.
+- **No `WORKER_MODES` change and no #309 P1.** `runtime.mode: host` is still
+  refused.
+- **The git-key guard is unchanged.** It did its job.
+- **`--locked` is a new way for a Darwin build to fail** that a Linux node does
+  not have: a `Cargo.lock` that no longer resolves the manifests fails the
+  compile rather than silently resolving a different graph. That is the intended
+  trade, and it fails loudly before anything is installed.
+
+### Verification — stated, and what was not run
+
+- `sh deploy/prod/build-worker.test.sh` — 66 cases, passing, including the nine
+  added here: a Darwin node compiles rather than extracts; a mac with no
+  reachable cargo refuses before any image is built and names
+  `WORKER_CARGO_<node>`; a mac with cargo but **no `rustc`** on the compile's
+  own `PATH`, and one whose cargo does not exec, each refuse there too; the
+  toolchain **directory** reaches both the remote compile and the launchd
+  agent's `PATH` (and is not prepended twice when it is already there), and the
+  conversion leaves `native.sha` describing what it built; the endpoint is
+  derived into the run spec and a Linux node's file is unchanged; a declared
+  endpoint rides per node; a derived value equal to the default is dropped; an
+  unparseable scheme and an absent socket each refuse with the live daemon
+  untouched; the staged binary must exec before it is installed; and the
+  conversion `NOTE` names the binary's provenance **per platform**. The macOS
+  run spec is asserted as a **whole-file golden**, beside the Linux one slice 4
+  added.
+- `sh deploy/prod/worker-refresh.test.sh` — 35 cases, passing, including: a
+  Darwin build phase compiles before the retag-swap, under a `PATH` carrying the
+  toolchain directory; a node whose cargo cannot find `rustc`, and one whose
+  cargo does not run, each refuse **before any docker mutation** rather than
+  mid-compile; a failed compile leaves the live images alone; a converted mac
+  with no cargo refuses the build by name; a Linux node is never asked for one;
+  the macOS swap installs the node's own build and not the image's; a staging
+  directory from another SHA refuses; and a staged binary that cannot exec
+  refuses on either platform.
+- `sh deploy/prod/install-worker-launchd.test.sh` — 7 cases, passing, with one
+  extended and one added: the opt-in macOS installer runs `--version` on the
+  daemon it is about to supervise, so a binary that is present, `0755` and
+  unable to exec — precisely what the air held — is refused instead of
+  bootstrapped into a `KeepAlive` loop; and it reads `WORKER_CARGO` out of the
+  run spec it is handed so the agent it writes carries the same toolchain
+  directory `build-worker.sh`'s does. Its "no executable daemon" message no
+  longer says the binary is extracted from the image, which on the only platform
+  that installer runs on is false.
+- `sh nix/chug-node/chug-worker-unit.test.sh`, `sh
+  deploy/prod/update-refresh.test.sh` — unchanged and passing.
+- **Not run, and it cannot be from here:** any of it on a mac. No node was
+  converted, no `cargo` ran on Darwin, no launchd agent was bootstrapped, and no
+  `docker context inspect` answered a real question. The first real execution is
+  the operator re-converting the air with
+  `WORKER_SSH=worksalot@dev-air.tail20c474.ts.net CHUG_WORKER_NODE=air
+  deploy/prod/build-worker.sh` from the fetched `chuggernaut.env`, on an idle
+  fleet — which is the same command that produced the measurement above. **Run
+  it before the next prod deploy**, for the reason in "The air must be
+  re-converted" above: the air still holds a pre-correction
+  `worker-refresh.sh`, and the next deploy that asks it to refresh installs the
+  Linux binary over the working daemon. Expect it to derive
+  `WORKER_DOCKER_ENDPOINT` from the node's own context and announce the value,
+  to compile with the node's cargo (declared as `WORKER_CARGO_air`, whose
+  directory then leads the agent's `PATH`), and to end at `worker up node=air
+  slots=2`.

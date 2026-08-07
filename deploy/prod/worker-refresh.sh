@@ -32,6 +32,10 @@
 #     image; the defaults are the paths build-worker.sh installs to and the ones
 #     crates/worker/src/config.rs already defaults to
 #   WORKER_UNIT / WORKER_AGENT_LABEL   what the swap asks the supervisor to restart
+#   WORKER_CARGO / WORKER_BUILD_DIR   DARWIN ONLY: the node's Rust toolchain and
+#     the tree + target dir it compiles the daemon in, because the worker image
+#     is a Linux container and a mac cannot run what comes out of it (#440 D6,
+#     corrected 2026-08-07). build-worker.sh writes both at conversion
 #   WORKER_SWAP_CONTAINER_MARKER   the file that says "this daemon is itself a
 #     container", i.e. a node nobody has converted yet (default /.dockerenv)
 set -eu
@@ -254,6 +258,44 @@ build)
   # docker call, with the free/needed numbers in the leg detail.
   refresh_disk_preflight || exit 1
 
+  # ── a Darwin node's daemon is COMPILED, not extracted (#440 D6, corrected
+  # 2026-08-07) ───────────────────────────────────────────────────────────────
+  # D6 has the swap lift the binary out of the worker image, which is a LINUX
+  # container: on a mac that binary is an ELF file the supervisor loops on with
+  # `cannot execute binary file` (gumbo-air-0, 2026-08-06). So this node builds
+  # its own, in the build phase where minutes are affordable, and the swap
+  # installs what was built. WORKER_CARGO is written into the environment file
+  # by build-worker.sh, because the daemon's PATH is the agent's and a
+  # nix-darwin or rustup cargo is not on it.
+  #
+  # Refused in the validate-first block for that block's reason: a node that
+  # cannot compile a daemon must fail with its images and its live daemon
+  # intact, rather than half-way through, and a converted mac that was never
+  # given a toolchain is exactly the state the air was left in.
+  NATIVE_DAEMON=""
+  if [ "$(uname -s)" = Darwin ]; then
+    NATIVE_DAEMON=1
+    CARGO="${WORKER_CARGO:-cargo}"
+    if ! command -v "$CARGO" > /dev/null 2>&1; then
+      echo "worker-refresh: this is a Darwin node and '$CARGO' is not on this daemon's PATH ('${PATH}') — the daemon binary in chuggernaut/worker:$TAG is a LINUX binary (design #440 D6 holds on Linux only, corrected 2026-08-07), so a mac COMPILES its own and this one cannot; REFUSING build (live images and live daemon untouched). Re-apply the node's spec with deploy/prod/build-worker.sh from the operator's laptop: it resolves the node's cargo and writes WORKER_CARGO into the environment file." >&2
+      exit 2
+    fi
+    # The toolchain is a DIRECTORY, not one binary: cargo resolves `rustc`
+    # through PATH, so an absolute WORKER_CARGO passes `command -v` while the
+    # compile still fails. Both questions are asked here, in the validate-first
+    # block written to catch them, rather than half-way through the build.
+    CARGO_DIR="$(dirname "$(command -v "$CARGO")")"
+    if ! "$CARGO" --version > /dev/null 2>&1; then
+      echo "worker-refresh: this is a Darwin node and '$CARGO' does not run ('$CARGO --version' failed) — a rustup shim with no default toolchain execs and compiles nothing; REFUSING build (live images and live daemon untouched). Set the node's default toolchain, or re-apply its spec with deploy/prod/build-worker.sh, which asks this same question over ssh before it converts." >&2
+      exit 2
+    fi
+    if ! PATH="$CARGO_DIR:$PATH" command -v rustc > /dev/null 2>&1; then
+      echo "worker-refresh: this is a Darwin node with '$CARGO' but no 'rustc' beside it or on this daemon's PATH ('${PATH}') — cargo resolves its compiler THROUGH PATH, so the build would fail after the images are replaced; REFUSING build (live images and live daemon untouched). Put rustc where cargo is and re-apply the node's spec with deploy/prod/build-worker.sh, which prepends that directory to the launchd agent's PATH." >&2
+      exit 2
+    fi
+    BUILD_DIR="${WORKER_BUILD_DIR:-$HOME/chuggernaut-worker/build}"
+  fi
+
   # Build every image under a TEMP tag first; only once all three build to
   # completion do we retag-swap them onto the live $TAG (below). A build that
   # dies part-way therefore leaves each live tag exactly as it was — a node that
@@ -369,6 +411,36 @@ build)
   if [ "$GOT_LABEL" != "$SHA" ]; then
     echo "worker-refresh: built worker image label '$GOT_LABEL' != requested $SHA — refusing retag-swap (live images untouched)" >&2
     exit 1
+  fi
+
+  # On Darwin, the fourth artifact: the Mach-O daemon this node will actually
+  # run, compiled from the same context the worker image was built from. Placed
+  # BEFORE the retag-swap so a node whose compile fails keeps the whole previous
+  # generation, images included — the swap phase has nothing to install and
+  # never runs. `--locked` so the dependency graph is the tree's, and
+  # CHUG_GIT_SHA because the daemon reads it with `option_env!` and the fleet's
+  # version column is that value. The source tree is replaced and `target/` is
+  # kept: it is the only thing that makes this minutes instead of a cold
+  # workspace compile. The exec check is the point of the exercise — a binary
+  # that will not run here must never reach the install.
+  if [ -n "$NATIVE_DAEMON" ]; then
+    refresh_phase "build-daemon"
+    git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/native.tar"
+    [ -s "$TMP/native.tar" ] || { echo "worker-refresh: empty context for the native daemon build — aborting (live images untouched)" >&2; exit 1; }
+    rm -rf "$BUILD_DIR/src"
+    mkdir -p "$BUILD_DIR/src"
+    tar -xf "$TMP/native.tar" -C "$BUILD_DIR/src"
+    (
+      cd "$BUILD_DIR/src"
+      PATH="$CARGO_DIR:$PATH" CHUG_GIT_SHA="$SHA" CARGO_TARGET_DIR="$BUILD_DIR/target" \
+        "$CARGO" build --release --locked --bin chuggernaut --bin chuggernaut-channel
+    )
+    if ! "$BUILD_DIR/target/release/chuggernaut" --version > /dev/null 2>&1; then
+      echo "worker-refresh: the daemon binary just compiled at $BUILD_DIR/target/release/chuggernaut does not run on this node — refusing to stage a binary the supervisor would loop on; aborting (live images and live daemon untouched)" >&2
+      exit 1
+    fi
+    printf '%s\n' "$SHA" > "$BUILD_DIR/native.sha"
+    echo "worker-refresh: compiled the native daemon for $SHA with $CARGO into $BUILD_DIR/target/release (design #440 D6, corrected 2026-08-07: the worker image is Linux and this node is not)"
   fi
 
   # All three built to completion — retag-swap onto the live tag. `docker tag`
@@ -520,13 +592,21 @@ swap)
     exit 1
   done
 
-  # ── extract, then install (design #440 D6) ───────────────────────────────────
-  # The binary comes OUT OF THE IMAGE the build phase just made, never from a
-  # compile on the node: that keeps its build environment byte-identical to the
-  # containerized daemon's, needs no Rust toolchain as a node machine fact, and
-  # leaves deploy/prod/Dockerfile.worker the single definition of how the binary
-  # is produced. This is the same `docker create` + `docker cp` pair
-  # build-worker.sh runs over ssh — one extraction, two callers.
+  # ── extract (or stage), then install (design #440 D6) ────────────────────────
+  # ON A LINUX NODE the binary comes OUT OF THE IMAGE the build phase just made,
+  # never from a compile on the node: that keeps its build environment
+  # byte-identical to the containerized daemon's, needs no Rust toolchain as a
+  # node machine fact, and leaves deploy/prod/Dockerfile.worker the single
+  # definition of how the binary is produced. This is the same `docker create` +
+  # `docker cp` pair build-worker.sh runs over ssh — one extraction, two callers.
+  #
+  # ON DARWIN THE IMAGE IS THE WRONG PLATFORM (#440 D6, corrected 2026-08-07):
+  # it is a Linux container, so what `docker cp` lifts out of it is an ELF file
+  # launchd loops on. That node's build phase compiled a Mach-O daemon instead
+  # and left it beside the tree it built from; this installs THAT. The staged
+  # SHA is checked against the image's own label rather than trusted: a staging
+  # directory from an earlier refresh is indistinguishable from this one's by
+  # existence alone, and installing it would silently take the node BACKWARDS.
   refresh_phase "swap-extract"
   SWAP_STAGE="$(mktemp -d)"
   SWAP_CID=""
@@ -535,18 +615,43 @@ swap)
     rm -rf "$SWAP_STAGE"
   }
   trap 'RC=$?; swap_cleanup; exit "$RC"' EXIT
-  SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
-  docker cp "$SWAP_CID:/usr/local/bin/chuggernaut" "$SWAP_STAGE/chuggernaut"
-  docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
-  docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/worker-refresh.sh" "$SWAP_STAGE/worker-refresh.sh"
-  docker rm "$SWAP_CID" > /dev/null
-  SWAP_CID=""
+  if [ "$SUPERVISOR" = launchd ]; then
+    BUILD_DIR="${WORKER_BUILD_DIR:-$HOME/chuggernaut-worker/build}"
+    SWAP_IMAGE_SHA="$(docker inspect --format '{{index .Config.Labels "chug.git.sha"}}' "chuggernaut/worker:$TAG" 2>/dev/null | tr -d '[:space:]' || true)"
+    SWAP_STAGED_SHA="$(tr -d '[:space:]' < "$BUILD_DIR/native.sha" 2>/dev/null || true)"
+    if [ -z "$SWAP_STAGED_SHA" ] || [ "$SWAP_STAGED_SHA" != "$SWAP_IMAGE_SHA" ]; then
+      echo "worker-refresh: the native daemon staged at $BUILD_DIR is '${SWAP_STAGED_SHA:-<absent>}' and chuggernaut/worker:$TAG is '${SWAP_IMAGE_SHA:-<unlabelled>}' — this mac compiles its own daemon in the build phase (design #440 D6 is Linux-only, corrected 2026-08-07) and installing a staging directory from another generation would take the node backwards; REFUSING swap (live daemon untouched, the node stays one generation behind). Re-apply the node's spec with deploy/prod/build-worker.sh from the operator's laptop." >&2
+      exit 1
+    fi
+    cp "$BUILD_DIR/target/release/chuggernaut" "$SWAP_STAGE/chuggernaut"
+    cp "$BUILD_DIR/target/release/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
+    cp "$BUILD_DIR/src/deploy/prod/worker-refresh.sh" "$SWAP_STAGE/worker-refresh.sh"
+    SWAP_FROM="the native build staged at $BUILD_DIR for $SWAP_STAGED_SHA"
+  else
+    SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
+    docker cp "$SWAP_CID:/usr/local/bin/chuggernaut" "$SWAP_STAGE/chuggernaut"
+    docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
+    docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/worker-refresh.sh" "$SWAP_STAGE/worker-refresh.sh"
+    docker rm "$SWAP_CID" > /dev/null
+    SWAP_CID=""
+    SWAP_FROM="chuggernaut/worker:$TAG"
+  fi
   for f in chuggernaut chuggernaut-channel worker-refresh.sh; do
     if [ ! -s "$SWAP_STAGE/$f" ]; then
-      echo "worker-refresh: '$f' came out of chuggernaut/worker:$TAG empty or not at all — refusing to install a daemon that cannot run; REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
+      echo "worker-refresh: '$f' came out of $SWAP_FROM empty or not at all — refusing to install a daemon that cannot run; REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
       exit 1
     fi
   done
+  # And it must RUN HERE, on both platforms, before anything is renamed into
+  # place. That is the generalisation of the finding rather than a mac special
+  # case: a binary from a foreign platform installs perfectly and then loops
+  # under the supervisor, which is a node out of the fleet with no scripted way
+  # back (design #440 D1).
+  chmod +x "$SWAP_STAGE/chuggernaut"
+  if ! "$SWAP_STAGE/chuggernaut" --version > /dev/null 2>&1; then
+    echo "worker-refresh: the daemon binary from $SWAP_FROM does not run on this node (chuggernaut --version failed: a foreign architecture, a missing dynamic loader, or a broken build) — installing it would leave the supervisor restarting a binary that cannot exec; REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
+    exit 1
+  fi
 
   # Installed by RENAME, and that is load-bearing twice over: writing over
   # $DAEMON_BIN in place is ETXTBSY while the daemon is executing it, and
@@ -567,7 +672,7 @@ swap)
   swap_install "$SWAP_STAGE/chuggernaut" "$DAEMON_BIN"
   swap_install "$SWAP_STAGE/chuggernaut-channel" "$CHANNEL_BIN"
   swap_install "$SWAP_STAGE/worker-refresh.sh" "$REFRESH_SCRIPT"
-  echo "worker-refresh: installed $DAEMON_BIN, $CHANNEL_BIN and $REFRESH_SCRIPT from chuggernaut/worker:$TAG"
+  echo "worker-refresh: installed $DAEMON_BIN, $CHANNEL_BIN and $REFRESH_SCRIPT from $SWAP_FROM"
 
   # The staging dir is dead the moment the three renames land, and it must go
   # HERE rather than in the trap: the restart below kills this shell's cgroup,

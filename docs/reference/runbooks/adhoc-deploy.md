@@ -97,8 +97,13 @@ a warm rebuild.
 
 `deploy/prod/build-worker.sh` builds all three node images (`worker`, `agent`,
 `agent-rust`) natively on the node — context streams over SSH via `git archive`,
-so the node needs nothing but Docker and your authorized key — then **extracts
-the daemon binary from the new `worker` image**, installs it with an environment
+so the node needs nothing but Docker and your authorized key — then, **on a
+Linux node**, extracts the daemon binary from the new `worker` image. A
+**Darwin** node compiles its own with the node's declared `WORKER_CARGO`
+instead, because the worker image is a Linux container and what `docker cp`
+lifts out of it is an ELF file launchd loops on (#440's
+[2026-08-07 correction](../../design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)).
+Either way it installs the binary with an environment
 file and a systemd unit (Linux) or launchd agent (macOS), and asks the
 supervisor to restart it (design
 [#440](../../design/440-native-worker-daemon.md) D2/D6). A node still running
@@ -109,8 +114,16 @@ re-attaches (`docs/spec.md` §3.1).
 
 **Converting a node is what puts it BACK on the self-refresh path.** Since #440
 slice 6 the swap installs the daemon binary out of the image the build phase
-just made and asks the supervisor to restart, so a converted node updates
-itself again. The refusal moved to the other side: a node **nobody has
+just made — on a **mac**, out of the Mach-O daemon that node compiled in its own
+build phase — and asks the supervisor to restart, so a converted node updates
+itself again. A converted mac whose run spec carries no reachable `WORKER_CARGO`
+(or whose cargo cannot find `rustc` on the launchd agent's `PATH`) **refuses its
+own build by name** and stays on the SHA it has; re-apply its spec with
+`build-worker.sh`, which resolves the toolchain and writes both halves. A mac
+converted before 2026-08-07 must be re-converted **before the next prod deploy**
+— it holds a pre-correction `worker-refresh.sh` whose swap still installs the
+image's Linux binary over its working daemon. The refusal moved to the other
+side: a node **nobody has
 converted** — one still running the `chug-worker` container — refuses its own
 swap (`this daemon is running INSIDE a container … REFUSING swap`) and its
 deploy leg fails rather than silently skipping, so redeploy that node over ssh
@@ -130,7 +143,8 @@ WORKER_NATS_URL=nats://100.x.y.z:4222 \
 - `WORKER_NATS_URL` — **required**; the **tailnet** NATS URL of the dispatcher
   host (the tailnet-IP form of `NATS_URL_CONTAINER`), not `localhost`.
 - The rest of the run spec — `WORKER_SLOTS`, `WORKER_CACHE_DIR`,
-  `WORKER_REFRESH_GIT_URL`, `WORKER_GIT_KEY` — comes from `chuggernaut.env`, so
+  `WORKER_REFRESH_GIT_URL`, `WORKER_GIT_KEY`, and on a mac
+  `WORKER_DOCKER_ENDPOINT` / `WORKER_CARGO` / `WORKER_BUILD_DIR` — comes from `chuggernaut.env`, so
   **source it** (`set -a; . deploy/prod/chuggernaut.env; set +a`) instead of
   retyping values: each may be declared per node as `<VAR>_<node>`, and the
   script writes what it resolves into the node's environment file (see §1c for

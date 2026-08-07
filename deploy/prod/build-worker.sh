@@ -10,6 +10,12 @@
 # on Linux, a launchd agent in the login user's GUI domain on macOS — over an
 # environment file that carries the whole run spec.
 #
+# EXTRACTED ON LINUX, COMPILED ON THE NODE ON macOS (#440's 2026-08-07
+# correction). The image is a Linux container, so on a Darwin node its binary is
+# an ELF file launchd reports as `cannot execute binary file` — measured on
+# gumbo-air-0, 2026-08-06. D6's "no host Rust toolchain" promise is Linux-only,
+# and a Darwin node declares a cargo instead.
+#
 # No-ops cleanly when WORKER_SSH is unset (single-node deploys).
 # Called from update.sh after the env is loaded; runnable by hand:
 #   WORKER_SSH=worksalot@gumbo-nuc-0 deploy/prod/build-worker.sh
@@ -107,9 +113,38 @@ trap 'rm -f "$CTX" "$SPEC"' EXIT INT TERM
 # seconds rather than after a ten-minute image build — and $HOME comes back with
 # it because the keys directory and the macOS agent both hang off a value that
 # cannot be expanded from here.
-NODE_PROBE="$(ssh "$WORKER_SSH" 'printf "%s\n%s\n" "$(uname -s)" "$HOME"' < /dev/null)"
+#
+# The node's TOOLCHAIN rides in the same round trip because on Darwin the daemon
+# binary is COMPILED HERE (below), and a node that cannot compile one must
+# refuse in seconds rather than after three image builds. Three answers, not
+# one, because `command -v cargo` is not the question the compile asks:
+#
+#   * where `cargo` is — `command -v` of WORKER_CARGO or of plain `cargo`, over
+#     ssh, which is the shell this deploy actually gets rather than the
+#     interactive one an operator sees;
+#   * whether `rustc` resolves with cargo's OWN DIRECTORY on PATH — cargo looks
+#     its compiler up through PATH (RUSTC, then `build.rustc`, then a plain
+#     lookup), and an absolute WORKER_CARGO is declared precisely BECAUSE the
+#     bare name is not on that PATH. Without this the deploy passes the guard
+#     and dies mid-compile, after three image builds;
+#   * whether that cargo RUNS at all — a rustup shim with no default toolchain
+#     is on PATH, execs, and fails every build.
+#
+# All three empty on a Linux node, where nothing reads them.
+NODE_PROBE="$(ssh "$WORKER_SSH" "printf '%s\n%s\n' \"\$(uname -s)\" \"\$HOME\"
+_c=\$(command -v '${WORKER_CARGO:-cargo}' 2> /dev/null || true)
+_r=
+_v=
+if [ -n \"\$_c\" ]; then
+  _r=\$(PATH=\"\$(dirname \"\$_c\"):\$PATH\"; command -v rustc 2> /dev/null || true)
+  \"\$_c\" --version > /dev/null 2>&1 && _v=ok
+fi
+printf '%s\n%s\n%s\n' \"\$_c\" \"\$_r\" \"\$_v\"" < /dev/null)"
 NODE_OS="$(printf '%s\n' "$NODE_PROBE" | sed -n 1p)"
 NODE_HOME="$(printf '%s\n' "$NODE_PROBE" | sed -n 2p)"
+NODE_CARGO="$(printf '%s\n' "$NODE_PROBE" | sed -n 3p)"
+NODE_RUSTC="$(printf '%s\n' "$NODE_PROBE" | sed -n 4p)"
+NODE_CARGO_RUNS="$(printf '%s\n' "$NODE_PROBE" | sed -n 5p)"
 case "$NODE_OS" in
   Linux | Darwin) ;;
   *)
@@ -150,8 +185,114 @@ else
   # The home path is therefore the default here, unchanged — the status quo #440
   # §4 names, and the gap #322 §7 already lists under what it gives up.
   KEYS_DIR="${WORKER_KEYS_DIR:-$NODE_HOME/chuggernaut-worker/keys}"
+  # Where the node compiles its own daemon (#440's 2026-08-07 correction). It is
+  # KEPT between deploys on purpose: `target/` is what makes the second build
+  # minutes instead of a cold workspace compile, and the node's self-refresh
+  # builds into the same directory — which is why the path rides in the run spec
+  # below rather than being re-derived at each end.
+  BUILD_DIR="${WORKER_BUILD_DIR:-$NODE_HOME/chuggernaut-worker/build}"
 fi
 ENV_DIR="${ENV_FILE%/*}"
+
+# ── the Darwin node's Rust toolchain (design #440 D6, corrected 2026-08-07) ───
+# D6 extracts the daemon binary from the worker image because that keeps its
+# build environment byte-identical and needs no host Rust toolchain. THAT HOLDS
+# ON LINUX AND CANNOT HOLD ON macOS: the image is a Linux container and the host
+# is Darwin, so what `docker cp` lifts out of it is an `ELF 64-bit LSB pie
+# executable, ARM aarch64` that launchd loops on with `cannot execute binary
+# file` (gumbo-air-0, 2026-08-06). Of the three ways to get a Mach-O daemon —
+# compile on the node, cross-compile on the builder, ship a prebuilt artifact —
+# only the first needs nothing this platform does not have: cross-compiling to
+# Darwin needs the macOS SDK and a Darwin linker (i.e. a mac) on the builder,
+# and a prebuilt artifact needs somewhere to put it, which is design #313 gap 11
+# and does not exist. So a Darwin node DECLARES a toolchain, and the honest cost
+# is stated rather than hidden: that node's binary is built by the NODE's cargo,
+# not by the pinned `rust:` image, so its build environment is the node's.
+#
+# Refused here, before anything is built, with the live daemon untouched — the
+# same place every other "this node cannot serve the spec" refusal lives.
+#
+# CARGO_DIR is the whole toolchain, not one binary. Everything that compiles —
+# the remote build below, and the DAEMON'S OWN self-refresh, whose PATH is the
+# launchd agent's — runs with it prepended, because a nix-darwin profile
+# directory or a rustup home is on none of the PATHs either end would otherwise
+# have.
+if [ "$NODE_OS" = Darwin ]; then
+  if [ -z "$NODE_CARGO" ]; then
+    echo "build-worker: $WORKER_SSH is a Darwin node and 'command -v ${WORKER_CARGO:-cargo}' found nothing over ssh — the daemon binary in the worker image is a LINUX binary (design #440 D6 is Linux-only, corrected 2026-08-07: on the air it installed as ELF aarch64 and launchd looped 'cannot execute binary file'), so a mac COMPILES its own and this one has no cargo this deploy can reach; REFUSING (live daemon untouched). Install a Rust toolchain on the node, and if it is not on the ssh PATH (a nix-darwin or rustup one usually is not) declare WORKER_CARGO_$NODE=<absolute path to cargo> in deploy/prod/chuggernaut.env ON THE MINI — 'ssh $WORKER_SSH command -v cargo' is the exact question this asked." >&2
+    exit 1
+  fi
+  if [ -z "$NODE_CARGO_RUNS" ]; then
+    echo "build-worker: $WORKER_SSH has '$NODE_CARGO' but '$NODE_CARGO --version' failed over ssh — a rustup shim with no default toolchain is on PATH and execs while compiling nothing, so the deploy would die mid-build with the images already replaced; REFUSING (live daemon untouched). Run 'ssh $WORKER_SSH $NODE_CARGO --version' to see what it says, and set the node's default toolchain ('rustup default stable')." >&2
+    exit 1
+  fi
+  if [ -z "$NODE_RUSTC" ]; then
+    echo "build-worker: $WORKER_SSH has '$NODE_CARGO' but no 'rustc' beside it or on the ssh PATH — cargo resolves its compiler THROUGH PATH, so declaring an absolute WORKER_CARGO makes 'command -v' pass while the compile still fails; REFUSING (live daemon untouched). Put rustc where cargo is (a rustup or nix-darwin toolchain installs both in one directory) — 'ssh $WORKER_SSH PATH=$(dirname "$NODE_CARGO"):\$PATH command -v rustc' is the exact question this asked." >&2
+    exit 1
+  fi
+  CARGO_DIR="$(dirname "$NODE_CARGO")"
+fi
+
+# ── the docker engine the daemon dials (#440's 2026-08-07 correction) ────────
+# `WORKER_DOCKER_ENDPOINT` has existed in crates/worker/src/config.rs all along
+# and NOTHING has ever rendered it, because its default — /var/run/docker.sock —
+# was correct by construction while the daemon was a container with that socket
+# bind-mounted in. Natively on macOS it is not: colima listens at
+# ~/.colima/default/docker.sock, and the converted air answered every launch
+# with `backend unavailable: Socket not found: /var/run/docker.sock`
+# (2026-08-06). Same shape as WORKER_MODES: forwarded, per-node overridable,
+# UNSET STAYS UNSET so a node that declares nothing produces the run spec it
+# produced before this existed.
+#
+# On Darwin it is DERIVED when undeclared, from the node's own `docker context`
+# — the same answer the `docker build` calls below get, so the daemon dials the
+# engine that just built its images rather than one an operator had to notice
+# and write down. THE DERIVED VALUE IS A SNAPSHOT: it is written into the
+# environment file and read at daemon start, so a node whose docker context
+# changes underneath it keeps dialing the old socket and fails every launch
+# until it is re-converted (or the file is edited and the agent kickstarted).
+# That is the same durability every other line in this file has, and it is why
+# the derivation announces the value it wrote.
+#
+# The shape is refused for WORKER_KVM's reason: DockerBackend::new rejects
+# anything that is not unix:// or tcp:// / http:// (crates/container/src/docker.rs)
+# and that is a start-time error the supervisor would loop. The socket is
+# checked for its own reason — a wrong path is not a daemon that refuses to
+# boot, it is a node that comes up healthy, announces its slots, and fails every
+# launch. Both are asked HERE, before the first image build, because neither
+# needs anything built and the alternative is a full conversion spent to learn
+# that the node cannot serve the spec.
+DOCKER_ENDPOINT="${WORKER_DOCKER_ENDPOINT:-}"
+DOCKER_ENDPOINT="${DOCKER_ENDPOINT#"${DOCKER_ENDPOINT%%[![:space:]]*}"}"
+DOCKER_ENDPOINT="${DOCKER_ENDPOINT%"${DOCKER_ENDPOINT##*[![:space:]]}"}"
+DOCKER_ENDPOINT_DEFAULT="unix:///var/run/docker.sock"
+DOCKER_ENDPOINT_DERIVED=""
+if [ -z "$DOCKER_ENDPOINT" ] && [ "$NODE_OS" = Darwin ]; then
+  DOCKER_ENDPOINT="$(ssh "$WORKER_SSH" "docker context inspect --format '{{.Endpoints.docker.Host}}' 2> /dev/null || true" < /dev/null | tr -d '[:space:]')"
+  if [ -n "$DOCKER_ENDPOINT" ]; then
+    DOCKER_ENDPOINT_DERIVED=1
+    echo "build-worker: WORKER_DOCKER_ENDPOINT derived from $WORKER_SSH's own docker context: $DOCKER_ENDPOINT"
+  fi
+fi
+if [ -n "$DOCKER_ENDPOINT" ]; then
+  case "$DOCKER_ENDPOINT" in
+    unix://* | tcp://* | http://*) ;;
+    *)
+      echo "build-worker: WORKER_DOCKER_ENDPOINT='$DOCKER_ENDPOINT' is neither unix:// nor tcp:// / http:// — the daemon refuses it when it opens the backend (crates/container/src/docker.rs) and the supervisor would loop that refusal; REFUSING (live daemon untouched)" >&2
+      exit 1
+      ;;
+  esac
+fi
+DOCKER_SOCKET="${DOCKER_ENDPOINT:-$DOCKER_ENDPOINT_DEFAULT}"
+case "$DOCKER_SOCKET" in
+  unix://*)
+    DOCKER_SOCKET="${DOCKER_SOCKET#unix://}"
+    if ! ssh "$WORKER_SSH" "[ -S '$DOCKER_SOCKET' ]" < /dev/null; then
+      echo "build-worker: the daemon on $NODE would dial '$DOCKER_SOCKET' and that is not a socket on $WORKER_SSH — the node would come up, announce its slots and fail EVERY launch with 'backend unavailable: Socket not found: $DOCKER_SOCKET' (gumbo-air-0, 2026-08-06); REFUSING (live daemon untouched). Read the node's real endpoint off it with 'ssh $WORKER_SSH docker context inspect --format \"{{.Endpoints.docker.Host}}\"' (on a mac colima answers ~/.colima/default/docker.sock) and declare WORKER_DOCKER_ENDPOINT_$NODE=unix://<path> in deploy/prod/chuggernaut.env ON THE MINI." >&2
+      exit 1
+    fi
+    ;;
+esac
 
 # ── the credential directory, checked before anything is built (design #440 D5) ─
 # A daemon that cannot read its own credential does not come up degraded, it
@@ -268,6 +409,41 @@ git archive --format=tar HEAD > "$CTX"
 ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent-rust:$TAG \
     -f deploy/prod/Dockerfile.agent-rust -" < "$CTX"
 
+# ── the Mach-O daemon a Darwin node cannot get out of a Linux image ──────────
+# The same context the worker image was built from, unpacked on the node and
+# compiled by the node's own cargo. `--locked` so the dependency graph is the
+# tree's Cargo.lock and not whatever resolves today — the closest this gets to
+# the image's byte-identical promise, and a stale lock refuses here rather than
+# shipping a different graph. CHUG_GIT_SHA is passed because the daemon reads it
+# with `option_env!` (crates/worker/src/daemon.rs) and the fleet's version
+# column is that value; the image passes the same one as a --build-arg.
+#
+# The source tree is replaced and the target directory is not: a cold workspace
+# compile on a mac is tens of minutes, and this is the only thing that makes a
+# re-conversion cheap. It is the same directory the node's own self-refresh
+# builds in, which is why WORKER_BUILD_DIR rides in the run spec — and why this
+# leaves `native.sha` behind exactly as that refresh does. Two writers share the
+# staging directory and both must leave it self-describing: the refresh's swap
+# refuses when that marker disagrees with the image's `chug.git.sha`, which is
+# the only thing standing between it and installing a binary from another
+# generation.
+#
+# CARGO_DIR goes on PATH because cargo resolves `rustc` through it and this is
+# the ssh shell's PATH, not the operator's — the same reason WORKER_CARGO had to
+# be declared absolute in the first place.
+if [ "$NODE_OS" = Darwin ]; then
+  git archive --format=tar HEAD > "$CTX"
+  [ -s "$CTX" ] || { echo "build-worker: empty build context for the native daemon build — aborting" >&2; exit 1; }
+  echo "build-worker: compiling the daemon natively on $WORKER_SSH ($NODE_CARGO, into $BUILD_DIR) — the worker image is Linux and this node is not (design #440 D6, corrected 2026-08-07)"
+  ssh "$WORKER_SSH" "set -e
+rm -rf '$BUILD_DIR/src'
+mkdir -p '$BUILD_DIR/src'
+tar -xf - -C '$BUILD_DIR/src'
+cd '$BUILD_DIR/src'
+PATH='$CARGO_DIR':\"\$PATH\" CHUG_GIT_SHA='$SHA' CARGO_TARGET_DIR='$BUILD_DIR/target' '$NODE_CARGO' build --release --locked --bin chuggernaut --bin chuggernaut-channel
+printf '%s\n' '$SHA' > '$BUILD_DIR/native.sha'" < "$CTX"
+fi
+
 # (Re)start the worker daemon on the new binary. Safe mid-job: job containers
 # are siblings on the node's docker socket and survive, and the dispatcher's
 # poll-based wait re-attaches (spec §3.1). NODE/NATS URL expand HERE (from
@@ -382,6 +558,28 @@ fi
 # on a node whose CPU count overstates what it can serve.
 if [ -n "${WORKER_SLOTS:-}" ]; then
   spec_line WORKER_SLOTS "$WORKER_SLOTS"
+fi
+# ── the docker engine the daemon dials: only the LINE is composed here ──────
+# The value was resolved and both its refusals answered far above, beside the
+# toolchain one (nothing this script builds is needed to answer either). Only
+# the composition is here, so the run spec's ordering is unchanged, and unset
+# still stays unset.
+#
+# A DERIVED value equal to the daemon's own default is dropped rather than
+# written: deriving must not make a node that declared nothing carry a line it
+# never chose. An explicitly declared one always rides, so an operator who wants
+# the default said out loud gets it and the drift guard sees it.
+if [ -n "$DOCKER_ENDPOINT" ] &&
+  ! { [ -n "$DOCKER_ENDPOINT_DERIVED" ] && [ "$DOCKER_ENDPOINT" = "$DOCKER_ENDPOINT_DEFAULT" ]; }; then
+  spec_line WORKER_DOCKER_ENDPOINT "$DOCKER_ENDPOINT"
+fi
+# The Darwin node's own build coordinates, in the run spec because the node's
+# SELF-refresh needs exactly what this run needed: which cargo, and where the
+# tree and its target directory live. A Linux node gets neither line and its
+# swap keeps extracting from the image (#440 D6, which holds there).
+if [ "$NODE_OS" = Darwin ]; then
+  spec_line WORKER_CARGO "$NODE_CARGO"
+  spec_line WORKER_BUILD_DIR "$BUILD_DIR"
 fi
 # The runtimes the node OFFERS (`WORKER_MODES`, design #309 P0 / #322 W1, daemon
 # side shipped by #434). A node property exactly like WORKER_CACHE_DIR: the node
@@ -655,12 +853,25 @@ elif [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
   exit 1
 fi
 # ── what gets installed, and who supervises it (design #440 D2, D6) ──────────
-# The daemon binary is EXTRACTED from the image just built rather than compiled
-# on the node: that keeps its build environment byte-identical to today's, needs
-# no Rust toolchain as a node machine fact, and leaves the pinned Dockerfile the
-# single definition of how the binary is produced (#440 D6). The channel binary
-# and the refresh script ride out of the same image, into the paths
-# crates/worker/src/config.rs already defaults to.
+# On LINUX the daemon binary is EXTRACTED from the image just built rather than
+# compiled on the node: that keeps its build environment byte-identical to
+# today's, needs no Rust toolchain as a node machine fact, and leaves the pinned
+# Dockerfile the single definition of how the binary is produced (#440 D6). The
+# channel binary and the refresh script ride out of the same image, into the
+# paths crates/worker/src/config.rs already defaults to.
+#
+# On DARWIN all three come out of the tree compiled above, for the reason stated
+# where that build is: an image built for Linux holds a binary a mac cannot exec
+# (#440's 2026-08-07 correction). The refresh script is the source file rather
+# than the image's copy of it — the same bytes, since the image gets it by COPY.
+#
+# EITHER WAY THE STAGED BINARY MUST RUN ON THIS NODE, and that is asked before a
+# single byte is installed. It is the generalisation of the finding, not a mac
+# special case: a binary whose provenance is a foreign platform installs
+# perfectly and then loops under the supervisor, and `--version` is the cheapest
+# question that distinguishes the two. It is a real question on Linux too — the
+# image is bookworm and a NixOS node has no /lib64 dynamic loader — which is a
+# prediction this check turns into a named refusal rather than a crash loop.
 #
 # Every write is "unprivileged first, `sudo -n` as the fallback" — the shape the
 # cache-dir provisioning above already uses. The binaries go to /usr/local on
@@ -672,16 +883,27 @@ fi
 # guard below must be able to read it back as the login user on every subsequent
 # deploy. A mode that made it root-only would turn #390's guard into a guard that
 # silently passes, which is the failure it exists to prevent.
+if [ "$NODE_OS" = Linux ]; then
+  REMOTE_STAGE="CID=\$(docker create chuggernaut/worker:$TAG)
+docker cp \"\$CID:/usr/local/bin/chuggernaut\" \"\$STAGE/chuggernaut\"
+docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel\"
+docker cp \"\$CID:/usr/local/lib/chuggernaut/worker-refresh.sh\" \"\$STAGE/worker-refresh.sh\"
+docker rm \"\$CID\" >/dev/null"
+else
+  REMOTE_STAGE="install -m 0755 '$BUILD_DIR/target/release/chuggernaut' \"\$STAGE/chuggernaut\"
+install -m 0755 '$BUILD_DIR/target/release/chuggernaut-channel' \"\$STAGE/chuggernaut-channel\"
+install -m 0755 '$BUILD_DIR/src/deploy/prod/worker-refresh.sh' \"\$STAGE/worker-refresh.sh\""
+fi
 REMOTE_INSTALL="set -e
 chug_dir() { mkdir -p \"\$1\" 2>/dev/null || sudo -n mkdir -p \"\$1\"; }
 chug_put() { install -m \"\$1\" \"\$2\" \"\$3\" 2>/dev/null || sudo -n install -m \"\$1\" \"\$2\" \"\$3\"; }
 STAGE=\$(mktemp -d)
 trap 'rm -rf \"\$STAGE\"' EXIT INT TERM
-CID=\$(docker create chuggernaut/worker:$TAG)
-docker cp \"\$CID:/usr/local/bin/chuggernaut\" \"\$STAGE/chuggernaut\"
-docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel\"
-docker cp \"\$CID:/usr/local/lib/chuggernaut/worker-refresh.sh\" \"\$STAGE/worker-refresh.sh\"
-docker rm \"\$CID\" >/dev/null
+$REMOTE_STAGE
+if ! \"\$STAGE/chuggernaut\" --version > /dev/null 2>&1; then
+  echo 'build-worker: the staged daemon binary does not run on this node (chuggernaut --version failed: a foreign architecture, a missing dynamic loader, or a broken build) — installing it would leave the supervisor restarting a binary that cannot exec, which is the crash loop the air took on 2026-08-06; REFUSING (live daemon untouched, nothing installed)' >&2
+  exit 1
+fi
 chug_dir '$BIN_DIR'
 chug_dir '$LIB_DIR'
 chug_dir '$ENV_DIR'
@@ -746,11 +968,23 @@ else
   # systemd unit reads. One declaration, one thing for the drift guard to read,
   # and the reason every value in it is quoted.
   #
+  # PATH carries the node's TOOLCHAIN DIRECTORY ahead of the usual places,
+  # because this agent's PATH is the one the daemon's own self-refresh compiles
+  # under (#440's 2026-08-07 correction) and a nix-darwin profile directory or a
+  # rustup home is on none of the defaults. Without it a converted mac refuses
+  # every refresh — or worse, passes `command -v` on an absolute WORKER_CARGO
+  # and then fails to find `rustc` mid-build.
+  #
   # The log is truncated between `bootout` and `bootstrap` because launchd opens
   # StandardOutPath append-only: without it the health probe's tail spans every
   # generation the node has ever run, and a previous one's "worker up" would
   # pass a daemon that never came up. Safe there and only there — the old agent
   # is gone and the new one has not been asked to start.
+  AGENT_PATH="${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
+  case ":$AGENT_PATH:" in
+    *":$CARGO_DIR:"*) ;;
+    *) AGENT_PATH="$CARGO_DIR:$AGENT_PATH" ;;
+  esac
   PLIST_TEXT="<?xml version=\"1.0\" encoding=\"UTF-8\"?>
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">
 <plist version=\"1.0\">
@@ -768,7 +1002,7 @@ else
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key><string>$NODE_HOME</string>
-    <key>PATH</key><string>${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}</string>
+    <key>PATH</key><string>$AGENT_PATH</string>
   </dict>
   <key>StandardOutPath</key><string>$WORKER_LOG_PATH</string>
   <key>StandardErrorPath</key><string>$WORKER_LOG_PATH</string>
@@ -907,9 +1141,15 @@ $_key="*) _passed=1 ;;
       fi
       continue
     fi
+    # The keys this script RESOLVES rather than reads straight out of the
+    # environment. Without them a re-deploy reports a change on every run —
+    # "live 'x' -> declared ''" — for a value that is not changing at all.
     case "$_key" in
       WORKER_NODE) _declared="$NODE" ;;
       WORKER_GIT_KEY) _declared="$GIT_KEY" ;;
+      WORKER_DOCKER_ENDPOINT) _declared="$DOCKER_ENDPOINT" ;;
+      WORKER_CARGO) _declared="$NODE_CARGO" ;;
+      WORKER_BUILD_DIR) _declared="${BUILD_DIR:-}" ;;
       *) eval "_declared=\${$_key:-}" ;;
     esac
     [ "$_declared" != "$_live" ] || continue
@@ -925,7 +1165,7 @@ $_key="*) _passed=1 ;;
 }
 build_worker_run_spec_drift || exit 1
 
-echo "build-worker: run spec for $NODE: WORKER_SLOTS=${WORKER_SLOTS:-<unset: daemon default 4>} WORKER_CACHE_DIR=${WORKER_CACHE_DIR:-<unset: caching OFF>} WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-<unset: cannot self-refresh>} WORKER_GIT_KEY=$GIT_KEY"
+echo "build-worker: run spec for $NODE: WORKER_SLOTS=${WORKER_SLOTS:-<unset: daemon default 4>} WORKER_CACHE_DIR=${WORKER_CACHE_DIR:-<unset: caching OFF>} WORKER_REFRESH_GIT_URL=${WORKER_REFRESH_GIT_URL:-<unset: cannot self-refresh>} WORKER_GIT_KEY=$GIT_KEY WORKER_DOCKER_ENDPOINT=${DOCKER_ENDPOINT:-<unset: daemon default $DOCKER_ENDPOINT_DEFAULT>}"
 echo "build-worker: supervising $NODE natively on $NODE_OS — $UNIT_PATH over $ENV_FILE (design #440 D2)"
 ssh "$WORKER_SSH" "$REMOTE" < /dev/null
 
@@ -980,13 +1220,22 @@ echo "build-worker: verified chug-worker is running and NATS-subscribed (worker 
 
 # What this node's own self-refresh will do, said HERE — at the moment it is
 # converted — because the conversion is what switches it. Since design #440
-# slice 6 the swap installs the binary out of the image the build phase made and
-# asks the supervisor to restart; the node updates itself again, and the record
-# of a replacement that will not start is the supervisor's log rather than a
-# retained sibling container. The converse is the note this line used to carry:
-# a node NOBODY has converted refuses its own swap, so it is deployed with this
-# script until it is.
-echo "build-worker: NOTE: $NODE is supervised NATIVELY now, so its self-refresh installs the daemon binary out of the worker image and restarts $UNIT_PATH (design #440 D6) — read what follows a swap in the supervisor's own log, not in a swapper container. A node this script has NOT converted refuses its swap and is deployed over ssh with this script." >&2
+# slice 6 the swap installs a binary and asks the supervisor to restart; the
+# node updates itself again, and the record of a replacement that will not start
+# is the supervisor's log rather than a retained sibling container. The converse
+# is the note this line used to carry: a node NOBODY has converted refuses its
+# own swap, so it is deployed with this script until it is.
+#
+# WHERE that binary comes from is the claim #440 D6 got wrong for one platform,
+# so it is said per-platform: this is the only place the operator is told, and
+# telling a mac's operator it extracts from the image is the exact wrong model
+# of what their node does on the next deploy.
+if [ "$NODE_OS" = Darwin ]; then
+  REFRESH_WHENCE="compiles its own daemon binary with $NODE_CARGO in $BUILD_DIR and installs that (the worker image is Linux; design #440 D6 is Linux-only, corrected 2026-08-07)"
+else
+  REFRESH_WHENCE="installs the daemon binary out of the worker image (design #440 D6)"
+fi
+echo "build-worker: NOTE: $NODE is supervised NATIVELY now, so its self-refresh $REFRESH_WHENCE and restarts $UNIT_PATH — read what follows a swap in the supervisor's own log, not in a swapper container. A node this script has NOT converted refuses its swap and is deployed over ssh with this script." >&2
 
 # Bound the node's docker disk (the 2026-07-23 air incident: 27G of BuildKit
 # cache + dangling image generations filled the colima partition and an image

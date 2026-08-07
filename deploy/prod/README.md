@@ -573,7 +573,12 @@ the Mini's NATS and executes container ops against its local Docker socket —
 `com.chuggernaut.worker` launchd agent in the login user's GUI domain on
 macOS — over an environment file that carries the whole run spec (design
 [#440](../../docs/design/440-native-worker-daemon.md) D2). `build-worker.sh`
-installs all three, extracting the binary from the worker image it just built.
+installs all three, extracting the binary from the worker image it just built —
+**on Linux**. That image is a Linux container, so on a **mac** it extracts a
+binary launchd loops on with `cannot execute binary file`, and a Darwin node
+instead **compiles** its own daemon on the node from a declared `WORKER_CARGO`
+(#440's [2026-08-07 correction](../../docs/design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476),
+measured on the air; "Converting a mac" below).
 **A node's own configuration may own the supervision half instead**, which is
 what slice 7 added: a NixOS node declares the unit with
 `chug.node.daemon.enable` ([`nix/chug-node/`](../../nix/chug-node/), off by
@@ -592,8 +597,13 @@ Job containers stay siblings on the node's docker socket, exactly as they were
 when the daemon was itself a container. **Converting a node is what puts it back
 on the self-refresh path:** since
 [#440](../../docs/design/440-native-worker-daemon.md) slice 6 the swap installs
-the daemon binary out of the image the build phase just made and asks the
-supervisor to restart, so a converted node updates itself again. A node nobody
+the daemon binary out of the image the build phase just made — on a **mac**, out
+of the Mach-O daemon that node compiled in its own build phase — and asks the
+supervisor to restart, so a converted node updates itself again. A converted mac
+whose run spec carries no reachable `WORKER_CARGO` (or whose cargo cannot find
+`rustc` on the agent's `PATH`) **refuses its own build by name** and stays on the
+SHA it has; re-apply its spec with `build-worker.sh`, which resolves the
+toolchain and writes both halves. A node nobody
 has converted refuses its own swap (`this daemon is running INSIDE a container …
 REFUSING swap`) and is deployed over ssh with `build-worker.sh` until it is —
 a loud stop, never a second daemon on one node name. Launches are
@@ -666,6 +676,78 @@ daemon is a `launchd` agent running as the login user in their GUI domain
 is no user a root-owned directory would exclude. The keys stay at
 `~/chuggernaut-worker/keys` at `0600` per file — the status quo — and cross-task
 secret isolation on that platform remains given up (#322 §7).
+
+**Converting a mac: two things it needs that a Linux node does not, and it is
+one-way.**
+
+Measured on `gumbo-air-0`, 2026-08-06 (#440's
+[2026-08-07 correction](../../docs/design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)):
+
+1. **A Rust toolchain on the node.** The worker image is a Linux container, so
+   the binary `docker cp` lifts out of it is an ELF file — the air installed one
+   and launchd looped `cannot execute binary file` until the health probe timed
+   out at 60s, with the container daemon already removed. A Darwin node compiles
+   its own daemon instead, so it needs `cargo`, and it needs one **this deploy's
+   ssh shell can see** — a nix-darwin or rustup cargo usually is not on it. The
+   script asks `command -v cargo` in the same round trip as `uname -s`, before
+   it builds anything, and refuses by name if the answer is empty:
+
+   ```sh
+   ssh <node> 'command -v cargo'      # the exact question the deploy asks
+   # if that is empty but cargo works interactively, declare the absolute path:
+   #   WORKER_CARGO_air=/etc/profiles/per-user/<you>/bin/cargo
+   # and check rustc is BESIDE it — cargo finds its compiler through PATH:
+   ssh <node> 'PATH=$(dirname <that path>):$PATH; command -v rustc'
+   ```
+
+   **`rustc` must live where `cargo` does**, and that is the second question the
+   script asks: cargo resolves its compiler through `PATH`, and an absolute
+   `WORKER_CARGO` is declared precisely because the bare name is not on the
+   `PATH` in question — so a node with cargo and no visible rustc would pass a
+   naive check and then fail mid-compile. A rustup or nix-darwin toolchain puts
+   both in one directory and needs nothing extra. The script also refuses a
+   cargo that does not exec at all (a rustup shim with no default toolchain).
+
+   `WORKER_CARGO` rides in the node's run spec and its **directory** leads the
+   launchd agent's `PATH`, because the node's own self-refresh compiles too and
+   the daemon's `PATH` is the agent's — the declaration alone would leave every
+   refresh failing to find `rustc`. `WORKER_BUILD_DIR_<node>` moves the tree and
+   target directory it builds in (default `~/chuggernaut-worker/build`, kept
+   between deploys so a rebuild is incremental — budget a few GB).
+
+2. **The docker socket the mac actually has.** The daemon defaults to
+   `/var/run/docker.sock`, which was correct when it *was* a container with that
+   bind mount; colima listens at `~/.colima/default/docker.sock`, and the air
+   answered every launch with `backend unavailable: Socket not found` until the
+   endpoint was written down. `build-worker.sh` now **derives** it from the
+   node's own `docker context inspect` and writes `WORKER_DOCKER_ENDPOINT` into
+   the run spec, so an ordinary mac needs no declaration —
+   `WORKER_DOCKER_ENDPOINT_<node>=unix:///path/to/docker.sock` overrides it, and
+   an absent socket refuses the deploy rather than producing a node that
+   announces slots and fails every launch. **The derived value is a snapshot**:
+   change the node's docker context afterwards and the daemon keeps dialling the
+   old socket until the node is re-converted.
+
+**And a conversion is one-way.** #440 slice 6 deleted the `docker run` path, so
+there is no scripted way back to a container daemon: a conversion that fails
+leaves the node out of the fleet until it is fixed forward. Everything that can
+refuse now refuses *before* the live daemon is touched — the toolchain, the
+credential directory, the endpoint, the write permissions, and the staged binary
+itself, which must run on the node (`chuggernaut --version`) before it is
+installed — but the window between the supervisor bootout and the health probe
+is real. **Drain the node first**
+([`worker-capacity.md`](../../docs/reference/runbooks/worker-capacity.md) §4.1:
+slots 0, wait for `occupied: 0`) and convert one you can afford to lose for the
+length of a build.
+
+**A mac converted before 2026-08-07 must be re-converted before the next prod
+deploy.** The daemon runs the `worker-refresh.sh` **installed on the node**, and
+a copy written by a pre-correction conversion still extracts the Linux binary
+out of the worker image — so the next deploy that asks it to refresh renames an
+ELF file over its working Mach-O daemon and kickstarts launchd, which is exactly
+the 2026-08-06 failure. This applies to `gumbo-air-0`, whose daemon was built by
+hand. Re-convert it (the command above), or drain it and `launchctl bootout
+gui/$(id -u)/com.chuggernaut.worker` until you can.
 
 **Migrating a node that already has keys under `$HOME` — you do this by hand.**
 
@@ -807,9 +889,10 @@ Notes:
   on all interfaces by compose).
 - **CD** — `update.sh` calls `build-worker.sh`: worker+agent images build
   natively on the node (context streamed over ssh from the deployed SHA), the
-  daemon binary is extracted from the worker image, installed, and the
-  supervisor is asked to restart. Safe mid-job: job containers survive and
-  the dispatcher's poll-based wait re-attaches.
+  daemon binary is extracted from the worker image (**Linux**) or compiled on
+  the node with its declared `WORKER_CARGO` (**macOS**, see "Converting a mac"
+  above), installed, and the supervisor is asked to restart. Safe mid-job: job
+  containers survive and the dispatcher's poll-based wait re-attaches.
 - **Verify placement** — during a job: `ssh worksalot@gumbo-nuc-0 docker ps`
   shows the work/eval containers; the Mini's colima shows none
   (`docker ps --filter label=chuggernaut.managed`).
