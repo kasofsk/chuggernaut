@@ -52,6 +52,10 @@ stands and its clearing rule changed — a `Doc-reread: <path>` trailer in a
 commit message on the branch now clears exactly the doc it names, which is an
 assertion a content edit is not. See the
 [#471 correction](#correction--2026-08-06-job-471-d7s-blocking-half-asked-for-the-wrong-thing).
+That assertion turned out to be rebase-fragile — a commit message is the one
+thing a rework rewrites — so job #482 gave it a second, tree-carried home in
+`.chug/doc-reread`, read from the branch's diff. See the
+[#482 correction](#correction--2026-08-07-job-482-d7s-assertion-did-not-survive-a-rebase).
 S4 landed on 2026-08-05 (job #449), last of the original programme:
 `docs/concepts.md` holds **12** rows and check 4 is live. Its measured yield is
 **one** duplicate in the whole tree *under the two shapes D4 gates* — the value
@@ -2777,3 +2781,73 @@ false positive.
 
 **Unchanged:** the advisory whole-tree ledger, the orphan half, the doc-names-doc
 exemption job #454 added, and every check in `check-doc-facts.sh`.
+
+---
+
+## Correction — 2026-08-07, job #482: D7's assertion did not survive a rebase
+
+The [#471 correction](#correction--2026-08-06-job-471-d7s-blocking-half-asked-for-the-wrong-thing)
+put the clearing assertion in a commit message, on the argument that a false
+assertion should be a **visible false statement**. It is — and it is also the
+one artifact a rework destroys. `--gate` reads the trailers of `<base>..HEAD`,
+so the assertion lives only in the text of commits on a job branch, and a job
+branch is rebased on every merge conflict. A resolution that squashes or
+re-authors a commit takes the trailer with it, and the doc blocks again for a
+reason that has nothing to do with the doc.
+
+**Measured.** Job #477 cycle 4, three days after #471 landed. Jobs #478, #479
+and #480 merged under it, all touching `deploy/prod/build-worker.sh`, so #477
+rebased; its `review-docs-updated` evaluator failed the cycle and said in terms
+that the finding was *"introduced by the rebase and not by the substance of the
+change"*. A full work-and-evaluation cycle was spent re-adding a line asserting
+something that was already true. Job #479 hit the near miss and worked around it
+by hand — its commit message records that it put the trailer *"on this commit as
+well as the branch's first"*, which is the defensive habit that hollows a gate
+out, forming on day three.
+
+**The fix adds a second place to assert, not a second way to skip.** A
+`Doc-reread: <path>` line that the branch's diff **adds** to `.chug/doc-reread`
+clears the same one doc as the trailer, with the same per-doc scope and the same
+absence of a blanket form. The trailer stays and stays preferred; the file is
+what a reworked branch reaches for.
+
+**Why the tree is the only durable carrier here.** Every work and evaluation
+container is a fresh `git clone --single-branch --filter=blob:none` of the job
+branch (`crates/container/src/lib.rs`), so where the gate actually runs there is
+no reflog of the rebase and the orphaned commits were never fetched. A rebase
+rewrites messages and replays content, so of the two things a clone has, only
+content crosses it.
+
+**Added-by-this-diff is the whole of the file's meaning.** The lines are read
+from `git diff <base>...HEAD`, never from the file's contents, so a line that
+merged is inert against every later branch and cannot become a standing waiver.
+That also makes the file a scratch slate rather than a registry: nothing prunes
+it, nothing can go stale in it, and a branch that needs it may overwrite it
+whole. D7's *"nothing an author maintains"* survives, because there is nothing
+to maintain — only something to assert.
+
+**What was rejected.**
+
+- **Detecting the loss and explaining it** — the gate noticing that a trailer
+  for this doc exists in the reflog or in a now-unreachable commit, and saying
+  the rebase ate it. It is dark exactly where it would fire: the fresh clone
+  above has neither. What survives of the idea is the remedy text, which now
+  says a commit message does not survive a rebase and what to write instead.
+- **Accepting a trailer from any commit that was ever on the branch** — the
+  same objection, from the other side. A force-pushed branch's old commits live
+  on the forge and are never fetched, so this is not a widening that can be
+  implemented, let alone one whose scope could be argued.
+- **Reading the trailer from the whole of `HEAD`'s history** rather than since
+  the base. That would make one merged `Doc-reread:` line clear that doc
+  forever, which is the "easier to bypass generally" the brief rules out.
+- **A trailer on the merge commit the dispatcher writes.** The gate runs before
+  the merge, so there is nothing to read.
+
+**Also changed:** an unresolvable `--since` is now a `LINTER ERROR` (exit 2)
+rather than a silent block. Reading every assertion as absent because the base
+ref did not resolve is the same failure this correction exists to fix, and the
+ledger's rule is that a check which cannot run says so.
+
+**Unchanged:** the advisory whole-tree ledger, the orphan half, the
+doc-names-doc exemption of job #454, the per-doc scope of the assertion, and the
+rule that with no `--since` at all the block stands.

@@ -71,6 +71,27 @@
 # whose messages to read, so the block stands — a caller that omits the argument
 # cannot silently stop enforcing.
 #
+# A COMMIT MESSAGE DOES NOT SURVIVE A REBASE, WHICH IS WHY THERE IS A SECOND
+# ROUTE (job #482). A job branch is rebased on every merge-conflict rework, and
+# a resolution that squashes or re-authors a commit takes the trailer with it —
+# so a doc that was genuinely re-read blocks again, for a reason that has
+# nothing to do with the doc. Recovering the lost line is not possible where it
+# matters: every work and evaluation container is a fresh `git clone
+# --single-branch --filter=blob:none` (`crates/container/src/lib.rs`), so there
+# is no reflog of the rebase and the orphaned commits were never fetched. What a
+# fresh clone does have is the TREE. So a `Doc-reread: <path>` line that THIS
+# BRANCH'S DIFF ADDS to `.chug/doc-reread` clears the same one doc, and content
+# is what a rebase, a squash and a re-author all carry through.
+#
+# ADDED-BY-THIS-DIFF IS THE WHOLE OF THE FILE'S MEANING, and it is what keeps
+# the second route from becoming a waiver. The line is read from
+# `git diff <since>...HEAD`, never from the file's contents, so a line already
+# on the base branch asserts nothing about this change and a merged assertion
+# goes inert the moment it lands. Nothing prunes the file and nothing has to:
+# every line in it is dead except the ones a diff is currently adding, which is
+# also why the file is a scratch slate rather than a registry and may be
+# rewritten wholesale by whichever branch next needs it.
+#
 # A `*.md` MOVER NEVER BLOCKS, and that is what makes the block above always
 # clearable (job #454). Only a `*.md` file makes claims, so a doc is the only
 # thing that can be BOTH sides of the relation — and two docs that name each
@@ -130,7 +151,9 @@
 #   .chug/tasks/doc-staleness.sh <file>...        # explicit, repo-relative, every suspect path
 #   .chug/tasks/doc-staleness.sh --gate [--since <ref>] <file>...
 #                                                 # whole-tree counts; details only the listed docs,
-#                                                 # cleared by a Doc-reread: trailer since <ref>
+#                                                 # cleared by a Doc-reread: assertion since <ref> —
+#                                                 # a commit-message trailer, or a line the diff adds
+#                                                 # to .chug/doc-reread
 #
 # The orphan half runs in the two whole-tree modes only. Reach is a property of
 # the whole tree, so a scoped run cannot answer it, and `--staged` is the hook's
@@ -145,6 +168,7 @@ LC_ALL=C
 export LC_ALL
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+reread_file=".chug/doc-reread"
 
 ledger_unrunnable() { # <line>...
 	for _l in "$@"; do echo "!!! doc-staleness: $_l"; done
@@ -195,14 +219,10 @@ case "${1:-}" in
 	gate=1
 	detail=1
 	_want_since=""
+	_since=""
 	for f in "$@"; do
 		if [ -n "$_want_since" ]; then
-			# The branch's own commit messages are the only place an author can
-			# ASSERT a re-read. Derived from git like everything else here.
-			git log "$f..HEAD" --format=%B 2>/dev/null |
-				sed -n 's/^[[:space:]]*Doc-reread:[[:space:]]*//p' |
-				sed 's/[[:space:]]*$//' |
-				grep -v '^$' >>"$reread_list" || :
+			_since="$f"
 			_want_since=""
 			continue
 		fi
@@ -215,6 +235,27 @@ case "${1:-}" in
 		echo "doc-staleness: --since needs a ref" >&2
 		exit 2
 	}
+	if [ -n "$_since" ]; then
+		# A base that does not resolve reads every assertion as absent, which is
+		# the failure this route exists to stop — so it is a LINTER ERROR and not
+		# a quiet block.
+		git rev-parse --verify --quiet "$_since^{commit}" >/dev/null 2>&1 || ledger_unrunnable \
+			"--since $_since does not name a commit — with no base there is no" \
+			"    branch whose assertions to read, so every re-read would read as absent."
+		# Route 1: the branch's commit messages, where an author asserting a
+		# re-read is making a visible statement (job #471).
+		git log "$_since..HEAD" --format=%B 2>/dev/null |
+			sed -n 's/^[[:space:]]*Doc-reread:[[:space:]]*//p' |
+			sed 's/[[:space:]]*$//' |
+			grep -v '^$' >>"$reread_list" || :
+		# Route 2: the same line, ADDED BY THIS DIFF to `.chug/doc-reread`. Read
+		# from the diff and never from the file, so what the base already carried
+		# asserts nothing (job #482).
+		git diff "$_since...HEAD" -- "$reread_file" 2>/dev/null |
+			sed -n 's/^+[[:space:]]*Doc-reread:[[:space:]]*//p' |
+			sed 's/[[:space:]]*$//' |
+			grep -v '^$' >>"$reread_list" || :
+	fi
 	set --
 	;;
 --staged)
@@ -290,7 +331,7 @@ git log --no-renames --format='@@@%ct %cs' --name-only 2>/dev/null | awk '
 # --- Join --------------------------------------------------------------------
 # A doc with no commit of its own (added but never committed) is skipped: it is
 # newer than everything by construction, so there is nothing to suspect it of.
-awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v rrf="$reread_list" -v detail="$detail" -v gate="$gate" '
+awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v rrf="$reread_list" -v rrfile="$reread_file" -v detail="$detail" -v gate="$gate" '
 	# Docs are ranked by the GAP — how long the newest mover has sat unread —
 	# and never by the date of that mover. Ranking by date puts everything this
 	# repo touched today at the top, which on ~15 jobs a day is the churn and
@@ -366,7 +407,7 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v rrf="$reread_list" -v det
 				printf "doc-staleness:   rework commit can clear. Not blocking (design #415 D7, job #454).\n"
 			}
 			if (cleared > 0) {
-				printf "doc-staleness:   %d doc(s) carry a Doc-reread: trailer on this branch — the\n", cleared
+				printf "doc-staleness:   %d doc(s) carry a Doc-reread: assertion on this branch — the\n", cleared
 				printf "doc-staleness:   author asserts they read it against the change. Cleared.\n"
 			}
 			if (blocked == 0) exit 0
@@ -389,11 +430,18 @@ awk -F'\t' -v tsf="$ts_index" -v gatef="$gate_list" -v rrf="$reread_list" -v det
 			printf "!!! doc-staleness: %d doc(s) above are edited by this diff and still suspect.\n", blocked
 			printf "!!!     The branch changed a non-doc file the doc names AFTER it last touched\n"
 			printf "!!!     the doc, so nothing in this change has re-read one against the other.\n"
-			printf "!!!     Re-read it, then say so in a commit message on this branch:\n"
+			printf "!!!     Re-read it, then assert that you did — one line per doc, either as a\n"
+			printf "!!!     trailer in a commit message on this branch, or as a line THIS DIFF ADDS\n"
+			printf "!!!     to %s:\n", rrfile
 			printf "!!!         Doc-reread: <path>\n"
-			printf "!!!     one line per doc. A trailer is an ASSERTION that you looked; committing\n"
-			printf "!!!     the doc unchanged would satisfy a timestamp without satisfying that, which\n"
-			printf "!!!     is what this gate used to accept. (design #415 D7, job #471)\n"
+			printf "!!!     ONLY THE FILE SURVIVES A REBASE. A rework that squashes or re-authors\n"
+			printf "!!!     your commits takes the trailer with it and this block comes back, so if\n"
+			printf "!!!     you wrote one and it is gone, that is what happened — assert it in the\n"
+			printf "!!!     file instead. The file is read from the diff, never from its contents:\n"
+			printf "!!!     a line the base already carried asserts nothing. An assertion says you\n"
+			printf "!!!     LOOKED; committing the doc unchanged would satisfy a timestamp without\n"
+			printf "!!!     satisfying that, which is what this gate used to accept.\n"
+			printf "!!!     (design #415 D7, jobs #471 and #482)\n"
 			exit 1
 		}
 		exit 0

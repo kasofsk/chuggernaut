@@ -196,7 +196,7 @@ BASE="$(cd "$REPO" && git rev-parse HEAD)"
 Doc-reread: docs/suspect.md")
 run_sut --gate --since "$BASE" docs/suspect.md
 check "an asserted re-read clears the block" 0 "$RC" "$OUT" \
-	"carry a Doc-reread: trailer"
+	"carry a Doc-reread: assertion"
 check_silent "a cleared doc is not listed as blocking" "$RC" "$OUT" \
 	"edited by this diff and still suspect"
 
@@ -212,6 +212,63 @@ check "the trailer clears only the doc it names" 1 "$RC" "$OUT" \
 run_sut --gate docs/suspect.md
 check "no --since means no clearing" 1 "$RC" "$OUT" \
 	"edited by this diff and still suspect"
+
+# --- The trailer that a rebase eats, and the route that survives one (job #482) -
+# The defect this fixture reproduces: the assertion of 11b lives only in a commit
+# MESSAGE, and a job branch is rebased on every merge-conflict rework. `git reset
+# --soft <base>` + a fresh commit is that rework in miniature — the tree is
+# untouched and every message is gone, which is what a squash or a re-authored
+# conflict resolution does.
+
+rework_squash() { # collapse everything since $BASE into one re-authored commit
+	(cd "$REPO" && git reset -q --soft "$BASE" &&
+		git -c user.email=t@e -c user.name=t commit -q --allow-empty \
+			-m "rework (rebased, message re-authored)")
+}
+
+# 11e. The reproduction. The doc was re-read and said so; the rework destroyed
+#      the evidence, and the doc blocks again for a reason that has nothing to
+#      do with the doc.
+rework_squash
+run_sut --gate --since "$BASE" docs/suspect.md
+check "a rebase that re-authors the message loses the trailer" 1 "$RC" "$OUT" \
+	"edited by this diff and still suspect"
+check "the remedy says a commit message does not survive a rebase" 1 "$RC" "$OUT" \
+	"ONLY THE FILE SURVIVES A REBASE"
+
+# 11f. The fix: the same assertion as a line THIS DIFF ADDS to `.chug/doc-reread`
+#      is content, and content is what a rebase, a squash and a re-author all
+#      carry through. Asserted, then put through the identical rework.
+printf 'Doc-reread: docs/suspect.md\n' > "$REPO/.chug/doc-reread"
+git -C "$REPO" add .chug/doc-reread >/dev/null 2>&1
+(cd "$REPO" && git -c user.email=t@e -c user.name=t commit -q -m "assert the re-read in the tree
+
+Doc-reread: docs/suspect.md")
+rework_squash
+run_sut --gate --since "$BASE" docs/suspect.md
+check "a tree-carried assertion survives the rework" 0 "$RC" "$OUT" \
+	"carry a Doc-reread: assertion"
+check_silent "the cleared doc is not listed as blocking" "$RC" "$OUT" \
+	"edited by this diff and still suspect"
+
+# 11g. It is the DIFF that asserts, never the file's contents — measured against
+#      HEAD the branch adds nothing, so the identical tree clears nothing. That
+#      is what keeps a merged line from becoming a standing waiver.
+run_sut --gate --since HEAD docs/suspect.md
+check "a line the base already carried asserts nothing" 1 "$RC" "$OUT" \
+	"edited by this diff and still suspect"
+
+# 11h. The file route is per-doc like the trailer, never a blanket waiver.
+run_sut --gate --since "$BASE" docs/suspect.md docs/suspect2.md
+check "the added line clears only the doc it names" 1 "$RC" "$OUT" \
+	"edited by this diff and still suspect"
+
+# 11i. A --since that does not resolve reads every assertion as absent, which is
+#      exactly the loss this route exists to stop — so it is a LINTER ERROR and
+#      not a quiet block.
+run_sut --gate --since no-such-ref docs/suspect.md
+check "an unresolvable --since is a LINTER ERROR" 2 "$RC" "$OUT" \
+	"does not name a commit"
 
 # 12. A doc the diff edits that is NOT suspect passes.
 run_sut --gate docs/quiet.md

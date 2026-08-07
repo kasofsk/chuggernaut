@@ -1,0 +1,12 @@
+The rebase-durable half of the staleness gate's clearing rule — design #415 D7,
+job #482. `.chug/tasks/doc-staleness.sh --gate` blocks a doc this diff edits that
+is still suspect through a non-doc file it names, and clears it on an asserted
+re-read: a `Doc-reread: <path>` line, one per doc, either as a trailer in a
+commit message on your branch or as a line added to this file. Only the second
+survives a rebase — a rework that squashes or re-authors your commits takes a
+commit message with it.
+
+THIS IS A SCRATCH SLATE, NOT A REGISTRY. The gate reads the lines your diff ADDS
+against its base, never the file's contents, so every line below is inert the
+moment it merges and asserts nothing about any later branch. Nothing prunes it
+and nothing has to; rewrite it wholesale if you need it.

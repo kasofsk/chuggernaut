@@ -251,9 +251,14 @@ Two things about that table are decisions rather than accidents:
   for history nobody in the commit caused is a ledger people disable — so the
   one case it blocks is a diff that edits a doc and then changes a non-doc file
   that doc names, which the author clears by re-reading the doc and *saying so*:
-  a `Doc-reread: <path>` trailer in a commit message on the branch, one line per
-  doc. The assertion is the point — a timestamp records that a doc was edited,
-  not that anyone read it.
+  a `Doc-reread: <path>` assertion, one line per doc, either as a trailer in a
+  commit message on the branch or as a line the branch's diff adds to
+  `.chug/doc-reread`. The assertion is the point — a timestamp records that a
+  doc was edited, not that anyone read it. Only the second form survives a
+  rebase, and a job branch is rebased on every merge-conflict rework, so a
+  squashed or re-authored commit takes a trailer with it (job #482); the file is
+  read from the diff and never from its contents, so a line already on the base
+  branch asserts nothing.
 - **The ledger's second half asks reach rather than truth.** Per tracked
   `docs/**/*.md`, how many other tracked `*.md` name it — by a backticked path
   claim or a relative link, prompts included, `docs/README.md` excluded. Zero is

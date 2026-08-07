@@ -123,11 +123,19 @@ the absence of a workflow file.
   purpose: failing a build for history nobody in the commit caused is how a
   ledger gets disabled, and at the commit no edit could clear it anyway. Since
   #471 that block is cleared by an **assertion of attention** rather than an
-  ordering: a `Doc-reread: <path>` trailer in a commit message on the branch
-  clears exactly the doc it names, read out of `--gate --since <base>`, which
-  `.chug/tasks/ci.sh` passes. Re-touching the doc still satisfies the timestamp,
-  but the gate's printed remedy names the trailer, because committing a doc
-  unchanged satisfies the ordering without satisfying the purpose. Only
+  ordering: a `Doc-reread: <path>` line clears exactly the doc it names, read
+  out of `--gate --since <base>`, which `.chug/tasks/ci.sh` passes. Re-touching
+  the doc still satisfies the timestamp, but the gate's printed remedy names the
+  assertion, because committing a doc unchanged satisfies the ordering without
+  satisfying the purpose. It may be written in **two** places and the gate reads
+  both: as a trailer in a commit message on the branch, or — since #482 — as a
+  line the branch's diff **adds** to `.chug/doc-reread`. Only the second
+  survives a rebase, and every merge-conflict rework rebases a job branch, so a
+  squashed or re-authored commit silently destroyed a true assertion and the doc
+  re-blocked; a fresh `git clone --single-branch` is all any container has, so
+  the lost commit cannot be recovered. The file is read from the diff and never
+  from its contents, which is what keeps a merged line from becoming a standing
+  waiver. Only
   file claims are judged — a directory is newer than every doc the moment
   anything under it changes, so it is a constant, not a signal. **A `*.md` mover
   never blocks** (job #454): only a doc makes claims, so only a doc can sit on
