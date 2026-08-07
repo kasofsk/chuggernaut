@@ -217,6 +217,7 @@ async fn mock_worker(store: &store::NatsStore, node: &str) -> tokio::task::JoinH
                         capacity_generation: None,
                         refresh_outcome: None,
                         refresh_progress: None,
+                        capabilities: None,
                     },
                 };
                 req.respond(serde_json::to_vec(&reply).unwrap()).await;
@@ -253,6 +254,7 @@ async fn capacity_worker(
                         capacity_generation: Some(0),
                         refresh_outcome: None,
                         refresh_progress: None,
+                        capabilities: None,
                     },
                 };
                 req.respond(serde_json::to_vec(&reply).unwrap()).await;
@@ -290,6 +292,7 @@ async fn counting_worker(store: &store::NatsStore, node: &str) -> tokio::task::J
                         capacity_generation: None,
                         refresh_outcome: None,
                         refresh_progress: None,
+                        capabilities: None,
                     },
                 };
                 req.respond(serde_json::to_vec(&reply).unwrap()).await;
@@ -540,6 +543,179 @@ async fn never_reporting_worker_is_visible_as_seed_sourced() {
     assert_eq!(capacity.source(), types::worker::CapacitySource::Seed);
     assert_eq!(capacity.observed_at, None);
     mock.abort();
+}
+
+/// A stand-in worker that advertises what it can do on its `ping` reply (design
+/// #309 §4) — the authoritative transport, ingested inside `probe_worker`.
+async fn capable_worker(
+    store: &store::NatsStore,
+    node: &str,
+    capabilities: types::worker::NodeCapabilities,
+) -> tokio::task::JoinHandle<()> {
+    let mut sub = store
+        .subscribe_requests(&store::subjects::worker_all(node))
+        .await
+        .expect("subscribe capable worker");
+    store.client().flush().await.expect("flush sub");
+    tokio::spawn(async move {
+        while let Some(req) = sub.next().await {
+            if req.subject.ends_with(".ping") {
+                let reply = types::worker::WorkerReply::Ok {
+                    value: types::worker::PingOk {
+                        running: 0,
+                        version: env!("CARGO_PKG_VERSION").to_string(),
+                        artifacts: std::collections::HashMap::new(),
+                        slots: Some(1),
+                        slots_max: Some(1),
+                        capacity_epoch: Some(1_769_000_000_123),
+                        capacity_generation: Some(0),
+                        refresh_outcome: None,
+                        refresh_progress: None,
+                        capabilities: Some(capabilities.clone()),
+                    },
+                };
+                req.respond(serde_json::to_vec(&reply).unwrap()).await;
+            }
+        }
+    })
+}
+
+fn host_capable() -> types::worker::NodeCapabilities {
+    types::worker::NodeCapabilities {
+        modes: vec![
+            types::job_type::RuntimeMode::Container,
+            types::job_type::RuntimeMode::Host,
+        ],
+        platform: "macos/aarch64".into(),
+        resources_enforced: false,
+        leases: Vec::new(),
+    }
+}
+
+/// The slice-5 contract on the wire (design #309 §4): a node's advertisement
+/// reaches the dispatcher on the `ping` reply path, inside `probe_worker` and
+/// before the startup gate reads the node, while a node that advertises nothing
+/// reads as the absent defaults — container-only, limits enforced.
+#[tokio::test]
+async fn ping_advertised_capabilities_reach_the_fleet() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let capable = capable_worker(&store, "mac", host_capable()).await;
+    let silent = mock_worker(&store, "nuc").await;
+    let fleet = FleetBackend::new(
+        vec![
+            DockerNodeConfig {
+                name: "mac".into(),
+                endpoint: "worker".into(),
+                slots: 0,
+            },
+            DockerNodeConfig {
+                name: "nuc".into(),
+                endpoint: "worker".into(),
+                slots: 2,
+            },
+        ],
+        store,
+        PlacementPolicy::default(),
+    )
+    .unwrap();
+
+    fleet.startup_check().await.unwrap();
+
+    assert_eq!(
+        fleet.node_capabilities("mac"),
+        Some(host_capable()),
+        "the ping's advertisement is what the fleet reads"
+    );
+    assert_eq!(
+        fleet.node_capabilities("nuc"),
+        Some(types::worker::NodeCapabilities::absent()),
+        "a node that says nothing reads container-only with limits enforced"
+    );
+    assert_eq!(fleet.node_capabilities("absent-node"), None);
+    capable.abort();
+    silent.abort();
+}
+
+/// Ping is authoritative (design #309 §4): a node joins by announce and is
+/// classified by it, then the first pull corrects the classification and no
+/// later announce can undo it.
+#[tokio::test]
+async fn ping_capabilities_win_over_the_announce() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let capable = capable_worker(&store, "mac", host_capable()).await;
+    let fleet = FleetBackend::new(vec![], store, PlacementPolicy::default()).unwrap();
+
+    let announced = types::worker::NodeCapabilities {
+        platform: "linux/x86_64".into(),
+        ..types::worker::NodeCapabilities::absent()
+    };
+    let observation = types::CapacityObservation::from_announce(&types::worker::WorkerAnnounce {
+        node: "mac".into(),
+        slots: 1,
+        slots_max: Some(1),
+        capacity_epoch: Some(1_769_000_000_000),
+        capacity_generation: Some(0),
+        version: "0.1.0".into(),
+        capabilities: Some(announced.clone()),
+    });
+    assert!(fleet.register_worker("mac", observation, None, Some(announced.clone())));
+    assert_eq!(
+        fleet.node_capabilities("mac"),
+        Some(announced.clone()),
+        "the join's advertisement stands until something is pulled"
+    );
+
+    fleet.startup_check().await.unwrap();
+    assert_eq!(fleet.node_capabilities("mac"), Some(host_capable()));
+
+    assert!(!fleet.register_worker("mac", observation, None, Some(announced)));
+    assert_eq!(
+        fleet.node_capabilities("mac"),
+        Some(host_capable()),
+        "an announce may not undo what the pull transport reported"
+    );
+    capable.abort();
+}
+
+/// A docker-endpoint node is a direct socket the fleet never pings, so it would
+/// read as absent forever; its capabilities are synthesized from the node kind
+/// instead (design #309 §4). No daemon and no Docker are involved — the
+/// derivation is from the roster.
+#[tokio::test]
+async fn docker_endpoint_capabilities_are_synthesized() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let dir = unique_temp_dir("chug-fleet-caps");
+    let socket = dir.join("docker.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    let fleet = FleetBackend::new(
+        vec![DockerNodeConfig {
+            name: "local".into(),
+            endpoint: format!("unix://{}", socket.display()),
+            slots: 2,
+        }],
+        store,
+        PlacementPolicy::default(),
+    )
+    .unwrap();
+
+    let caps = fleet
+        .node_capabilities("local")
+        .expect("a docker-endpoint node is in the fleet");
+    assert_eq!(caps, types::worker::NodeCapabilities::docker_endpoint());
+    assert!(
+        caps.resources_enforced,
+        "a docker endpoint demonstrably enforces cpu/memory"
+    );
+    assert!(!caps.serves(types::job_type::RuntimeMode::Host));
 }
 
 /// Spawn a worker daemon (node `node`, local Docker) with an optional

@@ -77,5 +77,6 @@ pub use version::{
     WORKLOAD_IDENTITY_SCHEMA_EPOCH, config_requires_dispatcher, declared_min_dispatcher,
 };
 pub use worker::{
-    CapacityObservation, CapacitySource, CapacityTransport, ObservedCapacity, capacity_applies,
+    CapacityObservation, CapacitySource, CapacityTransport, NodeCapabilities, ObservedCapabilities,
+    ObservedCapacity, capacity_applies,
 };

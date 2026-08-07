@@ -119,6 +119,7 @@ fn announce_at(
         capacity_epoch: Some(epoch),
         capacity_generation: Some(generation),
         version: version.into(),
+        capabilities: None,
     }
 }
 
@@ -507,6 +508,49 @@ async fn zero_seed_boot_then_announce() {
     let air = node(&fleet, "air");
     assert_eq!(air.slots, Some(4));
     assert!(air.available);
+    assert_invariants_of(&sink);
+}
+
+/// The announce's capabilities reach the backend (design #309 §4), which is why
+/// a node the dispatcher has never pinged is not misclassified on join; a node
+/// announcing none reaches it as the container-only absent reading.
+#[tokio::test]
+async fn announced_capabilities_reach_the_backend() {
+    let Some(server) = test_utils::nats::NatsTestServer::shared().await else {
+        return;
+    };
+    let store = NatsStore::connect_namespaced(server.url(), &test_utils::unique_prefix())
+        .await
+        .unwrap();
+    store.ensure_topology().await.unwrap();
+
+    let backend = Arc::new(FakeBackend::new());
+    let (handle, _repo, sink) = spawn_core(server, &store, vec![], None, backend.clone()).await;
+
+    let host = types::NodeCapabilities {
+        modes: vec![
+            types::job_type::RuntimeMode::Container,
+            types::job_type::RuntimeMode::Host,
+        ],
+        platform: "macos/aarch64".into(),
+        resources_enforced: false,
+        leases: Vec::new(),
+    };
+    let mut with_caps = announce("mac", 1, "0.1.0+mac");
+    with_caps.capabilities = Some(host.clone());
+    handle.announce_worker(with_caps).await.unwrap();
+    handle
+        .announce_worker(announce("nuc", 4, "0.1.0+nuc"))
+        .await
+        .unwrap();
+    wait_until(|| backend.registered().len() >= 2).await;
+
+    assert_eq!(backend.advertised("mac"), Some(host));
+    assert_eq!(
+        backend.advertised("nuc"),
+        Some(types::NodeCapabilities::absent()),
+        "a daemon predating the field reads container-only"
+    );
     assert_invariants_of(&sink);
 }
 

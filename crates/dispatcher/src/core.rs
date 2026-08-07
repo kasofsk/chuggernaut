@@ -1286,9 +1286,12 @@ impl Core {
             return;
         }
         self.announced_workers.insert(node.clone(), Utc::now());
-        let joined = self
-            .backend
-            .register_worker(&node, capacity, Some(version.clone()));
+        let joined = self.backend.register_worker(
+            &node,
+            capacity,
+            Some(version.clone()),
+            announce.capabilities.clone(),
+        );
         if joined {
             tracing::info!(
                 node = %node,

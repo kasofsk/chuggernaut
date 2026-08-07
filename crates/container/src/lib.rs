@@ -283,6 +283,7 @@ pub trait ContainerBackend: Send + Sync {
         _name: &str,
         _capacity: types::CapacityObservation,
         _version: Option<String>,
+        _capabilities: Option<types::worker::NodeCapabilities>,
     ) -> bool {
         false
     }

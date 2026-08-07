@@ -237,6 +237,10 @@ struct WorkerState {
     /// replaces (design #440 D4). False ⇒ a container-only node, whose work
     /// survives the swap by construction and whose refresh path is untouched.
     host_mode: bool,
+    /// What this node advertises it can do (design #309 §4), derived once from
+    /// `WORKER_MODES` at start. Reported on both transports, so the pull and the
+    /// push halves cannot disagree.
+    capabilities: types::worker::NodeCapabilities,
     /// Node-local build+swap script for self-refresh (spec §3.1); `None` ⇒
     /// refresh requests are rejected as unconfigured.
     refresh_script: Option<PathBuf>,
@@ -459,6 +463,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         nix: nix.clone(),
         nix_rooted: std::sync::Mutex::new(HashMap::new()),
         host_mode: serves_host(&config.modes),
+        capabilities: node_capabilities(&config.modes),
         refresh_script: config.refresh_script.clone(),
         refresh_git_url: config.refresh_git_url.clone(),
         refresh_git_key: config.refresh_git_key.clone(),
@@ -493,6 +498,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         capacity,
         announce_now,
         state.version.clone(),
+        state.capabilities.clone(),
     );
     spawn_nix_reaper(state.clone());
 
@@ -536,6 +542,26 @@ fn serves_host(modes: &[WorkerMode]) -> bool {
 /// serves containers, which is what every node in the fleet does today.
 fn serves_container(modes: &[WorkerMode]) -> bool {
     modes.contains(&WorkerMode::Container) || !serves_host(modes)
+}
+
+/// This node's capability advertisement (design #309 §4), resolved from its
+/// `WORKER_MODES`. `resources_enforced` follows container capability: the Docker
+/// `HostConfig` is what enforces `resources.cpu`/`memory`, and a host-only node
+/// has none.
+fn node_capabilities(modes: &[WorkerMode]) -> types::worker::NodeCapabilities {
+    let mut served = Vec::new();
+    if serves_container(modes) {
+        served.push(types::job_type::RuntimeMode::Container);
+    }
+    if serves_host(modes) {
+        served.push(types::job_type::RuntimeMode::Host);
+    }
+    types::worker::NodeCapabilities {
+        modes: served,
+        platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
+        resources_enforced: serves_container(modes),
+        leases: Vec::new(),
+    }
 }
 
 /// The `/workspace` collision #309 §2(a) names is dodged by option (iii) — one
@@ -835,6 +861,7 @@ fn spawn_announce(
     capacity: Arc<Capacity>,
     announce_now: Arc<tokio::sync::Notify>,
     version: String,
+    capabilities: types::worker::NodeCapabilities,
 ) {
     tokio::spawn(async move {
         let subject = store::subjects::worker_announce();
@@ -848,6 +875,7 @@ fn spawn_announce(
                 capacity_epoch: Some(report.epoch_ms),
                 capacity_generation: Some(report.generation),
                 version: version.clone(),
+                capabilities: Some(capabilities.clone()),
             };
             match serde_json::to_vec(&announce) {
                 Ok(bytes) => {
@@ -1406,6 +1434,7 @@ async fn ping(state: &WorkerState) -> WorkerReply<PingOk> {
                     .unwrap()
                     .as_ref()
                     .map(RefreshProgressState::wire),
+                capabilities: Some(state.capabilities.clone()),
             })
         }
         .await,
@@ -1881,6 +1910,50 @@ mod tests {
 
         assert!(!serves_container(&[WorkerMode::Host]));
         assert!(serves_host(&[WorkerMode::Host]));
+    }
+
+    /// What this node advertises (design #309 §4) is what it constructs: the
+    /// `WORKER_MODES` default reads container-only with limits enforced, a
+    /// dual-mode node names both in canonical order, and a host-only node
+    /// reports it cannot enforce `resources.cpu`/`memory`.
+    #[test]
+    fn advertised_capabilities_follow_worker_modes() {
+        use types::job_type::RuntimeMode;
+
+        let default = node_capabilities(&crate::config::default_modes());
+        assert_eq!(default.modes, vec![RuntimeMode::Container]);
+        assert!(default.resources_enforced);
+        assert_eq!(
+            default,
+            node_capabilities(&[]),
+            "declaring nothing is the same node"
+        );
+        assert_eq!(
+            types::worker::NodeCapabilities {
+                platform: types::worker::PLATFORM_UNKNOWN.into(),
+                ..default.clone()
+            },
+            types::worker::NodeCapabilities::absent(),
+            "only the platform separates a container-only node from the absent reading"
+        );
+
+        let both = node_capabilities(&[WorkerMode::Host, WorkerMode::Container]);
+        assert_eq!(both.modes, vec![RuntimeMode::Container, RuntimeMode::Host]);
+        assert!(both.resources_enforced, "it still has a docker daemon");
+
+        let host_only = node_capabilities(&[WorkerMode::Host]);
+        assert_eq!(host_only.modes, vec![RuntimeMode::Host]);
+        assert!(
+            !host_only.resources_enforced,
+            "no HostConfig means no cpu/memory enforcement (design #309 §7)"
+        );
+        assert!(host_only.leases.is_empty(), "device leases are #309 P4");
+        assert!(
+            host_only.platform.contains('/')
+                && host_only.platform != types::worker::PLATFORM_UNKNOWN,
+            "a live node names its platform: {}",
+            host_only.platform
+        );
     }
 
     /// A node offering `host` — alone or beside `container` — whose capacity is
@@ -2561,6 +2634,11 @@ mod tests {
             nix: None,
             nix_rooted: std::sync::Mutex::new(HashMap::new()),
             host_mode,
+            capabilities: node_capabilities(if host_mode {
+                &[WorkerMode::Host]
+            } else {
+                &[WorkerMode::Container]
+            }),
             refresh_script: Some(script),
             refresh_git_url: Some("git@example.invalid:acme/chug.git".into()),
             refresh_git_key: git_key,

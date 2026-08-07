@@ -22,6 +22,14 @@
 //! `(capacity_epoch, capacity_generation)`, so the `DOCKER_NODES` slot field is
 //! a pre-observation fallback for worker nodes rather than a competing source —
 //! and `fleet_status` reports which of the two each node is running on.
+//!
+//! Its **capabilities** ride the same two transports and land through
+//! [`ingest_capabilities`] (design #309 §4), but under a different rule: there is
+//! no ordering key, the `ping` reply is authoritative, and an announce applies
+//! only while no ping has answered for the node. A docker-endpoint node can
+//! answer neither, so [`FleetBackend::node_capabilities`] synthesizes its
+//! capabilities from the node kind. Nothing places by them yet — the
+//! capability-aware `choose_placement` predicate is #309 P2 slice 6.
 
 use async_trait::async_trait;
 use container::docker::{DockerBackend, DockerNodeConfig};
@@ -66,6 +74,10 @@ enum NodeHandle {
         /// it is what tips this variant past `clippy::large_enum_variant`, and
         /// nodes are few and long-lived so the indirection costs nothing.
         capacity: Box<Mutex<types::ObservedCapacity>>,
+        /// What the node says it can do (design #309 §4). Boxed and locked for
+        /// the same reasons `capacity` is, but ordered by transport alone — a
+        /// capability is a boot-time fact with no ordering key.
+        capabilities: Box<Mutex<types::ObservedCapabilities>>,
         /// Cleared on ping failure, restored on success; placement skips
         /// out-of-service nodes but always re-probes them.
         in_service: AtomicBool,
@@ -176,6 +188,7 @@ fn worker_handle(store: NatsStore, name: &str, seed_slots: u32) -> NodeHandle {
         rpc: Box::new(WorkerRpc::new(store, name.to_string())),
         slots: AtomicU32::new(seed_slots),
         capacity: Box::new(Mutex::new(types::ObservedCapacity::default())),
+        capabilities: Box::new(Mutex::new(types::ObservedCapabilities::default())),
         in_service: AtomicBool::new(true),
         schedulable: AtomicBool::new(true),
         version_warned: AtomicBool::new(false),
@@ -213,6 +226,52 @@ fn ingest_capacity(
         "the slot cell placement reads must hold the number just applied"
     );
     moved
+}
+
+/// Ingest one capability advertisement for a worker node (design #309 §4):
+/// apply it under the ping-wins precedence and report whether the node now reads
+/// differently. The single place either transport writes the cell, so the
+/// precedence cannot be bypassed by adding a third caller.
+fn ingest_capabilities(
+    cell: &Mutex<types::ObservedCapabilities>,
+    advertised: &types::worker::NodeCapabilities,
+    transport: types::CapacityTransport,
+) -> bool {
+    cell.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .apply(advertised, transport)
+}
+
+/// Apply everything a `ping` reply reports about the node itself — its capacity
+/// (spec §3.1 slot source) and its capabilities (design #309 §4) — on the reply
+/// path, before the load is computed and before the startup gate reads the node.
+/// One place, so the two observations cannot drift apart in their ordering.
+fn ingest_ping(
+    name: &str,
+    ping: &types::worker::PingOk,
+    slot_cell: &AtomicU32,
+    capacity: &Mutex<types::ObservedCapacity>,
+    capabilities: &Mutex<types::ObservedCapabilities>,
+) {
+    if let Some(observation) = types::CapacityObservation::from_ping(ping)
+        && ingest_capacity(slot_cell, capacity, &observation)
+    {
+        tracing::info!(
+            node = %name,
+            slots = observation.slots,
+            "worker capacity updated from ping (spec §3.1 slot source)"
+        );
+    }
+    if let Some(advertised) = &ping.capabilities
+        && ingest_capabilities(capabilities, advertised, types::CapacityTransport::Ping)
+    {
+        tracing::info!(
+            node = %name,
+            modes = ?advertised.modes,
+            platform = %advertised.platform,
+            "worker capabilities updated from ping (design #309 §4)"
+        );
+    }
 }
 
 /// One fleet node's boot-time capacity: its slots as of its startup probe,
@@ -320,6 +379,23 @@ impl FleetBackend {
         self.nodes.read().unwrap().clone()
     }
 
+    /// What one node reads as being capable of (design #309 §4): its
+    /// advertisement, the absent reading while it has made none, or the
+    /// synthesized values for a docker-endpoint node, which has no wire path to
+    /// advertise on. `None` for a name the fleet does not hold.
+    pub fn node_capabilities(&self, node: &str) -> Option<types::worker::NodeCapabilities> {
+        self.snapshot()
+            .into_iter()
+            .find(|n| n.name == node)
+            .map(|n| match &n.handle {
+                NodeHandle::Docker { .. } => types::worker::NodeCapabilities::docker_endpoint(),
+                NodeHandle::Worker { capabilities, .. } => capabilities
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .effective(),
+            })
+    }
+
     /// §3.6 startup as a fleet-level property (spec §3.1): probe every node,
     /// mark each in/out-of-service and log, then apply the "no live capacity"
     /// hard-fail ONCE across every transport. Capacity is a fleet property, not
@@ -397,6 +473,7 @@ impl FleetBackend {
             rpc,
             slots,
             capacity,
+            capabilities,
             in_service,
             schedulable,
             version_warned,
@@ -424,15 +501,7 @@ impl FleetBackend {
                 if let Some(outcome) = &ping.refresh_outcome {
                     *last_refresh.lock().unwrap() = Some(outcome.clone());
                 }
-                if let Some(observation) = types::CapacityObservation::from_ping(&ping)
-                    && ingest_capacity(slots, capacity, &observation)
-                {
-                    tracing::info!(
-                        node = %node.name,
-                        slots = observation.slots,
-                        "worker capacity updated from ping (spec §3.1 slot source)"
-                    );
-                }
+                ingest_ping(&node.name, &ping, slots, capacity, capabilities);
                 let own = env!("CARGO_PKG_VERSION");
                 if !ping.version.starts_with(own) && !version_warned.swap(true, Ordering::Relaxed) {
                     tracing::warn!(
@@ -915,6 +984,7 @@ impl ContainerBackend for FleetBackend {
         name: &str,
         capacity: types::CapacityObservation,
         version: Option<String>,
+        advertised: Option<types::worker::NodeCapabilities>,
     ) -> bool {
         let mut nodes = self.nodes.write().unwrap();
         let shape: Vec<(&str, bool)> = nodes
@@ -938,6 +1008,7 @@ impl ContainerBackend for FleetBackend {
                 let NodeHandle::Worker {
                     slots: slot_cell,
                     capacity: observed,
+                    capabilities,
                     in_service,
                     schedulable,
                     last_version,
@@ -949,6 +1020,9 @@ impl ContainerBackend for FleetBackend {
                 let changed = ingest_capacity(slot_cell, observed, &capacity)
                     || !schedulable.swap(true, Ordering::Relaxed);
                 in_service.store(true, Ordering::Relaxed);
+                if let Some(a) = &advertised {
+                    ingest_capabilities(capabilities, a, types::CapacityTransport::Announce);
+                }
                 if let Some(v) = version {
                     *last_version.lock().unwrap() = Some(v);
                 }
@@ -959,11 +1033,15 @@ impl ContainerBackend for FleetBackend {
                 if let NodeHandle::Worker {
                     slots: slot_cell,
                     capacity: observed,
+                    capabilities,
                     last_version,
                     ..
                 } = &handle
                 {
                     ingest_capacity(slot_cell, observed, &capacity);
+                    if let Some(a) = &advertised {
+                        ingest_capabilities(capabilities, a, types::CapacityTransport::Announce);
+                    }
                     if let Some(v) = version {
                         *last_version.lock().unwrap() = Some(v);
                     }

@@ -9,6 +9,7 @@
 //! Everything must fit NATS's default 1MB max_payload — the store layer
 //! enforces a size guard before sending.
 
+use crate::job_type::RuntimeMode;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -293,6 +294,122 @@ pub struct RefreshCancelOk {
 /// by a comparison against this constant.
 pub const REFRESH_STAGE_CANCELLED: &str = "cancelled";
 
+/// What a node can do, as opposed to how much of it (design #309 §4): the
+/// execution modes it serves, the platform it runs on, whether it enforces a
+/// task's resource limits, and the exclusive resources it holds.
+///
+/// Carried on both [`PingOk`] and [`WorkerAnnounce`] as an `Option`, additively,
+/// so a daemon predating the field needs no coordination and reads as
+/// [`NodeCapabilities::absent`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeCapabilities {
+    /// Execution modes this daemon serves. Absent ⇒ container-only: a daemon
+    /// predating the field runs containers and nothing else, so the default
+    /// fails closed.
+    #[serde(default = "container_only")]
+    pub modes: Vec<RuntimeMode>,
+    /// `{os}/{arch}` as the node's own build reports it. Absent ⇒
+    /// [`PLATFORM_UNKNOWN`]; diagnostic only, and never a placement filter on
+    /// its own.
+    #[serde(default = "platform_unknown")]
+    pub platform: String,
+    /// Whether the node enforces a task's `resources.cpu`/`memory` (design #309
+    /// §7). Absent ⇒ `true`, because every backend that can serve a container
+    /// launch enforces them through the runtime.
+    #[serde(default = "resources_enforced_default")]
+    pub resources_enforced: bool,
+    /// Named exclusive resources this node holds (design #309 §5). Absent ⇒
+    /// none, so an undeclared lease is never acquired.
+    #[serde(default)]
+    pub leases: Vec<String>,
+}
+
+/// [`NodeCapabilities::platform`] for a node that named none (design #309 §4).
+pub const PLATFORM_UNKNOWN: &str = "unknown";
+
+fn container_only() -> Vec<RuntimeMode> {
+    vec![RuntimeMode::Container]
+}
+
+fn platform_unknown() -> String {
+    PLATFORM_UNKNOWN.to_string()
+}
+
+fn resources_enforced_default() -> bool {
+    true
+}
+
+impl Default for NodeCapabilities {
+    fn default() -> Self {
+        Self {
+            modes: container_only(),
+            platform: platform_unknown(),
+            resources_enforced: resources_enforced_default(),
+            leases: Vec::new(),
+        }
+    }
+}
+
+impl NodeCapabilities {
+    /// The absent reading (design #309 §4): what a node advertising nothing is
+    /// taken to mean, field by field. Every node reads as this through the whole
+    /// rollout window, so it is the container fleet's behavior unchanged.
+    pub fn absent() -> Self {
+        Self::default()
+    }
+
+    /// Capabilities for a docker-endpoint node, which has no wire path to
+    /// advertise on and would otherwise read as absent forever (design #309 §4).
+    /// Same values as [`Self::absent`], derived from the node kind rather than
+    /// from silence.
+    pub fn docker_endpoint() -> Self {
+        Self::absent()
+    }
+
+    /// Whether this node serves `mode`. The predicate design #309 §5a's
+    /// capability-aware placement is built on; nothing filters by it yet.
+    pub fn serves(&self, mode: RuntimeMode) -> bool {
+        self.modes.contains(&mode)
+    }
+}
+
+/// The dispatcher's per-node record of what a node says it can do (design #309
+/// §4). Deliberately carries no `(epoch, generation)` ordering key: capabilities
+/// are boot-time facts, so ping-wins is sufficient and self-healing.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ObservedCapabilities {
+    /// What the node last advertised; `None` until it advertises anything, which
+    /// [`Self::effective`] reads as [`NodeCapabilities::absent`].
+    pub advertised: Option<NodeCapabilities>,
+    /// Whether the value in force arrived on a `ping` reply — the authoritative
+    /// transport, which an announce may not overwrite.
+    pub from_ping: bool,
+}
+
+impl ObservedCapabilities {
+    /// Ingest one advertisement under the design #309 §4 precedence, returning
+    /// whether it changed what the node reads as. **Ping is authoritative**: an
+    /// announce applies only while no ping has ever answered for the node.
+    pub fn apply(&mut self, advertised: &NodeCapabilities, transport: CapacityTransport) -> bool {
+        let ping = transport == CapacityTransport::Ping;
+        if self.from_ping && !ping {
+            return false;
+        }
+        let changed = self.advertised.as_ref() != Some(advertised);
+        self.from_ping = ping;
+        self.advertised = Some(advertised.clone());
+        changed
+    }
+
+    /// What a reader takes the node to be capable of: its advertisement, or the
+    /// absent reading for a node that has never advertised one.
+    pub fn effective(&self) -> NodeCapabilities {
+        self.advertised
+            .clone()
+            .unwrap_or_else(NodeCapabilities::absent)
+    }
+}
+
 /// A worker daemon's announce/heartbeat (spec §3.1 dynamic registration).
 /// Published periodically by `chuggernaut worker` on [`crate::worker`]'s announce
 /// subject; the dispatcher merges it into the live fleet without a restart. It is
@@ -337,6 +454,11 @@ pub struct WorkerAnnounce {
     pub capacity_generation: Option<u64>,
     /// Worker build version (+ git SHA when baked), same string `ping` reports.
     pub version: String,
+    /// What the node can do (design #309 §4), so a node the dispatcher has never
+    /// pinged is not misclassified on join. `None` on a daemon predating the
+    /// field, which reads as [`NodeCapabilities::absent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<NodeCapabilities>,
 }
 
 /// Payload for `set_slots` (spec §3.1 operator capacity control): the operator's
@@ -581,6 +703,11 @@ pub struct PingOk {
     /// flight, and on a pre-field daemon (`#[serde(default)]`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh_progress: Option<RefreshProgress>,
+    /// What the node can do (design #309 §4), on the **authoritative** transport:
+    /// a ping is pulled at every placement attempt, so a denied announce costs
+    /// one extra probe rather than a misclassification.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<NodeCapabilities>,
 }
 
 /// Where the slot count the scheduler is using came from (design #293 §7/§8).
@@ -870,6 +997,7 @@ mod tests {
             capacity_generation: Some(3),
             version: "0.1.0+abc123".into(),
             artifacts: HashMap::from([("channel".into(), "deadbeef".into())]),
+            capabilities: None,
             refresh_outcome: Some(RefreshOutcome {
                 accepted_at: chrono::Utc::now(),
                 finished_at: Some(chrono::Utc::now()),
@@ -909,6 +1037,7 @@ mod tests {
             capacity_epoch: Some(1_769_000_000_123),
             capacity_generation: Some(1),
             version: "0.1.0+abc123".into(),
+            capabilities: None,
         };
         let json = serde_json::to_string(&announce).unwrap();
         assert_eq!(
@@ -947,6 +1076,7 @@ mod tests {
             capacity_epoch: Some(epoch),
             capacity_generation: Some(generation),
             version: "0.1.0".into(),
+            capabilities: None,
         })
     }
 
@@ -961,6 +1091,7 @@ mod tests {
             artifacts: HashMap::new(),
             refresh_outcome: None,
             refresh_progress: None,
+            capabilities: None,
         })
         .expect("a ping reporting slots is an observation")
     }
@@ -1011,6 +1142,7 @@ mod tests {
             capacity_epoch: None,
             capacity_generation: None,
             version: "0.1.0".into(),
+            capabilities: None,
         });
         assert_eq!(unordered.mark, (0, 0));
 
@@ -1033,6 +1165,7 @@ mod tests {
             artifacts: HashMap::new(),
             refresh_outcome: None,
             refresh_progress: None,
+            capabilities: None,
         };
         assert_eq!(CapacityObservation::from_ping(&silent), None);
     }
@@ -1138,6 +1271,135 @@ mod tests {
         assert_eq!(
             RefreshOutcome::confirm("other", "0.1.0", Some(&failed)),
             RefreshConfirmation::Pending
+        );
+    }
+
+    fn host_capable() -> NodeCapabilities {
+        NodeCapabilities {
+            modes: vec![RuntimeMode::Container, RuntimeMode::Host],
+            platform: "macos/aarch64".into(),
+            resources_enforced: false,
+            leases: vec!["kvm".into()],
+        }
+    }
+
+    /// Capabilities round-trip on **both** records (design #309 §4), and the
+    /// additive shape holds: a payload from a daemon predating the field decodes
+    /// with `capabilities: None` on either transport.
+    #[test]
+    fn capabilities_round_trip_on_both_transports_and_absent_decodes() {
+        let announce = WorkerAnnounce {
+            node: "air".into(),
+            slots: 1,
+            slots_max: Some(1),
+            capacity_epoch: Some(1_769_000_000_123),
+            capacity_generation: Some(0),
+            version: "0.1.0+abc123".into(),
+            capabilities: Some(host_capable()),
+        };
+        let json = serde_json::to_string(&announce).unwrap();
+        assert_eq!(
+            serde_json::from_str::<WorkerAnnounce>(&json).unwrap(),
+            announce
+        );
+        assert!(json.contains(r#""modes":["container","host"]"#), "{json}");
+
+        let ping = PingOk {
+            running: 0,
+            slots: Some(1),
+            slots_max: Some(1),
+            capacity_epoch: Some(1_769_000_000_123),
+            capacity_generation: Some(0),
+            version: "0.1.0+abc123".into(),
+            artifacts: HashMap::new(),
+            refresh_outcome: None,
+            refresh_progress: None,
+            capabilities: Some(host_capable()),
+        };
+        let json = serde_json::to_string(&ping).unwrap();
+        assert_eq!(serde_json::from_str::<PingOk>(&json).unwrap(), ping);
+
+        let old: WorkerAnnounce =
+            serde_json::from_str(r#"{"node":"air","slots":2,"version":"0.1.0"}"#).unwrap();
+        assert_eq!(old.capabilities, None);
+        let old: PingOk =
+            serde_json::from_str(r#"{"running":0,"version":"0.1.0","artifacts":{},"slots":2}"#)
+                .unwrap();
+        assert_eq!(old.capabilities, None);
+    }
+
+    /// The design #309 §4 absent-defaults table, field by field: a node that
+    /// says nothing, and a node that says `{}`, both read as container-only on an
+    /// unknown platform with limits enforced and no leases.
+    #[test]
+    fn absent_capabilities_read_as_the_documented_defaults() {
+        let absent = NodeCapabilities::absent();
+        assert_eq!(absent.modes, vec![RuntimeMode::Container]);
+        assert_eq!(absent.platform, PLATFORM_UNKNOWN);
+        assert!(absent.resources_enforced, "the container fleet unchanged");
+        assert!(absent.leases.is_empty());
+        assert!(absent.serves(RuntimeMode::Container));
+        assert!(!absent.serves(RuntimeMode::Host), "fails closed");
+
+        assert_eq!(
+            serde_json::from_str::<NodeCapabilities>("{}").unwrap(),
+            absent,
+            "each absent field within a present record takes the same default"
+        );
+        assert!(
+            serde_json::from_str::<NodeCapabilities>(r#"{"modes":["host"]}"#)
+                .unwrap()
+                .resources_enforced,
+            "a node that does not say otherwise enforces limits"
+        );
+        assert_eq!(ObservedCapabilities::default().effective(), absent);
+    }
+
+    /// A docker-endpoint node has no wire path to advertise on, so its
+    /// capabilities are synthesized from the node kind (design #309 §4) — the
+    /// same values the absent table gives, reached deliberately rather than by
+    /// silence.
+    #[test]
+    fn docker_endpoint_capabilities_are_synthesized_not_silent() {
+        let synthesized = NodeCapabilities::docker_endpoint();
+        assert_eq!(synthesized.modes, vec![RuntimeMode::Container]);
+        assert_eq!(synthesized.platform, PLATFORM_UNKNOWN);
+        assert!(
+            synthesized.resources_enforced,
+            "a docker endpoint demonstrably enforces cpu/memory"
+        );
+        assert!(synthesized.leases.is_empty());
+    }
+
+    /// Ping is authoritative (design #309 §4): an announce fills in for a node
+    /// no ping has answered for, and is refused afterwards — the reading that
+    /// makes a denied announce cost one probe rather than a misclassification.
+    #[test]
+    fn ping_capabilities_win_over_announce() {
+        let host = host_capable();
+        let container_only = NodeCapabilities::absent();
+
+        let mut observed = ObservedCapabilities::default();
+        assert!(
+            observed.apply(&host, CapacityTransport::Announce),
+            "nothing pulled yet, so the join's advertisement stands"
+        );
+        assert_eq!(observed.effective(), host);
+
+        assert!(observed.apply(&container_only, CapacityTransport::Ping));
+        assert_eq!(observed.effective(), container_only);
+
+        assert!(
+            !observed.apply(&host, CapacityTransport::Announce),
+            "an announce may not undo what the pull transport reported"
+        );
+        assert_eq!(observed.effective(), container_only);
+
+        assert!(observed.apply(&host, CapacityTransport::Ping));
+        assert_eq!(observed.effective(), host);
+        assert!(
+            !observed.apply(&host, CapacityTransport::Ping),
+            "a re-report of what is already in force changes nothing"
         );
     }
 }

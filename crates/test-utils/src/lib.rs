@@ -106,6 +106,10 @@ struct FakeBackendState {
     /// has to as well — otherwise a dispatcher test would read an announced slot
     /// count that no backend ever confirmed.
     observed: std::collections::HashMap<String, (u32, types::ObservedCapacity)>,
+    /// Per-node capabilities as they arrived on the announce (design #309 §4),
+    /// with an absent advertisement recorded as the reading it resolves to — how
+    /// a dispatcher test asserts the announce's capabilities reached the backend.
+    advertised: std::collections::HashMap<String, types::NodeCapabilities>,
     /// `set_slots` commands the backend received, in call order (design #293 §3/§4)
     /// — how a test asserts what the reconciler pushed, and how often.
     slot_commands: Vec<(String, u32)>,
@@ -379,6 +383,16 @@ impl FakeBackend {
         self.state.lock().unwrap().registered.clone()
     }
 
+    /// What one node's announce advertised it can do (design #309 §4), as the
+    /// backend received it.
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
+    pub fn advertised(&self, node: &str) -> Option<types::NodeCapabilities> {
+        self.state.lock().unwrap().advertised.get(node).cloned()
+    }
+
     /// Workers the backend was told to deregister via `mark_worker_unschedulable`.
     #[allow(
         clippy::unwrap_used,
@@ -617,8 +631,11 @@ impl ContainerBackend for FakeBackend {
         name: &str,
         capacity: types::CapacityObservation,
         version: Option<String>,
+        capabilities: Option<types::worker::NodeCapabilities>,
     ) -> bool {
         let mut st = self.state.lock().unwrap();
+        st.advertised
+            .insert(name.to_string(), capabilities.unwrap_or_default());
         st.registered
             .push((name.to_string(), capacity.slots, version));
         let entry = st.observed.entry(name.to_string()).or_default();

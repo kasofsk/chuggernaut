@@ -2,8 +2,9 @@
 
 Status: PROPOSED — no macOS-specific work has been done; W1, N2 and W5 were
 satisfied generically by [#309](309-host-native-execution.md) P0 (job #434),
-job #401 and [#440](440-native-worker-daemon.md) slice 3 (job #460). See
-[Current state](#current-state).
+job #401 and [#440](440-native-worker-daemon.md) slice 3 (job #460), and P1 is
+half satisfied the same way by #309 P2 slice 5 (job #483) — the record, not the
+`choose_placement` predicate. See [Current state](#current-state).
 
 Written against the tree at `61b721d` (2026-07-30). Every claim about current
 behavior was read out of the source or out of [docs/spec.md](../spec.md); where
@@ -54,7 +55,7 @@ since #309 was written); [docs/reference/style.md](../reference/style.md);
 rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
 
-**No macOS work has been done, and three of the phases were satisfied
+**No macOS work has been done, and three and a half of the phases were satisfied
 generically by somebody else.** W1 is exactly what
 [#309](309-host-native-execution.md) P0's first slice landed (job #434), N2's
 schema is what job #401 landed for [#373](373-project-toolchains.md), and W5 is
@@ -68,7 +69,12 @@ the fleet runs macOS host tasks. `runtime.mode: host` **validates** since
 [#309](309-host-native-execution.md) P1 (job #478) landed the host row's field
 rules — the top-level `image` ban and the required `env` this document's N2 also
 asks for; N2's own `mode: host` requires `work.type: command` rule did not land
-with them, and nothing places by mode either, which is #309 P2. §[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)'s
+with them. This document's P1 is half paid for too: #309 P2 slice 5 (job #483)
+put `NodeCapabilities` on `PingOk`/`WorkerAnnounce` and ingests it in
+`probe_worker` (`crates/types/src/worker.rs`, `crates/worker/src/backend.rs`),
+so the record P1 asks for exists — without this phase's `envs` field, and with
+no `choose_placement` predicate reading it, so nothing places by mode still.
+§[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)'s
 "what is true today" is superseded on one point: `ContainerLaunchConfig.image`
 and `WorkerLaunchRequest.image` are **`Option<String>`** since #309 P1
 (job #479), and their absence is what selects host mode, so a dual-mode node
@@ -88,7 +94,7 @@ argument and its dependency.
 | **W4** | Node-side env-ref resolution: Xcode discovery, `xcode:<version>` → `DEVELOPER_DIR` | Proposed — the `xcode:`-is-host-only *validate* rule shipped with N2; no resolution exists |
 | **W5** | Refresh precondition: decline a refresh while a host task runs | **Landed** (job #460) generically, as [#440](440-native-worker-daemon.md) slice 3 — §6's phase-1 mitigation, plus a swap-boundary re-check that phase never asked for |
 | **N3** | The macOS node runbook in `deploy/prod/README.md` | Proposed |
-| **P1** | `NodeCapabilities` on ping/announce + the `choose_placement` predicate | Proposed — #309 P2 and [#367](367-android-emulator-execution.md) A3 are the same slice; no such record exists yet |
+| **P1** | `NodeCapabilities` on ping/announce + the `choose_placement` predicate | **Partly landed** generically (job #483), as #309 P2 slice 5 — the record exists on `PingOk`/`WorkerAnnounce` and is ingested in `probe_worker`, carrying `modes`, `platform`, `resources_enforced` and `leases`. This phase's `envs` field and the `choose_placement` predicate did not land; that half is #309 P2 slice 6 and [#367](367-android-emulator-execution.md) A3, still Proposed |
 | **P2** | Per-task launchd jobs, agent work on a Mac, device leases, signing | Later, deliberately |
 
 ## Corrections to the brief and to #309

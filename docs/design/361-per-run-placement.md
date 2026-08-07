@@ -53,7 +53,8 @@ that *do* need doing are already scheduled inside
 | Fleet capacity requires **`platform_admin`** | `crates/api/src/routes.rs` `platform_fleet_capacity_set` → `platform_admin`; `docs/spec.md` §7.5 "Platform-level config" | Shipped |
 | A factory triage **agent** may create jobs from inside a container | `crates/auth/src/nats.rs` `triage_container_permissions` grants `req.jobs.create.{owner}.{project}` | Shipped |
 | Inputs never reach job-type resolution, tier-1 tested | `crates/domain/src/release.rs` — `resolved_job_type_is_equal_for_any_two_input_maps` | Shipped |
-| `NodeCapabilities`, capability-aware `choose_placement`, `placement.leases` | [#309](309-host-native-execution.md) §4, §5a, §5b (P2, P4) | Designed, not in the tree |
+| `NodeCapabilities` on `PingOk`/`WorkerAnnounce`, ingested per node | [#309](309-host-native-execution.md) §4 (P2 slice 5); `crates/types/src/worker.rs`, `crates/worker/src/backend.rs` | Shipped — advertised and visible, read by no placement decision |
+| Capability-aware `choose_placement`, `placement.leases` | [#309](309-host-native-execution.md) §5a, §5b (P2 slice 6, P4) | Designed, not in the tree |
 | **Not one job type in this repo sets `placement`** | `.chug/jobs/*.yaml` — zero matches | The one affinity control ships unused |
 
 That last row is worth pausing on. The platform's existing per-node steering

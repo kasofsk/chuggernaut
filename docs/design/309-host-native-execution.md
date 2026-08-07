@@ -6,7 +6,11 @@ Status: PROPOSED; **P0 landed 2026-08-05 (job #434)** — `HostBackend`,
 declaration that nothing places by yet
 ([P1 as landed](#p1-as-landed-2026-08-07--the-host-rows-field-rules-job-478)),
 and a dual-mode node now routes each launch by its declared mode
-([P1 as landed, per-launch routing](#p1-as-landed-2026-08-07--per-launch-mode-routing-job-479)).
+([P1 as landed, per-launch routing](#p1-as-landed-2026-08-07--per-launch-mode-routing-job-479))
+— and **P2 slice 5 landed 2026-08-07 (job #483)**: `NodeCapabilities` rides both
+worker transports and is ingested in `probe_worker`, with no placement decision
+reading it yet
+([the 2026-08-07 note](#note-2026-08-07--slice-5-landed-runtimemode-not-execmode-job-483)).
 §1's recommendation had already shipped before P0 started; see
 [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed)
 and its addendum on `remove` racing its own reaper.
@@ -54,10 +58,18 @@ and deleted the refusal, with no epoch bump, and job #479 carried the resolved
 mode to the worker: `image` is `Option<String>` on both the launch config and
 the wire (`WORKER_RPC_VERSION` 2), a node constructs exactly the backends its
 `WORKER_MODES` names, and one naming both routes each launch by the image's
-presence. So a host job type is now
-**well-formed and unroutable**: nothing places by mode, because that is P2 and
-P2 is gated on #293 job 3. Everything from P2 on is unstarted: no
-`NodeCapabilities` record exists in the tree.
+presence. **P2 is half-landed.** Its slice 5 shipped in job #483 now that its
+gate — [#293](293-worker-capacity.md) job 3 — is in: `NodeCapabilities` is a
+wire record on both
+`PingOk` and `WorkerAnnounce` (`crates/types/src/worker.rs`), additive and so
+still at `WORKER_RPC_VERSION` 2, a daemon derives its own from `WORKER_MODES`,
+and the dispatcher ingests it inside `probe_worker` on the reply path with the
+`ping`-wins precedence §4 argues for (`crates/worker/src/backend.rs`). Its
+modes are `types::job_type::RuntimeMode`, not the `ExecMode` §4 sketches — see
+[the 2026-08-07 note](#note-2026-08-07--slice-5-landed-runtimemode-not-execmode-job-483).
+So a host job type is still **well-formed and unroutable**: a node's
+capabilities are now *visible*, but nothing filters by them, because that is P2
+slice 6. Everything from P3 on is unstarted.
 [#440](440-native-worker-daemon.md) is the design for the native-supervision
 prerequisite P0 named and left unowned.
 
@@ -70,7 +82,7 @@ is the same work sliced by contract, not a second plan.
 | --- | --- | --- |
 | **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed) |
 | **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch; **Landed** (job #479) for §1's per-launch routing and the `WORKER_RPC_VERSION` bump it needed |
-| **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | Proposed — gated on P1 and #293 job 3 |
+| **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | **Landed** (job #483) for slice 5 — the record on both transports, additive, ingested in `probe_worker` with ping authoritative and docker-endpoint nodes synthesized; slice 6 (capability-aware `choose_placement`) Proposed, now gated on nothing but itself |
 | **P3** | Per-task users; `resources_enforced`; transient scopes | Proposed — gated on P2 |
 | **P4** | Device leases | Proposed — only when a host node must run a second, non-device-bound task concurrently |
 | **P5** | Declared caches + GC roots + warm set | Proposed — gated on P1, independent of P2–P4 |
@@ -1458,3 +1470,61 @@ What did **not** change: placement. Nothing dispatcher-side routes jobs to nodes
 by mode, no `NodeCapabilities` record exists, and no node advertises `host`.
 That is still P2, still gated on [#293](293-worker-capacity.md) job 3. What this
 job removes is the reason a node could not honestly advertise both.
+
+---
+
+## Note, 2026-08-07 — slice 5 landed, `RuntimeMode` not `ExecMode` (job #483)
+
+Appended by the job that implemented P2 slice 5. Nothing above is edited; this
+is the record of what the tree got that [§4](#4-capability-advertisement) did
+not spell out.
+
+**Both of the gate's premises were re-verified before anything was written.**
+[#293](293-worker-capacity.md) reads `Status: IMPLEMENTED — shipped in jobs
+295–301`, and its job 3 — the dispatcher-side observation ingest this slice had
+to land *after* — is commit `3cfcfab` (`job/297: code`) in this history. So
+the "do not race #293" hazard §4's [Sequencing](#sequencing-with-293) names is
+spent, not merely believed to be.
+
+**The mode enum is `types::job_type::RuntimeMode`, not a new `ExecMode`.** §4's
+struct sketch names `ExecMode` and the tree had no such type; it had *two*
+enums over exactly `{container, host}` already — `RuntimeMode` (in `types`,
+serde `lowercase`, what a job type's `runtime.mode` declares) and
+`WorkerMode` (worker-crate-local, what `WORKER_MODES` parses into, never on the
+wire). Adding a third would have made slice 6's predicate a mapping between two
+vocabularies for one concept, which is the shape docs/reference/style.md's
+duplication rule exists to prevent — and the comparison slice 6 performs is
+*literally* "does this node serve the mode this job type declared", so the
+declaration's own type is the honest one. `WorkerMode` was left where it is:
+promoting it to `types` would drag env-var parsing into a pure-data crate, and
+the node maps it to `RuntimeMode` once, in `node_capabilities`
+(`crates/worker/src/daemon.rs`).
+
+**`resources_enforced` is derived, not declared.** A node reports it as "do I
+serve `container`", because the Docker `HostConfig` is what enforces
+`cpu`/`memory` and a host-only node has none. That means a **dual-mode** node
+reports `true` while being unable to enforce limits on the host half of its
+work — the honest per-mode answer needs [§7](#7-resource-limits)'s predicate,
+which is P3. Recorded here rather than guessed at, because the field is
+advertised now and read by nothing.
+
+**`leases` is on the wire and always empty.** [§5b](#5b-exclusive-resources-device-leases)
+is P4; the field ships with the record because the absent-defaults table
+already commits to its reading (`[]`), and a node that acquires one later needs
+no wire change to say so.
+
+**What a node running the previous binary reports.** Nothing — its `PingOk` and
+`WorkerAnnounce` carry no `capabilities` key at all, both fields being
+`Option` + `skip_serializing_if`, so `WORKER_RPC_VERSION` stays at 2 and the
+dispatcher decodes the payload unchanged. It then reads as
+`NodeCapabilities::absent()`: `modes: [container]`, `platform: "unknown"`,
+`resources_enforced: true`, `leases: []` — the whole fleet's reading through the
+entire rollout window, and every existing placement decision unchanged because
+nothing consults the record yet.
+
+**Ping-wins is implemented as "an announce applies only while no ping has ever
+answered for the node"**, in `types::ObservedCapabilities::apply`. Stronger than
+last-writer-wins and deliberately so: once the pull transport has spoken, a
+stale or malicious announce cannot reclassify the node, and a node that genuinely
+changes its `WORKER_MODES` is corrected at the next placement probe — which is
+the self-healing property §4 argues the pull path buys.

@@ -231,6 +231,7 @@ async fn stale_list_running_worker(store: &NatsStore, node: &str) -> tokio::task
                         capacity_generation: None,
                         refresh_outcome: None,
                         refresh_progress: None,
+                        capabilities: None,
                     },
                 })
                 .unwrap()
