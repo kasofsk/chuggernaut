@@ -75,6 +75,40 @@ build_worker_run_spec_per_node() {
 }
 build_worker_run_spec_per_node
 
+# ── does this node name a container runtime at all (design #309 §1) ──────────
+# Every docker step below serves CONTAINER launches — the socket the daemon
+# would dial, the three images, the channel binary it injects into agent
+# containers — and a node naming only `host` serves none of them:
+# `local_backend` constructs the host backend and RETURNS before it opens a
+# docker endpoint (crates/worker/src/daemon.rs), so `WORKER_DOCKER_ENDPOINT` is
+# never read and no image is ever launched. A host job type cannot declare one
+# either (crates/types/src/job_type.rs `validate_top_level_image`), and host mode
+# serves `work.type: command` only — which is the one launch path that never
+# carries the channel binary (`Core::channel_mcp` has exactly two callers, both
+# agent-shaped: crates/dispatcher/src/exec.rs and eval.rs).
+#
+# The answer is derived HERE, once, in the daemon's own spelling
+# (`serves_container`: names `container`, or names nothing at all). A second
+# spelling of that rule is the bug to avoid — a deploy that disagrees with the
+# node it is converting either refuses a legal node or hands a docker-less one a
+# spec it cannot serve.
+#
+# Only the ANSWER is derived here. WORKER_MODES is still VALIDATED further down,
+# where it always was, so an unparseable value refuses in the same place with the
+# same message — and this scan cannot be fooled by one, because it matches whole
+# comma-separated entries (`hostt` names no mode here either).
+MODES="${WORKER_MODES:-}"
+MODES="${MODES#"${MODES%%[![:space:]]*}"}"
+MODES="${MODES%"${MODES##*[![:space:]]}"}"
+SERVES_CONTAINER=1
+case ",$(printf '%s' "$MODES" | tr -d '[:space:]')," in
+  *,container,*) ;;
+  *,host,*) SERVES_CONTAINER="" ;;
+esac
+if [ -z "$SERVES_CONTAINER" ]; then
+  echo "build-worker: WORKER_MODES='$MODES' names no container runtime, so $NODE serves host commands only (design #309 §1) — this deploy skips the docker socket check, the agent images and the channel binary, and the daemon it installs never opens a docker endpoint"
+fi
+
 # DOCKER_BUILDKIT=1 requests the in-daemon BuildKit builder so the Dockerfiles'
 # RUN --mount=type=cache dependency caches take effect (#115). It is a no-op on
 # engines that already default to BuildKit and harmless where BuildKit is
@@ -267,7 +301,7 @@ DOCKER_ENDPOINT="${DOCKER_ENDPOINT#"${DOCKER_ENDPOINT%%[![:space:]]*}"}"
 DOCKER_ENDPOINT="${DOCKER_ENDPOINT%"${DOCKER_ENDPOINT##*[![:space:]]}"}"
 DOCKER_ENDPOINT_DEFAULT="unix:///var/run/docker.sock"
 DOCKER_ENDPOINT_DERIVED=""
-if [ -z "$DOCKER_ENDPOINT" ] && [ "$NODE_OS" = Darwin ]; then
+if [ -z "$DOCKER_ENDPOINT" ] && [ "$NODE_OS" = Darwin ] && [ -n "$SERVES_CONTAINER" ]; then
   DOCKER_ENDPOINT="$(ssh "$WORKER_SSH" "docker context inspect --format '{{.Endpoints.docker.Host}}' 2> /dev/null || true" < /dev/null | tr -d '[:space:]')"
   if [ -n "$DOCKER_ENDPOINT" ]; then
     DOCKER_ENDPOINT_DERIVED=1
@@ -284,7 +318,10 @@ if [ -n "$DOCKER_ENDPOINT" ]; then
   esac
 fi
 DOCKER_SOCKET="${DOCKER_ENDPOINT:-$DOCKER_ENDPOINT_DEFAULT}"
-case "$DOCKER_SOCKET" in
+# Skipped on a host-only node, and that is not a weakened check: the socket
+# matters because a daemon that dials the wrong one comes up healthy and fails
+# every launch, and a node serving no container launches never dials it at all.
+case "${SERVES_CONTAINER:+$DOCKER_SOCKET}" in
   unix://*)
     DOCKER_SOCKET="${DOCKER_SOCKET#unix://}"
     if ! ssh "$WORKER_SSH" "[ -S '$DOCKER_SOCKET' ]" < /dev/null; then
@@ -378,36 +415,59 @@ else
   echo "build-worker: NOTE: $NODE runs the daemon as the LOGIN USER in their GUI domain, so design #440 D5's root-owned 0700 boundary does not port to macOS — $KEYS_DIR stays in that user's home and cross-task secret isolation there remains given up (#322 §7)"
 fi
 
+# ── which of the three images this node actually needs ───────────────────────
+# The AGENT images are what job types run in, so a node serving no container
+# launch needs neither. The WORKER image is not in that class on Linux: it is
+# where that node's daemon binary comes from (#440 D6), extracted below, so a
+# host-only Linux node still builds it and still needs a docker to build it
+# with. On Darwin the daemon is compiled natively instead and the image's only
+# remaining passenger is the channel binary — which a command-only node never
+# injects — so there the image is skipped outright and the node needs no docker
+# at all. That asymmetry is D6's, not this branch's.
+if [ -n "$SERVES_CONTAINER" ] || [ "$NODE_OS" != Darwin ]; then
+  WORKER_IMAGE=1
+else
+  WORKER_IMAGE=""
+fi
+
 # Worker daemon image (repo-root context; bakes chuggernaut + channel binary).
 # --label chug.git.sha=<sha> stamps the requested SHA INTO the image so we can
 # positively prove, below, that the image the daemon will run was built from the
 # commit we asked for — an exit code alone is not trustworthy here.
-git archive --format=tar HEAD > "$CTX"
-[ -s "$CTX" ] || { echo "build-worker: empty build context for worker image — aborting" >&2; exit 1; }
-ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/worker:$TAG \
+if [ -n "$WORKER_IMAGE" ]; then
+  git archive --format=tar HEAD > "$CTX"
+  [ -s "$CTX" ] || { echo "build-worker: empty build context for worker image — aborting" >&2; exit 1; }
+  ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/worker:$TAG \
     -f deploy/prod/Dockerfile.worker --build-arg CHUG_GIT_SHA=$SHA \
     --label chug.git.sha=$SHA -" < "$CTX"
 
-# Positively assert the built image carries the requested SHA label BEFORE we
-# restart the daemon onto it. A stale/failed build (label missing or mismatched)
-# must never reach `docker run` — refuse loudly and leave the live daemon as-is.
-GOT_LABEL="$(ssh "$WORKER_SSH" \
-  "docker inspect --format '{{index .Config.Labels \"chug.git.sha\"}}' chuggernaut/worker:$TAG" \
-  < /dev/null 2>/dev/null | tr -d '[:space:]' || true)"
-if [ "$GOT_LABEL" != "$SHA" ]; then
-  echo "build-worker: worker image label '$GOT_LABEL' != requested SHA '$SHA' — REFUSING daemon restart (stale or failed build; live daemon untouched)" >&2
-  exit 1
+  # Positively assert the built image carries the requested SHA label BEFORE we
+  # restart the daemon onto it. A stale/failed build (label missing or mismatched)
+  # must never reach `docker run` — refuse loudly and leave the live daemon as-is.
+  GOT_LABEL="$(ssh "$WORKER_SSH" \
+    "docker inspect --format '{{index .Config.Labels \"chug.git.sha\"}}' chuggernaut/worker:$TAG" \
+    < /dev/null 2>/dev/null | tr -d '[:space:]' || true)"
+  if [ "$GOT_LABEL" != "$SHA" ]; then
+    echo "build-worker: worker image label '$GOT_LABEL' != requested SHA '$SHA' — REFUSING daemon restart (stale or failed build; live daemon untouched)" >&2
+    exit 1
+  fi
+  echo "build-worker: verified chuggernaut/worker:$TAG carries chug.git.sha=$SHA"
+else
+  echo "build-worker: skipping chuggernaut/worker:$TAG on $NODE — it serves host commands only and compiles its own daemon (design #440 D6, corrected 2026-08-07), so the image has no passenger left for this node"
 fi
-echo "build-worker: verified chuggernaut/worker:$TAG carries chug.git.sha=$SHA"
 
 # Agent images the job types run in, native on the node.
-git archive --format=tar HEAD:deploy/dev > "$CTX"
-[ -s "$CTX" ] || { echo "build-worker: empty build context for agent image — aborting" >&2; exit 1; }
-ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent:$TAG -f Dockerfile.agent -" < "$CTX"
-git archive --format=tar HEAD > "$CTX"
-[ -s "$CTX" ] || { echo "build-worker: empty build context for agent-rust image — aborting" >&2; exit 1; }
-ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent-rust:$TAG \
+if [ -n "$SERVES_CONTAINER" ]; then
+  git archive --format=tar HEAD:deploy/dev > "$CTX"
+  [ -s "$CTX" ] || { echo "build-worker: empty build context for agent image — aborting" >&2; exit 1; }
+  ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent:$TAG -f Dockerfile.agent -" < "$CTX"
+  git archive --format=tar HEAD > "$CTX"
+  [ -s "$CTX" ] || { echo "build-worker: empty build context for agent-rust image — aborting" >&2; exit 1; }
+  ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent-rust:$TAG \
     -f deploy/prod/Dockerfile.agent-rust -" < "$CTX"
+else
+  echo "build-worker: skipping chuggernaut/{agent,agent-rust}:$TAG on $NODE — a job type serving host mode declares no image (crates/types/src/job_type.rs), so nothing on this node ever launches one"
+fi
 
 # ── the Mach-O daemon a Darwin node cannot get out of a Linux image ──────────
 # The same context the worker image was built from, unpacked on the node and
@@ -431,6 +491,14 @@ ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent-rust:$TAG \
 # CARGO_DIR goes on PATH because cargo resolves `rustc` through it and this is
 # the ssh shell's PATH, not the operator's — the same reason WORKER_CARGO had to
 # be declared absolute in the first place.
+#
+# A host-only node compiles the daemon ALONE. Its native chuggernaut-channel was
+# always discarded — the installed copy comes out of the image, because a Mach-O
+# is what no Linux container can exec (#480) — and here there is no container to
+# inject one into either, so building it would be minutes of the node's own cargo
+# spent on a file nothing reads.
+NATIVE_BINS="--bin chuggernaut --bin chuggernaut-channel"
+[ -n "$SERVES_CONTAINER" ] || NATIVE_BINS="--bin chuggernaut"
 if [ "$NODE_OS" = Darwin ]; then
   git archive --format=tar HEAD > "$CTX"
   [ -s "$CTX" ] || { echo "build-worker: empty build context for the native daemon build — aborting" >&2; exit 1; }
@@ -440,7 +508,7 @@ rm -rf '$BUILD_DIR/src'
 mkdir -p '$BUILD_DIR/src'
 tar -xf - -C '$BUILD_DIR/src'
 cd '$BUILD_DIR/src'
-PATH='$CARGO_DIR':\"\$PATH\" CHUG_GIT_SHA='$SHA' CARGO_TARGET_DIR='$BUILD_DIR/target' '$NODE_CARGO' build --release --locked --bin chuggernaut --bin chuggernaut-channel
+PATH='$CARGO_DIR':\"\$PATH\" CHUG_GIT_SHA='$SHA' CARGO_TARGET_DIR='$BUILD_DIR/target' '$NODE_CARGO' build --release --locked $NATIVE_BINS
 printf '%s\n' '$SHA' > '$BUILD_DIR/native.sha'" < "$CTX"
 fi
 
@@ -649,9 +717,10 @@ fi
 # with the live daemon untouched. The scan runs over a comma-TERMINATED copy so
 # the final entry is examined like every other one; a bare split would consume
 # `container,` as one entry and never see the empty one behind it.
-MODES="${WORKER_MODES:-}"
-MODES="${MODES#"${MODES%%[![:space:]]*}"}"
-MODES="${MODES%"${MODES##*[![:space:]]}"}"
+#
+# $MODES was trimmed at the top of this script, where the container-capability
+# question is answered; the validation is still here, so an unparseable value
+# refuses in the same place and with the same message it always did.
 if [ -n "$MODES" ]; then
   MODES_HOST=""
   MODES_SEEN=""
@@ -987,10 +1056,27 @@ fi
 # guard below must be able to read it back as the login user on every subsequent
 # deploy. A mode that made it root-only would turn #390's guard into a guard that
 # silently passes, which is the failure it exists to prevent.
+#
+# A HOST-ONLY NODE IS HANDED NO CHANNEL BINARY AT ALL, and that is the honest
+# default rather than a gap: the file is injected by `Core::channel_mcp`, whose
+# only two callers are the agent work arm and the agent evaluator
+# (crates/dispatcher/src/exec.rs, crates/dispatcher/src/eval.rs), while a host
+# node serves `work.type: command` only — twice enforced, in the job type's own
+# field rules and again in `HostBackend::admit`. The command path's launch config
+# carries inline ssh credentials and nothing else
+# (`Core::command_launch_config`), so it never names an artifact. A daemon whose
+# channel binary is absent warns once at boot and leaves its artifact map empty
+# (crates/worker/src/daemon.rs), which only a `FileSource::LocalArtifact` launch
+# would ever notice. Installing one anyway would put a binary nothing on the node
+# can use where a later reader has to work out why.
 if [ "$NODE_OS" = Linux ]; then
   REMOTE_STAGE="CID=\$(docker create chuggernaut/worker:$TAG)
-docker cp \"\$CID:/usr/local/bin/chuggernaut\" \"\$STAGE/chuggernaut\"
-docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel\"
+docker cp \"\$CID:/usr/local/bin/chuggernaut\" \"\$STAGE/chuggernaut\""
+  if [ -n "$SERVES_CONTAINER" ]; then
+    REMOTE_STAGE="$REMOTE_STAGE
+docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel\""
+  fi
+  REMOTE_STAGE="$REMOTE_STAGE
 docker cp \"\$CID:/usr/local/lib/chuggernaut/worker-refresh.sh\" \"\$STAGE/worker-refresh.sh\"
 docker rm \"\$CID\" >/dev/null"
   # The container's platform IS the node's, so the cheapest question is the one
@@ -999,39 +1085,51 @@ docker rm \"\$CID\" >/dev/null"
   # the environment and then speaks JSON-RPC on stdin — so a run with no context
   # exits non-zero either way, and 126/127 is the only answer that means the
   # kernel would not load it (the `cannot execute binary file` the air's daemon
-  # took, one artifact over).
-  REMOTE_CHANNEL_CHECK="if \"\$STAGE/chuggernaut-channel\" < /dev/null > /dev/null 2>&1; then CHAN_RC=0; else CHAN_RC=\$?; fi
+  # took, one artifact over). Nothing to ask on a host-only node, which stages
+  # no such file.
+  REMOTE_CHANNEL_CHECK=":"
+  if [ -n "$SERVES_CONTAINER" ]; then
+    REMOTE_CHANNEL_CHECK="if \"\$STAGE/chuggernaut-channel\" < /dev/null > /dev/null 2>&1; then CHAN_RC=0; else CHAN_RC=\$?; fi
 if [ \"\$CHAN_RC\" = 126 ] || [ \"\$CHAN_RC\" = 127 ]; then
   echo \"build-worker: the staged chuggernaut-channel binary cannot be executed on this node (exit \$CHAN_RC: a foreign architecture, a missing dynamic loader, or a broken build) — the daemon injects THIS FILE into every agent container, where a binary that cannot exec produces no error the operator ever sees: Claude Code reports the chuggernaut-channel MCP server as pending forever, the agent silently loses update_status and submit_eval, and it surfaces four job escalations later as the evaluator produced no output (#477, #478). REFUSING (live daemon untouched, nothing installed).\" >&2
   exit 1
 fi"
+  fi
 else
   # The architecture the injected binary must be built for, read off the node's
   # OWN docker rather than assumed from its `uname -m`: colima is a Linux VM and
   # its arch is the operator's choice, so `arm64/linux` on the air is an answer
   # and not a constant. Underivable is a refusal, because the alternative is
   # installing an unchecked binary — which is exactly the state this fixes.
-  NODE_DOCKER_PLATFORM="$(ssh "$WORKER_SSH" "docker version --format '{{.Server.Arch}}/{{.Server.Os}}' 2> /dev/null || true" < /dev/null | tr -d '[:space:]')"
-  case "$NODE_DOCKER_PLATFORM" in
-    arm64/linux | aarch64/linux) CHANNEL_ELF_MACHINE=b700 ;;
-    amd64/linux | x86_64/linux) CHANNEL_ELF_MACHINE=3e00 ;;
-    *)
-      echo "build-worker: cannot read the container platform of $WORKER_SSH's docker — 'docker version --format {{.Server.Arch}}/{{.Server.Os}}' answered '${NODE_DOCKER_PLATFORM:-<nothing>}', and this deploy needs it to tell a usable chuggernaut-channel binary from one no agent container can exec (the daemon injects that file into every container; a mac's own build is a Mach-O and fails silently, #477/#478); REFUSING (live daemon untouched, nothing installed). Start the node's docker (on a mac, 'colima start') and re-run." >&2
-      exit 1
-      ;;
-  esac
-  echo "build-worker: $NODE runs $NODE_DOCKER_PLATFORM containers — the injected chuggernaut-channel binary comes out of chuggernaut/worker:$TAG, which that same docker built, and the daemon binary comes out of the native tree build"
+  # A host-only mac is asked none of it: there is no injected binary to judge,
+  # and its remedy line ("start the node's docker") would demand a runtime this
+  # node exists in order not to need.
   REMOTE_STAGE="install -m 0755 '$BUILD_DIR/target/release/chuggernaut' \"\$STAGE/chuggernaut\"
-install -m 0755 '$BUILD_DIR/src/deploy/prod/worker-refresh.sh' \"\$STAGE/worker-refresh.sh\"
+install -m 0755 '$BUILD_DIR/src/deploy/prod/worker-refresh.sh' \"\$STAGE/worker-refresh.sh\""
+  REMOTE_CHANNEL_CHECK=":"
+  if [ -z "$SERVES_CONTAINER" ]; then
+    echo "build-worker: $NODE gets no chuggernaut-channel binary — that file is injected into AGENT containers only (crates/dispatcher/src/exec.rs \`Core::channel_mcp\`) and a host node serves commands only, so a copy here would be bytes nothing on the node can use"
+  else
+    NODE_DOCKER_PLATFORM="$(ssh "$WORKER_SSH" "docker version --format '{{.Server.Arch}}/{{.Server.Os}}' 2> /dev/null || true" < /dev/null | tr -d '[:space:]')"
+    case "$NODE_DOCKER_PLATFORM" in
+      arm64/linux | aarch64/linux) CHANNEL_ELF_MACHINE=b700 ;;
+      amd64/linux | x86_64/linux) CHANNEL_ELF_MACHINE=3e00 ;;
+      *)
+        echo "build-worker: cannot read the container platform of $WORKER_SSH's docker — 'docker version --format {{.Server.Arch}}/{{.Server.Os}}' answered '${NODE_DOCKER_PLATFORM:-<nothing>}', and this deploy needs it to tell a usable chuggernaut-channel binary from one no agent container can exec (the daemon injects that file into every container; a mac's own build is a Mach-O and fails silently, #477/#478); REFUSING (live daemon untouched, nothing installed). Start the node's docker (on a mac, 'colima start') and re-run." >&2
+        exit 1
+        ;;
+    esac
+    echo "build-worker: $NODE runs $NODE_DOCKER_PLATFORM containers — the injected chuggernaut-channel binary comes out of chuggernaut/worker:$TAG, which that same docker built, and the daemon binary comes out of the native tree build"
+    REMOTE_STAGE="$REMOTE_STAGE
 CID=\$(docker create chuggernaut/worker:$TAG)
 docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel\"
 docker rm \"\$CID\" >/dev/null"
-  # Asking this binary to run HERE would be exactly backwards — the right answer
-  # on a mac is that it does not. So the question is asked of its object header
-  # instead: ELF magic, and the e_machine the node's containers run. `od` is
-  # POSIX and on both platforms; e_machine is two little-endian bytes at file
-  # offset 18, so aarch64 (0xb7) reads back `b700` and x86-64 (0x3e) `3e00`.
-  REMOTE_CHANNEL_CHECK="chug_magic() { od -A n -v -t x1 -j \"\$2\" -N \"\$3\" \"\$1\" 2> /dev/null | tr -d '[:space:]'; }
+    # Asking this binary to run HERE would be exactly backwards — the right answer
+    # on a mac is that it does not. So the question is asked of its object header
+    # instead: ELF magic, and the e_machine the node's containers run. `od` is
+    # POSIX and on both platforms; e_machine is two little-endian bytes at file
+    # offset 18, so aarch64 (0xb7) reads back `b700` and x86-64 (0x3e) `3e00`.
+    REMOTE_CHANNEL_CHECK="chug_magic() { od -A n -v -t x1 -j \"\$2\" -N \"\$3\" \"\$1\" 2> /dev/null | tr -d '[:space:]'; }
 chug_channel_ok() { [ \"\$(chug_magic \"\$1\" 0 4)\" = 7f454c46 ] && [ \"\$(chug_magic \"\$1\" 18 2)\" = \"\$2\" ]; }
 if ! chug_channel_ok \"\$STAGE/chuggernaut-channel\" $CHANNEL_ELF_MACHINE; then
   CHAN_MAGIC=\$(chug_magic \"\$STAGE/chuggernaut-channel\" 0 4)
@@ -1043,7 +1141,11 @@ if ! chug_channel_ok \"\$STAGE/chuggernaut-channel\" $CHANNEL_ELF_MACHINE; then
   echo \"build-worker: the staged chuggernaut-channel binary is \$CHAN_KIND, and it NEVER RUNS ON THIS MAC — the daemon injects it into every agent container, and this node's docker runs $NODE_DOCKER_PLATFORM containers, so it must be a Linux ELF for that architecture. An injected binary that cannot exec produces no error the operator ever sees: Claude Code reports the chuggernaut-channel MCP server as pending forever, the agent silently loses update_status and submit_eval, and it surfaces four job escalations later as the evaluator produced no output (#477, #478). REFUSING (live daemon untouched, nothing installed). The right bytes are already on the node, in chuggernaut/worker:$TAG at /usr/local/lib/chuggernaut/chuggernaut-channel.\" >&2
   exit 1
 fi"
+  fi
 fi
+REMOTE_PUT_CHANNEL=""
+[ -z "$SERVES_CONTAINER" ] || REMOTE_PUT_CHANNEL="chug_put 0755 \"\$STAGE/chuggernaut-channel\" '$LIB_DIR/chuggernaut-channel'
+"
 REMOTE_INSTALL="set -e
 chug_dir() { mkdir -p \"\$1\" 2>/dev/null || sudo -n mkdir -p \"\$1\"; }
 chug_put() { install -m \"\$1\" \"\$2\" \"\$3\" 2>/dev/null || sudo -n install -m \"\$1\" \"\$2\" \"\$3\"; }
@@ -1059,8 +1161,7 @@ chug_dir '$BIN_DIR'
 chug_dir '$LIB_DIR'
 chug_dir '$ENV_DIR'
 chug_put 0755 \"\$STAGE/chuggernaut\" '$BIN_DIR/chuggernaut'
-chug_put 0755 \"\$STAGE/chuggernaut-channel\" '$LIB_DIR/chuggernaut-channel'
-chug_put 0755 \"\$STAGE/worker-refresh.sh\" '$LIB_DIR/worker-refresh.sh'
+${REMOTE_PUT_CHANNEL}chug_put 0755 \"\$STAGE/worker-refresh.sh\" '$LIB_DIR/worker-refresh.sh'
 cat > \"\$STAGE/worker.env\" <<'CHUG_WORKER_ENV'
 ${SPEC_ENV}CHUG_WORKER_ENV
 chug_put 0644 \"\$STAGE/worker.env\" '$ENV_FILE'"
@@ -1394,7 +1495,14 @@ echo "build-worker: NOTE: $NODE is supervised NATIVELY now, so its self-refresh 
 # build died ENOSPC mid-deploy). Each rebuild strands the previous image
 # generation as dangling — prune those (NEVER -a: tagged agent images must
 # survive, the #183 lesson) and cap the BuildKit cache at 15G, which keeps the
-# hot cargo/sccache cache-mounts (#115) while shedding stale layers.
-ssh "$WORKER_SSH" "docker image prune -f >/dev/null; docker builder prune -f --keep-storage 15GB >/dev/null 2>&1 || true" < /dev/null
+# hot cargo/sccache cache-mounts (#115) while shedding stale layers. A node that
+# built nothing has nothing dangling and may have no docker to ask.
+if [ -n "$WORKER_IMAGE" ]; then
+  ssh "$WORKER_SSH" "docker image prune -f >/dev/null; docker builder prune -f --keep-storage 15GB >/dev/null 2>&1 || true" < /dev/null
+fi
 
-echo "build-worker: chuggernaut/{worker,agent,agent-rust}:$TAG deployed + VERIFIED on $WORKER_SSH ($SHA) — image label matches and chug-worker is up"
+if [ -n "$SERVES_CONTAINER" ]; then
+  echo "build-worker: chuggernaut/{worker,agent,agent-rust}:$TAG deployed + VERIFIED on $WORKER_SSH ($SHA) — image label matches and chug-worker is up"
+else
+  echo "build-worker: $NODE deployed + VERIFIED on $WORKER_SSH ($SHA) — it names no container runtime, so no image was built and the daemon is up on its own binary"
+fi

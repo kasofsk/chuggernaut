@@ -1,6 +1,6 @@
 # Design — the natively-supervised worker daemon
 
-Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away and on 2026-08-08 for the one artifact that correction over-reached onto**, and no node runs a native daemon from this tree: nothing was applied, and no node advertises `host` (#309 P1 made `runtime.mode: host` a legal declaration in job #478; placing by it is P2).
+Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away, on 2026-08-08 for the one artifact that correction over-reached onto, and again for the docker steps both corrections asked of every node rather than of a container-capable one** (job #487), and no node runs a native daemon from this tree: nothing was applied, and no node advertises `host` (#309 P1 made `runtime.mode: host` a legal declaration in job #478; placing by it is P2).
 
 **The first conversion of a real node, on 2026-08-06, found two things this
 design got wrong for macOS** — [D6](#decisions)'s extracted binary is an ELF file
@@ -3335,3 +3335,109 @@ The drift guard is unchanged and still needed: the daemon reads more `WORKER_*`
 than the run spec composes (`WORKER_HOST_ROOT`, `WORKER_CHANNEL_BINARY`,
 `WORKER_REFRESH_SCRIPT`), and a live daemon carrying one of those is still a
 refusal.
+
+## Correction, 2026-08-07 — the docker requirements are the *container-capable* node's, not the mac's (job #487)
+
+The two corrections above are written as "what a mac node needs": a docker
+endpoint the daemon can dial, and a *running* docker to stage
+`chuggernaut-channel` out of the worker image. Both are true of a mac that
+serves container launches, and neither is true of a node that names no container
+runtime at all — the deploy scripts asked them of every node, so a mac that only
+runs host tasks could not be deployed to even though the daemon it would run
+needs nothing from docker.
+
+### The daemon already served this shape; the scripts did not
+
+`local_backend` (`crates/worker/src/daemon.rs`) builds the host backend and
+**returns** when `!serves_container`, so `docker_backend` is never reached and
+`WORKER_DOCKER_ENDPOINT` is never read. `serves_container` is
+`contains(Container) || !serves_host(modes)` — a node names containers if it
+says `container`, or if it says nothing at all, which is every node in the fleet
+today.
+
+`deploy/prod/build-worker.sh` and `deploy/prod/worker-refresh.sh` now branch on
+that same rule, derived once per script from `WORKER_MODES` in the daemon's own
+spelling. A second spelling was the thing to avoid: a deploy that disagrees with
+the node it is converting either refuses a legal node or hands a docker-less one
+a spec it cannot serve.
+
+### What a host-only node skips, and why each is safe
+
+- **The docker socket check** — nothing dials it.
+- **`chuggernaut/agent` and `chuggernaut/agent-rust`** — a job type resolving to
+  `runtime.mode: host` cannot declare an `image:`
+  (`crates/types/src/job_type.rs`), so no launch on that node carries one.
+- **The container-platform probe** — its only purpose is judging the injected
+  binary, and there is none.
+- **`chuggernaut-channel`, which is installed nowhere on such a node.** It is
+  injected by exactly one function, `Core::channel_mcp`
+  (`crates/dispatcher/src/exec.rs`), with two callers: the `WorkType::Agent` arm
+  and the agent evaluator (`crates/dispatcher/src/eval.rs`). The command path
+  composes its launch in `Core::command_launch_config`
+  (`crates/dispatcher/src/launch_queue.rs`), whose `files:` is inline ssh
+  credentials and nothing else — no artifact reference. And host mode serves
+  `work.type: command` alone, enforced twice: `validate_host_serves_commands_only`
+  and `HostBackend::admit`, which also refuses an image-carrying launch. A
+  missing channel binary is already tolerated by the daemon — it warns and
+  leaves its artifact map empty, and that map is consulted only on the
+  `FileSource::LocalArtifact` branch a command-only node never reaches.
+  **Installing nothing is the honest default**: a binary nothing on the node can
+  use is a thing a later reader has to work out.
+- **The refresh disk pre-flight** — it exists to protect an image build. This is
+  the immediate operational payoff: it refused deploy #486 on dev-air over
+  headroom no build was going to consume.
+- **The native compile's `--bin chuggernaut-channel`** — the mac's own copy was
+  always discarded (the 2026-08-08 narrowing), and on this node there is no
+  container to inject one into either.
+
+### D6 is why "needs no docker" is a Darwin sentence
+
+On Linux the worker image is the only place that node's daemon binary comes
+from, so a host-only **Linux** node still builds it and still needs a docker to
+build and extract with. It skips the agent images and the channel binary and
+nothing else. On Darwin the daemon is compiled natively, so skipping the image
+leaves nothing behind that wants a runtime — which is exactly the asymmetry the
+2026-08-07 correction introduced, read forward.
+
+### What this does not do
+
+- **No Rust change.** The daemon was already correct.
+- **No node was converted.** `WORKER_MODES` in `deploy/prod/chuggernaut.env` is <!-- runtime -->
+  unchanged and no node declares `host`. This makes the conversion possible;
+  performing it is an operator step.
+- **No host guard was weakened.** `WORKER_SLOTS=1`/`WORKER_SLOTS_MAX=1`, the
+  host-root probe and the supervision probe all still refuse with the live
+  daemon untouched, and a host-only node with the wrong capacity is a case in
+  the suite.
+- **The staged-generation check DEGRADES on a host-only mac rather than being
+  dropped.** The swap compares `native.sha` against the worker image's
+  `chug.git.sha` label; with no image there is no label, and the swap phase is
+  handed a tag rather than a SHA, so there is nothing else on the node to
+  compare with. It now requires the staging directory to exist and to name a
+  SHA, and reports which one it is installing. That is strictly weaker than the
+  container path and is said out loud rather than left to be discovered.
+- **The disk pre-flight's `DISK_PATH` is still wrong on a container-capable
+  mac**, and is deliberately left open. Since this design made the daemon
+  native, `/` is the boot volume while docker lives in a VM: dev-air measured
+  7.2GB free on `/` against 76.3GB inside colima. Host-only sidesteps it by
+  running no build; a dual-mode or container mac still meets it. Fixing it means
+  asking docker for its own free space, i.e. running a container on every
+  refresh of every node — a new failure mode on the whole fleet's hot path, for
+  a guard that is deliberately fail-open — and re-deriving the 30GB floor, which
+  was measured against `/` semantics on a Linux node. It wants its own change
+  and its own measurement. `WORKER_REFRESH_DISK_FREE_GB_MIN_<node>=0` turns the
+  guard off for one node in the meantime.
+
+### Verification
+
+`sh deploy/prod/build-worker.test.sh` and `sh deploy/prod/worker-refresh.test.sh`,
+both green, with nine cases added between them: a host-only mac deploys and
+refreshes with no docker call at all and still installs its daemon, writes its
+run spec and restarts; its swap installs two artifacts rather than three, and
+refuses when nothing is staged; a host-only Linux node builds only the worker
+image; and a host-only node with the wrong capacity still refuses. Each of those
+fails against the unfixed scripts — verified by running the new suites against
+`HEAD`'s copies. The last case in each suite is the acceptance bar rather than
+new behaviour: it diffs the docker calls a `container` and a `container, host`
+node issues against an **unset** node's, in both phases, and therefore passes
+against the unfixed scripts too — which is the point.

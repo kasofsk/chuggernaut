@@ -279,6 +279,10 @@ refusals in the script today (design
 [2026-08-07 correction](../../design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)
 and its [2026-08-08 narrowing](../../design/440-native-worker-daemon.md#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)):
 
+**Facts 2 and 3 are for a *container-capable* mac.** A node whose
+`WORKER_MODES` names `host` and not `container` needs neither, and needs no
+docker at all — §[4c](#4c-a-host-only-mac-needs-no-docker).
+
 1. **A Rust toolchain the deploy's ssh shell can see.** The worker image is a
    Linux container, so the binary extracted from it is an ELF file launchd loops
    on with `cannot execute binary file`. A mac compiles its own daemon instead,
@@ -376,6 +380,42 @@ every `linux/arm64` agent container, where it cannot exec — so every agent
 evaluator on that node produces no output and every work task runs blind. The
 same re-conversion fixes it, and the deploy now refuses rather than installing
 one.
+
+## 4c. A host-only mac needs no docker
+
+`WORKER_MODES` decides it, and both deploy scripts read that declaration with
+the daemon's own rule — `serves_container` in `crates/worker/src/daemon.rs`:
+a node names containers if it says `container`, or if it says nothing at all.
+Declaring `host` and not `container` therefore removes the whole docker surface
+from a conversion and from every self-refresh after it:
+
+| step | why a host-only node does not need it |
+| --- | --- |
+| the docker socket check | `local_backend` builds the host backend and **returns** before it opens a docker endpoint, so `WORKER_DOCKER_ENDPOINT` is never read |
+| `chuggernaut/agent` + `agent-rust` | a job type resolving to `runtime.mode: host` cannot declare an `image:` (`crates/types/src/job_type.rs`), so nothing here launches one |
+| `chuggernaut/worker` (Darwin only) | the daemon is compiled natively, and the image's only other passenger is the channel binary this node does not take |
+| the container-platform probe | there is no injected binary to judge |
+| `chuggernaut-channel` | injected into **agent containers** only (`Core::channel_mcp`, whose two callers are both agent-shaped), while host mode serves `work.type: command` alone — twice enforced, in the job type's field rules and in `HostBackend::admit` |
+| the refresh disk pre-flight | it exists to protect an image build; there is none |
+
+Two things to know before converting one:
+
+- **The daemon warns once at boot** — `channel binary unavailable` — and carries
+  an empty artifact map. That is the correct state, not a gap: only a
+  `FileSource::LocalArtifact` launch reads it, and a command-only node never
+  makes one. Installing a copy anyway would put bytes on the node that nothing
+  can use.
+- **"No docker at all" is a Darwin property.** On Linux the worker image is
+  still built, because #440 D6 holds there and that image is the only place a
+  Linux node's daemon binary comes from. A host-only Linux node skips the agent
+  images and the channel binary and nothing else.
+
+Nothing here weakens a host node: `WORKER_SLOTS=1` and `WORKER_SLOTS_MAX=1`
+node-wide (#309 §2 option (iii)), a creatable `WORKER_HOST_ROOT` and the
+supervision probe all still refuse before the live daemon is touched.
+**Converting is an operator step** — declare `WORKER_MODES_<node>=host` in
+`deploy/prod/chuggernaut.env` on the Mini and re-run the deploy. <!-- runtime --> No node in the
+fleet declares it today.
 
 ---
 

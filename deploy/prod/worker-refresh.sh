@@ -58,6 +58,36 @@ refresh_phase() {
   echo "worker-refresh: phase $1"
 }
 
+# ── the runtimes this node offers (design #309 §1) ───────────────────────────
+# Read off WORKER_MODES, which build-worker.sh wrote into the environment file
+# the supervisor hands this daemon — so this script and the daemon that invoked
+# it answer the question from the same declaration. The rule is the daemon's own
+# (`serves_container` in crates/worker/src/daemon.rs): a node names containers if
+# it says `container`, or if it says nothing at all, which is every node in the
+# fleet today. Written once here because a second spelling of it somewhere below
+# could disagree with the daemon this script is about to replace.
+#
+# What follows from it: a host-only node launches no image, so it builds no agent
+# image, and it is handed no chuggernaut-channel binary — that file is injected
+# into AGENT containers only (`Core::channel_mcp`, whose two callers are both
+# agent-shaped) and host mode serves `work.type: command` alone.
+NODE_MODES="$(printf '%s' "${WORKER_MODES:-}" | tr -d '[:space:]')"
+SERVES_CONTAINER=1
+case ",$NODE_MODES," in
+  *,container,*) ;;
+  *,host,*) SERVES_CONTAINER="" ;;
+esac
+
+# Whether a refresh here builds a container image AT ALL, which is not the same
+# question. A host-only DARWIN node builds none: it compiles its daemon natively
+# (#440's 2026-08-07 correction) and the worker image's only other passenger is
+# the channel binary it does not take. A host-only LINUX node still builds the
+# worker image, because #440 D6 holds there and that image is the only place its
+# daemon binary comes from — so docker is still a machine fact on Linux.
+refresh_builds_images() {
+  [ -n "$SERVES_CONTAINER" ] || [ "$(uname -s)" != Darwin ]
+}
+
 # ── the run spec this node is actually running (ticket #390) ─────────────────
 # This script inherits its config from the daemon's own environment, which is
 # the only mechanism available to it: the dispatcher host cannot ssh a tagged
@@ -144,6 +174,22 @@ DISK_FREE_GB_MIN="${WORKER_REFRESH_DISK_FREE_GB_MIN:-30}"
 # /var/lib/docker — statfs on it reports exactly the pool images and the
 # BuildKit cache compete for. A node that splits them points _DISK_PATH at the
 # docker filesystem instead.
+#
+# STILL OPEN ON A CONTAINER-CAPABLE MAC, and deliberately not fixed here (job
+# #487). Since #440 made the daemon native, `/` on a mac is the boot volume
+# while docker lives in a VM: dev-air measured 7.2GB free on `/` against 76.3GB
+# free inside colima, so the pre-flight refused a refresh (deploy #486) over
+# space the build was never going to touch — and the comment above's remedy is
+# unavailable, because that filesystem is not addressable from the host at all.
+# A host-only node does not meet this, because it runs no build to protect; a
+# dual-mode or container mac still does. Not fixed in this change for two
+# reasons: asking docker for its own free space means running a container on
+# every refresh of every node, which is a new failure mode on the fleet's whole
+# hot path for a guard that is deliberately fail-open; and the 30GB floor was
+# derived against `/` semantics on a Linux node and would have to be re-derived
+# with it. The workaround today is to declare
+# WORKER_REFRESH_DISK_FREE_GB_MIN_<node>=0 for that mac, which switches the
+# guard off for it and for nothing else.
 DISK_PATH="${WORKER_REFRESH_DISK_PATH:-/}"
 # BuildKit cache cap for the prune pair. 15G was sized for the #115 cache mounts
 # when agent-rust compiled the whole workspace into one; #352 deleted that build,
@@ -256,7 +302,17 @@ build)
   # Disk pre-flight (deploy #248): read-only, so it lives in the validate-first
   # block — a node without headroom fails here, before the fetch and before any
   # docker call, with the free/needed numbers in the leg detail.
-  refresh_disk_preflight || exit 1
+  #
+  # It exists to protect a docker build, so a node that runs none is not asked:
+  # the floor is a whole image generation plus BuildKit growth, and refusing a
+  # refresh over headroom nothing is going to consume is how a host-only mac
+  # gets locked out of every deploy (job #486, the air at 7.1GB free on / with
+  # 99G of colima datadisk it does not need).
+  if refresh_builds_images; then
+    refresh_disk_preflight || exit 1
+  else
+    echo "worker-refresh: disk pre-flight skipped on ${WORKER_NODE:-?} — WORKER_MODES names no container runtime and this node builds no image, so there is no image generation to find room for (design #309 §1)"
+  fi
 
   # ── a Darwin node's daemon is COMPILED, not extracted (#440 D6, corrected
   # 2026-08-07) ───────────────────────────────────────────────────────────────
@@ -315,7 +371,9 @@ build)
   refresh_cleanup() {
     _rc="$1"
     rm -rf "$TMP"
-    docker rmi -f "chuggernaut/worker:$NEW" "chuggernaut/agent:$NEW" "chuggernaut/agent-rust:$NEW" >/dev/null 2>&1 || true
+    if refresh_builds_images; then
+      docker rmi -f "chuggernaut/worker:$NEW" "chuggernaut/agent:$NEW" "chuggernaut/agent-rust:$NEW" >/dev/null 2>&1 || true
+    fi
     if [ "$_rc" -ne 0 ] && [ "$BUILD_STARTED" -eq 1 ]; then
       refresh_disk_prune "a failed build"
     fi
@@ -377,40 +435,55 @@ build)
   # we can positively PROVE, before the retag-swap, that the image about to go
   # live was built from the commit we asked for — an exit code alone is not
   # trustworthy (the buildx-missing class of failure).
-  git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/worker.tar"
-  [ -s "$TMP/worker.tar" ] || { echo "worker-refresh: empty worker context — aborting (live images untouched)" >&2; exit 1; }
-  BUILD_STARTED=1
-  refresh_phase "build-image 1/3 worker"
-  docker build -q -t "chuggernaut/worker:$NEW" \
+  # How many images this generation has, said out loud in the markers because a
+  # host-only Linux node builds the worker image and nothing else — "1/3" there
+  # would report two builds that are never coming.
+  REFRESH_IMAGE_COUNT=3
+  [ -n "$SERVES_CONTAINER" ] || REFRESH_IMAGE_COUNT=1
+  if refresh_builds_images; then
+    git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/worker.tar"
+    [ -s "$TMP/worker.tar" ] || { echo "worker-refresh: empty worker context — aborting (live images untouched)" >&2; exit 1; }
+    BUILD_STARTED=1
+    refresh_phase "build-image 1/$REFRESH_IMAGE_COUNT worker"
+    docker build -q -t "chuggernaut/worker:$NEW" \
       -f deploy/prod/Dockerfile.worker --build-arg "CHUG_GIT_SHA=$SHA" \
       --label "chug.git.sha=$SHA" - < "$TMP/worker.tar"
+  else
+    echo "worker-refresh: skipping chuggernaut/worker:$NEW — this node names no container runtime and compiles its own daemon, so the image has no passenger left here (design #309 §1, #440 D6)"
+  fi
 
   # Agent images the job types run in.
-  git -C "$TMP" archive --format=tar FETCH_HEAD:deploy/dev > "$TMP/agent.tar"
-  [ -s "$TMP/agent.tar" ] || { echo "worker-refresh: empty agent context — aborting (live images untouched)" >&2; exit 1; }
-  refresh_phase "build-image 2/3 agent"
-  docker build -q -t "chuggernaut/agent:$NEW" -f Dockerfile.agent - < "$TMP/agent.tar"
-  git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/agent-rust.tar"
-  [ -s "$TMP/agent-rust.tar" ] || { echo "worker-refresh: empty agent-rust context — aborting (live images untouched)" >&2; exit 1; }
-  # Was the long pole while this image baked the #123 warm-target seed (air 673s,
-  # nuc 332s, nearly all of it the workspace compile). #352 deleted the seed, and
-  # with it the `COPY . /workspace` that made every SHA bump invalidate the
-  # layers below — so on a node that has built this image before, a refresh is
-  # now layer-cache hits down to the binary fetches.
-  refresh_phase "build-image 3/3 agent-rust"
-  docker build -q -t "chuggernaut/agent-rust:$NEW" \
+  if [ -n "$SERVES_CONTAINER" ]; then
+    git -C "$TMP" archive --format=tar FETCH_HEAD:deploy/dev > "$TMP/agent.tar"
+    [ -s "$TMP/agent.tar" ] || { echo "worker-refresh: empty agent context — aborting (live images untouched)" >&2; exit 1; }
+    refresh_phase "build-image 2/3 agent"
+    docker build -q -t "chuggernaut/agent:$NEW" -f Dockerfile.agent - < "$TMP/agent.tar"
+    git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/agent-rust.tar"
+    [ -s "$TMP/agent-rust.tar" ] || { echo "worker-refresh: empty agent-rust context — aborting (live images untouched)" >&2; exit 1; }
+    # Was the long pole while this image baked the #123 warm-target seed (air 673s,
+    # nuc 332s, nearly all of it the workspace compile). #352 deleted the seed, and
+    # with it the `COPY . /workspace` that made every SHA bump invalidate the
+    # layers below — so on a node that has built this image before, a refresh is
+    # now layer-cache hits down to the binary fetches.
+    refresh_phase "build-image 3/3 agent-rust"
+    docker build -q -t "chuggernaut/agent-rust:$NEW" \
       -f deploy/prod/Dockerfile.agent-rust - < "$TMP/agent-rust.tar"
+  else
+    echo "worker-refresh: skipping chuggernaut/{agent,agent-rust}:$NEW — a host job type declares no image (crates/types/src/job_type.rs), so nothing launched on this node ever runs one"
+  fi
 
   # Positively assert the freshly built worker image carries the requested SHA
   # label BEFORE the retag-swap flips the live tag onto it. A build whose label
   # is missing or wrong (stale layer, silent buildx failure) must never become
   # the live image — refuse the swap; the trap drops the temp tags and the live
   # images stay exactly as they were.
-  refresh_phase "verify-label"
-  GOT_LABEL="$(docker inspect --format '{{index .Config.Labels "chug.git.sha"}}' "chuggernaut/worker:$NEW" 2>/dev/null | tr -d '[:space:]' || true)"
-  if [ "$GOT_LABEL" != "$SHA" ]; then
-    echo "worker-refresh: built worker image label '$GOT_LABEL' != requested $SHA — refusing retag-swap (live images untouched)" >&2
-    exit 1
+  if refresh_builds_images; then
+    refresh_phase "verify-label"
+    GOT_LABEL="$(docker inspect --format '{{index .Config.Labels "chug.git.sha"}}' "chuggernaut/worker:$NEW" 2>/dev/null | tr -d '[:space:]' || true)"
+    if [ "$GOT_LABEL" != "$SHA" ]; then
+      echo "worker-refresh: built worker image label '$GOT_LABEL' != requested $SHA — refusing retag-swap (live images untouched)" >&2
+      exit 1
+    fi
   fi
 
   # On Darwin, the fourth artifact: the Mach-O daemon this node will actually
@@ -423,6 +496,14 @@ build)
   # kept: it is the only thing that makes this minutes instead of a cold
   # workspace compile. The exec check is the point of the exercise — a binary
   # that will not run here must never reach the install.
+  #
+  # A host-only node compiles the daemon ALONE. The native chuggernaut-channel
+  # was always thrown away — the installed copy rides out of the image, because a
+  # Mach-O is what no Linux container can exec (#480) — and on this node there is
+  # no container to inject one into either, so building it spends the node's own
+  # cargo on a file nothing will read.
+  NATIVE_BINS="--bin chuggernaut --bin chuggernaut-channel"
+  [ -n "$SERVES_CONTAINER" ] || NATIVE_BINS="--bin chuggernaut"
   if [ -n "$NATIVE_DAEMON" ]; then
     refresh_phase "build-daemon"
     git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/native.tar"
@@ -432,8 +513,9 @@ build)
     tar -xf "$TMP/native.tar" -C "$BUILD_DIR/src"
     (
       cd "$BUILD_DIR/src"
+      # shellcheck disable=SC2086
       PATH="$CARGO_DIR:$PATH" CHUG_GIT_SHA="$SHA" CARGO_TARGET_DIR="$BUILD_DIR/target" \
-        "$CARGO" build --release --locked --bin chuggernaut --bin chuggernaut-channel
+        "$CARGO" build --release --locked $NATIVE_BINS
     )
     if ! "$BUILD_DIR/target/release/chuggernaut" --version > /dev/null 2>&1; then
       echo "worker-refresh: the daemon binary just compiled at $BUILD_DIR/target/release/chuggernaut does not run on this node — refusing to stage a binary the supervisor would loop on; aborting (live images and live daemon untouched)" >&2
@@ -446,21 +528,33 @@ build)
   # All three built to completion — retag-swap onto the live tag. `docker tag`
   # is local and instant, so the live images flip to the new build only now,
   # and only after we know every image is buildable.
-  refresh_phase "retag-swap"
-  docker tag "chuggernaut/worker:$NEW"     "chuggernaut/worker:$TAG"
-  docker tag "chuggernaut/agent:$NEW"      "chuggernaut/agent:$TAG"
-  docker tag "chuggernaut/agent-rust:$NEW" "chuggernaut/agent-rust:$TAG"
+  if refresh_builds_images; then
+    refresh_phase "retag-swap"
+    docker tag "chuggernaut/worker:$NEW"     "chuggernaut/worker:$TAG"
+  fi
+  if [ -n "$SERVES_CONTAINER" ]; then
+    docker tag "chuggernaut/agent:$NEW"      "chuggernaut/agent:$TAG"
+    docker tag "chuggernaut/agent-rust:$NEW" "chuggernaut/agent-rust:$TAG"
+  fi
 
   # Bound the node's docker disk after every refresh (the 2026-07-23 air
   # ENOSPC incident): the retag-swap just stranded the previous generation as
   # dangling — prune those (NEVER -a: live tags must survive, #183) and cap
   # the BuildKit cache at $BUILDER_KEEP_STORAGE. Report the build's own disk
   # cost first, while the generation it built is still unpruned.
-  refresh_disk_report_build_cost
-  refresh_phase "prune"
-  refresh_disk_prune "a successful refresh"
+  if refresh_builds_images; then
+    refresh_disk_report_build_cost
+    refresh_phase "prune"
+    refresh_disk_prune "a successful refresh"
+  fi
 
-  echo "worker-refresh: built chuggernaut/{worker,agent,agent-rust}:$TAG ($SHA)"
+  if [ -n "$SERVES_CONTAINER" ]; then
+    echo "worker-refresh: built chuggernaut/{worker,agent,agent-rust}:$TAG ($SHA)"
+  elif refresh_builds_images; then
+    echo "worker-refresh: built chuggernaut/worker:$TAG ($SHA) — this node names no container runtime, so the agent images were skipped and only the daemon's own image was made"
+  else
+    echo "worker-refresh: built no image for $SHA — this node names no container runtime and compiles its own daemon, which is staged and ready for the swap"
+  fi
   ;;
 
 swap)
@@ -584,7 +678,17 @@ swap)
   # install creates what is missing. Asked without creating anything, so a
   # refusal changes no node; without it the operator gets a bare `sudo: a
   # password is required` from half-way through an install instead.
-  for _p in "$DAEMON_BIN" "$CHANNEL_BIN" "$REFRESH_SCRIPT"; do
+  #
+  # The channel binary is on that list only when this node injects one. A
+  # host-only node installs the daemon and this script and nothing else, so
+  # demanding a writable /usr/local/lib/chuggernaut for a file it will not write
+  # would refuse a node over a permission it never exercises.
+  if [ -n "$SERVES_CONTAINER" ]; then
+    set -- "$DAEMON_BIN" "$CHANNEL_BIN" "$REFRESH_SCRIPT"
+  else
+    set -- "$DAEMON_BIN" "$REFRESH_SCRIPT"
+  fi
+  for _p in "$@"; do
     _d="$(dirname "$_p")"
     while [ ! -d "$_d" ]; do _d="$(dirname "$_d")"; done
     if [ -w "$_d" ] || sudo -n test -w "$_d" 2> /dev/null; then continue; fi
@@ -631,33 +735,55 @@ swap)
     rm -rf "$SWAP_STAGE"
   }
   trap 'RC=$?; swap_cleanup; exit "$RC"' EXIT
+  SWAP_CHANNEL_FROM=""
   if [ "$SUPERVISOR" = launchd ]; then
     BUILD_DIR="${WORKER_BUILD_DIR:-$HOME/chuggernaut-worker/build}"
-    SWAP_IMAGE_SHA="$(docker inspect --format '{{index .Config.Labels "chug.git.sha"}}' "chuggernaut/worker:$TAG" 2>/dev/null | tr -d '[:space:]' || true)"
-    SWAP_STAGED_SHA="$(tr -d '[:space:]' < "$BUILD_DIR/native.sha" 2>/dev/null || true)"
-    if [ -z "$SWAP_STAGED_SHA" ] || [ "$SWAP_STAGED_SHA" != "$SWAP_IMAGE_SHA" ]; then
-      echo "worker-refresh: the native daemon staged at $BUILD_DIR is '${SWAP_STAGED_SHA:-<absent>}' and chuggernaut/worker:$TAG is '${SWAP_IMAGE_SHA:-<unlabelled>}' — this mac compiles its own daemon in the build phase (design #440 D6 is Linux-only, corrected 2026-08-07) and installing a staging directory from another generation would take the node backwards; REFUSING swap (live daemon untouched, the node stays one generation behind). Re-apply the node's spec with deploy/prod/build-worker.sh from the operator's laptop." >&2
-      exit 1
+    if [ -n "$SERVES_CONTAINER" ]; then
+      SWAP_IMAGE_SHA="$(docker inspect --format '{{index .Config.Labels "chug.git.sha"}}' "chuggernaut/worker:$TAG" 2>/dev/null | tr -d '[:space:]' || true)"
+      SWAP_STAGED_SHA="$(tr -d '[:space:]' < "$BUILD_DIR/native.sha" 2>/dev/null || true)"
+      if [ -z "$SWAP_STAGED_SHA" ] || [ "$SWAP_STAGED_SHA" != "$SWAP_IMAGE_SHA" ]; then
+        echo "worker-refresh: the native daemon staged at $BUILD_DIR is '${SWAP_STAGED_SHA:-<absent>}' and chuggernaut/worker:$TAG is '${SWAP_IMAGE_SHA:-<unlabelled>}' — this mac compiles its own daemon in the build phase (design #440 D6 is Linux-only, corrected 2026-08-07) and installing a staging directory from another generation would take the node backwards; REFUSING swap (live daemon untouched, the node stays one generation behind). Re-apply the node's spec with deploy/prod/build-worker.sh from the operator's laptop." >&2
+        exit 1
+      fi
+    else
+      # A host-only mac builds no image, so the label that generation was checked
+      # against does not exist here and the check DEGRADES rather than being
+      # dropped quietly: the staging directory must be there and must name a SHA,
+      # and which one it names is reported. The swap phase is handed a tag and
+      # never a SHA, so there is nothing else on this node to compare it with.
+      SWAP_STAGED_SHA="$(tr -d '[:space:]' < "$BUILD_DIR/native.sha" 2>/dev/null || true)"
+      if [ -z "$SWAP_STAGED_SHA" ]; then
+        echo "worker-refresh: no native daemon staged at $BUILD_DIR (no readable native.sha) — this mac compiles its own daemon in the build phase and there is nothing here to install; REFUSING swap (live daemon untouched, the node stays one generation behind). Re-apply the node's spec with deploy/prod/build-worker.sh from the operator's laptop." >&2
+        exit 1
+      fi
+      echo "worker-refresh: installing the native daemon staged at $BUILD_DIR for $SWAP_STAGED_SHA — this node names no container runtime, so there is no worker image label to cross-check that generation against (design #309 §1)"
     fi
     cp "$BUILD_DIR/target/release/chuggernaut" "$SWAP_STAGE/chuggernaut"
     cp "$BUILD_DIR/src/deploy/prod/worker-refresh.sh" "$SWAP_STAGE/worker-refresh.sh"
-    SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
-    docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
-    docker rm "$SWAP_CID" > /dev/null
-    SWAP_CID=""
+    if [ -n "$SERVES_CONTAINER" ]; then
+      SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
+      docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
+      docker rm "$SWAP_CID" > /dev/null
+      SWAP_CID=""
+      SWAP_CHANNEL_FROM="chuggernaut/worker:$TAG"
+    fi
     SWAP_FROM="the native build staged at $BUILD_DIR for $SWAP_STAGED_SHA"
-    SWAP_CHANNEL_FROM="chuggernaut/worker:$TAG"
   else
     SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
     docker cp "$SWAP_CID:/usr/local/bin/chuggernaut" "$SWAP_STAGE/chuggernaut"
-    docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
+    if [ -n "$SERVES_CONTAINER" ]; then
+      docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
+      SWAP_CHANNEL_FROM="chuggernaut/worker:$TAG"
+    fi
     docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/worker-refresh.sh" "$SWAP_STAGE/worker-refresh.sh"
     docker rm "$SWAP_CID" > /dev/null
     SWAP_CID=""
     SWAP_FROM="chuggernaut/worker:$TAG"
-    SWAP_CHANNEL_FROM="chuggernaut/worker:$TAG"
   fi
-  for f in chuggernaut chuggernaut-channel worker-refresh.sh; do
+  SWAP_FILES="chuggernaut worker-refresh.sh"
+  [ -z "$SERVES_CONTAINER" ] || SWAP_FILES="chuggernaut chuggernaut-channel worker-refresh.sh"
+  # shellcheck disable=SC2086
+  for f in $SWAP_FILES; do
     if [ ! -s "$SWAP_STAGE/$f" ]; then
       echo "worker-refresh: '$f' came out of $SWAP_FROM empty or not at all — refusing to install a daemon that cannot run; REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
       exit 1
@@ -685,8 +811,11 @@ swap)
   # fall back on: an injected binary that cannot exec leaves the MCP server
   # `pending` and the agent without `submit_eval`, which surfaces jobs later as
   # "the evaluator produced no output" (#477, #478).
-  chmod +x "$SWAP_STAGE/chuggernaut-channel"
-  if [ "$SUPERVISOR" = launchd ]; then
+  # Not asked at all on a host-only node, which staged no such file: the question
+  # is "can the container this file is injected into exec it", and there is no
+  # such container.
+  [ -z "$SERVES_CONTAINER" ] || chmod +x "$SWAP_STAGE/chuggernaut-channel"
+  if [ -n "$SERVES_CONTAINER" ] && [ "$SUPERVISOR" = launchd ]; then
     swap_magic() { od -A n -v -t x1 -j "$2" -N "$3" "$1" 2> /dev/null | tr -d '[:space:]'; }
     SWAP_DOCKER_PLATFORM="$(docker version --format '{{.Server.Arch}}/{{.Server.Os}}' 2> /dev/null | tr -d '[:space:]' || true)"
     case "$SWAP_DOCKER_PLATFORM" in
@@ -703,7 +832,7 @@ swap)
       echo "worker-refresh: the chuggernaut-channel binary from $SWAP_CHANNEL_FROM is not a Linux ELF for $SWAP_DOCKER_PLATFORM (magic ${SWAP_CHAN_MAGIC:-none}, e_machine ${SWAP_CHAN_MACHINE:-none}; wanted 7f454c46 / $SWAP_ELF_MACHINE) — this mac never execs that file, it injects it into every agent container, where a binary that cannot exec leaves the chuggernaut-channel MCP server pending forever and the agent without update_status or submit_eval (#477, #478); REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
       exit 1
     fi
-  else
+  elif [ -n "$SERVES_CONTAINER" ]; then
     if "$SWAP_STAGE/chuggernaut-channel" < /dev/null > /dev/null 2>&1; then SWAP_CHAN_RC=0; else SWAP_CHAN_RC=$?; fi
     if [ "$SWAP_CHAN_RC" = 126 ] || [ "$SWAP_CHAN_RC" = 127 ]; then
       echo "worker-refresh: the chuggernaut-channel binary from $SWAP_CHANNEL_FROM cannot be executed on this node (exit $SWAP_CHAN_RC: a foreign architecture, a missing dynamic loader, or a broken build) — the daemon injects that file into every agent container, where it would leave the chuggernaut-channel MCP server pending forever and the agent without update_status or submit_eval (#477, #478); REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
@@ -728,9 +857,13 @@ swap)
   }
   refresh_phase "swap-install"
   swap_install "$SWAP_STAGE/chuggernaut" "$DAEMON_BIN"
-  swap_install "$SWAP_STAGE/chuggernaut-channel" "$CHANNEL_BIN"
+  [ -z "$SERVES_CONTAINER" ] || swap_install "$SWAP_STAGE/chuggernaut-channel" "$CHANNEL_BIN"
   swap_install "$SWAP_STAGE/worker-refresh.sh" "$REFRESH_SCRIPT"
-  echo "worker-refresh: installed $DAEMON_BIN and $REFRESH_SCRIPT from $SWAP_FROM, and $CHANNEL_BIN from $SWAP_CHANNEL_FROM (the agent containers exec that one, not this node)"
+  if [ -n "$SERVES_CONTAINER" ]; then
+    echo "worker-refresh: installed $DAEMON_BIN and $REFRESH_SCRIPT from $SWAP_FROM, and $CHANNEL_BIN from $SWAP_CHANNEL_FROM (the agent containers exec that one, not this node)"
+  else
+    echo "worker-refresh: installed $DAEMON_BIN and $REFRESH_SCRIPT from $SWAP_FROM; no $CHANNEL_BIN, because this node names no container runtime and that file is only ever injected into an agent container"
+  fi
 
   # The staging dir is dead the moment the three renames land, and it must go
   # HERE rather than in the trap: the restart below kills this shell's cgroup,

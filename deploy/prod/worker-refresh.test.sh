@@ -1346,6 +1346,191 @@ esac
 grep_out "journalctl -u chug-worker"
 echo "ok: the swap announces extract, install and restart before each runs"
 
+# ── Case 5: a node that names NO container runtime (WORKER_MODES=host) ───────
+# The daemon has served this since #309 P1 — `local_backend` returns the host
+# backend before it ever opens a docker endpoint — but the refresh assumed
+# docker unconditionally: a disk pre-flight sized for a whole image generation,
+# three builds, a retag-swap and a `docker cp` of a binary this node never
+# injects. WORKER_MODES rides in the environment file the supervisor hands this
+# daemon, so the script reads the same declaration the daemon read.
+#
+# Everything here asserts an ABSENCE, so the assertions are written against the
+# whole call log: the fakes answer every command, so a step still issued would
+# pass silently.
+# The swap's staging directory is a fresh `mktemp -d` per run, so the
+# destination of each `docker cp` is normalised away — otherwise every
+# comparison between two runs would differ on a path neither run chose.
+docker_calls() { grep -F "docker " "$LOG" | sed 's#\(docker cp [^ ]*\) .*#\1 <stage>#' || true; }
+
+: > "$LOG"
+mac_build_reset
+set_free_kb 3000000   # ~2.9GB — far under the 30GB floor, which must not be read
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_MODES=host \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  WORKER_CARGO="$MACBIN/cargo" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1 \
+  || fail "a host-only mac must refresh with no docker at all"
+
+# The disk pre-flight exists to protect a docker build; with no build there is
+# nothing to protect, and the floor it applies is what blocked deploy #486 on a
+# node with 99G of colima datadisk it would not need.
+[ -z "$(docker_calls)" ] || fail "a host-only mac issued docker: $(docker_calls)"
+grep_out "disk pre-flight skipped"
+if grep -qF "df " "$LOG"; then
+  fail "a skipped pre-flight must not even measure the disk"
+fi
+# It is still a refresh: the daemon is compiled and staged for the swap.
+grep_out "phase build-daemon"
+[ -x "$MAC_BUILD_DIR/target/release/chuggernaut" ] || fail "the daemon must still be compiled and staged"
+[ "$(cat "$MAC_BUILD_DIR/native.sha")" = abc123 ] || fail "the staged build must still record its SHA"
+# And the channel binary is not even COMPILED: it was always discarded on a mac
+# (#480), and here there is no container to inject one into either.
+grep_log "cargo build --release --locked --bin chuggernaut ["
+if grep -qF -- "--bin chuggernaut-channel" "$LOG"; then
+  fail "a host-only node must not spend its own cargo on a channel binary nothing reads"
+fi
+echo "ok: a host-only mac refreshes with no docker call, no disk pre-flight and no channel binary"
+set_free_kb 60000000
+
+# ── Case 5a: the swap on that node installs two artifacts, not three ──────────
+# `Core::channel_mcp` (crates/dispatcher/src/exec.rs) is the only injector of
+# that file and both its callers are agent-shaped, while host mode serves
+# `work.type: command` only — twice enforced, in the job type's field rules and
+# in `HostBackend::admit`. So installing nothing is the honest default: a binary
+# nothing on the node can use is a thing to explain later.
+: > "$LOG"
+native_swap_reset
+mac_build_stage abc123
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_MODES=host \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  sh "$SUT" swap prod > "$OUT" 2>&1 \
+  || fail "a host-only mac must swap with no docker at all"
+
+[ -z "$(docker_calls)" ] || fail "a host-only swap issued docker: $(docker_calls)"
+[ -x "$DAEMON_BIN" ] || fail "the daemon must still be installed"
+[ -s "$NODE_SCRIPT" ] || fail "this script must still be installed"
+[ -e "$CHANNEL_BIN" ] && fail "a host-only node must be handed no channel binary"
+grep_log "launchctl kickstart"
+# The generation check DEGRADES rather than disappearing: there is no image label
+# to cross-check against, so the staging directory must exist and the SHA it
+# names is reported instead of assumed.
+grep_out "installing the native daemon staged at $MAC_BUILD_DIR for abc123"
+echo "ok: a host-only swap installs the daemon and this script, and no channel binary"
+
+# ── Case 5b: with nothing staged, that swap still refuses ────────────────────
+# Losing the image label must not turn the check into a pass: a mac with no
+# native build has nothing to install, and installing nothing while reporting
+# success is how a node silently stops updating.
+: > "$LOG"
+native_swap_reset
+mac_build_reset
+set +e
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_MODES=host \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a host-only swap with nothing staged must refuse"
+grep_out "no native daemon staged at $MAC_BUILD_DIR"
+[ -e "$DAEMON_BIN" ] && fail "a refused swap must install nothing"
+if grep -qF "launchctl kickstart" "$LOG"; then
+  fail "the refusal must come before the restart"
+fi
+echo "ok: a host-only swap with no staged build refuses rather than reporting a no-op"
+
+# ── Case 5c: a host-only LINUX node still builds the image its daemon is in ───
+# #440 D6 holds on Linux: the worker image is the only place that node's daemon
+# binary comes from, so it is not optional however few runtimes the node names.
+# The AGENT images are, and so is the channel binary.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_MODES=host \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1 \
+  || fail "a host-only Linux node must still refresh"
+grep_log "docker build -q -t chuggernaut/worker:prod-refresh"
+grep_log "docker tag chuggernaut/worker:prod-refresh chuggernaut/worker:prod"
+for _img in "chuggernaut/agent:prod-refresh" "chuggernaut/agent-rust:prod-refresh"; do
+  if grep -F "docker build" "$LOG" | grep -qF "$_img"; then
+    fail "a host-only node launches no image — $_img must not be built"
+  fi
+done
+grep_out "phase build-image 1/1 worker"
+# The pre-flight still runs here: an image IS built, so the headroom it protects
+# is real, even though only one of the three is made.
+grep_out "disk pre-flight:"
+
+: > "$LOG"
+native_swap_reset
+PATH="$BIN:$PATH" \
+  WORKER_NODE=nuc \
+  WORKER_MODES=host \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  sh "$SUT" swap prod > "$OUT" 2>&1 \
+  || fail "a host-only Linux node must still swap"
+grep_log "docker cp fakecid:/usr/local/bin/chuggernaut"
+grep_log "docker cp fakecid:/usr/local/lib/chuggernaut/worker-refresh.sh"
+if grep -qF "chuggernaut-channel" "$LOG"; then
+  fail "a host-only Linux node must neither extract nor install the channel binary"
+fi
+[ -x "$DAEMON_BIN" ] || fail "the daemon must still be installed"
+[ -e "$CHANNEL_BIN" ] && fail "a host-only node must be handed no channel binary"
+echo "ok: a host-only Linux node builds only the image its daemon comes out of"
+
+# ── Case 5d: a container-capable node is byte-identical to today ──────────────
+# The acceptance bar: every node in the fleet today names either nothing or
+# `container,host`, and none may see a docker call move. Both spellings are
+# compared against UNSET, which is what the fleet actually runs and the one
+# baseline that cannot drift out of step with the script.
+for _phase_args in "build abc123 prod" "swap prod"; do
+  _first=""
+  for _modes in "" "container" "container, host"; do
+    : > "$LOG"
+    native_swap_reset
+    PATH="$BIN:$PATH" \
+      WORKER_NODE=nuc \
+      WORKER_MODES="$_modes" \
+      WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+      WORKER_GIT_KEY="$KEY" \
+      WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+      WORKER_DAEMON_BIN="$DAEMON_BIN" \
+      WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+      WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+      sh "$SUT" $_phase_args > /dev/null 2>&1 \
+      || fail "'$_phase_args' must succeed with WORKER_MODES='$_modes'"
+    docker_calls > "$WORK/surface-$(printf '%s' "$_modes" | tr -dc 'a-z').txt"
+    if [ -z "$_first" ]; then
+      _first="$WORK/surface-$(printf '%s' "$_modes" | tr -dc 'a-z').txt"
+      [ -s "$_first" ] || fail "the '$_phase_args' baseline must issue docker calls to compare against"
+    else
+      diff "$_first" "$WORK/surface-$(printf '%s' "$_modes" | tr -dc 'a-z').txt" > /dev/null \
+        || fail "WORKER_MODES='$_modes' changed the docker calls of '$_phase_args'"
+    fi
+  done
+done
+echo "ok: container-only and dual-mode nodes issue exactly the docker calls an unset node does"
+
 # ── Case 4: unknown phase is a hard error ────────────────────────────────────
 if PATH="$BIN:$PATH" sh "$SUT" frobnicate 2>/dev/null; then
   fail "unknown phase should exit non-zero"

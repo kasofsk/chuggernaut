@@ -2368,4 +2368,180 @@ case "$(env_file)" in
 esac
 echo "ok: WORKER_MODES round-trips through the environment file, and a change reports"
 
+# ── Case 8: a node that names NO container runtime (WORKER_MODES=host) ────────
+# The daemon has served this shape since #309 P1: `local_backend` builds the
+# host backend and RETURNS before it opens a docker endpoint
+# (crates/worker/src/daemon.rs), and `serves_container` reads WORKER_MODES the
+# same way this script now does. The deploy assumed docker unconditionally, so a
+# mac that only runs host tasks could not be deployed to at all.
+#
+# Everything this asserts is the ABSENCE of a docker call, so the assertions are
+# written against the whole log rather than one line of it: the fake ssh answers
+# every probe, so a step that is still issued would pass silently and the case
+# would prove nothing.
+docker_surface() { grep -F -e docker -e "[ -S '" "$LOG" || true; }
+
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_ROOT=/Users/op/chuggernaut-worker/host-tasks \
+  sh "$SUT" > "$WORK/hostonly-mac.out" 2>&1
+
+# NOT ONE of the docker steps: no socket probe, no image build, no label
+# read-back, no container-platform probe, no create/cp extraction, no prune.
+for _step in "[ -S '" "docker build" "docker inspect --format" "docker version --format" \
+  "docker context inspect" "docker create" "docker cp" "docker image prune"; do
+  if grep -qF -- "$_step" "$LOG"; then
+    fail "a host-only node must not run '$_step' — it serves no container launch"
+  fi
+done
+# What DOES survive is the two pre-#440 legacy calls that address the old
+# containerized daemon by name — the drift guard's fallback read of `chug-worker`
+# and its removal on conversion. Both discard their output and tolerate any exit,
+# so on a node with no docker binary they cost an unread 127; removing them would
+# leave a node converted FROM a container running two daemons. Everything else
+# must be gone, and this asserts that positively rather than by the absence list
+# above, which only knows the steps someone thought to name.
+docker_surface | grep -vF "docker rm -f chug-worker" | grep -vF "docker inspect chug-worker" \
+  > "$WORK/hostonly-docker-left.txt" || true
+[ ! -s "$WORK/hostonly-docker-left.txt" ] \
+  || fail "a host-only node still issues docker: $(cat "$WORK/hostonly-docker-left.txt")"
+
+# And it is still a deploy: the daemon is compiled, installed, given its run
+# spec and restarted.
+grep_log "build --release --locked"
+grep_log "chug_put 0755 \"\$STAGE/chuggernaut\" '/usr/local/bin/chuggernaut'"
+grep_log "chug_put 0755 \"\$STAGE/worker-refresh.sh\" '/usr/local/lib/chuggernaut/worker-refresh.sh'"
+case "$(env_file)" in
+  *"WORKER_MODES='host'"*) ;;
+  *) fail "a host-only node's run spec must still carry WORKER_MODES" ;;
+esac
+started || fail "a host-only node must still have its daemon restarted"
+
+# The channel binary is the one artifact it does NOT get, and installing nothing
+# is deliberate: `Core::channel_mcp` (crates/dispatcher/src/exec.rs) is the only
+# injector and both its callers are agent-shaped, while a host node serves
+# `work.type: command` only. The daemon warns once and carries an empty artifact
+# map, which only a `FileSource::LocalArtifact` launch would notice.
+if grep -qF "chuggernaut-channel" "$LOG"; then
+  fail "a host-only node must be handed no chuggernaut-channel binary at all"
+fi
+
+# The host guard set is untouched — this change must not buy docker-freedom with
+# a weaker host node.
+grep_log "mkdir -p '/Users/op/chuggernaut-worker/host-tasks'"
+case "$(env_file)" in
+  *"WORKER_SLOTS='1'"*) ;;
+  *) fail "a host node still declares WORKER_SLOTS=1 (#309 §2 option iii)" ;;
+esac
+case "$(env_file)" in
+  *"WORKER_SLOTS_MAX='1'"*) ;;
+  *) fail "a host node still declares WORKER_SLOTS_MAX=1 (#309 §2 option iii)" ;;
+esac
+grep -qF "names no container runtime" "$WORK/hostonly-mac.out" \
+  || fail "the operator must be told the deploy skipped the docker steps, and why"
+echo "ok: a host-only mac deploys with no docker step at all, and keeps every host guard"
+
+# ── Case 8a: the same node, with its capacity wrong, still REFUSES ────────────
+# The host guards are the reason a host-only node is a legal node rather than a
+# looser one, so the docker-free path must not become the path around them.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=2 \
+  WORKER_SLOTS_MAX=2 \
+  sh "$SUT" > "$WORK/hostonly-slots.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a host-only node without WORKER_SLOTS=1 must still fail the deploy"
+not_started "a host-only node with the wrong capacity must not reach the daemon restart"
+echo "ok: a host-only node is still held to the one-host-task-per-node capacity rule"
+
+# ── Case 8b: a host-only LINUX node still builds the worker image ─────────────
+# #440 D6 holds on Linux: that image is the only place the node's daemon binary
+# comes from, so the image is not optional there however few runtimes the node
+# names. What it does NOT build is the agent images, and what it is NOT handed is
+# the channel binary — so the skip is scoped to what the mode actually decides.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  sh "$SUT" > "$WORK/hostonly-linux.out" 2>&1
+
+grep_log "docker build -q -t chuggernaut/worker:prod"
+grep_log "docker create chuggernaut/worker:prod"
+grep_log '"$CID:/usr/local/bin/chuggernaut"'
+grep_log '"$CID:/usr/local/lib/chuggernaut/worker-refresh.sh"'
+for _img in "chuggernaut/agent:prod" "chuggernaut/agent-rust:prod"; do
+  if grep -F "docker build" "$LOG" | grep -qF "$_img"; then
+    fail "a host-only node launches no image — $_img must not be built"
+  fi
+done
+if grep -qF "chuggernaut-channel" "$LOG"; then
+  fail "a host-only Linux node must not extract or install the channel binary"
+fi
+if grep -qF -- "[ -S '" "$LOG"; then
+  fail "a host-only node never dials a docker socket — the socket check must be skipped"
+fi
+started || fail "a host-only Linux node must still have its daemon restarted"
+echo "ok: a host-only Linux node builds only the image its own daemon comes out of"
+
+# ── Case 8c: a container-capable node is byte-identical to today ──────────────
+# The acceptance bar for this change: every node in the fleet today names either
+# nothing or `container,host`, and none of them may see a single docker call
+# move. `container` and `container, host` are compared against the UNSET spelling
+# rather than against a recorded transcript, because unset is what the fleet
+# actually runs and is the one baseline that cannot drift out of step with the
+# script.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT" > /dev/null 2>&1
+docker_surface > "$WORK/surface-unset.txt"
+[ -s "$WORK/surface-unset.txt" ] || fail "the baseline run must issue docker calls to compare against"
+
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_MODES=container \
+  sh "$SUT" > /dev/null 2>&1
+docker_surface > "$WORK/surface-container.txt"
+diff "$WORK/surface-unset.txt" "$WORK/surface-container.txt" > /dev/null \
+  || fail "WORKER_MODES=container must issue exactly the docker calls an unset node does"
+
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_MODES="container, host" \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  sh "$SUT" > /dev/null 2>&1
+docker_surface > "$WORK/surface-dual.txt"
+diff "$WORK/surface-unset.txt" "$WORK/surface-dual.txt" > /dev/null \
+  || fail "a dual-mode node must issue exactly the docker calls an unset node does"
+echo "ok: container-only and dual-mode nodes are byte-identical to an unset node"
+
 echo "ALL PASS"

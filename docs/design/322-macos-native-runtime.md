@@ -984,6 +984,19 @@ that the rebase regressed), and the `chuggernaut worker` launchd agent plus its
 node-local `chuggernaut-channel` copy. That is a runbook, in the shape of
 `deploy/prod/README.md`'s existing node sections — not platform machinery.
 
+**Except the `chuggernaut-channel` copy, on a Mac that serves host mode alone**
+(job #487): that file is injected into agent **containers** and nothing else, by
+`Core::channel_mcp` (`crates/dispatcher/src/exec.rs`), whose two callers are
+both agent-shaped — while a host node serves `work.type: command` only (N2, and
+`HostBackend::admit`). `deploy/prod/build-worker.sh` installs none on such a
+node, and with the socket check and the images gone with it, a `WORKER_MODES`
+that names `host` and not `container` makes docker no part of a Mac node at all.
+The daemon warns once at boot and carries an empty artifact map, which only a
+`FileSource::LocalArtifact` launch would read. A **dual-mode** Mac — the
+`WORKER_MODES=container,host` W2 prototypes on — is unchanged and still needs
+every one of those things, and the appended `ci` evaluator's container node
+below is why one is the likelier shape.
+
 The platform's contribution is to make the unmanaged parts **legible and
 fail-loud**: the node discovers and advertises its Xcodes as env refs
 (§[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)),

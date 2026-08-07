@@ -691,7 +691,9 @@ is no user a root-owned directory would exclude. The keys stay at
 secret isolation on that platform remains given up (#322 §7).
 
 **Converting a mac: three things it needs that a Linux node does not, and it is
-one-way.**
+one-way.** Items 2 and 3 are **container-capable macs only**: a node whose
+`WORKER_MODES` names `host` and not `container` needs neither, and needs no
+docker at all — see *A host-only mac needs no docker* below.
 
 The first two measured on `gumbo-air-0`, 2026-08-06 (#440's
 [2026-08-07 correction](../../docs/design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)),
@@ -761,6 +763,47 @@ the third from its
    An empty or non-Linux answer **refuses the deploy** rather than installing an
    unchecked binary — guessing `arm64` because the mac is one is how a
    `linux/amd64` colima would ship the same silent failure with a green deploy.
+
+**A host-only mac needs no docker.** `WORKER_MODES` is what decides it, and
+`build-worker.sh` reads it with the daemon's own rule (`serves_container` in
+`crates/worker/src/daemon.rs`: names `container`, or names nothing at all). A
+node that names only `host` gets **no** socket check, **no** agent images, **no**
+container-platform probe and **no** `chuggernaut-channel` binary — because
+`local_backend` returns its host backend before it ever opens a docker endpoint,
+a host job type cannot declare an `image:`, and the channel binary is injected
+into *agent* containers only (`Core::channel_mcp`), while host mode serves
+`work.type: command` alone. On Darwin the daemon is compiled natively, so
+nothing is left that needs docker and **the worker image is skipped too**.
+
+Two consequences worth knowing before you convert one:
+
+- **The daemon logs one warning at boot** — `channel binary unavailable` — and
+  carries an empty artifact map. That is the correct state: only a
+  `FileSource::LocalArtifact` launch reads it, and a command-only node never
+  makes one.
+- **On Linux the worker image is still built**, because #440 D6 holds there and
+  that image is the only place a Linux node's daemon binary comes from. So
+  "needs no docker at all" is a **Darwin** property; a host-only Linux node
+  still needs a docker to build and extract from.
+
+The host guard set is unchanged: `WORKER_SLOTS=1` and `WORKER_SLOTS_MAX=1` node
+-wide (#309 §2 option (iii)), a creatable `WORKER_HOST_ROOT`, and the
+supervision probe. Converting a node is an operator step — declare
+`WORKER_MODES_<node>=host` in `chuggernaut.env` and re-run the deploy; nothing
+in this repo converts one for you.
+
+**Still open: the refresh disk pre-flight on a *container-capable* mac.**
+`worker-refresh.sh`'s floor is measured on `WORKER_REFRESH_DISK_PATH`, default
+`/` — which was the docker filesystem while the daemon was a container, and is
+the boot volume now that it is native. dev-air measured **7.2GB free on `/`
+against 76.3GB free inside colima**, so the guard refused a refresh
+(deploy #486) over space the build would never have touched, and the knob's documented
+remedy does not apply because that filesystem is not reachable from the mac at
+all. A host-only mac sidesteps this — it runs no build to protect, so the
+pre-flight is skipped outright — but a dual-mode or container mac still meets
+it. Workaround: declare `WORKER_REFRESH_DISK_FREE_GB_MIN_<node>=0`, which turns
+the guard off for that node alone. The argument for leaving it is in
+`worker-refresh.sh` beside `DISK_PATH`.
 
 **And a conversion is one-way.** #440 slice 6 deleted the `docker run` path, so
 there is no scripted way back to a container daemon: a conversion that fails
