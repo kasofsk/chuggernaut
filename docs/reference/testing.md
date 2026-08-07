@@ -293,7 +293,7 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-21 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
+23 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
 a throwaway repo against stubbed
 `cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
@@ -308,6 +308,12 @@ these suites cover.
 - **Discovery is `git ls-files '*.test.sh'`** — a new suite is picked up with no
   list to update, and tracked-files-only keeps `node_modules/` and `target/` out
   by construction. A glob that matches nothing **fails** the gate.
+- **A suite beside `nix/chug-node/` still evaluates no nix.**
+  `chug-worker-unit.test.sh` (#440 slice 7) compares the worker daemon's unit
+  template against the unit `deploy/prod/build-worker.sh` renders, and the
+  module's option defaults against that script's — text over text, in ~0.1s.
+  Nothing in CI runs `nixos-rebuild` (#372 §2.3), so a green run says the two
+  renderings agree and says nothing about whether the module evaluates.
 - **Bounded**: 60s per suite (`CHUG_CI_SUITE_TIMEOUT_SECS`), 120s total
   (`CHUG_CI_SUITES_BUDGET_SECS`); over either is a loud failure, because an
   unconditional stage's cost is every job's cost. Measured 2026-08-02 on the

@@ -25,11 +25,16 @@ have missed.
 ## 1. What it declares, and what it deliberately leaves alone
 
 `chug-node` is **host preparation, not a service** — hence `chug.node.*` rather
-than `services.chug-node.*`. It owns no lifecycle. What it contributes and
-asserts (NixOS, [`nix/chug-node/nixos.nix`](../../../nix/chug-node/nixos.nix)):
+than `services.chug-node.*`. Since design
+[#440](../../design/440-native-worker-daemon.md) D2 it owns **one** lifecycle and
+no more — the native worker daemon's systemd unit, **off by default** (§4a) — so
+the namespace argument stands unchanged and adopting the module still starts
+nothing. What it contributes and asserts (NixOS,
+[`nix/chug-node/nixos.nix`](../../../nix/chug-node/nixos.nix)):
 
 | It sets | So that | And asserts the *merged* value, because |
 | --- | --- | --- |
+| `systemd.units."chug-worker.service"`, only when `chug.node.daemon.enable` | the native daemon comes back from a reboot, under one supervisor | its `ExecStart` and `EnvironmentFile` paths are asserted absolute — systemd rejects a relative one at load, so the node would come back with a unit that never ran. The unit names *where* the environment file is and never a `WORKER_*` value: lifecycle here, run spec in the deploy's file (#372 §8 R3, §4a) |
 | `virtualisation.docker.enable` | the daemon and every job container have a socket | a host that turns it off is not a node |
 | `virtualisation.docker.enableOnBoot` | `--restart=always` containers come back from a reboot | socket activation makes docker *available*, not *running* — the node comes back dead and silent |
 | `daemon.settings.live-restore` | a dockerd restart does not kill in-flight tasks | the cost is real and worth a build failure: live-restore is incompatible with docker swarm |
@@ -42,11 +47,17 @@ Two different merge mechanisms, one outcome. The three scalar settings
 definition simply wins; the three list contributions (`autoPrune.flags`,
 `extraGroups`, the tmpfiles rule) **merge** with yours rather than either one
 winning — which is what §5's coupled edit is about. Either way a stock host
-needs to know none of it.
+needs to know none of it. The unit row is **neither** mechanism: it is a whole
+unit declared by name, so a host that defines
+`systemd.units."chug-worker.service"` itself gets an eval conflict rather than a
+merge — the loud answer. A drop-in under
+`/etc/systemd/system/chug-worker.service.d/` is the quiet one, and yours.
 
 Every row but the cache directory is *also* asserted, and an assertion reads the
 final merged `config` — so `mkForce` can only turn a silent breakage into a
-`nixos-rebuild build` failure that names the reason. The cache directory is
+`nixos-rebuild build` failure that names the reason. The unit's assertion reads
+its own options instead, because a conflicting *definition* of it is an eval
+error before any assertion gets to run. The cache directory is
 created and not asserted on purpose: nothing about its *contents* is a
 correctness condition — spec §3.1 makes an empty or cold cache always safe, so
 there is nothing for an assertion to protect (design #372 §5 A6). Its
@@ -63,10 +74,10 @@ the VM does not share resolves *inside the VM*, silently, as an empty directory 
 and that `darwin.dockerBootAgent`, when set to a name, names a `launchd` entry
 that exists (§4).
 
-**What it does not touch, on purpose:** the worker daemon, its unit or launchd
-agent, its environment file, and the node's slot count — bringing the unit into
-`chug.node` is design [#440](../../design/440-native-worker-daemon.md) slice 7,
-still Proposed. Adopting the module changes no daemon and no capacity. `WORKER_*` still comes from
+**What it does not touch, on purpose:** the daemon's environment file, its
+credentials and the node's slot count. Adopting the module still changes no
+daemon and no capacity — the one lifecycle it now declares is **off by
+default** (§4a). `WORKER_*` still comes from
 `deploy/prod/build-worker.sh`, which writes it into the node's environment file
 the supervisor loads on every start (#440 D6/D7); a self-refresh copies nothing
 forward. Capacity
@@ -185,6 +196,78 @@ daemon left to honour it.
 
 `cacheDir = null` is legal everywhere and leaves caching off, which is always
 safe.
+
+---
+
+## 4a. The worker daemon's unit — opt-in, and NixOS only
+
+Since design [#440](../../design/440-native-worker-daemon.md) D2 the daemon is a
+native process rather than a container, and the module declares the systemd unit
+that supervises it. **It is off by default and adopting the module starts
+nothing** — turning it on is a separate, deliberate edit:
+
+```nix
+chug.node.daemon.enable = true;      # everything else has a default
+```
+
+The three knobs, all with the deploy's own defaults
+([`nix/chug-node/options.nix`](../../../nix/chug-node/options.nix)):
+`daemon.binary` (`/usr/local/bin/chuggernaut`), `daemon.environmentFile`
+(`/etc/chuggernaut/worker.env`) and `daemon.path` (the unit's `PATH`, which
+names `/run/current-system/sw/bin` first because the daemon shells out to `git`,
+`ssh` and `docker`).
+
+**What the module declares and what it must not.** The unit is the *machine
+fact* — the binary path, `User=root`, `Restart=always`, which environment file
+to read. The **run spec** is the platform's, in that environment file, and no
+`WORKER_*` value is ever a nix option: that split is what answers
+[design #372](../../design/372-chug-node-modules.md) §8's R3 rather than
+contradicting it, and the module's own header argues all four of §8's reasons.
+If the two halves name different files the unit **fails to start** saying which
+file it could not load — a split has to fail loudly, and this one does.
+
+**Order matters, and on NixOS there is one seam.** `/etc/systemd/system` is a
+read-only symlink into the store, so `deploy/prod/build-worker.sh` — which
+installs the binary, the environment file and its own copy of the unit — refuses
+that node with the live daemon untouched. On a node whose configuration declares
+the unit:
+
+1. Declare `daemon.enable = true`, build, drain, switch (§6). Between this step
+   and the next the unit exists with nothing to run and `Restart=always` loops
+   it; that is loud and bounded, not damage.
+2. Give the deploy somewhere to put its copy —
+   `WORKER_UNIT_DIR_<node>=/run/systemd/system` in `deploy/prod/chuggernaut.env` <!-- runtime -->
+   on the Mini — and run `build-worker.sh` against the node. systemd loads
+   `/etc/systemd/system` **ahead of** `/run/systemd/system`, so the
+   configuration's unit is the one that runs and the deploy's copy is outranked
+   and discarded at the next boot. Do this only once the module declares the
+   unit: without it, a `/run` unit is a daemon that disappears at the next power
+   cycle, which is why the script refuses rather than falling back there itself.
+3. After that the node is on the self-refresh path and **no unit is written
+   again** — the swap installs a binary and asks the supervisor to restart
+   (#440 D6).
+
+Verify: `systemctl cat chug-worker.service` (the text should be the module's),
+`systemctl show -p FragmentPath chug-worker.service` (under `/etc`), and
+`systemctl is-active chug-worker.service`.
+
+**darwin declares no agent, and asserts that it does not.** Setting
+`chug.node.daemon.enable` on a mac fails `darwin-rebuild build` naming
+[`deploy/prod/install-worker-launchd.sh`](../../../deploy/prod/install-worker-launchd.sh),
+the opt-in installer that renders the GUI-domain agent from
+`deploy/prod/launchd-worker/com.chuggernaut.worker.plist.template`. That
+template is deliberately outside `deploy/prod/launchd/`, whose glob
+`install-launchd.sh` installs wholesale on the Mini, and the installer refuses a
+mac that runs the dispatcher or api agent. A mac's own configuration could
+declare `launchd.user.agents` from the same template instead — **secondhand**:
+no `macos-runner` configuration is checked out in this repo, so nothing here
+verifies that shape.
+
+**None of this is evaluated by Chuggernaut's CI** (§1). What CI does run is
+`nix/chug-node/chug-worker-unit.test.sh`, which compares the unit template and
+the module's defaults against `build-worker.sh`'s — text over text. A green
+Chuggernaut job means the two renderings agree; **your `nixos-rebuild build` is
+still the only thing that has ever evaluated the module.**
 
 ---
 
@@ -360,6 +443,9 @@ unverified — including the `chug.node` block you just added.
 | `chug.node: chug.node.darwin.dockerBootAgent names "…", which is not a launchd entry` | the agent was renamed or removed | point it at the current entry, or use `"external"` |
 | a warning that nothing declares the runtime starts at boot | `dockerBootAgent` is unset — the default | set it, or set `"external"` to record the decision with an author and a date |
 | `chug.node: docker did not answer for <user>` on every darwin switch | the activation probe runs as `chug.node.user` through a login shell, because a mac's runtime is user-scoped | the VM is down, `docker` is not on that user's `PATH`, or activation could not `sudo -n`. All three are operational states, which is why this warns rather than fails |
+| `chug.node: chug.node.daemon.enable is a NixOS option — it declares a systemd unit, and this is darwin` | the daemon knobs are Linux-only | install the macOS agent with `deploy/prod/install-worker-launchd.sh` (§4a) |
+| `chug-worker.service` loops on `Restart=always`, journal says it cannot load the environment file | the unit is declared and the deploy has not run yet, or the two halves name different files | run `build-worker.sh` against the node, or point `daemon.environmentFile` and `WORKER_ENV_FILE_<node>` at one path (§4a) |
+| `build-worker: … has no usable systemd unit directory at '/etc/systemd/system'` | NixOS: the deploy has nowhere to write its own copy of the unit | declare the unit (§4a) and set `WORKER_UNIT_DIR_<node>=/run/systemd/system` |
 | the switch "worked" but nothing changed (darwin) | the two profile pointers disagree | §8 |
 | running jobs died during a switch | that switch restarted dockerd without live-restore active — the adopting switch, or a reboot | drain next time ([`worker-capacity.md`](worker-capacity.md) §4.1) |
 
@@ -370,7 +456,8 @@ unverified — including the `chug.node` block you just added.
 - [design #372](../../design/372-chug-node-modules.md) — §5 (the assertion set:
   A1/A1b the prune filter, A4 live-restore, A7 the VM boundary, A8 boot
   persistence), §6 (drain), §7 (what the module must not reach into), §8 (why it
-  must not declare the container).
+  must not declare the container — still true of the container, amended for a
+  unit over a binary by [#440](../../design/440-native-worker-daemon.md) D2).
 - [`worker-capacity.md`](worker-capacity.md) §4.1 — drain before rebuild, and
   why the adopting switch is the expensive one.
 - [`worker-kvm.md`](worker-kvm.md) — the KVM/Android half of a node's
@@ -381,6 +468,7 @@ unverified — including the `chug.node` block you just added.
 - [`docs/spec.md`](../../spec.md) §3.1 — normative: worker nodes and their node-local
   properties, including the cache directory's ownership.
 - [`deploy/prod/README.md`](../../../deploy/prod/README.md) §6 — provisioning a
-  worker node's daemon: its systemd unit or launchd agent and the environment
-  file carrying its run spec, which this module deliberately does not declare
-  (until design [#440](../../design/440-native-worker-daemon.md) slice 7).
+  worker node's daemon: the binary, the credentials and the environment file
+  carrying its run spec. Since design
+  [#440](../../design/440-native-worker-daemon.md) slice 7 the Linux *unit* may
+  instead be this module's (§4a); the run spec never is.

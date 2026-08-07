@@ -70,6 +70,19 @@ in
   config = mkIf cfg.enable {
     assertions = [
       {
+        assertion = !cfg.daemon.enable;
+        message = ''
+          chug.node: chug.node.daemon.enable is a NixOS option — it declares a
+          systemd unit, and this is darwin. The macOS daemon is a launchd agent
+          in the login user's GUI domain (design #440 D2), installed opt-in by
+          deploy/prod/install-worker-launchd.sh from a template no glob reaches;
+          a mac's own configuration may declare launchd.user.agents from that
+          same template instead. Nothing in this repo can verify a macos-runner
+          configuration, so this module declares no agent rather than a
+          plausible one.
+        '';
+      }
+      {
         assertion = cfg.cacheDir == null || lib.any underSharedPath cfg.darwin.vmSharedPaths;
         message = ''
           chug.node: cacheDir ${cacheDir} is not under any of

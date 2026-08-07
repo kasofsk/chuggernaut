@@ -1,0 +1,21 @@
+# The worker daemon's systemd unit — the MACHINE FACT half of design #440 D2's
+# split. Substituted by nix/chug-node/nixos.nix; the same shape (and the same
+# defaults) deploy/prod/build-worker.sh renders, pinned by
+# nix/chug-node/chug-worker-unit.test.sh. It carries NO run spec: every WORKER_*
+# value lives in the environment file below, which the platform owns.
+[Unit]
+Description=Chuggernaut worker daemon (@NODE@)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=@ENV_FILE@
+Environment=PATH=@PATH@
+ExecStart=@BINARY@ worker
+User=root
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

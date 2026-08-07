@@ -93,7 +93,7 @@ the absence of a workflow file.
   ~30ms for the whole repo, so it is unconditional) — `.chug/tasks/check-comments.sh`,
   the comment lint, `.chug/tasks/check-doc-facts.sh`, the doc-fact gate,
   `.chug/tasks/doc-staleness.sh`, the staleness ledger, and
-  since #385 **the repo's 21 `*.test.sh` shell suites**.
+  since #385 **the repo's 23 `*.test.sh` shell suites**.
   Any clone fails the gate.
 - **A doc's claims about the tree are gated on every job, whole-tree, as an
   error.** `.chug/tasks/check-doc-facts.sh` resolves every backticked path claim

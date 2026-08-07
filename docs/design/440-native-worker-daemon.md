@@ -1,7 +1,16 @@
 # Design — the natively-supervised worker daemon
 
-Status: PROPOSED — the prerequisite #309 P0 named and left unowned. Slices 1–6
-and 8 have landed — 3 as
+Status: IMPLEMENTED — all eight slices landed, and **no node runs a native daemon**: nothing was applied, and `runtime.mode: host` is still refused (#401, #309 P1).
+
+`IMPLEMENTED` is a claim about the slices and nothing more
+([`docs/reference/docs.md`](../reference/docs.md)), and it is worth saying what it does
+not claim. Every slice is in the tree; the daemon is buildable and supervisable
+natively on both platforms; and the fleet is exactly where it was — two nodes
+still running the containerized daemon, no `WORKER_MODES` naming `host`, and the
+`runtime.mode: host` refusal untouched. The last slice's own half is the sharpest
+case of this: `nix/chug-node/` declares the unit, **nothing in this repo's CI
+evaluates that module** (#372 §2.3), and no node has ever been given it. The
+slices landed as — 3 as
 [the refusal at both checks](#correction-2026-08-06--slice-3-as-landed-job-460),
 8 as
 [the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470),
@@ -9,8 +18,10 @@ and 8 have landed — 3 as
 that **no node has yet been given**, 5 as
 [a root-owned directory and four refusals](#correction-2026-08-06--slice-5-as-landed-job-472)
 over it, 6 as
-[install-and-restart, with the detached swapper and every carry-forward deleted](#correction-2026-08-06--slice-6-as-landed-job-473)
-— and 7 has not started.
+[install-and-restart, with the detached swapper and every carry-forward deleted](#correction-2026-08-06--slice-6-as-landed-job-473),
+and 7 as
+[a shared unit template, an amended charter and an installer no glob reaches](#correction-2026-08-07--slice-7-as-landed-job-475)
+— the nix half of which is **unevaluated by construction**.
 [D3](#decisions) and [D8](#decisions) are **both
 proven on Linux, through the shipped code path**: on `gumbo-nuc-0` (NixOS,
 **systemd 260 (260.2)**, cgroup v2) on 2026-08-06, all thirteen tests in
@@ -31,8 +42,13 @@ source and this run confirms — see
 
 **Two qualifiers travel with that result and neither is settled by it.** Every
 Linux run needed `XDG_RUNTIME_DIR=/run/user/1000` set in the invoking
-environment; whether a daemon under a supervisor has one is
-[slice 7](#slices)'s provisioning question. And the defect the flag fixes is
+environment, because every one of them ran unprivileged and an unprivileged
+daemon can only create a `systemd --user` scope. [Slice 7](#slices) answers that
+by construction rather than by measurement: the unit it declares runs as `root`,
+whose scopes are **system** scopes on a bus at a fixed socket path, so the
+daemon borrows nothing from its environment — read off `scope_manager` and
+`borrowed_bus` in `crates/container/src/host.rs`, on a node that does not exist.
+And the defect the flag fixes is
 **systemd-version dependent**: v258 turned `--expand-environment=` on by default
 for `--scope`, so a client below v258 never rewrote a task's argv and the flag
 is a no-op on v254–v257 — and below v254 an unknown option, which makes the node
@@ -106,7 +122,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | **Landed** (job #469), and **no node has been converted** — the script changes, nothing was applied. Three things the slice line does not mention: the guard keeps a `docker inspect` path *for the conversion itself*, the nix toolchain-shape guard was **ported rather than deleted**, and two knobs were added the design did not name — see [the correction](#correction-2026-08-06--slice-4-as-landed-job-469) |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | **Landed** (job #472), on **Linux only** and with the migration left to the operator's hands — two things the slice line does not mention, plus a third: the node-local *artifacts* had already moved in slice 4, so what this changed is the credentials and the guard over them — see [the correction](#correction-2026-08-06--slice-5-as-landed-job-472) |
 | 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | **Landed** (job #473), and **no node has been converted**, so every un-converted node's self-refresh now REFUSES — the cost is named, not hidden. What the slice line does not mention: install is by rename (ETXTBSY, and this script truncating itself) and escalates to `sudo -n`, refusals guard against a second daemon on one node, and §3.1's host-task-across-a-unit-restart case becomes true for the first time — see [the correction](#correction-2026-08-06--slice-6-as-landed-job-473) |
-| 7 | `code` — `nix/chug-node/` gains the unit and the `chug.node` charter amendment; the macOS plist template and its opt-in installer | `chug.node` option surface | 4, 6 | Proposed |
+| 7 | `code` — `nix/chug-node/` gains the unit and the `chug.node` charter amendment; the macOS plist template and its opt-in installer | `chug.node` option surface | 4, 6 | **Landed** (job #475), **unevaluated by construction** on the nix half and with nothing applied to any node. Three things the slice line does not mention: the unit is a **shared template** rather than a second rendering, so the two halves cannot drift textually; the macOS installer is opt-in three times over and refuses a control-plane mac; and a NixOS node that declares the unit leaves `build-worker.sh` a seam that this slice documents rather than closes — see [the correction](#correction-2026-08-07--slice-7-as-landed-job-475) |
 | 8 | `docs` — `docs/spec.md` §3.1's drain guarantee narrowed to say what survives a *native* daemon restart and what does not | spec §3.1 | 2, 3 | **Landed** (job #470) — four cases, the reboot residue explicit, and both live qualifiers stated; see [the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470) |
 
 **The ordering between 2–3 and 4–6 is load-bearing**, not a preference: flipping
@@ -2663,3 +2679,202 @@ script that re-adds a `docker run -d --name chug-worker-swap` line, which it
 catches. **Nothing was run against a node**: no refresh, no restart, no
 `chuggernaut.env` edit. The first real execution of this path is a deploy leg on
 a node an operator has converted, and no node has been.
+
+---
+
+## Correction, 2026-08-07 — slice 7 as landed (job #475)
+
+Appended by job #475, which implemented [slice 7](#slices) and closed the
+design. Nothing above is edited except that slice's State cell, the `Status:`
+line and the head's `XDG_RUNTIME_DIR` qualifier. **No node was touched, and no
+node has ever run the unit this slice declares.**
+
+### The honest limit, first, because a green job does not carry it
+
+**Nothing in this repo's CI evaluates `nix/chug-node/`.** [#372](./372-chug-node-modules.md)
+§2.3 says so, the [test-placement note](#slices) above says slice 7 does not
+change that, and it did not: there is no nix stage in `.chug/tasks/ci.sh`, no
+agent image carries `nix`, and a `nix/`-only diff runs neither the cargo stage
+nor the web one. So the nix half of this slice is **unverified by construction**
+— not "verified by tests that happened to pass", and not "unverified because
+nobody wrote a test". The only thing that has ever evaluated the module is a
+consuming host repo's `nixos-rebuild build`, and no such repo has been pointed
+at this branch. That is exactly [#415](./415-knowledge-architecture.md) M7's
+class — a gate that did not run reading as a gate that passed — so it is stated
+in the module's own header, in the adoption runbook, in
+[`docs/reference/crates.md`](../reference/crates.md), and in the commit message.
+
+What CI *does* run is `nix/chug-node/chug-worker-unit.test.sh`, and its reach is
+narrow on purpose: it is **text over text**. It proves the unit template and
+`deploy/prod/build-worker.sh` render the same unit and that the module's option
+defaults are that script's defaults. It cannot tell you whether the nix
+evaluates, whether `systemd.units."chug-worker.service"` is spelled the way
+nixpkgs expects, or whether the substituted text loads on a machine.
+
+The macOS half is different in kind and the difference is worth naming. It can
+be reasoned about against `deploy/prod/install-launchd.sh`, which exists and
+works on the Mini today:
+
+| Checked against `install-launchd.sh` | Not checked, and why |
+| --- | --- |
+| the domain (`gui/$(id -u)`), `bootout`-then-`bootstrap`, `plutil -lint` before loading, `@…@` placeholders substituted by `sed`, the plist landing in `$HOME/Library/LaunchAgents` | whether `launchctl bootstrap` accepts this plist on a real mac — `launchctl` and `plutil` are stubbed in the suite, and no mac has run the installer |
+| the agent's shape, byte-for-byte against the plist `build-worker.sh` renders (the suite diffs them) | whether the daemon it launches comes up: that needs a node with a run spec, a credential and a binary, and there is none |
+
+### One shape, and it is one file
+
+The brief's preference was a shared template over two renderings, and that is
+what landed: `nix/chug-node/chug-worker.service.in` is the unit, with `@NODE@`,
+`@ENV_FILE@`, `@PATH@` and `@BINARY@` substituted by `builtins.replaceStrings`
+in `nixos.nix`. `systemd.units."chug-worker.service".text` rather than
+`systemd.services.chug-worker` for exactly that reason — the text *is* the
+artifact, so there is no attribute-set-to-unit-file translation for a reader to
+audit.
+
+**`build-worker.sh` was not touched**, which is why the sharing is one-directional:
+the script keeps its own heredoc, and slices 4 and 6 stay byte-identical and
+verified. What keeps the two in step is mechanical rather than editorial —
+`chug-worker-unit.test.sh` extracts the unit out of the script, renders the
+template with the script's own variable names left unexpanded, and **diffs
+them**; then reads the script's `WORKER_ENV_FILE`, `WORKER_PATH` and `BIN_DIR`
+defaults and compares each against the matching `chug.node.daemon.*` default. A
+divergence in shape or in a default fails a normal Chuggernaut job. Each of the
+three was checked against a mutated tree before it was trusted.
+
+Two things it deliberately does not equalize:
+
+- **The `Description=` parenthetical.** The script substitutes the *fleet node
+  name*; nix substitutes `config.networking.hostName`. The fleet name is run
+  spec — it is `WORKER_NODE` in the environment file — and putting it in a nix
+  option would be #372 §8's R3 reintroduced for a human-readable string. The
+  diff compares the script's `$NODE` against the template's `@NODE@`, so the
+  shape is pinned and the value is allowed to differ.
+- **`wantedBy`.** The unit text carries `[Install] WantedBy=multi-user.target`
+  because the script's does, but NixOS makes its own enablement symlinks and
+  never runs `systemctl enable` over `/etc/systemd/system` — so the module sets
+  `wantedBy` as an attribute too, and the suite asserts it. Without that the node
+  would hold a unit that exists and never starts at boot.
+
+### The charter, amended against #372 §8's four reasons
+
+In `nix/chug-node/options.nix`, where an operator editing the module meets it.
+R1 and R2 dissolve (there is no `docker rm -f` for a supervisor to read as a
+crash, and `--restart=always` is gone); R4 dissolves for its own reason (a unit
+over a binary has no tag to be missing, so §8's registry precondition is never
+triggered, and this design still does not propose that move); **R3 survives and
+is answered by the split** — nix owns the lifecycle, the platform's environment
+file owns the run spec, and no `WORKER_*` value is a nix option.
+
+The split's failure mode is named rather than assumed: if the module's
+`environmentFile` and the deploy's `WORKER_ENV_FILE_<node>` name different
+files, the unit **fails to start** saying which file it could not load. The
+module also warns at build time whenever `environmentFile` is not the deploy's
+default. That is the answer to the [risk list](#risks-and-open-questions)'s
+"splits drift" — the drift is loud on both sides.
+
+**The option surface is three knobs and an `enable`, not the four
+[§2](#linux-nixos) sketched.** `chug.node.daemon.{enable,binary,environmentFile,path}`
+landed; "whether the node serves host mode at all" did **not**, and refusing it
+is the same argument as R3. `WORKER_MODES` is run spec: it is read from the
+environment file by `crates/worker/src/config.rs`, the daemon refuses to
+advertise `host` when the node cannot create a scope, and a second declaration
+in nix could only be a copy that a reboot resurrects. #309 P1's
+`runtime.mode: host` refusal is untouched, and nothing here enables `host`
+anywhere.
+
+### The provisioning question, answered by construction
+
+The head has carried an open question since [job #451](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451):
+every Linux proof needed `XDG_RUNTIME_DIR` in the invoking environment, and
+whether a daemon under a supervisor gets one was slice 7's. The answer is that
+it does not need one. `scope_manager()` picks `System` for euid 0 and
+`borrowed_bus` returns an empty map for a system scope — the system bus is a
+fixed socket path — so a `User=root` unit borrows nothing. `loginctl
+enable-linger` and `XDG_RUNTIME_DIR=/run/user/$UID` are an **unprivileged**
+daemon's provisioning, and this module declares no way to run one. Read off
+`crates/container/src/host.rs`; **not measured**, because measuring it needs a
+node running the unit.
+
+### The macOS half, and the hazard it refuses to create
+
+`deploy/prod/launchd-worker/com.chuggernaut.worker.plist.template` plus
+`deploy/prod/install-worker-launchd.sh`. Job #467 recorded the hazard —
+`install-launchd.sh` globs `deploy/prod/launchd/*.plist.template` and installs
+what it finds, so a worker template dropped there arrives on the **Mini**, whose
+own colima node sits at 0 slots precisely so heavy builds cannot starve the
+control plane. Three independent locks, each asserted by
+`deploy/prod/install-worker-launchd.test.sh`:
+
+1. the template is in a **different directory**, which that glob cannot reach;
+2. **nothing calls the installer** — the suite greps every tracked `*.sh`,
+   `*.yaml` and hook for its name and fails if anything does;
+3. the installer **refuses a mac that runs the dispatcher or api agent**,
+   checking both the plist on disk and `launchctl print`, and names
+   `CHUG_WORKER_ON_CONTROL_PLANE=1` as the deliberate override.
+
+It installs a lifecycle and never a run spec, symmetrically with the nix half: a
+missing or unreadable environment file is a refusal here rather than a
+boot-loop under `KeepAlive` on the node, and so is a missing daemon binary.
+`uninstall` boots the agent out and removes the plist, leaving the environment
+file, the binary and the keys alone.
+
+It also removes a containerized `chug-worker` before bootstrapping the agent —
+announced rather than silent, because the agent claims the same `WORKER_NODE`
+and two daemons on one node name is the state `worker-refresh.sh` refuses its
+swap over (§1). That is what `build-worker.sh` does at its own bootstrap. The
+existence question is `docker inspect`'s, **not** `docker rm -f`'s exit status:
+under `--force` the CLI reports a missing container and still exits 0, so a
+status-driven removal would announce one on every node that never had one. And a
+docker that cannot be asked at all — absent, or its daemon down — is a
+**refusal** before anything is written rather than a shrug, because a stopped
+`--restart=always` container is invisible to a check that cannot run and comes
+back the moment dockerd does; `CHUG_WORKER_SKIP_DOCKER_CHECK=1` is how an
+operator asserts this mac never ran one. `build-worker.sh` can afford `|| true`
+at its own removal because it has already driven docker on that node in the same
+run; nothing in the installer has.
+
+**Not** a nix-darwin declaration, and `darwin.nix` now *asserts*
+`chug.node.daemon.enable` is false with a message pointing at the installer.
+Two reasons: the option declares a systemd unit, which darwin has none of; and
+the plist's home in the operator's `macos-runner` configuration remains
+**secondhand** — no such configuration is checked out here, so the module
+declares no agent rather than a plausible one. A mac's own configuration may
+declare `launchd.user.agents` from the same template, and that claim is marked
+secondhand wherever it is made.
+
+### The seam this slice documents rather than closes
+
+On NixOS `/etc/systemd/system` is a read-only symlink into the store, so
+`build-worker.sh` — which installs the binary, the environment file *and its own
+copy of the unit* — refuses such a node before it builds anything. Declaring the
+unit in nix does not by itself make that script succeed, because the script
+still wants a writable unit directory; **it was deliberately not changed**
+(slices 4 and 6 are verified and the brief scopes them out). The documented
+sequence is in
+[the adoption runbook](../reference/runbooks/chug-node-adoption.md) §4a: declare
+and switch first, then run the deploy with
+`WORKER_UNIT_DIR_<node>=/run/systemd/system`, whose copy systemd outranks with
+the configuration's `/etc` unit and which is discarded at the next boot. After
+that the node is on the self-refresh path and no unit is written again — the
+swap installs a binary and asks the supervisor to restart (D6). The narrower
+fix, teaching `build-worker.sh` a "the node declares its own unit" mode, is a
+follow-up and is named here so it is not rediscovered.
+
+### Verification — stated, and what was not run
+
+- `sh nix/chug-node/chug-worker-unit.test.sh` — 5 cases, passing. Each of the
+  three drift checks was also run against a mutated tree (a changed
+  `RestartSec`, a renamed placeholder, a changed option default) and fails
+  naming the divergence.
+- `sh deploy/prod/install-worker-launchd.test.sh` — 6 cases, passing, driving
+  the real installer against stubbed `uname`, `launchctl`, `plutil` and `docker`
+  in a throwaway `$HOME`; the docker stub carries real docker's shape, where
+  `rm --force` exits 0 whether or not the container was there, and the
+  docker-less case runs against a `PATH` built of symlinks with no docker on it.
+  Also checked against mutants: a template moved into the globbed directory, a
+  caller added to another deploy script, `docker rm -f`'s status used as an
+  existence oracle, and the `docker info` gate deleted — all four are caught.
+- **Not run, and it cannot be from here:** any nix evaluation, any `launchctl`
+  on a real mac, any node. `nix` is not on this image and neither is macOS. The
+  first real execution of either half is an operator on a node they can reach,
+  which the [risk list](#risks-and-open-questions) already says should not be a
+  prod node.

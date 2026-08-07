@@ -30,8 +30,16 @@ both prod nodes were adopted on 2026-08-03 (secondhand — the host repo is not
 checked out here), and the runbooks record what that adoption taught. Slice 1
 landed **without** the skipping `nix flake check` stage it also asked for:
 `.chug/tasks/ci.sh` has no nix stage, so nothing in this repo's CI evaluates
-`nix/chug-node/` — a gap [#440](440-native-worker-daemon.md) slice 7 inherits
-and names.
+`nix/chug-node/` — a gap [#440](440-native-worker-daemon.md) slice 7 inherited,
+named and did **not** close.
+
+**§8 is amended, and only for the object it never considered.** The module still
+declares no `chug-worker` *container*; since [#440](440-native-worker-daemon.md)
+D2 (job #475) it declares the systemd unit over the installed **binary**, opt-in
+behind `chug.node.daemon.enable` and off by default, with §8's four reasons
+answered one at a time — see
+[the correction](#correction--2026-08-07-job-475-8-amended-for-a-unit-over-a-binary).
+§6's refusal of a drain hook and §7's clocks are untouched.
 
 The rows below are [10. Implementation slices](#10-implementation-slices)'s four
 numbered items with their states; the section itself is prose and stays that
@@ -1270,3 +1278,48 @@ document's subject.** A publicly readable mirror force-pushed every five minutes
 means every merge to `main` is a publication; the disclosure boundary that
 follows is recorded in [`infra/README.md`](../../infra/README.md), which is
 where a job adding a file — rather than a host consuming the flake — needs it.
+
+---
+
+## Correction — 2026-08-07, job #475 (§8 amended for a unit over a *binary*)
+
+Appended by the job that implemented
+[#440](./440-native-worker-daemon.md) slice 7. Nothing above is edited except
+the head; §8 is append-only and stands as the argument it was.
+
+**What is unchanged:** the module still declares no `chug-worker` **container**,
+and the "when nix *should* own the container" precondition — image delivery moves
+to a registry first — is still not proposed by anything.
+
+**What changed:** the daemon stopped being a container (#440 D1/D2, slices 4–6),
+and `nix/chug-node/` now declares the systemd unit over the installed **binary**,
+opt-in behind `chug.node.daemon.enable` and off by default. §8's four reasons
+were re-read one at a time against that object, in
+[`nix/chug-node/options.nix`](../../nix/chug-node/options.nix)'s charter:
+
+- **R1** dissolves — the swap installs a binary and asks the supervisor to
+  restart, so there is no `docker rm -f` for a supervisor to read as a crash and
+  no second starter to collide with.
+- **R2** dissolves — `--restart=always` is gone with the container.
+- **R3 survives and is answered by a split**, not a denial: nix owns the
+  lifecycle, the platform's environment file owns the run spec, and no `WORKER_*`
+  value is a nix option. The failure mode of the split is a unit that refuses to
+  start naming the file it could not load.
+- **R4** dissolves for a reason R1 and R2 do not: a unit over a binary has no tag
+  to be missing and no pull policy to set, so the registry precondition is never
+  triggered.
+
+**§6's closing paragraph is the prior support**, and it reads correctly now:
+"a future `chug-node` module *would* own [the drain constraint], because on a
+host-mode node the daemon is a unit the module declares." That is this. §6's
+refusal of a **drain hook** is untouched — the unit carries no platform
+credential and no dispatcher address — and §7's three clocks still hold, because
+the module takes clock 1 (the unit) and touches no part of clock 2 (the run
+spec).
+
+**§2.3 is untouched and still the honest limit:** nothing in Chuggernaut's CI
+evaluates `nix/chug-node/`. Slice 7 added `chug-worker-unit.test.sh` beside the
+module, which CI does run, but it is text over text — the unit template against
+the one `deploy/prod/build-worker.sh` renders, and the module's defaults against
+that script's. A green job says the two renderings agree and says nothing about
+whether the nix evaluates.

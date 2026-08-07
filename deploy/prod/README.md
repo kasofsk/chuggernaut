@@ -573,8 +573,22 @@ the Mini's NATS and executes container ops against its local Docker socket —
 `com.chuggernaut.worker` launchd agent in the login user's GUI domain on
 macOS — over an environment file that carries the whole run spec (design
 [#440](../../docs/design/440-native-worker-daemon.md) D2). `build-worker.sh`
-installs all three, extracting the binary from the worker image it just built;
-job containers stay siblings on the node's docker socket, exactly as they were
+installs all three, extracting the binary from the worker image it just built.
+**A node's own configuration may own the supervision half instead**, which is
+what slice 7 added: a NixOS node declares the unit with
+`chug.node.daemon.enable` ([`nix/chug-node/`](../../nix/chug-node/), off by
+default, and the seam it opens with this script is in
+[the adoption runbook](../../docs/reference/runbooks/chug-node-adoption.md) §4a),
+and a mac that this deploy never reaches installs its agent by hand with
+[`install-worker-launchd.sh`](install-worker-launchd.sh) — opt-in, refusing the
+Mini, and removing the containerized `chug-worker` at its bootstrap exactly as
+this script does at its own, because both would otherwise leave two daemons on
+one `WORKER_NODE`. Unlike this script it has not driven docker on that node
+already, so it asks `docker inspect` whether there is one and **refuses** a
+docker it cannot ask at all rather than assuming there is none. Either way the environment file, the binary and the
+credentials stay this script's, and the run spec is never declared twice.
+
+Job containers stay siblings on the node's docker socket, exactly as they were
 when the daemon was itself a container. **Converting a node is what puts it back
 on the self-refresh path:** since
 [#440](../../docs/design/440-native-worker-daemon.md) slice 6 the swap installs

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Rendered by install-worker-launchd.sh, which is opt-in and runs on a WORKER
+     mac only. This directory is deliberately NOT deploy/prod/launchd/, whose
+     *.plist.template glob install-launchd.sh installs wholesale on the Mini
+     (design #440 §2, job #467). The same shape build-worker.sh renders — the
+     agent SOURCES the environment file the systemd unit reads, because launchd
+     has no EnvironmentFile. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.chuggernaut.worker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; . '@ENV_FILE@'; set +a; exec '@BINARY@' worker</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>@HOME@</string>
+    <key>PATH</key><string>@PATH@</string>
+  </dict>
+  <key>StandardOutPath</key><string>@LOG@</string>
+  <key>StandardErrorPath</key><string>@LOG@</string>
+</dict>
+</plist>
