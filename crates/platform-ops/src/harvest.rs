@@ -354,6 +354,17 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
+    /// The harvest asks for a **wire** path (design #322 §2): a host backend
+    /// rebases it into the task directory, and a path outside the two prefixes
+    /// is refused there rather than read off the node.
+    #[test]
+    fn the_output_archive_is_addressed_by_a_wire_path() {
+        assert!(
+            OUTPUT_PATH.starts_with(&format!("{}/", container::WIRE_WORKSPACE)),
+            "{OUTPUT_PATH} is unmappable on a host node"
+        );
+    }
+
     /// Design #362 S1's failure posture: only the size-band refusal earns the
     /// louder level and the move-it-to-a-bucket instruction. An N-1 worker that
     /// does not know `copy_file_chunk` answers with a `WorkerError::Other`

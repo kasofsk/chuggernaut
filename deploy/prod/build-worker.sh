@@ -570,6 +570,20 @@ fi
 if [ -n "${WORKER_SLOTS_MAX:-}" ]; then
   spec_line WORKER_SLOTS_MAX "$WORKER_SLOTS_MAX"
 fi
+# Where a host node keeps its per-task directories (`WORKER_HOST_ROOT`, design
+# #309 P0 / #322 W2). Same shape as WORKER_SLOTS_MAX: forwarded, per-node
+# overridable, UNSET STAYS UNSET so a node that declares nothing gets the
+# daemon's own default (`HOST_ROOT_DEFAULT`, /var/lib/chuggernaut/host-tasks).
+#
+# It was the named example of a knob this script drops (the drift comment
+# below); forwarding it is what lets a mac declare a root its LOGIN USER can
+# create. On macOS /var/lib is root-owned and `sudo` wants a password, so the
+# default is unwritable there and `HostBackend::new` — which creates the root at
+# CONSTRUCTION, at daemon boot — fails the boot outright. The refusal that
+# catches that lives with the WORKER_MODES guard below, where `host` is known.
+if [ -n "${WORKER_HOST_ROOT:-}" ]; then
+  spec_line WORKER_HOST_ROOT "$WORKER_HOST_ROOT"
+fi
 # ── the docker engine the daemon dials: only the LINE is composed here ──────
 # The value was resolved and both its refusals answered far above, beside the
 # toolchain one (nothing this script builds is needed to answer either). Only
@@ -678,6 +692,46 @@ if [ -n "$MODES" ]; then
     fi
     if [ -n "$CAP_BAD" ]; then
       echo "build-worker: WORKER_MODES='$MODES' names host, which the daemon serves only at WORKER_SLOTS=1 AND WORKER_SLOTS_MAX=1 (one host task per node — design #309 §2 option (iii), crates/worker/src/daemon.rs \`enforce_host_capacity\`), but $CAP_BAD on $NODE; REFUSING daemon restart (live daemon untouched). Declare WORKER_SLOTS_$NODE=1 and WORKER_SLOTS_MAX_$NODE=1 in deploy/prod/chuggernaut.env — this script forwards both into $ENV_FILE, so neither is added to the node by hand." >&2
+      exit 1
+    fi
+    # The host root, asked of the NODE rather than assumed. `HostBackend::new`
+    # creates it at construction and `local_backend` constructs it at daemon
+    # boot, so a root the daemon's user cannot create is not a degraded node —
+    # it is a boot failure the supervisor loops on `KeepAlive`/`Restart=always`,
+    # which is the shape every other guard here exists to prevent.
+    #
+    # Asked of the user the DAEMON runs as, which is not the same user on the
+    # two platforms and is why this probe branches where the capacity one above
+    # does not. The systemd unit this script writes sets `User=root`, so a Linux
+    # node's answer is root's: `mkdir -p` unprivileged, then `sudo -n`, exactly
+    # as WORKER_CACHE_DIR and WORKER_NIX_GCROOTS_DIR ask it — otherwise the
+    # DEFAULT root under root-owned /var/lib refuses every Linux host node,
+    # including a working one whose root root already owns at 0755. launchd runs
+    # the mac agent in the login user's GUI domain, so there the login user IS
+    # the daemon's user and its own answer is the whole answer.
+    #
+    # Measured on gumbo-air-0 (2026-08-07): `mkdir -p /var/lib/chuggernaut` is
+    # `Permission denied` for the login user and `/` itself is read-only, so the
+    # default is the failing case on a mac and the refusal has to name the fix —
+    # and the fix differs by platform, so the message does too. Telling a Linux
+    # operator to point the root daemon at a login-user-owned tree would move
+    # credentials into the home of the user that is in the `docker` group, which
+    # is the placement design #440 D5 exists to prevent.
+    #
+    # The probe creates it, which is the same act the daemon would perform; a
+    # root that already exists and is writable by that user passes untouched.
+    HOST_ROOT_EFF="${WORKER_HOST_ROOT:-/var/lib/chuggernaut/host-tasks}"
+    if [ "$NODE_OS" = Darwin ]; then
+      HOST_ROOT_PROBE="mkdir -p '$HOST_ROOT_EFF' 2> /dev/null && [ -w '$HOST_ROOT_EFF' ]"
+      HOST_ROOT_WHO="as the login user, which is the user launchd runs the agent as"
+      HOST_ROOT_FIX="Declare WORKER_HOST_ROOT_$NODE=<a path this user owns> in deploy/prod/chuggernaut.env ON THE MINI — this script forwards it into $ENV_FILE. On a mac the default is under root-owned /var/lib and \`sudo\` wants a password a non-interactive deploy cannot give, so a host-mode mac has to declare one (design #322 W2)."
+    else
+      HOST_ROOT_PROBE="{ mkdir -p '$HOST_ROOT_EFF' 2> /dev/null || sudo -n mkdir -p '$HOST_ROOT_EFF'; } && { [ -w '$HOST_ROOT_EFF' ] || sudo -n test -w '$HOST_ROOT_EFF'; }"
+      HOST_ROOT_WHO="as the login user or via \`sudo -n\`, and the unit this script writes runs the daemon as root"
+      HOST_ROOT_FIX="Grant the login user passwordless sudo on this node, or create the root by hand (\`sudo mkdir -p $HOST_ROOT_EFF\`), or declare WORKER_HOST_ROOT_$NODE=<a path root can write> in deploy/prod/chuggernaut.env ON THE MINI — this script forwards it into $ENV_FILE. Do not point it into the login user's home: that user is in the \`docker\` group, and a host task's credential tree is what design #440 D5 keeps out of its reach."
+    fi
+    if ! ssh "$WORKER_SSH" "$HOST_ROOT_PROBE" < /dev/null; then
+      echo "build-worker: WORKER_MODES='$MODES' names host, but $WORKER_SSH cannot create or write '$HOST_ROOT_EFF' $HOST_ROOT_WHO — the daemon creates that root while constructing its host backend at boot (crates/container/src/host.rs \`HostBackend::new\`), so it would fail to start and the supervisor would loop the failure; REFUSING daemon restart (live daemon untouched). $HOST_ROOT_FIX" >&2
       exit 1
     fi
   fi
@@ -1173,8 +1227,9 @@ fi
 # The comparison is against $SPEC_ENV, not against the shell's variables, because
 # only $SPEC_ENV knows what will actually be written: a knob this script does not
 # forward (the daemon reads more WORKER_* than the composition above renders —
-# WORKER_HOST_ROOT is one) is dropped no matter what chuggernaut.env says about
-# it, and a check that read the env would call that clean. Presence decides the refusal; the VALUE comparison is informational
+# WORKER_REFRESH_SCRIPT is one; WORKER_HOST_ROOT was, until #322 W2 needed a mac
+# to declare a root its login user can create) is dropped no matter what
+# chuggernaut.env says about it, and a check that read the env would call that clean. Presence decides the refusal; the VALUE comparison is informational
 # only, so a quoted value this cannot parse costs a noisy line and never a
 # wrong verdict.
 #

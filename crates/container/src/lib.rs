@@ -573,24 +573,10 @@ impl LogTail {
 }
 
 /// Wrap a container CMD with the standard workspace bootstrap (spec §4.1):
-/// clone the job branch to /workspace, cd, exec the original command.
-/// Images must provide `git` and an SSH client; they never clone themselves.
-///
-/// `--single-branch` skips every other in-flight `job/*` and `merge-gate/*`
-/// ref; the container only ever works on its own branch, and all merging is
-/// server-side. This is the big one — without it each task also drags in every
-/// concurrent job's unmerged work.
-///
-/// `--filter=blob:none` skips historical blobs while keeping the commit graph,
-/// so `git log`/`git blame` still work as agent context.
-///
-/// Both depend on server-side setup, and both fail *silently-ish* without it:
-/// - `uploadpack.allowFilter` on the bare repo (`RepoManager::create_project`),
-///   else the filter is ignored and the full history ships anyway.
-/// - git protocol **v2** through the SSH front (`AcceptEnv GIT_PROTOCOL` in
-///   sshd_config). On v0, upload-pack refuses the promisor remote's follow-up
-///   fetch for unadvertised blobs: the clone "succeeds" and checkout leaves an
-///   empty workspace. git supplies the client half itself.
+/// clone the job branch to `${CHUG_WORKSPACE:-/workspace}` ([`WORKSPACE_VAR`]),
+/// cd, exec the original command. The clone's narrowing flags, their
+/// server-side preconditions and the indirection are in
+/// `docs/implementation-notes.md`.
 pub fn bootstrap_cmd(original: &[String], runtime_env: Option<&str>) -> Vec<String> {
     let joined = original
         .iter()
@@ -602,10 +588,24 @@ pub fn bootstrap_cmd(original: &[String], runtime_env: Option<&str>) -> Vec<Stri
         "sh".into(),
         "-c".into(),
         format!(
-            "{prelude}git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace && cd /workspace && {{ git config core.hooksPath .githooks || true; }} && exec {joined}"
+            "{prelude}WS=\"${{{WORKSPACE_VAR}:-{WIRE_WORKSPACE}}}\"; git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" \"$WS\" && cd \"$WS\" && {{ git config core.hooksPath .githooks || true; }} && exec {joined}"
         ),
     ]
 }
+
+/// Where the bootstrap clones when nothing redirects it, and the first of the
+/// two prefixes a task's paths are addressed by on the wire (design #322 §2).
+/// A container backend takes it literally; [`host::HostBackend`] maps it.
+pub const WIRE_WORKSPACE: &str = "/workspace";
+
+/// The second wire prefix: injected credential files and node-local artifacts
+/// (`InjectedFile::container_path`, spec §4.1).
+pub const WIRE_CHUGGERNAUT: &str = "/chuggernaut";
+
+/// Task-side variable naming the clone destination, set by a backend that maps
+/// [`WIRE_WORKSPACE`] elsewhere (design #322 §2). One name, so the injection
+/// site and the script consuming it cannot drift.
+pub const WORKSPACE_VAR: &str = "CHUG_WORKSPACE";
 
 /// Container-side variable naming the realised environment's store path, set by
 /// the worker daemon after it realises a launch's `runtime.env` (design #373
@@ -648,6 +648,10 @@ fn shell_quote(s: &str) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The clone the bootstrap emits, so a test that wants to run the rest of
+    /// the script can stand something else in its place.
+    const CLONE: &str = "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" \"$WS\"";
 
     fn cand<'a>(name: &'a str, running: i64, free: i64, index: usize) -> PlacementCandidate<'a> {
         PlacementCandidate {
@@ -1042,12 +1046,53 @@ mod tests {
         let cmd = bootstrap_cmd(&["claude".into(), "-p".into(), "do the thing".into()], None);
         assert_eq!(cmd[0], "sh");
         assert_eq!(cmd[1], "-c");
-        assert!(cmd[2].starts_with("git clone "));
+        assert!(cmd[2].starts_with(&format!(
+            "WS=\"${{{WORKSPACE_VAR}:-{WIRE_WORKSPACE}}}\"; git clone "
+        )));
         assert!(cmd[2].ends_with("exec claude -p 'do the thing'"));
         assert!(
             cmd[2].contains("git config core.hooksPath .githooks"),
             "{}",
             cmd[2]
+        );
+    }
+
+    /// The wire path is resolved by the task's own shell (design #322 §2), and
+    /// **unset is today's behaviour**: the clone lands at [`WIRE_WORKSPACE`] and
+    /// the cwd is the same path, so no container task moves.
+    #[test]
+    fn bootstrap_clones_where_the_workspace_variable_says() {
+        let script = bootstrap_cmd(&["pwd".into()], None)[2]
+            .replace(CLONE, "printf '%s ' \"$WS\"")
+            .replace("cd \"$WS\"", "cd /");
+        let destination = |env: &str| {
+            let out = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!("{env}{script}"))
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        };
+        assert_eq!(
+            destination(""),
+            WIRE_WORKSPACE,
+            "an unset {WORKSPACE_VAR} is byte-for-byte today's clone destination"
+        );
+        assert_eq!(
+            destination(&format!(
+                "{WORKSPACE_VAR}=/var/tasks/host-7/workspace; export {WORKSPACE_VAR}; "
+            )),
+            "/var/tasks/host-7/workspace",
+            "a backend that maps the wire path redirects both the clone and the cwd"
         );
     }
 
@@ -1064,18 +1109,14 @@ mod tests {
 
         let undeclared = bootstrap_cmd(&task, None);
         assert!(
-            undeclared[2].starts_with("git clone ")
-                && !undeclared[2].contains(RUNTIME_ENV_PATH_VAR),
+            undeclared[2].starts_with("WS=") && !undeclared[2].contains(RUNTIME_ENV_PATH_VAR),
             "a job type declaring no env is bootstrapped exactly as it is today: {}",
             undeclared[2]
         );
 
         let script = cmd[2].clone();
-        let clone = "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace";
         let run = |env: &str| {
-            let body = script
-                .replace(clone, "true")
-                .replace("cd /workspace", "cd /");
+            let body = script.replace(CLONE, "true").replace("cd \"$WS\"", "cd /");
             let out = std::process::Command::new("sh")
                 .arg("-c")
                 .arg(format!("{env}{body}"))
@@ -1120,7 +1161,6 @@ mod tests {
     #[test]
     fn bootstrap_hooks_path_failure_still_execs_but_clone_failure_does_not() {
         let script = bootstrap_cmd(&["echo".into(), "started".into()], None)[2].clone();
-        let clone = "git clone --single-branch --filter=blob:none --branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace";
         let run = |s: String| {
             let out = std::process::Command::new("sh")
                 .arg("-c")
@@ -1134,14 +1174,12 @@ mod tests {
         };
 
         let hooks_fail = script
-            .replace(clone, "true")
-            .replace("cd /workspace", "cd /")
+            .replace(CLONE, "true")
+            .replace("cd \"$WS\"", "cd /")
             .replace("git config core.hooksPath .githooks", "false");
         assert_eq!(run(hooks_fail), (true, "started".into()));
 
-        let clone_fail = script
-            .replace(clone, "false")
-            .replace("cd /workspace", "cd /");
+        let clone_fail = script.replace(CLONE, "false").replace("cd \"$WS\"", "cd /");
         assert_eq!(run(clone_fail), (false, String::new()));
     }
 
@@ -1180,7 +1218,7 @@ mod tests {
         assert!(cmd[2].contains("--single-branch"), "{}", cmd[2]);
         assert!(cmd[2].contains("--filter=blob:none"), "{}", cmd[2]);
         assert!(
-            cmd[2].contains("--branch \"$JOB_BRANCH\" \"$REPO_URL\" /workspace"),
+            cmd[2].contains("--branch \"$JOB_BRANCH\" \"$REPO_URL\" \"$WS\""),
             "{}",
             cmd[2]
         );

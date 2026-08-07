@@ -890,7 +890,7 @@ the mac-side path never appears at all.
   about to compose and **refuses**, live daemon untouched, when the new run
   would drop a setting the node is running — including one this script never
   forwards (the daemon reads more `WORKER_*` than the run spec composes;
-  `WORKER_HOST_ROOT` is one). Declare it, or pass `WORKER_SPEC_DROP_OK=1` to
+  `WORKER_REFRESH_SCRIPT` is one). Declare it, or pass `WORKER_SPEC_DROP_OK=1` to
   drop it on purpose. Both are loud; neither is silent. A node that still runs
   the container daemon has no environment file yet, so the live container's
   environment is read instead — the conversion is exactly the recreate this
@@ -1010,6 +1010,23 @@ Notes:
   the deploy — live daemon untouched — when either is anything else, naming the
   one that is wrong. An unset ceiling is refused with them: the daemon defaults
   it to the node's CPU count.
+- **A host node's task root is `WORKER_HOST_ROOT`, and a mac has to declare
+  one** (design [#322](../../docs/design/322-macos-native-runtime.md) W2). The
+  daemon defaults it to `/var/lib/chuggernaut/host-tasks` and creates it while
+  constructing its host backend at boot, so a root the daemon's user cannot
+  create is a boot failure the supervisor loops — and on macOS `/var/lib` is
+  root-owned under a sealed read-only root volume, which makes the default that
+  case. `build-worker.sh` forwards it per node like every other knob (unset
+  stays unset) and refuses the deploy, live daemon untouched, when the node
+  cannot create the root it would use. It asks **the user the daemon will run
+  as**, which differs by platform: the systemd unit sets `User=root`, so a Linux
+  node is probed unprivileged and then through `sudo -n` like every other
+  directory this script provisions, while launchd runs the mac agent in the
+  login user's GUI domain, so there the login user's own answer is the whole
+  answer. The two refusals name different remedies for that reason — a Linux one
+  never sends the root daemon's credential tree into the home of the user that
+  is in the `docker` group. Every wire path a task names — `/workspace`,
+  `/chuggernaut` — is rebased under that root, one directory per task.
 - **Per-task nix GC roots are the same shape of per-node opt-in** (spec §3.1,
   [the runbook §7](../../docs/reference/runbooks/worker-kvm.md)). `WORKER_NIX_GCROOTS_DIR`
   turns them on; `build-worker.sh` provisions the directory and checks the node

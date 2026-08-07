@@ -2,8 +2,10 @@
 //! #309 P0). No Docker and no NATS — a host task is a process group and a
 //! directory, so this suite runs everywhere, including a Docker-less evaluator.
 //!
-//! Every backend here is given its own root **and its own workspace path**, so
-//! the suite never touches the machine's real `/workspace`.
+//! Every backend here is given its own root, and since #322 W2 that is the
+//! whole of it: `/workspace` and `/chuggernaut` are wire paths this backend
+//! rebases into the task directory, so the suite exercises the real wire paths
+//! without touching the machine's own.
 //!
 //! Five tests are the exception and say so on the way past: design #440 D3's
 //! transient scope needs a systemd with a cgroup-v2 hierarchy that this
@@ -42,7 +44,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use container::host::{HOST_ROOT_DEFAULT, HOST_WORKSPACE, HostBackend, ScopeManager, Supervision};
+use container::host::{
+    AGENT_CONFIG_VAR, HOST_ROOT_DEFAULT, HostBackend, ScopeManager, Supervision,
+};
 use container::{ContainerBackend, ContainerLaunchConfig, ContainerStatus, InjectedFile};
 use std::collections::HashMap;
 
@@ -61,13 +65,20 @@ fn temp_root(name: &str) -> std::path::PathBuf {
 }
 
 fn backend(root: &std::path::Path) -> HostBackend {
-    HostBackend::with_workspace(
-        "w1",
-        root.join("tasks"),
-        root.join("workspace"),
-        Supervision::ProcessGroup,
-    )
-    .unwrap()
+    HostBackend::new("w1", root.join("tasks"), Supervision::ProcessGroup).unwrap()
+}
+
+/// One task's directory, which is what every wire path a launch names is
+/// rebased into (design #322 §2).
+fn task_dir(root: &std::path::Path, id: &str) -> std::path::PathBuf {
+    root.join("tasks").join(id.split_once('/').unwrap().1)
+}
+
+/// A path's permission bits, so a credential's declared mode and the task
+/// directory's `0700` are asserted rather than assumed.
+fn mode_of(path: &std::path::Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o777
 }
 
 fn cfg(script: &str) -> ContainerLaunchConfig {
@@ -127,23 +138,21 @@ async fn settle(backend: &HostBackend, id: &String) -> i32 {
 async fn launch_inspect_logs_copy_and_remove() {
     let root = temp_root("roundtrip");
     let backend = backend(&root);
-    let workspace = root.join("workspace");
-    let marker = workspace.join("eval-result.json");
 
     let gate = root.join("release-roundtrip");
     let mut config = cfg(&format!(
-        "mkdir -p {}; echo out-line; echo err-line >&2; printf '{{\"pass\":true}}' > {}; {}; exit 3",
-        workspace.display(),
-        marker.display(),
+        "echo out-line; echo err-line >&2; printf '{{\"pass\":true}}' > \"${}/eval-result.json\"; {}; exit 3",
+        container::WORKSPACE_VAR,
         hold_until_released(&gate)
     ));
     config.files = vec![InjectedFile {
-        container_path: root.join("injected.txt").display().to_string(),
+        container_path: format!("{}/ssh/id", container::WIRE_CHUGGERNAUT),
         contents: b"injected".to_vec(),
         mode: 0o600,
         artifact: None,
     }];
     let id = backend.launch(config).await.unwrap();
+    let dir = task_dir(&root, &id);
     assert!(id.starts_with("w1/"), "ids stay {{node}}/{{task}}: {id}");
     assert_eq!(
         backend.inspect(&id).await.unwrap(),
@@ -178,24 +187,21 @@ async fn launch_inspect_logs_copy_and_remove() {
     assert!(past.data.is_empty());
     assert_eq!(past.offset, logs.len() as u64);
 
-    let harvested = backend.copy_file(&id, &marker.display().to_string()).await;
-    assert_eq!(harvested.unwrap(), Some(b"{\"pass\":true}".to_vec()));
+    let harvested = backend.copy_file(&id, "/workspace/eval-result.json").await;
     assert_eq!(
-        backend
-            .copy_file(&id, &root.join("nope").display().to_string())
-            .await
-            .unwrap(),
+        harvested.unwrap(),
+        Some(b"{\"pass\":true}".to_vec()),
+        "the dispatcher asks for the wire path and gets this task's file"
+    );
+    assert_eq!(
+        backend.copy_file(&id, "/workspace/nope").await.unwrap(),
         None,
         "an absent artifact is silence, never an error"
     );
 
     backend.remove(&id).await.unwrap();
     assert_eq!(backend.inspect(&id).await.unwrap(), None);
-    assert!(!workspace.exists(), "remove reclaims the workspace");
-    assert!(
-        !root.join("injected.txt").exists(),
-        "remove reclaims exactly the paths the launch wrote"
-    );
+    assert!(!dir.exists(), "remove reclaims the whole task directory");
     backend.remove(&id).await.unwrap();
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -262,6 +268,141 @@ async fn an_image_carrying_launch_is_refused() {
         0,
         "the refusal claimed nothing — the next host launch still runs"
     );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Design #322 §2: phase 1 serves `work.type: command` only, and the
+/// restriction is **enforced at the node** rather than documented — an agent
+/// host task would look healthy while its transcript harvest found nothing.
+#[tokio::test]
+async fn an_agent_shaped_launch_is_refused() {
+    let root = temp_root("agent-shape");
+    let backend = backend(&root);
+
+    let mut config = cfg("true");
+    config
+        .env
+        .insert(AGENT_CONFIG_VAR.to_string(), "/chuggernaut/claude".into());
+    let err = backend.launch(config).await.unwrap_err();
+    assert!(
+        matches!(err, container::BackendError::Launch(_)),
+        "agent shape on a host node is a hard refusal, never retried capacity: {err}"
+    );
+    let text = err.to_string();
+    for named in [AGENT_CONFIG_VAR, "work.type: command", "transcript_path"] {
+        assert!(text.contains(named), "the refusal names {named}: {text}");
+    }
+    assert!(
+        backend.list_managed_running().await.unwrap().is_empty(),
+        "a refused launch leaves no task behind"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// The rebase over its remaining two surfaces, end to end: the credential lands
+/// under the task's own `chuggernaut/` at its declared mode, the env **value**
+/// that names it resolves to that same file from inside the task, and both are
+/// gone the moment the command returns (design #322 §2).
+#[tokio::test]
+async fn injected_credentials_land_in_the_task_tree_and_die_with_the_command() {
+    let root = temp_root("credentials");
+    let backend = backend(&root);
+    let seen = root.join("key.seen");
+
+    let gate = root.join("release-credentials");
+    let mut config = cfg(&format!(
+        "set -- $GIT_SSH_COMMAND; cat \"$3\" > {}; {}",
+        seen.display(),
+        hold_until_released(&gate)
+    ));
+    config.env.insert(
+        "GIT_SSH_COMMAND".to_string(),
+        format!(
+            "ssh -i {0}/ssh/id -o CertificateFile={0}/ssh/id-cert.pub",
+            container::WIRE_CHUGGERNAUT
+        ),
+    );
+    config.files = vec![
+        InjectedFile {
+            container_path: format!("{}/ssh/id", container::WIRE_CHUGGERNAUT),
+            contents: b"a private key".to_vec(),
+            mode: 0o600,
+            artifact: None,
+        },
+        InjectedFile {
+            container_path: format!("{}/ssh/id-cert.pub", container::WIRE_CHUGGERNAUT),
+            contents: b"a certificate".to_vec(),
+            mode: 0o644,
+            artifact: None,
+        },
+    ];
+    let id = backend.launch(config).await.unwrap();
+    let dir = task_dir(&root, &id);
+
+    assert_eq!(mode_of(&dir), 0o700, "the task directory is private");
+    assert_eq!(mode_of(&dir.join("chuggernaut/ssh/id")), 0o600);
+    assert_eq!(mode_of(&dir.join("chuggernaut/ssh/id-cert.pub")), 0o644);
+    release(&gate);
+    assert_eq!(settle(&backend, &id).await, 0);
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap(),
+        "a private key",
+        "the rebased GIT_SSH_COMMAND names the file the launch actually wrote"
+    );
+    assert!(
+        !dir.join("chuggernaut").exists(),
+        "the credential tree dies with the command, earlier than remove (#322 §2 teardown)"
+    );
+    assert!(
+        dir.join("output.log").exists(),
+        "and the rest of the task directory outlives it, so logs still work"
+    );
+    backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// The mapping is total, so an unmapped path is a hard error naming the path on
+/// every surface it can arrive by — there is no fall-through to the node's own
+/// filesystem, which is how a `copy_file` bug becomes a write to `/`.
+#[tokio::test]
+async fn an_unmapped_path_is_refused_on_every_surface() {
+    let root = temp_root("unmapped");
+    let backend = backend(&root);
+
+    let mut injected = cfg("true");
+    injected.files = vec![InjectedFile {
+        container_path: "/etc/chug-should-never-exist".into(),
+        contents: b"escaped".to_vec(),
+        mode: 0o600,
+        artifact: None,
+    }];
+    let err = backend.launch(injected).await.unwrap_err().to_string();
+    assert!(err.contains("/etc/chug-should-never-exist"), "{err}");
+    assert!(
+        !std::path::Path::new("/etc/chug-should-never-exist").exists(),
+        "a refused injection wrote nothing"
+    );
+
+    let mut valued = cfg("true");
+    valued
+        .env
+        .insert("CARGO_TARGET_DIR".to_string(), "/workspace/target".into());
+    let err = backend.launch(valued).await.unwrap_err().to_string();
+    assert!(
+        err.contains("CARGO_TARGET_DIR") && err.contains("/workspace/target"),
+        "an unexpected env value carrying a wire prefix is the assertion firing: {err}"
+    );
+
+    let id = backend.launch(cfg("true")).await.unwrap();
+    assert_eq!(settle(&backend, &id).await, 0);
+    for outside in ["/etc/passwd", "/workspace/../../etc/passwd"] {
+        let err = backend.copy_file(&id, outside).await.unwrap_err();
+        assert!(
+            err.to_string().contains(outside),
+            "copy_file must refuse {outside} by name: {err}"
+        );
+    }
+    backend.remove(&id).await.unwrap();
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -367,6 +508,16 @@ async fn a_task_sees_the_composed_environment_and_not_the_daemons() {
     assert_eq!(seen.get("CHUG_TASK_ID"), Some(&"2"));
     assert!(seen.contains_key("CHUG_HOST_EXIT"), "{dumped}");
     assert!(seen.contains_key("CHUG_HOST_EXIT_TMP"), "{dumped}");
+    let dir = task_dir(&root, &id);
+    assert_eq!(
+        seen.get(container::WORKSPACE_VAR).map(std::path::Path::new),
+        Some(dir.join("workspace").as_path()),
+        "the clone destination is this task's, which is the whole of the rebase (#322 §2)"
+    );
+    assert_eq!(
+        seen.get("CHUG_HOST_CREDS").map(std::path::Path::new),
+        Some(dir.join("chuggernaut").as_path())
+    );
     assert_eq!(
         seen.get("PATH").copied(),
         std::env::var("PATH").ok().as_deref(),
@@ -385,7 +536,10 @@ async fn a_task_sees_the_composed_environment_and_not_the_daemons() {
         .keys()
         .copied()
         .filter(|k| {
-            !shell_added.contains(k) && !k.starts_with("CHUG_HOST_EXIT") && !composed.contains(k)
+            !shell_added.contains(k)
+                && !k.starts_with("CHUG_HOST_")
+                && *k != container::WORKSPACE_VAR
+                && !composed.contains(k)
         })
         .collect();
     assert!(undeclared.is_empty(), "undeclared: {undeclared:?}");
@@ -769,13 +923,7 @@ async fn a_host_task_runs_in_its_own_supervision_unit() {
         return;
     };
     let root = temp_root("scope");
-    let backend = HostBackend::with_workspace(
-        "w1",
-        root.join("tasks"),
-        root.join("workspace"),
-        supervision,
-    )
-    .unwrap();
+    let backend = HostBackend::new("w1", root.join("tasks"), supervision).unwrap();
 
     let gate = root.join("release-scope");
     let id = backend
@@ -831,13 +979,7 @@ async fn a_scoped_task_is_handed_the_dollars_its_command_was_written_with() {
         return;
     };
     let root = temp_root("verbatim");
-    let backend = HostBackend::with_workspace(
-        "w1",
-        root.join("tasks"),
-        root.join("workspace"),
-        supervision,
-    )
-    .unwrap();
+    let backend = HostBackend::new("w1", root.join("tasks"), supervision).unwrap();
 
     let seen = root.join("shell.pid");
     let id = backend
@@ -913,13 +1055,7 @@ async fn a_setsid_escapee_is_staged_under_a_scope_as_well() {
         return;
     };
     let root = temp_root("staging-scope");
-    let backend = HostBackend::with_workspace(
-        "w1",
-        root.join("tasks"),
-        root.join("workspace"),
-        supervision,
-    )
-    .unwrap();
+    let backend = HostBackend::new("w1", root.join("tasks"), supervision).unwrap();
     let pidfile = root.join("escapee.pid");
 
     let id = backend
@@ -1031,13 +1167,7 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
         return;
     };
     let root = temp_root("escapee");
-    let backend = HostBackend::with_workspace(
-        "w1",
-        root.join("tasks"),
-        root.join("workspace"),
-        supervision,
-    )
-    .unwrap();
+    let backend = HostBackend::new("w1", root.join("tasks"), supervision).unwrap();
 
     let pidfile = root.join("escapee.pid");
     let id = backend
@@ -1147,14 +1277,22 @@ async fn a_host_task_survives_the_teardown_of_the_launching_unit() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// The two constants a host node's whole path story rests on, asserted so a
-/// silent edit to either is a red test rather than a transcript harvest that
-/// finds nothing (#309 §2(a)).
+/// The constants a host node's whole path story rests on, asserted so a silent
+/// edit to any of them is a red test rather than a credential that points at
+/// nothing (#309 §2(a), #322 §2).
 #[test]
-fn the_workspace_and_root_paths_are_the_documented_ones() {
+fn the_wire_and_root_paths_are_the_documented_ones() {
     assert_eq!(
-        HOST_WORKSPACE, "/workspace",
+        container::WIRE_WORKSPACE,
+        "/workspace",
         "bootstrap_cmd clones here and agent::transcript_path's -workspace slug is derived from it"
+    );
+    assert_eq!(container::WIRE_CHUGGERNAUT, "/chuggernaut");
+    assert_eq!(container::WORKSPACE_VAR, "CHUG_WORKSPACE");
+    assert_eq!(
+        AGENT_CONFIG_VAR, "CLAUDE_CONFIG_DIR",
+        "the agent-shape refusal reads the variable agent::claude sets; that crate's own test \
+         holds the two together"
     );
     assert!(HOST_ROOT_DEFAULT.starts_with('/'));
     assert!(!HOST_ROOT_DEFAULT.starts_with("/nix/store/"));

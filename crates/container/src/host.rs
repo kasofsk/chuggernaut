@@ -6,13 +6,20 @@
 //! container: it is what makes `inspect`, the two listings and `remove`
 //! implementable at all.
 //!
-//! P0 takes #309 §2's option **(iii)** — one host task per node, `slots: 1` —
-//! so [`HOST_WORKSPACE`] is unambiguous without rebasing the path out of
-//! `bootstrap_cmd`, `dispatcher::launch_queue` and `agent::transcript_path`.
-//! Rebasing (option i) is the durable answer and is not P0's; option (ii),
-//! per-task mount namespaces, is Linux-only and macOS is the point. The
-//! exclusion is **enforced here**, not assumed: a launch arriving while another
-//! task is live is refused as `NoCapacity`.
+//! `/workspace` and `/chuggernaut` are **wire paths**, not host paths (design
+//! #322 §2, W2): [`rebase_path`] maps each into the task directory and refuses
+//! everything else, which is what makes the first launch possible at all — the
+//! macOS root filesystem is sealed and read-only, so a literal `/workspace`
+//! cannot be created. The mapping is total over all four surfaces — the clone
+//! destination ([`crate::WORKSPACE_VAR`]), `InjectedFile::container_path`, the
+//! `copy_file` argument, and env *values* that embed a prefix.
+//!
+//! Option (iii) — one host task per node, `slots: 1` — stays for phase 1 on
+//! CoreSimulator's global device state rather than as the collision fix, and is
+//! **enforced here**: a launch arriving while another task is live is refused as
+//! `NoCapacity`. Phase 1 also serves **command work only**: a launch carrying
+//! agent shape is refused, because `agent::transcript_path` derives its
+//! `-workspace` slug from the cwd this backend moves.
 //!
 //! A launch **declaring an image is refused** (#309 §1, P1): the image's absence
 //! is what selects this backend, so one that carries an image was misrouted and
@@ -43,11 +50,31 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Where a host task's clone lands, because that is the path `bootstrap_cmd`
-/// hardcodes (`git clone … /workspace && cd /workspace`) and the path
-/// `agent::transcript_path`'s measured `-workspace` slug is derived from.
-/// Unambiguous only under the one-task-per-node rule this backend enforces.
-pub const HOST_WORKSPACE: &str = "/workspace";
+/// Where each wire prefix lands inside a task directory (design #322 §2): the
+/// clone under `workspace/`, the injected credential tree under
+/// `chuggernaut/`, which is deleted the moment the command returns.
+const WORKSPACE_DIR: &str = "workspace";
+const CHUGGERNAUT_DIR: &str = "chuggernaut";
+
+/// The total wire-path mapping, as pairs. Anything a path or an env value names
+/// outside these two prefixes is refused rather than reaching the node's own
+/// filesystem — a permissive mapping is how a `copy_file` bug becomes a write
+/// to `/`.
+const WIRE_PREFIXES: [(&str, &str); 2] = [
+    (crate::WIRE_WORKSPACE, WORKSPACE_DIR),
+    (crate::WIRE_CHUGGERNAUT, CHUGGERNAUT_DIR),
+];
+
+/// The variables whose *values* name a wire path inline — design #322 §2's
+/// fourth surface, `GIT_SSH_COMMAND` naming `SSH_ID_PATH` and
+/// `GOOGLE_APPLICATION_CREDENTIALS` naming its ADC document. A prefix in any
+/// other value is refused, which is what catches a third consumer.
+const WIRE_PATH_VALUE_VARS: [&str; 2] = ["GIT_SSH_COMMAND", "GOOGLE_APPLICATION_CREDENTIALS"];
+
+/// `agent::CLAUDE_CONFIG_DIR`'s variable, which is the shape of an agent
+/// launch. Spelled out because `container` does not depend on `agent`; that
+/// crate's own test asserts the two still agree.
+pub const AGENT_CONFIG_VAR: &str = "CLAUDE_CONFIG_DIR";
 
 /// The node's host root when `WORKER_HOST_ROOT` is unset — worker-writable node
 /// state beside the other `/var/lib/chuggernaut` leaves, never a nix store path.
@@ -72,15 +99,12 @@ pub const TASK_PREFIX: &str = "host-";
 /// half-removed tree is never mistaken for a task.
 const REMOVING_PREFIX: &str = ".removing-";
 
-/// Names the task currently holding [`HOST_WORKSPACE`], so a `remove` arriving
-/// after the next launch has already claimed it deletes only its own task
-/// directory. Survives a daemon restart because it is a file, not a field.
-const WORKSPACE_OWNER: &str = "workspace-owner";
-
-/// Where the task's own wrapper writes its exit status, handed over as
-/// environment so no path is ever quoted into a shell command.
+/// Where the task's own wrapper writes its exit status, and the credential tree
+/// it deletes first, handed over as environment so no path is ever quoted into
+/// a shell command.
 const EXIT_TMP_VAR: &str = "CHUG_HOST_EXIT_TMP";
 const EXIT_VAR: &str = "CHUG_HOST_EXIT";
+const CREDS_VAR: &str = "CHUG_HOST_CREDS";
 
 /// The only two variables a host task takes from the daemon, and it takes them
 /// **by name** (design #440 D8). `PATH` because a host node's toolchain is
@@ -385,8 +409,9 @@ pub struct TaskMeta {
     pub project: Option<String>,
     pub job: Option<u64>,
     pub task: Option<u64>,
-    /// Absolute paths this launch materialized outside the task directory, so
-    /// `remove` reclaims exactly what it wrote and nothing beside it.
+    /// Absolute paths this launch materialized, so `remove` reclaims exactly
+    /// what it wrote and nothing beside it. Since #322 W2 every one of them is
+    /// inside the task directory, because the wire-path mapping is total.
     pub files: Vec<String>,
     /// The transient scope this task runs in (#440 D3), `None` on a node whose
     /// mechanism is the process group. `kill` reaches through it to a `setsid()`
@@ -406,7 +431,6 @@ pub struct TaskMeta {
 pub struct HostBackend {
     node: String,
     root: PathBuf,
-    workspace: PathBuf,
     /// The mechanism every launch goes into (#440 D3), named by the caller
     /// rather than probed here — the daemon probes once at boot and refuses to
     /// serve `host` at all when the node has none.
@@ -423,25 +447,12 @@ pub struct HostBackend {
 }
 
 impl HostBackend {
-    /// The node's host backend, rooted at `root` and cloning into
-    /// [`HOST_WORKSPACE`]. The root is created if absent — it is worker-owned
-    /// node state, not an operator precondition.
+    /// The node's host backend, rooted at `root`, into which every wire path a
+    /// launch names is rebased. The root is created if absent — it is
+    /// worker-owned node state, not an operator precondition.
     pub fn new(
         node: impl Into<String>,
         root: impl Into<PathBuf>,
-        supervision: Supervision,
-    ) -> Result<Self, BackendError> {
-        Self::with_workspace(node, root, HOST_WORKSPACE, supervision)
-    }
-
-    /// [`Self::new`] with the workspace path named explicitly. A real node only
-    /// ever passes [`HOST_WORKSPACE`], because that is the literal
-    /// `bootstrap_cmd` emits; the parameter exists so the round-trip test does
-    /// not touch the machine's real `/workspace`.
-    pub fn with_workspace(
-        node: impl Into<String>,
-        root: impl Into<PathBuf>,
-        workspace: impl Into<PathBuf>,
         supervision: Supervision,
     ) -> Result<Self, BackendError> {
         let root = root.into();
@@ -451,7 +462,6 @@ impl HostBackend {
         Ok(Self {
             node: node.into(),
             root,
-            workspace: workspace.into(),
             supervision,
             launching: tokio::sync::Mutex::new(()),
             live: Arc::new(Mutex::new(HashSet::new())),
@@ -512,18 +522,11 @@ impl HostBackend {
         Some(status_after_restart(meta.as_ref(), observed.as_deref()))
     }
 
-    /// The task currently holding [`Self::workspace`], if any.
-    fn workspace_owner(&self) -> Option<String> {
-        std::fs::read_to_string(self.root.join(WORKSPACE_OWNER))
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    }
-
-    /// Whether this node may take the launch: it must be a host launch, and it
-    /// must be the only one. The exclusion is #309 §2 option (iii) **enforced**:
-    /// `NoCapacity` is transient, so the dispatcher queues and retries (§3.5)
-    /// rather than spending the job's retry budget.
+    /// Whether this node may take the launch: it must be a host launch, it must
+    /// not be agent-shaped, and it must be the only one. The exclusion is #309
+    /// §2 option (iii) **enforced**: `NoCapacity` is transient, so the
+    /// dispatcher queues and retries (§3.5) rather than spending the retry
+    /// budget.
     async fn admit(&self, config: &ContainerLaunchConfig) -> Result<(), BackendError> {
         if let Some(image) = config.image.as_deref() {
             return Err(BackendError::Launch(format!(
@@ -533,12 +536,23 @@ impl HostBackend {
                 self.node
             )));
         }
+        if config.env.contains_key(AGENT_CONFIG_VAR) {
+            return Err(BackendError::Launch(format!(
+                "node {} serves host mode and this launch sets {AGENT_CONFIG_VAR}, which is agent \
+                 shape — design #322 §2 serves work.type: command only on a host node, because \
+                 agent::transcript_path derives its '-workspace' slug from the agent CLI's \
+                 slugification of the cwd and a host task's cwd is inside its task directory, so \
+                 the run would look healthy and the harvest would find nothing",
+                self.node
+            )));
+        }
         if let Some(held) = self.list_managed_running().await?.first() {
             return Err(BackendError::NoCapacity(format!(
-                "host node {} runs one task at a time (#309 P0 takes §2 option iii, which is \
-                 what makes {} unambiguous); {} holds it",
+                "host node {} runs one task at a time (#309 P0 takes §2 option iii, kept for \
+                 phase 1 by CoreSimulator's global device state — #322 §2's rebase is what \
+                 removed the {} collision); {} holds it",
                 self.node,
-                self.workspace.display(),
+                crate::WIRE_WORKSPACE,
                 held.id
             )));
         }
@@ -553,25 +567,135 @@ impl HostBackend {
         }
         Ok(())
     }
+}
 
-    /// Reclaim a leftover workspace before a launch claims it. Only ever called
-    /// with no managed task live, which is what makes deleting a path outside
-    /// the root defensible at all.
-    fn reclaim_workspace(&self) -> Result<(), BackendError> {
-        if !self.workspace.exists() {
-            return Ok(());
-        }
-        tracing::warn!(
-            workspace = %self.workspace.display(),
-            "host node: reclaiming an orphaned workspace before launch — no managed task holds it"
-        );
-        std::fs::remove_dir_all(&self.workspace).map_err(|e| {
-            BackendError::Launch(format!(
-                "reclaiming {}: {e} — a host node cannot launch into a workspace it cannot clear",
-                self.workspace.display()
-            ))
+/// One wire path as a real path under `dir` (design #322 §2). The mapping is
+/// **total**: a path outside both prefixes, and one whose remainder is not
+/// purely descending, are refused by name rather than reaching the node's own
+/// filesystem.
+fn rebase_path(dir: &Path, wire: &str) -> Result<PathBuf, String> {
+    let (local, rest) = WIRE_PREFIXES
+        .iter()
+        .find_map(|(prefix, local)| match wire.strip_prefix(prefix)? {
+            "" => Some((*local, "")),
+            rest if rest.starts_with('/') => Some((*local, rest.trim_start_matches('/'))),
+            _ => None,
         })
+        .ok_or_else(|| unmapped(wire))?;
+    let rebased = dir.join(local).join(rest);
+    if !contained(dir, &rebased) {
+        return Err(format!(
+            "{wire:?} rebases to {}, which is outside the task directory {} — containment of a \
+             climbing or symlinked path is design #322 W3's, and until it lands such a path is \
+             refused",
+            rebased.display(),
+            dir.display()
+        ));
     }
+    Ok(rebased)
+}
+
+/// How the mapping refuses a path it does not map, naming the path and both
+/// prefixes so the caller reads what it should have said instead.
+fn unmapped(wire: &str) -> String {
+    format!(
+        "{wire:?} is outside {} and {} — a host task's filesystem is its task directory, and the \
+         wire-path mapping is total by design (#322 §2): there is no fall-through to the node",
+        crate::WIRE_WORKSPACE,
+        crate::WIRE_CHUGGERNAUT
+    )
+}
+
+/// Whether a rebased path is under the task directory, by components. A `..`
+/// is refused rather than resolved — the rebase asserts its own output
+/// (docs/reference/style.md Tier 2 rule 2).
+fn contained(dir: &Path, path: &Path) -> bool {
+    path.strip_prefix(dir).is_ok_and(|rest| {
+        rest.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+    })
+}
+
+/// The earliest **mention** of a wire prefix in a value, as `(prefix, local,
+/// offset)`. Whether the mention is a wire path or a lookalike that continues
+/// into another segment is [`substitute_wire_paths`]'s question.
+fn first_wire_prefix(value: &str) -> Option<(&'static str, &'static str, usize)> {
+    WIRE_PREFIXES
+        .iter()
+        .filter_map(|(prefix, local)| value.find(prefix).map(|at| (*prefix, *local, at)))
+        .min_by_key(|(_, _, at)| *at)
+}
+
+/// The launch env with every wire path in a **value** rebased — design #322
+/// §2's fourth surface. A prefix in any other variable is refused: that
+/// assertion is what catches a third consumer interpolating a wire path into a
+/// value instead of letting the credential silently point at nothing.
+fn rebase_env(
+    dir: &Path,
+    env: &HashMap<String, String>,
+) -> Result<HashMap<String, String>, String> {
+    let mut out = HashMap::with_capacity(env.len());
+    for (name, value) in env {
+        let Some(rebased) = substitute_wire_paths(dir, value).map_err(|e| format!("{name}={e}"))?
+        else {
+            out.insert(name.clone(), value.clone());
+            continue;
+        };
+        if !WIRE_PATH_VALUE_VARS.contains(&name.as_str()) {
+            return Err(format!(
+                "{name}={value:?} names a wire path, and {name} is not one of the variables that \
+                 carry one ({}) — a host launch rebases those two by substitution, so an \
+                 unexpected one would silently point at nothing (design #322 §2)",
+                WIRE_PATH_VALUE_VARS.join(", ")
+            ));
+        }
+        if value.contains("..") {
+            return Err(format!(
+                "{name}={value:?} names a wire path and contains '..' — containment of a climbing \
+                 path is design #322 W3's, and until it lands such a value is refused"
+            ));
+        }
+        out.insert(name.clone(), rebased);
+    }
+    Ok(out)
+}
+
+/// Every wire path in one value replaced by the directory it maps to, in a
+/// single left-to-right pass so a task directory whose own name holds a prefix
+/// is never rescanned; `None` when the value mentions neither prefix.
+///
+/// A mention that continues into another segment (`/workspaces`) is a
+/// lookalike, and is refused on the same boundary [`rebase_path`] requires
+/// rather than rewritten into a path the node does not have.
+fn substitute_wire_paths(dir: &Path, value: &str) -> Result<Option<String>, String> {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    let mut found = false;
+    while let Some((prefix, local, at)) = first_wire_prefix(rest) {
+        let tail = &rest[at + prefix.len()..];
+        if !matches!(tail.chars().next(), None | Some('/')) {
+            return Err(format!(
+                "{value:?} continues {prefix:?} into another path segment — {}",
+                unmapped(&rest[at..])
+            ));
+        }
+        found = true;
+        out.push_str(&rest[..at]);
+        out.push_str(&dir.join(local).to_string_lossy());
+        rest = tail;
+    }
+    out.push_str(rest);
+    Ok(found.then_some(out))
+}
+
+/// A directory created `0700`, so a task's credential tree is unreadable to
+/// every other user from the moment it exists (design #322 §2 teardown).
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
 }
 
 /// Whether a `{node}/{task}` id names a host task rather than a container
@@ -657,8 +781,8 @@ fn supervised_cmd(
         "sh".to_string(),
         "-c".to_string(),
         format!(
-            "{shed}\"$@\"; s=$?; printf %s \"$s\" > \"${EXIT_TMP_VAR}\" && mv \"${EXIT_TMP_VAR}\" \
-             \"${EXIT_VAR}\"; exit $s"
+            "{shed}\"$@\"; s=$?; rm -rf \"${CREDS_VAR}\"; printf %s \"$s\" > \"${EXIT_TMP_VAR}\" \
+             && mv \"${EXIT_TMP_VAR}\" \"${EXIT_VAR}\"; exit $s"
         ),
         "sh".to_string(),
     ];
@@ -783,24 +907,32 @@ fn shed_borrowed(borrowed: &BTreeMap<String, OsString>) -> String {
 }
 
 /// Everything a host task's environment holds: the floor carried from the
-/// daemon by name, the dispatcher's launch env, and the two exit-status paths
-/// the wrapper writes through. Composed rather than inherited, so it is
+/// daemon by name, the **rebased** launch env, the clone destination and the
+/// paths the wrapper writes through. Composed rather than inherited, so it is
 /// exhaustive — [`spawn_task`] clears the daemon's environment first.
 fn task_env(
     daemon: &HashMap<String, String>,
     launch: &HashMap<String, String>,
     dir: &Path,
-) -> BTreeMap<String, OsString> {
+) -> Result<BTreeMap<String, OsString>, String> {
     let mut env = floor_env(daemon);
-    for (name, value) in launch {
-        env.insert(name.clone(), OsString::from(value));
+    for (name, value) in rebase_env(dir, launch)? {
+        env.insert(name, OsString::from(value));
     }
+    env.insert(
+        crate::WORKSPACE_VAR.to_string(),
+        dir.join(WORKSPACE_DIR).into_os_string(),
+    );
+    env.insert(
+        CREDS_VAR.to_string(),
+        dir.join(CHUGGERNAUT_DIR).into_os_string(),
+    );
     env.insert(
         EXIT_TMP_VAR.to_string(),
         dir.join(EXIT_CODE_TMP).into_os_string(),
     );
     env.insert(EXIT_VAR.to_string(), dir.join(EXIT_CODE).into_os_string());
-    env
+    Ok(env)
 }
 
 fn read_meta(dir: &Path) -> Option<TaskMeta> {
@@ -824,20 +956,15 @@ fn write_exit_code(dir: &Path, code: i32) -> std::io::Result<()> {
     std::fs::rename(tmp, dir.join(EXIT_CODE))
 }
 
-/// Materialize one injected file at its literal absolute path. P0 option (iii)
-/// makes the node's own filesystem the container's, so `/chuggernaut/prompt.md`
-/// means exactly that — and [`ContainerBackend::remove`] reclaims each path this
-/// returns.
-fn materialize(file: &InjectedFile) -> Result<String, BackendError> {
-    let path = PathBuf::from(&file.container_path);
-    if !path.is_absolute() {
-        return Err(BackendError::Launch(format!(
-            "injected file {:?} is not an absolute path",
-            file.container_path
-        )));
-    }
+/// Materialize one injected file at its **rebased** path (design #322 §2's
+/// second surface), so `/chuggernaut/ssh/id` lands in the 0700 task directory
+/// rather than at a machine-global path. Every directory it creates is 0700,
+/// and [`ContainerBackend::remove`] reclaims each path this returns.
+fn materialize(dir: &Path, file: &InjectedFile) -> Result<String, BackendError> {
+    let path = rebase_path(dir, &file.container_path)
+        .map_err(|e| BackendError::Launch(format!("injected file {}: {e}", file.container_path)))?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
+        create_private_dir(parent)
             .map_err(|e| BackendError::Launch(format!("{}: {e}", parent.display())))?;
     }
     std::fs::write(&path, &file.contents)
@@ -845,7 +972,7 @@ fn materialize(file: &InjectedFile) -> Result<String, BackendError> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(file.mode))
         .map_err(|e| BackendError::Launch(format!("{}: {e}", path.display())))?;
-    Ok(file.container_path.clone())
+    Ok(path.display().to_string())
 }
 
 /// Materialize the injected files, open the merged log and spawn the task into
@@ -859,7 +986,7 @@ fn spawn_task(
 ) -> Result<(std::process::Child, TaskMeta), BackendError> {
     let mut files = Vec::with_capacity(config.files.len());
     for file in &config.files {
-        files.push(materialize(file)?);
+        files.push(materialize(dir, file)?);
     }
     let log = std::fs::File::create(dir.join(OUTPUT_LOG))
         .map_err(|e| BackendError::Launch(format!("{OUTPUT_LOG}: {e}")))?;
@@ -867,7 +994,7 @@ fn spawn_task(
         .try_clone()
         .map_err(|e| BackendError::Launch(format!("{OUTPUT_LOG}: {e}")))?;
 
-    let env = task_env(&daemon_floor(), &config.env, dir);
+    let env = task_env(&daemon_floor(), &config.env, dir).map_err(BackendError::Launch)?;
     let borrowed = borrowed_bus(supervision, &daemon_bus(), &env);
     let wrapped = supervised_launch(supervision, unit, supervised_cmd(&config.cmd, &borrowed)?);
     use std::os::unix::process::CommandExt;
@@ -957,6 +1084,16 @@ fn sweep_detached_in(root: &Path) -> std::io::Result<()> {
     failure.map_or(Ok(()), Err)
 }
 
+/// Delete a task's mapped `/chuggernaut` tree, which the task's own wrapper
+/// already deleted (design #322 §2 teardown point 2). The daemon repeating it
+/// at the terminal state is what covers a wrapper killed before it got there.
+fn reclaim_credentials(dir: &Path) -> std::io::Result<()> {
+    match std::fs::remove_dir_all(dir.join(CHUGGERNAUT_DIR)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// A reclaim's failure, or `None` when it succeeded or the path was already
 /// gone. Idempotence is the trait's documented contract for `remove`.
 fn reclaim_failure(result: std::io::Result<()>, what: &str) -> Option<String> {
@@ -1027,7 +1164,6 @@ impl ContainerBackend for HostBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
         let _serialized = self.launching.lock().await;
         self.admit(&config).await?;
-        self.reclaim_workspace()?;
 
         let task = format!(
             "{TASK_PREFIX}{:x}-{:x}",
@@ -1038,16 +1174,20 @@ impl ContainerBackend for HostBackend {
             self.counter.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&task);
-        std::fs::create_dir_all(&dir)
-            .map_err(|e| BackendError::Launch(format!("{}: {e}", dir.display())))?;
+        for private in [
+            dir.clone(),
+            dir.join(WORKSPACE_DIR),
+            dir.join(CHUGGERNAUT_DIR),
+        ] {
+            create_private_dir(&private)
+                .map_err(|e| BackendError::Launch(format!("{}: {e}", private.display())))?;
+        }
 
         let (child, meta) = spawn_task(&dir, &config, self.supervision, &unit_name(&task))?;
         let encoded = serde_json::to_vec(&meta)
             .map_err(|e| BackendError::Launch(format!("{META_JSON}: {e}")))?;
         std::fs::write(dir.join(META_JSON), encoded)
             .map_err(|e| BackendError::Launch(format!("{META_JSON}: {e}")))?;
-        std::fs::write(self.root.join(WORKSPACE_OWNER), &task)
-            .map_err(|e| BackendError::Launch(format!("{WORKSPACE_OWNER}: {e}")))?;
         if let Ok(mut live) = self.live.lock() {
             live.insert(task.clone());
         }
@@ -1106,16 +1246,20 @@ impl ContainerBackend for HostBackend {
         Ok(self.status(&task))
     }
 
+    /// Read a **wire** path (design #322 §2's third surface): the dispatcher
+    /// asks for `/workspace/eval-result.json` and gets this task's. An unmapped
+    /// path is refused by name rather than read off the node's filesystem.
     async fn copy_file(
         &self,
         id: &ContainerId,
         path: &str,
     ) -> Result<Option<Vec<u8>>, BackendError> {
-        self.task_dir(id)?;
-        match std::fs::read(path) {
+        let dir = self.task_dir(id)?;
+        let path = rebase_path(&dir, path).map_err(BackendError::Other)?;
+        match std::fs::read(&path) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(BackendError::Other(format!("{path}: {e}"))),
+            Err(e) => Err(BackendError::Other(format!("{}: {e}", path.display()))),
         }
     }
 
@@ -1163,10 +1307,10 @@ impl ContainerBackend for HostBackend {
         })
     }
 
-    /// Delete the task directory, every path the launch wrote outside it, and
-    /// the workspace when this task still owns it. Nothing else on the node
-    /// reclaims a 5–10 GB `target/`, so a failure is an error **and** an
-    /// `error!` rather than a silent leak (#309 §2(c)).
+    /// Delete the task directory and every path the launch wrote — since #322
+    /// W2 the clone and the credential tree are both inside it. Nothing else on
+    /// the node reclaims a 5–10 GB `target/`, so a failure is an error **and**
+    /// an `error!` rather than a silent leak (#309 §2(c)).
     async fn remove(&self, id: &ContainerId) -> Result<(), BackendError> {
         let dir = self.task_dir(id)?;
         if !dir.exists() {
@@ -1176,15 +1320,6 @@ impl ContainerBackend for HostBackend {
         let mut failed: Vec<String> = Vec::new();
         for path in meta.iter().flat_map(|m| m.files.iter()) {
             failed.extend(reclaim_failure(std::fs::remove_file(path), path));
-        }
-        let task = dir.file_name().map(|n| n.to_string_lossy().to_string());
-        if task.is_some() && task == self.workspace_owner() {
-            let workspace = self.workspace.display().to_string();
-            failed.extend(reclaim_failure(
-                std::fs::remove_dir_all(&self.workspace),
-                &workspace,
-            ));
-            let _ = std::fs::remove_file(self.root.join(WORKSPACE_OWNER));
         }
         failed.extend(reclaim_failure(
             detach_and_remove(&dir),
@@ -1245,9 +1380,10 @@ fn read_fully(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize
     Ok(filled)
 }
 
-/// Reap the spawned child and, only if its own wrapper never got to it, write
-/// the exit code. Leaving the live set **last** is what closes the window in
-/// which a just-exited task would otherwise read as gone.
+/// Reap the spawned child, re-delete the credential tree the wrapper deletes
+/// first, and, only if that wrapper never got to it, write the exit code.
+/// Leaving the live set **last** is what closes the window in which a
+/// just-exited task would otherwise read as gone.
 fn spawn_reaper(
     mut child: std::process::Child,
     dir: PathBuf,
@@ -1256,6 +1392,9 @@ fn spawn_reaper(
 ) {
     tokio::task::spawn_blocking(move || {
         let status = child.wait();
+        if let Err(e) = reclaim_credentials(&dir) {
+            tracing::error!(task = %task, "host task credential tree is unreclaimable: {e}");
+        }
         if dir.is_dir() && read_exit_code(&dir).is_none() {
             let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
             if let Err(e) = write_exit_code(&dir, code) {
@@ -1352,16 +1491,157 @@ mod tests {
         );
 
         let dir = std::env::temp_dir().join(format!("chug-host-wrap-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let creds = dir.join(CHUGGERNAUT_DIR);
+        std::fs::create_dir_all(creds.join("ssh")).unwrap();
+        std::fs::write(creds.join("ssh").join("id"), b"a private key").unwrap();
         let out = std::process::Command::new(&wrapped[0])
             .args(&wrapped[1..])
             .env(EXIT_TMP_VAR, dir.join(EXIT_CODE_TMP))
             .env(EXIT_VAR, dir.join(EXIT_CODE))
+            .env(CREDS_VAR, &creds)
             .status()
             .unwrap();
         assert_eq!(out.code(), Some(7), "the wrapper preserves the exit status");
         assert_eq!(read_exit_code(&dir), Some(7));
+        assert!(
+            !creds.exists(),
+            "the credential tree is deleted at process exit, before the exit code is written \
+             (design #322 §2 teardown)"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The mapping is **total** (design #322 §2): each wire prefix lands under
+    /// the task directory, and everything else — another absolute path, a
+    /// lookalike, a relative one, a climb — is refused by name rather than
+    /// reaching the node's own filesystem.
+    #[test]
+    fn the_wire_path_mapping_is_total_and_lands_under_the_task_dir() {
+        let dir = Path::new("/var/lib/chuggernaut/host-tasks/host-1-0");
+        for (wire, expected) in [
+            (crate::WIRE_WORKSPACE, "workspace"),
+            ("/workspace/eval-result.json", "workspace/eval-result.json"),
+            (
+                "/workspace/chug-output.tar.gz",
+                "workspace/chug-output.tar.gz",
+            ),
+            (crate::WIRE_CHUGGERNAUT, "chuggernaut"),
+            ("/chuggernaut/ssh/id", "chuggernaut/ssh/id"),
+        ] {
+            let got = rebase_path(dir, wire).unwrap();
+            assert_eq!(got, dir.join(expected), "{wire}");
+            assert!(contained(dir, &got), "{wire} escaped the task directory");
+        }
+
+        for outside in [
+            "/etc/passwd",
+            "/",
+            "/workspaces/other",
+            "/chuggernautical",
+            "workspace/eval-result.json",
+            "",
+            "/workspace/../../etc/passwd",
+            "/chuggernaut/../workspace/x",
+        ] {
+            let err = rebase_path(dir, outside).unwrap_err();
+            assert!(
+                err.contains(outside) || outside.is_empty(),
+                "the refusal names the path: {err}"
+            );
+        }
+    }
+
+    /// Design #322 §2's fourth surface: an env **value** that embeds a wire
+    /// prefix is rebased by the same substitution, and a prefix in any other
+    /// value is the assertion firing — the third consumer this rule exists for.
+    #[test]
+    fn env_values_carrying_a_wire_path_are_rebased_and_every_other_one_asserted() {
+        let dir = Path::new("/var/lib/chuggernaut/host-tasks/host-2-0");
+        let ssh = format!(
+            "ssh -i {}/ssh/id -o CertificateFile={}/ssh/id-cert.pub -o IdentitiesOnly=yes",
+            crate::WIRE_CHUGGERNAUT,
+            crate::WIRE_CHUGGERNAUT
+        );
+        let env = HashMap::from([
+            ("GIT_SSH_COMMAND".to_string(), ssh),
+            (
+                "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+                "/chuggernaut/cloud/gcp-deployer/adc.json".to_string(),
+            ),
+            ("JOB_BRANCH".to_string(), "job/322".to_string()),
+        ]);
+        let rebased = rebase_env(dir, &env).unwrap();
+        assert_eq!(
+            rebased["JOB_BRANCH"], "job/322",
+            "a value naming none is untouched"
+        );
+        assert_eq!(
+            rebased["GOOGLE_APPLICATION_CREDENTIALS"],
+            dir.join("chuggernaut/cloud/gcp-deployer/adc.json")
+                .display()
+                .to_string()
+        );
+        let command = &rebased["GIT_SSH_COMMAND"];
+        assert_eq!(
+            command,
+            &format!(
+                "ssh -i {0}/ssh/id -o CertificateFile={0}/ssh/id-cert.pub -o IdentitiesOnly=yes",
+                dir.join(CHUGGERNAUT_DIR).display()
+            ),
+            "both paths inside one value are rebased"
+        );
+        assert!(
+            !command.contains(&format!(" {}", crate::WIRE_CHUGGERNAUT)),
+            "no wire prefix survives the substitution: {command}"
+        );
+
+        for (name, value) in [
+            ("CARGO_TARGET_DIR", "/workspace/target"),
+            ("CHUG_INPUT_PATH", "/chuggernaut/inputs.json"),
+            (crate::WORKSPACE_VAR, crate::WIRE_WORKSPACE),
+        ] {
+            let err = rebase_env(dir, &HashMap::from([(name.to_string(), value.to_string())]))
+                .unwrap_err();
+            assert!(err.contains(name) && err.contains(value), "{err}");
+        }
+        let climbing = HashMap::from([(
+            "GOOGLE_APPLICATION_CREDENTIALS".to_string(),
+            "/chuggernaut/../../etc/adc.json".to_string(),
+        )]);
+        assert!(
+            rebase_env(dir, &climbing).unwrap_err().contains(".."),
+            "a climbing value is refused, not substituted"
+        );
+
+        for lookalike in [
+            "ssh -i /workspaces/other/id",
+            "ssh -i /chuggernaut-old/ssh/id",
+        ] {
+            let err = rebase_env(
+                dir,
+                &HashMap::from([("GIT_SSH_COMMAND".to_string(), lookalike.to_string())]),
+            )
+            .unwrap_err();
+            assert!(
+                err.contains(lookalike) && err.contains("another path segment"),
+                "a value whose prefix continues into another segment is refused on the same \
+                 boundary a path is, not silently rewritten: {err}"
+            );
+        }
+    }
+
+    /// A task directory whose own path holds a wire prefix must not be
+    /// rescanned into itself — the substitution is one left-to-right pass.
+    #[test]
+    fn substitution_never_rescans_what_it_wrote() {
+        let dir = Path::new("/Users/ci/workspace/host-tasks/host-3-0");
+        assert_eq!(
+            substitute_wire_paths(dir, "ssh -i /chuggernaut/ssh/id").unwrap(),
+            Some(format!(
+                "ssh -i {}/ssh/id",
+                dir.join(CHUGGERNAUT_DIR).display()
+            ))
+        );
     }
 
     fn daemon_env() -> HashMap<String, String> {
@@ -1388,19 +1668,21 @@ mod tests {
             ("JOB_ID".to_string(), "440".to_string()),
             ("NATS_CREDS".to_string(), "the dispatcher's".to_string()),
         ]);
-        let env = task_env(&daemon_env(), &launch, dir);
+        let env = task_env(&daemon_env(), &launch, dir).unwrap();
 
         assert_eq!(
             env.keys().map(String::as_str).collect::<Vec<_>>(),
             vec![
+                CREDS_VAR,
                 EXIT_VAR,
                 EXIT_TMP_VAR,
+                crate::WORKSPACE_VAR,
                 "HOME",
                 "JOB_ID",
                 "NATS_CREDS",
                 "PATH"
             ],
-            "the launch env, the floor and the two exit paths — and nothing else"
+            "the launch env, the floor, the mapped wire paths and the exit paths — nothing else"
         );
         for leaked in ["DOCKER_HOST", "WORKER_NODE"] {
             assert!(
@@ -1443,22 +1725,26 @@ mod tests {
 
         assert_eq!(
             task_path(),
-            task_env(&daemon_floor(), &HashMap::new(), dir)[PATH_VAR],
+            task_env(&daemon_floor(), &HashMap::new(), dir).unwrap()[PATH_VAR],
             "a tool staged for a task is resolved through the PATH a launch composes, so a floor \
              that stopped carrying the daemon's would break the staging guard and not only the task"
         );
 
-        let bare = task_env(&HashMap::new(), &HashMap::new(), dir);
+        let bare = task_env(&HashMap::new(), &HashMap::new(), dir).unwrap();
         assert_eq!(bare["PATH"], PATH_FALLBACK);
         assert!(
             !bare.contains_key("HOME"),
             "no daemon HOME means no invented one — the tools fall back to the passwd entry"
         );
-        assert_eq!(bare.len(), 3, "PATH and the two exit paths: {bare:?}");
+        assert_eq!(
+            bare.len(),
+            5,
+            "PATH, the two exit paths and the two mapped ones: {bare:?}"
+        );
 
         let declared = HashMap::from([("PATH".to_string(), "/nix/store/x/bin".to_string())]);
         assert_eq!(
-            task_env(&daemon_env(), &declared, dir)["PATH"],
+            task_env(&daemon_env(), &declared, dir).unwrap()["PATH"],
             "/nix/store/x/bin",
             "a declared PATH wins over the floor, as a container env wins over its image's"
         );
@@ -1803,7 +2089,7 @@ mod tests {
                 OsString::from("unix:path=/run/user/1000/bus"),
             ),
         ]);
-        let task = task_env(&daemon_env(), &HashMap::new(), dir);
+        let task = task_env(&daemon_env(), &HashMap::new(), dir).unwrap();
         for name in BUS_VARS {
             assert!(
                 !task.contains_key(name),
@@ -1852,7 +2138,8 @@ mod tests {
             &daemon_env(),
             &HashMap::from([(RUNTIME_DIR_VAR.to_string(), "the dispatcher's".to_string())]),
             dir,
-        );
+        )
+        .unwrap();
         assert_eq!(
             borrowed_bus(Supervision::Scope(ScopeManager::User), &bus, &declared)
                 .keys()
@@ -1881,7 +2168,7 @@ mod tests {
             ),
         ]);
         let launch = HashMap::from([("JOB_ID".to_string(), "455".to_string())]);
-        let task = task_env(&daemon_env(), &launch, dir);
+        let task = task_env(&daemon_env(), &launch, dir).unwrap();
         let borrowed = borrowed_bus(Supervision::Scope(ScopeManager::User), &bus, &task);
         let client = launch_env(&task, &borrowed);
 
@@ -2028,9 +2315,7 @@ mod tests {
         std::fs::write(leftover.join("nested").join("big"), b"target/").unwrap();
         std::fs::create_dir_all(root.join("host-2-0")).unwrap();
 
-        let backend =
-            HostBackend::with_workspace("w1", &root, root.join("ws"), Supervision::ProcessGroup)
-                .unwrap();
+        let backend = HostBackend::new("w1", &root, Supervision::ProcessGroup).unwrap();
         assert!(!leftover.exists(), "a detached tree is reclaimed at boot");
         assert_eq!(
             backend.task_ids().unwrap(),
@@ -2045,9 +2330,7 @@ mod tests {
     #[test]
     fn ids_outside_the_root_are_not_found() {
         let root = std::env::temp_dir().join(format!("chug-host-ids-{}", std::process::id()));
-        let backend =
-            HostBackend::with_workspace("w1", &root, root.join("ws"), Supervision::ProcessGroup)
-                .unwrap();
+        let backend = HostBackend::new("w1", &root, Supervision::ProcessGroup).unwrap();
         assert_eq!(
             backend.task_dir(&"w1/host-1-0".to_string()).unwrap(),
             root.join("host-1-0")

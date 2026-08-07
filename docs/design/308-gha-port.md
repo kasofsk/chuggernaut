@@ -67,7 +67,7 @@ argument. **Phase numbers are never reassigned** — the children cite them.
 | **5** | Deploys, forward-only (category C) | Not started |
 | **6** | Image build and push (category D) | Not started — #313 half B is still a design |
 | **7** | Node-level exclusive resources | Not started — #309 P4 |
-| **8** | Mobile and simulator jobs on host nodes (category F) | Started on the Android leg only — [#367](367-android-emulator-execution.md) A1/A2 landed (jobs #374, #395); the macOS leg ([#322](322-macos-native-runtime.md)) has not |
+| **8** | Mobile and simulator jobs on host nodes (category F) | Started on both legs — [#367](367-android-emulator-execution.md) A1/A2 landed (jobs #374, #395); the macOS leg ([#322](322-macos-native-runtime.md)) has its W2 `/workspace` rebase landed (job #485), **Linux-proven only**, with no macOS node in the fleet |
 | **9** | Job inputs → unblocks rollback | **Landed** (job #314) — [#311](311-job-inputs.md) slice A, with jobs #315–#317 and #319 |
 | **10** | Per-run placement | Answered, not scheduled — [#361](361-per-run-placement.md) found gap 10 needs no new field |
 

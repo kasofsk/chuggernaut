@@ -529,6 +529,7 @@ impl JobType {
         match self.work.r#type {
             WorkType::Agent => {
                 errs.extend(self.validate_top_level_image(ctx(WorkType::Agent)));
+                errs.extend(self.validate_host_serves_commands_only());
                 if self.work.prompt.is_none() {
                     errs.push(FieldRuleError::Required {
                         field: "work.prompt",
@@ -582,6 +583,7 @@ impl JobType {
                 }
             }
             WorkType::Human => {
+                errs.extend(self.validate_host_serves_commands_only());
                 if self.work.prompt.is_none() {
                     errs.push(FieldRuleError::Required {
                         field: "work.prompt",
@@ -861,6 +863,24 @@ impl JobType {
             }),
             _ => None,
         }
+    }
+
+    /// Design #322 §2's phase-1 restriction as a field rule (N2): a host job
+    /// type is command work, because `agent::transcript_path`'s `-workspace`
+    /// slug is the agent CLI's slugification of a cwd a host task moves.
+    ///
+    /// It fails the author's own CI rather than a task at runtime; the node
+    /// refuses an agent-shaped host launch as well (`container::host`), which
+    /// covers a job type that reaches a host node by a `placement.node` pin.
+    fn validate_host_serves_commands_only(&self) -> Option<FieldRuleError> {
+        (self.resolved_mode() == RuntimeMode::Host).then(|| FieldRuleError::Invalid {
+            field: "work.type",
+            context: format!("job type '{}' (runtime.mode: host)", self.name),
+            reason: "runtime.mode: host serves work.type: command only — an agent task's \
+                     transcript is harvested from a path derived from the cwd, which a host task \
+                     moves (design #322 §2)"
+                .into(),
+        })
     }
 
     /// The `runtime:` block's field rules (spec §1.1, design #309 §3, #373
@@ -2099,11 +2119,16 @@ min_dispatcher: 5
         jt_with_image_and_runtime("image: img:latest\n", block)
     }
 
-    /// A host-mode agent job type with no top-level `image`, carrying `extra`
-    /// as further `runtime:` lines — the shape design #309 §3's host row
-    /// specifies.
+    /// A host-mode job type with no top-level `image`, carrying `extra` as
+    /// further `runtime:` lines — the shape design #309 §3's host row
+    /// specifies, in the **command** work #322 N2 restricts host mode to.
     fn jt_host(extra: &str) -> JobType {
-        jt_with_image_and_runtime("", &format!("  mode: host\n{extra}"))
+        JobType::parse(&format!(
+            "name: mobile\nmin_dispatcher: {}\nwork:\n  type: command\n  run: ./go.sh\n\
+             runtime:\n  mode: host\n{extra}",
+            crate::version::RUNTIME_SCHEMA_EPOCH
+        ))
+        .expect("runtime block should parse")
     }
 
     #[test]
@@ -2211,6 +2236,43 @@ min_dispatcher: 5
         );
     }
 
+    /// Design #322 N2: a host job type is command work, and the rule fails the
+    /// author's own CI rather than a task at runtime. Container mode is
+    /// untouched — every existing agent job type validates exactly as before.
+    #[test]
+    fn host_mode_serves_command_work_only() {
+        let host_agent =
+            jt_with_image_and_runtime("", "  mode: host\n  env: \"nix:.#chug-mobile\"\n");
+        let invalid = host_agent
+            .validate()
+            .into_iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    FieldRuleError::Invalid {
+                        field: "work.type",
+                        ..
+                    }
+                )
+            })
+            .expect("an agent host job type is refused at validate");
+        assert!(
+            invalid.to_string().contains("work.type: command"),
+            "the rule says what to declare instead: {invalid}"
+        );
+
+        assert_eq!(
+            jt_host("  env: \"nix:.#chug-mobile\"\n").validate(),
+            vec![],
+            "command work under host mode is the shape phase 1 serves"
+        );
+        assert_eq!(
+            jt_with_runtime("  mode: container\n  env: \"nix:.#chug-mobile\"\n").validate(),
+            vec![],
+            "an agent job type in container mode is untouched by the rule"
+        );
+    }
+
     #[test]
     fn host_mode_requires_a_declared_environment() {
         let errs = jt_host("").validate();
@@ -2230,7 +2292,7 @@ min_dispatcher: 5
     fn an_evaluator_resolves_its_own_mode_under_a_host_job_type() {
         let yaml = |image: &str| {
             format!(
-                "name: mobile\nmin_dispatcher: {}\nwork:\n  type: agent\n  prompt: p.md\n\
+                "name: mobile\nmin_dispatcher: {}\nwork:\n  type: command\n  run: ./go.sh\n\
                  runtime:\n  mode: host\n  env: \"nix:.#chug-mobile\"\n\
                  eval:\n  - name: ci\n    type: command\n    run: ./.chug/tasks/ci.sh\n{image}",
                 crate::version::RUNTIME_SCHEMA_EPOCH
@@ -2255,7 +2317,7 @@ min_dispatcher: 5
     fn a_wrap_up_resolves_its_own_mode_under_a_host_job_type() {
         let yaml = |image: &str| {
             format!(
-                "name: mobile\nmin_dispatcher: {}\nwork:\n  type: agent\n  prompt: p.md\n\
+                "name: mobile\nmin_dispatcher: {}\nwork:\n  type: command\n  run: ./go.sh\n\
                  runtime:\n  mode: host\n  env: \"nix:.#chug-mobile\"\n\
                  wrap_up:\n  run: ./publish.sh\n{image}",
                 crate::version::RUNTIME_SCHEMA_EPOCH
@@ -2329,7 +2391,7 @@ min_dispatcher: 5
     #[test]
     fn host_mode_requires_the_min_dispatcher_declaration_too() {
         let errs = JobType::parse(
-            "name: mobile\nwork:\n  type: agent\n  prompt: p.md\n\
+            "name: mobile\nwork:\n  type: command\n  run: ./go.sh\n\
              runtime:\n  mode: host\n  env: \"nix:.#chug-mobile\"\n",
         )
         .unwrap()

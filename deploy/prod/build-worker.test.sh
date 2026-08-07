@@ -73,6 +73,16 @@ EOF
 #   * the cache-dir provisioning (`mkdir -p '…'`) succeeds unless $FAIL_MKDIR is
 #     set, which models a node where neither the login user nor `sudo -n` can
 #     create the path;
+#   * the HOST ROOT probe (host mode only), which is TWO probes because the
+#     daemon runs as a different user per platform. The macOS shape
+#     (`mkdir -p '…' && [ -w '…' ]`, asked of the login user launchd runs the
+#     agent as) succeeds unless $FAIL_HOST_ROOT is set — the mac the default
+#     root cannot be created on, /var/lib being root-owned and / read-only. The
+#     Linux shape (`… || sudo -n mkdir -p '…'` then `… || sudo -n test -w '…'`,
+#     asked of root, which the unit runs the daemon as) ignores
+#     $FAIL_HOST_ROOT — an unprivileged failure there is rescued by `sudo -n`,
+#     which is the whole point — and fails only under $FAIL_HOST_ROOT_SUDO, the
+#     node whose login user has no passwordless sudo either;
 #   * the CREDENTIAL DIRECTORY probe (`printf 'own=%s mode=%s…`, Linux) answers
 #     with $FAKE_KEYS_OWNER (default root) and $FAKE_KEYS_MODE (default 700), or
 #     with both empty when $FAKE_KEYS_ABSENT is set — the directory is not there.
@@ -129,6 +139,9 @@ case "\$*" in
       [ -n "\${FAIL_PROBE:-}" ] || echo HEALTHY
     fi
     ;;
+  *"sudo -n mkdir -p '"*"sudo -n test -w '"*)
+    [ -z "\${FAIL_HOST_ROOT_SUDO:-}" ] || exit 1 ;;
+  *"&& [ -w '"*)   [ -z "\${FAIL_HOST_ROOT:-}" ] || exit 1 ;;
   *"mkdir -p '"*)  [ -z "\${FAIL_MKDIR:-}" ] || exit 1 ;;
   *"own=%s mode=%s"*)
     if [ -n "\${FAKE_KEYS_ABSENT:-}" ]; then
@@ -538,6 +551,119 @@ for _max in 4 ""; do
   not_started "a ceiling above 1 must not reach the daemon restart"
 done
 echo "ok: host mode names the WORKER_SLOTS_MAX half alone when that is the wrong one"
+
+# ── Case 2c2d: the host root is declarable, per node, and refused when it is not
+# creatable (design #322 W2). `HostBackend::new` creates the root while the
+# daemon builds its backends at boot, so a root the login user cannot create is
+# a boot failure the supervisor loops — the same class as the capacity guard
+# above, and the reason a mac needs to declare one at all: the daemon's default
+# lives under root-owned /var/lib, which a non-interactive deploy cannot create.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_MODES=container,host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_ROOT=/var/lib/chuggernaut/host-tasks \
+  WORKER_HOST_ROOT_air=/Users/op/chug/host-tasks \
+  sh "$SUT"
+
+grep_log "WORKER_HOST_ROOT='/Users/op/chug/host-tasks'"
+if grep -qF "WORKER_HOST_ROOT='/var/lib" "$LOG"; then
+  fail "a per-node WORKER_HOST_ROOT_air must win over the bare WORKER_HOST_ROOT"
+fi
+echo "ok: WORKER_HOST_ROOT reaches the env file, per node like every other knob"
+
+# Unset stays UNSET: a node that declares nothing gets the daemon's own default
+# and produces the run spec it produced before this knob was forwarded.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_MODES=container,host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  sh "$SUT"
+
+if grep -qF "WORKER_HOST_ROOT=" "$LOG"; then
+  fail "WORKER_HOST_ROOT must not be passed when unset (daemon default applies)"
+fi
+echo "ok: no WORKER_HOST_ROOT passed when unset"
+
+# The mac, which is the node this guard was written for: launchd runs the agent
+# in the LOGIN user's GUI domain, so the login user's own answer is the whole
+# answer and the default root under root-owned /var/lib is unreachable.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  FAIL_HOST_ROOT=1 \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_MODES=container,host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  sh "$SUT" >"$WORK/host-root.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a host root the node cannot create must fail the deploy (got rc=0)"
+grep -qF "/var/lib/chuggernaut/host-tasks" "$WORK/host-root.out" \
+  || fail "the refusal must name the path that could not be created"
+grep -qF "WORKER_HOST_ROOT_air=" "$WORK/host-root.out" \
+  || fail "the refusal must name the fix, per node"
+not_started "a node that cannot create its host root must not reach the daemon restart"
+echo "ok: an uncreatable host root refuses before the daemon is replaced (macOS)"
+
+# The SAME default root on Linux must NOT refuse: the unit runs the daemon as
+# root, so an unprivileged `mkdir` failing under root-owned /var/lib is the
+# expected state and `sudo -n` is the answer — asking the login user instead
+# would refuse every Linux host node, including one already serving tasks.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  FAIL_HOST_ROOT=1 \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_MODES=container,host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  sh "$SUT" >"$WORK/host-root-linux.out" 2>&1
+grep -qF "REFUSING" "$WORK/host-root-linux.out" \
+  && fail "a Linux node whose sudo -n can create the root must not be refused"
+started || fail "a Linux host node with a sudo-creatable root must reach the daemon restart"
+grep_log "sudo -n mkdir -p '/var/lib/chuggernaut/host-tasks'"
+echo "ok: the Linux probe asks root, the user the unit runs the daemon as"
+
+# And it still refuses when neither the login user nor `sudo -n` can — with the
+# remedy that platform actually has, never "hand the root daemon a tree in the
+# home of the user that is in the docker group" (design #440 D5).
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  FAIL_HOST_ROOT_SUDO=1 \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_MODES=container,host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  sh "$SUT" >"$WORK/host-root-nosudo.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Linux host root no user can create must fail the deploy (got rc=0)"
+grep -qF "/var/lib/chuggernaut/host-tasks" "$WORK/host-root-nosudo.out" \
+  || fail "the refusal must name the path that could not be created"
+grep -qF "passwordless sudo" "$WORK/host-root-nosudo.out" \
+  || fail "the Linux refusal must name the remedy that platform has"
+grep -qF "a path this user owns" "$WORK/host-root-nosudo.out" \
+  && fail "the Linux refusal must not send a root daemon into the login user's tree"
+not_started "a node that cannot create its host root must not reach the daemon restart"
+echo "ok: the Linux refusal names sudo, not the login user's home"
 
 # ── Case 2c3: a mode the daemon cannot parse is refused BEFORE the restart ────
 # An unknown name is a hard config error (crates/worker/src/config.rs), so
@@ -2121,7 +2247,7 @@ started || fail "a declared spec must proceed to the daemon restart"
 echo "ok: a declared spec proceeds, reporting what the deploy changes"
 
 # ── Case 7d: a knob this script does not FORWARD is a drop, declared or not ───
-# The daemon reads more WORKER_* than this script composes — WORKER_HOST_ROOT
+# The daemon reads more WORKER_* than this script composes — WORKER_REFRESH_SCRIPT
 # (crates/worker/src/config.rs) is one — so a node carrying one loses it on every
 # recreation whatever chuggernaut.env says. Comparing against the composed
 # environment file rather than against the environment is what keeps this from
@@ -2132,16 +2258,37 @@ PATH="$BIN:$PATH" \
   WORKER_SSH=worksalot@nuc \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=nuc \
-  WORKER_HOST_ROOT=/var/lib/chuggernaut/host \
+  WORKER_REFRESH_SCRIPT=/opt/chug/refresh.sh \
   FAKE_LIVE_ENV_FILE="WORKER_NODE='nuc'
-WORKER_HOST_ROOT='/var/lib/chuggernaut/host'" \
+WORKER_REFRESH_SCRIPT='/opt/chug/refresh.sh'" \
   sh "$SUT" >"$WORK/unforwarded.out" 2>&1
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail "an unforwarded live setting must fail the deploy (got rc=0)"
-grep -qF "build-worker.sh does not forward WORKER_HOST_ROOT" "$WORK/unforwarded.out" \
+grep -qF "build-worker.sh does not forward WORKER_REFRESH_SCRIPT" "$WORK/unforwarded.out" \
   || fail "the refusal must say the value is declared but never forwarded"
 echo "ok: a declared-but-unforwarded setting is reported as the drop it is"
+
+# ── Case 7d0: the HOST ROOT round-trips instead of being dropped ──────────────
+# It was case 7d's documented example until #322 W2: a mac cannot serve a host
+# task at the daemon's default root, so the knob it has to declare had to stop
+# being one the next deploy silently removed. Same shape as 7d1 below.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_HOST_ROOT=/var/lib/chuggernaut/host \
+  FAKE_LIVE_ENV_FILE="WORKER_NODE='nuc'
+WORKER_HOST_ROOT='/var/lib/chuggernaut/host'" \
+  sh "$SUT" >"$WORK/host-root-roundtrip.out" 2>&1
+
+grep -qF "does not forward WORKER_HOST_ROOT" "$WORK/host-root-roundtrip.out" \
+  && fail "WORKER_HOST_ROOT is forwarded — the drift guard must not call it a drop"
+grep -qF "REFUSING" "$WORK/host-root-roundtrip.out" \
+  && fail "a declared, forwarded WORKER_HOST_ROOT must not refuse the deploy"
+started || fail "a declared, forwarded WORKER_HOST_ROOT must reach the daemon restart"
+echo "ok: a declared WORKER_HOST_ROOT survives the deploy that recreates the daemon"
 
 # ── Case 7d1: the CEILING round-trips instead of being dropped ────────────────
 # It used to be the documented example of case 7d: a node given a lowered ceiling

@@ -51,7 +51,8 @@ pub(crate) const MAX_QUEUE_WAIT: Duration = Duration::from_secs(30 * 60);
 const GATE_LOG_TAIL_BYTES: usize = 8_000;
 
 /// The well-known path a command evaluator writes its structured verdict to
-/// (spec §3.3).
+/// (spec §3.3). A **wire** path: a host backend rebases it into the task
+/// directory (design #322 §2), so nothing here knows where it really lands.
 const EVAL_RESULT_PATH: &str = "/workspace/eval-result.json";
 
 /// Escalation reason for a launch that outwaited the queue (spec §3.5). A

@@ -16,3 +16,4 @@ Doc-reread: docs/design/309-host-native-execution.md
 Doc-reread: docs/design/361-per-run-placement.md
 Doc-reread: docs/implementation-notes.md
 Doc-reread: deploy/prod/README.md
+Doc-reread: docs/reference/crates.md

@@ -448,6 +448,19 @@ mod tests {
         }
     }
 
+    /// The variable a host node reads as agent shape (design #322 §2's
+    /// launch-time refusal) is the one this provider sets. `container` cannot
+    /// depend on `agent`, so the two are held together from this side.
+    #[test]
+    fn the_config_dir_variable_is_the_one_a_host_node_refuses_on() {
+        assert_eq!(
+            container::host::AGENT_CONFIG_VAR,
+            "CLAUDE_CONFIG_DIR",
+            "this launch sets that name (above), and a host node refuses a launch carrying it — \
+             a rename on either side makes the refusal silently stop firing"
+        );
+    }
+
     #[test]
     fn invocation_composes_all_flags() {
         let inv = ClaudeProvider::claude_invocation(&config());

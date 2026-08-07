@@ -1614,7 +1614,10 @@ async fn host_mode_without_one_slot_refuses_to_start() {
     assert!(err.contains("WORKER_MODES"), "unexpected: {err}");
     assert!(err.contains("host"), "must name the mode: {err}");
     assert!(err.contains("WORKER_SLOTS=1"), "must name the fix: {err}");
-    assert!(err.contains("/workspace"), "must name what collides: {err}");
+    assert!(
+        err.contains("one host task per node"),
+        "must name the rule it enforces: {err}"
+    );
 }
 
 /// A node that cannot create a supervision unit refuses to advertise `host`

@@ -564,21 +564,18 @@ fn node_capabilities(modes: &[WorkerMode]) -> types::worker::NodeCapabilities {
     }
 }
 
-/// The `/workspace` collision #309 §2(a) names is dodged by option (iii) — one
-/// host task per node — so a host node's capacity is **enforced** here rather
-/// than left to an operator's `WORKER_SLOTS` or a runtime `set_slots` raise.
-/// Deliberately **node-wide** even on a dual-mode node (#309 P1), which has no
-/// per-mode slot accounting to narrow it with: one task at a time, of either
-/// kind.
+/// Option (iii) — one host task per node — is **enforced** here rather than
+/// left to an operator's `WORKER_SLOTS` or a runtime `set_slots` raise. Why it
+/// outlived the `/workspace` collision that motivated it, and why it stays
+/// node-wide on a dual-mode node, is in `docs/implementation-notes.md`.
 fn enforce_host_capacity(slots: u32, slots_max: u32) -> Result<(), WorkerRunError> {
     if slots == 1 && slots_max == 1 {
         return Ok(());
     }
     Err(WorkerRunError::Config(format!(
         "WORKER_MODES names host, which needs WORKER_SLOTS=1 and WORKER_SLOTS_MAX=1 (got {slots} \
-         and {slots_max}): #309 P0 takes §2 option (iii), one host task per node, because two \
-         concurrent host tasks cannot both own {}",
-        container::host::HOST_WORKSPACE
+         and {slots_max}): #309 §2 option (iii), one host task per node, kept for phase 1 by the \
+         machine-global simulator state design #322 §5 names"
     )))
 }
 
@@ -626,7 +623,7 @@ async fn host_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>
     tracing::info!(
         node = %config.node,
         host_root = %config.host_root.display(),
-        workspace = %container::host::HOST_WORKSPACE,
+        wire_paths = %format!("{} and {} map into each task directory", container::WIRE_WORKSPACE, container::WIRE_CHUGGERNAUT),
         supervision = ?supervision,
         modes = ?config.modes,
         "host execution enabled — launches carrying no image run as host processes here"
@@ -1974,8 +1971,8 @@ mod tests {
             let err = enforce_host_capacity(slots, max).unwrap_err().to_string();
             assert!(err.contains("WORKER_SLOTS=1"), "{slots}/{max}: {err}");
             assert!(
-                err.contains(container::host::HOST_WORKSPACE),
-                "the refusal names what collides: {err}"
+                err.contains("one host task per node"),
+                "the refusal names the rule it enforces: {err}"
             );
         }
     }
