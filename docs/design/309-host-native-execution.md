@@ -75,7 +75,17 @@ Its slice 6 shipped in job #484: `choose_placement` takes the mode the launch's
 "no node advertises this mode" from "every capable node is full" — see
 [the 2026-08-07 note on slice 6](#note-2026-08-07--slice-6-landed-host-work-is-routable-job-484).
 So a host job type is now **well-formed and routable**, on any node that
-advertises the mode and with no pin. Everything from P3 on is unstarted.
+advertises the mode and with no pin. The precedence rule
+[Coexistence](#coexistence-on-a-mixed-fleet) states is honoured at the launch as
+well as in validation since job #507: `types::JobType`'s `level_image`,
+`level_mode` and `level_runtime_env` resolve a launch from the level it is for,
+so a level whose own `image` resolves it **out of the job type's mode** — a host
+job type's container evaluator — inherits no `runtime.env`, while under
+`mode: container` an `image` and an `env` still layer
+([#373](373-project-toolchains.md) Decision 2). That is what makes "host work,
+container CI, one job" actually run; the carve-out is
+[the 2026-08-08 correction](#correction-2026-08-08--the-precedence-rule-fires-only-across-a-mode-boundary-job-507).
+Everything from P3 on is unstarted.
 [#440](440-native-worker-daemon.md) is the design for the native-supervision
 prerequisite P0 named and left unowned.
 
@@ -87,7 +97,7 @@ is the same work sliced by contract, not a second plan.
 | Phase | What | State |
 | --- | --- | --- |
 | **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed) |
-| **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch; **Landed** (job #479) for §1's per-launch routing and the `WORKER_RPC_VERSION` bump it needed |
+| **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch; **Landed** (job #479) for §1's per-launch routing and the `WORKER_RPC_VERSION` bump it needed; **Landed** (job #507) for the launch half of [Coexistence](#coexistence-on-a-mixed-fleet)'s precedence rule — `JobType::level_image` / `level_runtime_env` resolve a launch from the **level** it is for, so a host job type's container evaluator inherits no `runtime.env` |
 | **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | **Landed** (job #483) for slice 5 — the record on both transports, additive, ingested in `probe_worker` with ping authoritative and docker-endpoint nodes synthesized; **Landed** (job #484) for slice 6 — `choose_placement` takes the required mode, excludes the nodes that do not serve it, and answers "no node advertises it" differently from "every capable node is full". P2 is complete: host work is routable |
 | **P3** | Per-task users; `resources_enforced`; transient scopes | Proposed — gated on P2 |
 | **P4** | Device leases | Proposed — only when a host node must run a second, non-device-bound task concurrently |
@@ -1615,3 +1625,33 @@ declaring `mode: host` on a fleet where exactly one node advertises `host`
 places every host launch on that node without a pin, queues them behind each
 other at its one slot, and sends the same job type's container `ci` evaluator
 wherever the policy prefers.
+
+## Correction, 2026-08-08 — the precedence rule fires only across a mode boundary (job #507)
+
+[Coexistence](#coexistence-on-a-mixed-fleet) states the rule unconditionally —
+*"an explicit `image` at a level resolves that level to container mode and does
+not inherit `runtime`"* — and the body two paragraphs on already contradicts it,
+calling `wrap_up.image.or(job_type.image)` "the container-mode half of the same
+rule, unchanged". Job #507, which implemented the launch half, resolved that
+against the narrower reading: **a level's own `image` costs it the job type's
+`runtime.env` only when that image resolves the level out of the job type's
+mode.** Under `mode: host` it does, and the appended `ci` evaluator gets no
+`xcode:` reference it could not reach anyway. Under `mode: container` it does
+not, and an `image` and an `env` go on layering.
+
+The unconditional reading would have been a regression rather than a stricter
+rule. [#373](373-project-toolchains.md) Decision 2 has the two **layer** in
+container mode — a declared `runtime.env` is a nix environment realised on the
+node and bind-mounted into whatever image the level names — so dropping the
+environment from every level carrying its own image would have silently taken
+the toolchain away from the `ci` evaluator of every nix-layered container job
+type in the fleet, none of which #507's brief was about. Nothing in this
+document ever argued for that; the sentence was written with the host case in
+view and generalised one step too far.
+
+Where it lives: `JobType::level_runtime_env` (`crates/types/src/job_type.rs`)
+returns the declaration when `level_mode(level)` equals the job type's resolved
+mode and nothing otherwise, which is the boundary condition stated as code. The
+normative form is `docs/spec.md` §1.1's `mode: host` row, which was already
+scoped to that mode and needed no correction; this section exists because the
+prose above it was not.

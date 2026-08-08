@@ -32,12 +32,13 @@
 
 use crate::capacity::DecidedLaunch;
 use crate::core::{Core, Msg, Result, TaskExit};
-use crate::exec::{ChannelRole, eval_image, task_timeout};
+use crate::exec::{ChannelRole, task_timeout};
 use crate::forge_ingest::triage::tail;
 use crate::queue::{QueuedLaunch, launch_priority};
 use chrono::Utc;
 use container::{BackendError, ContainerLaunchConfig, bootstrap_cmd};
 use std::time::Duration;
+use types::job_type::Level;
 use types::{JobState, JobType, Task, TaskKind, TaskPhase, TaskResult, TaskState};
 
 /// Maximum time a launch may sit in the capacity queue before it escalates as a
@@ -104,7 +105,7 @@ impl Core {
         branch: &str,
         job_type: &JobType,
         secrets: &[String],
-        image: Option<String>,
+        level: Level<'_>,
         run: String,
         role: ChannelRole,
         timeout: Duration,
@@ -121,9 +122,10 @@ impl Core {
                 timeout,
             )
             .await?;
+        let runtime_env = job_type.level_runtime_env(level);
         Ok(ContainerLaunchConfig {
-            image,
-            cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run], job_type.runtime_env()),
+            image: job_type.level_image(level).map(String::from),
+            cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run], runtime_env),
             env,
             files: self
                 .ssh_credential_files(owner, project, seq, role, timeout)
@@ -131,7 +133,7 @@ impl Core {
             cpu_limit: job_type.resources.as_ref().and_then(|r| r.cpu),
             memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
             node: job_type.placement_node().map(String::from),
-            runtime_env: job_type.runtime_env().map(String::from),
+            runtime_env: runtime_env.map(String::from),
         })
     }
 
@@ -359,11 +361,11 @@ impl Core {
         let job = self.must_get(owner, project, seq)?.clone();
         let job_type = self.active.get(&key).expect("checked").job_type.clone();
 
-        let (branch, secrets, image, role, timeout, monitor) = match task.phase {
+        let (branch, secrets, level, role, timeout, monitor) = match task.phase {
             TaskPhase::Work => (
                 job.branch.clone(),
                 job_type.work.secrets.clone(),
-                job_type.image.clone(),
+                Level::Work,
                 ChannelRole::Work { task_id },
                 self.active.get(&key).expect("checked").work_timeout(),
                 MonitorKind::Logs,
@@ -373,7 +375,6 @@ impl Core {
                     .eval
                     .iter()
                     .find(|e| Some(&e.name) == task.evaluator.as_ref())
-                    .cloned()
                 else {
                     return Ok(ResumeOutcome::Discarded);
                 };
@@ -385,7 +386,7 @@ impl Core {
                 (
                     branch,
                     evaluator.secrets.clone(),
-                    eval_image(&job_type, &evaluator),
+                    Level::Eval(evaluator),
                     ChannelRole::Eval {
                         task_id,
                         evaluator: evaluator.name.clone(),
@@ -397,11 +398,7 @@ impl Core {
             TaskPhase::WrapUp => (
                 self.repos.default_branch(owner, project).await?,
                 job_type.wrap_up.secrets.clone(),
-                job_type
-                    .wrap_up
-                    .image
-                    .clone()
-                    .or_else(|| job_type.image.clone()),
+                Level::WrapUp,
                 ChannelRole::Work { task_id },
                 task_timeout(&job_type),
                 MonitorKind::Logs,
@@ -413,7 +410,7 @@ impl Core {
 
         let mut config = self
             .command_launch_config(
-                owner, project, seq, &branch, &job_type, &secrets, image, run, role, timeout,
+                owner, project, seq, &branch, &job_type, &secrets, level, run, role, timeout,
             )
             .await?;
         let mut task = task;

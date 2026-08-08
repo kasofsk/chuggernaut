@@ -14,24 +14,21 @@
 # THE PREREQUISITE IS A DEPLOY, NOT A MERGE. min_dispatcher below is the runtime
 # block's epoch and says nothing about host mode being *served*; what this job
 # type actually needs is a dispatcher and a worker carrying #490 slice 5 (job
-# #497), which is what permits an agent-shaped host launch at all.
+# #497), which is what permits an agent-shaped host launch at all, and a
+# dispatcher carrying job #507, which is what keeps the appended `ci` evaluator
+# out of this job type's host runtime (below).
 #
-# THE APPENDED `ci` EVALUATOR CANNOT PASS UNDER THIS JOB TYPE, and that is a
-# platform gap this config cannot close. Every level's launch is handed the job
-# type's runtime.env regardless of the mode that level resolves to
-# (crates/dispatcher/src/launch_queue.rs, crates/dispatcher/src/eval.rs), so the
-# ci evaluator — a container launch, because .chug/jobs/_defaults.yaml gives it
-# an explicit image — arrives at the node declaring `xcode:26.5`. The daemon
-# resolves it against the node's installed Xcode and injects a macOS
-# DEVELOPER_DIR/CHUG_ENV_PATH (crates/worker/src/daemon.rs), and the §4.1
-# bootstrap prelude then refuses because no Linux container can see that
-# directory (crates/container/src/lib.rs). The evaluator is NOT overridable: a
-# job type declaring its own `ci` collides with the project default and fails
-# JobType::with_defaults. So a released mac-proof job runs its work task, gets
-# its stdout and transcript harvested, and then ESCALATES on a red ci rather
-# than reaching Done. The work task's report is the deliverable and survives
-# that; docs/design/490-agent-work-on-a-mac.md's job #502 correction records the
-# mechanism and names the code slice that fixes it.
+# THE APPENDED `ci` EVALUATOR IS A CONTAINER TASK AND RUNS AS ONE. It carries an
+# explicit image from .chug/jobs/_defaults.yaml, which resolves that level to
+# container mode, and a level resolved out of this job type's host mode is handed
+# NO runtime.env (JobType::level_runtime_env, spec §1.1's mode: host row, design
+# #309 P1). So it reaches the node as an ordinary Linux container launch: no
+# xcode:26.5 declaration, no macOS DEVELOPER_DIR/CHUG_ENV_PATH injected by the
+# daemon, and no §4.1 bootstrap prelude to refuse on. Host work, container CI,
+# one job — the mode resolution has always said so, and job #507 is what made the
+# launch path ask for it. Note the evaluator is NOT overridable either way: a job
+# type declaring its own `ci` collides with the project default and fails
+# JobType::with_defaults.
 #
 # The deliverable is the task's STDOUT plus its output archive: the dispatcher
 # harvests an agent work task's logs into its `stdout.log` artifact and

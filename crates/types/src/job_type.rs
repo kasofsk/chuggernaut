@@ -389,6 +389,21 @@ impl RuntimeMode {
     }
 }
 
+/// One of the three levels a job type launches a task for, each carrying its
+/// own optional `image` (design #309 P1). A launch names the level it is for,
+/// so the image and the runtime it resolves to come from one rule
+/// ([`JobType::level_image`], [`JobType::level_runtime_env`]) rather than from
+/// each call site.
+#[derive(Debug, Clone, Copy)]
+pub enum Level<'a> {
+    /// The work task, whose image is the job type's own top-level `image`.
+    Work,
+    /// One evaluator, container or host by its own `image` declaration.
+    Eval(&'a Evaluator),
+    /// The wrap-up task.
+    WrapUp,
+}
+
 /// One declared job input (spec §1.1, design #311 Decision 2): a name, a kind,
 /// and the narrowing that makes a supplied value safe to hand to a script.
 ///
@@ -1045,11 +1060,55 @@ impl JobType {
         self.placement.as_ref().and_then(|p| p.node.as_deref())
     }
 
-    /// The toolchain this job type's tasks run against, if any (spec §1.1,
-    /// design #373 P2). One accessor, so every launch path reads the declaration
-    /// the same way `image` is read.
-    pub fn runtime_env(&self) -> Option<&str> {
+    /// The toolchain this job type *declares*, if any (spec §1.1, design #373
+    /// P2). Private because a launch is per level: [`JobType::level_runtime_env`]
+    /// is what a launch path asks, and going around it is the defect job #507
+    /// fixed.
+    fn runtime_env(&self) -> Option<&str> {
         self.runtime.as_ref().and_then(|r| r.env.as_deref())
+    }
+
+    /// The image a level's task runs, `None` when neither that level nor the
+    /// job type declares one — which under `runtime.mode: host` is the host
+    /// task the absence selects (design #309 §1), and which validation refuses
+    /// in container mode.
+    pub fn level_image<'a>(&'a self, level: Level<'a>) -> Option<&'a str> {
+        self.level_own_image(level).or(self.image.as_deref())
+    }
+
+    /// The backend a level's task resolves to (design #309 P1): a level
+    /// carrying its **own** `image` is a container task whatever the job type's
+    /// `runtime.mode` says, and a level with none inherits that mode.
+    pub fn level_mode(&self, level: Level<'_>) -> RuntimeMode {
+        match self.level_own_image(level) {
+            Some(_) => RuntimeMode::Container,
+            None => self.resolved_mode(),
+        }
+    }
+
+    /// The toolchain a level's task runs against (design #309 P1, #373
+    /// Decision 2): the declaration when the level resolves to the job type's
+    /// own mode, and nothing when its own `image` resolved it out of that mode.
+    ///
+    /// A host job type's container `ci` evaluator is the case that makes the
+    /// distinction load-bearing — an `xcode:` environment is realised on the
+    /// node and no container can reach it — while container mode is untouched,
+    /// where an `image` and an `env` layer by design.
+    pub fn level_runtime_env<'a>(&'a self, level: Level<'a>) -> Option<&'a str> {
+        (self.level_mode(level) == self.resolved_mode())
+            .then(|| self.runtime_env())
+            .flatten()
+    }
+
+    /// The `image` a level declares for itself, ignoring the top-level
+    /// fallback: the work task's image *is* the top-level one, so work declares
+    /// none of its own.
+    fn level_own_image<'a>(&'a self, level: Level<'a>) -> Option<&'a str> {
+        match level {
+            Level::Work => None,
+            Level::Eval(evaluator) => evaluator.image.as_deref(),
+            Level::WrapUp => self.wrap_up.image.as_deref(),
+        }
     }
 
     /// Non-fatal config warnings (spec §14): unknown top-level fields that were
@@ -2347,6 +2406,136 @@ min_dispatcher: 5
             vec![],
             "an explicit image resolves that wrap_up to container mode"
         );
+    }
+
+    /// `mac-proof`'s shape: agent host work against an Xcode, plus the `ci`
+    /// evaluator `.chug/jobs/_defaults.yaml` appends to every job type with an
+    /// explicit image of its own.
+    fn jt_host_with_container_evaluator() -> JobType {
+        let yaml = format!(
+            "name: mac-proof\nmin_dispatcher: {}\nwork:\n  type: agent\n  prompt: p.md\n\
+             runtime:\n  mode: host\n  env: \"xcode:26.5\"\n\
+             wrap_up:\n  run: ./publish.sh\n\
+             eval:\n  - name: ci\n    type: command\n    run: ./.chug/tasks/ci.sh\n    \
+             image: chuggernaut/agent-rust:prod\n",
+            crate::version::RUNTIME_SCHEMA_EPOCH
+        );
+        JobType::parse(&yaml).unwrap()
+    }
+
+    /// The launch-path half of the mode resolution the validation above already
+    /// asserts (design #309 P1, job #507): the container `ci` evaluator of a
+    /// host job type inherits **no** environment, because an `xcode:` one is
+    /// realised on the node and no container can reach it.
+    #[test]
+    fn a_container_level_of_a_host_job_type_inherits_no_runtime_environment() {
+        let jt = jt_host_with_container_evaluator();
+        assert_eq!(jt.validate(), vec![]);
+        assert_eq!(
+            jt.level_runtime_env(Level::Work),
+            Some("xcode:26.5"),
+            "the work task is the host task, and it runs against the declared Xcode"
+        );
+        assert_eq!(jt.level_mode(Level::Work), RuntimeMode::Host);
+        assert_eq!(
+            jt.level_runtime_env(Level::Eval(&jt.eval[0])),
+            None,
+            "the evaluator's own image resolved it out of host mode, so it inherits nothing"
+        );
+        assert_eq!(
+            jt.level_mode(Level::Eval(&jt.eval[0])),
+            RuntimeMode::Container
+        );
+        assert_eq!(
+            jt.level_image(Level::Eval(&jt.eval[0])),
+            Some("chuggernaut/agent-rust:prod")
+        );
+        assert_eq!(
+            jt.level_image(Level::Work),
+            None,
+            "and the host work task has no image to fall back to"
+        );
+    }
+
+    /// The mirror case: a level declaring no image of its own is a host task,
+    /// so it takes the job type's environment — the evaluator and the wrap-up
+    /// alike.
+    #[test]
+    fn a_level_with_no_image_of_its_own_inherits_the_host_runtime_environment() {
+        let yaml = format!(
+            "name: mobile\nmin_dispatcher: {}\nwork:\n  type: command\n  run: ./go.sh\n\
+             runtime:\n  mode: host\n  env: \"nix:.#chug-mobile\"\n\
+             wrap_up:\n  run: ./publish.sh\n\
+             eval:\n  - name: ci\n    type: command\n    run: ./ci.sh\n",
+            crate::version::RUNTIME_SCHEMA_EPOCH
+        );
+        let jt = JobType::parse(&yaml).unwrap();
+        assert_eq!(jt.validate(), vec![]);
+        for level in [Level::Work, Level::WrapUp, Level::Eval(&jt.eval[0])] {
+            assert_eq!(jt.level_runtime_env(level), Some("nix:.#chug-mobile"));
+            assert_eq!(jt.level_mode(level), RuntimeMode::Host);
+            assert_eq!(jt.level_image(level), None);
+        }
+        let with_image = JobType::parse(&yaml.replace(
+            "  run: ./publish.sh\n",
+            "  run: ./publish.sh\n  image: publish:latest\n",
+        ))
+        .unwrap();
+        assert_eq!(
+            with_image.level_runtime_env(Level::WrapUp),
+            None,
+            "a wrap-up declaring its own image is a container task like the evaluator"
+        );
+        assert_eq!(
+            with_image.level_runtime_env(Level::Work),
+            Some("nix:.#chug-mobile"),
+            "and it changes nothing about the levels beside it"
+        );
+    }
+
+    /// Container mode is untouched, which is the acceptance criterion the fix
+    /// carries: an `image` and an `env` **layer** there (#373 Decision 2), so a
+    /// level naming its own image still gets the declared environment — and a
+    /// job type with no `runtime:` block at all sends nothing, as every job
+    /// type in this repo does today.
+    #[test]
+    fn container_mode_layers_its_environment_over_every_level() {
+        let yaml = format!(
+            "name: mobile\nimage: img:latest\nmin_dispatcher: {}\n\
+             work:\n  type: command\n  run: ./go.sh\n\
+             runtime:\n  mode: container\n  env: \"nix:.#chug-mobile\"\n\
+             wrap_up:\n  run: ./publish.sh\n  image: publish:latest\n\
+             eval:\n  - name: ci\n    type: command\n    run: ./ci.sh\n    image: ci:latest\n",
+            crate::version::RUNTIME_SCHEMA_EPOCH
+        );
+        let layered = JobType::parse(&yaml).unwrap();
+        assert_eq!(layered.validate(), vec![]);
+        for level in [Level::Work, Level::WrapUp, Level::Eval(&layered.eval[0])] {
+            assert_eq!(layered.level_runtime_env(level), Some("nix:.#chug-mobile"));
+            assert_eq!(layered.level_mode(level), RuntimeMode::Container);
+        }
+        assert_eq!(layered.level_image(Level::Work), Some("img:latest"));
+        assert_eq!(layered.level_image(Level::WrapUp), Some("publish:latest"));
+        assert_eq!(
+            layered.level_image(Level::Eval(&layered.eval[0])),
+            Some("ci:latest")
+        );
+
+        let plain = JobType::parse(
+            "name: plain\nimage: img:latest\nwork:\n  type: command\n  run: ./go.sh\n\
+             eval:\n  - name: ci\n    type: command\n    run: ./ci.sh\n    image: ci:latest\n",
+        )
+        .unwrap();
+        for level in [Level::Work, Level::WrapUp, Level::Eval(&plain.eval[0])] {
+            assert_eq!(plain.level_runtime_env(level), None);
+            assert_eq!(plain.level_mode(level), RuntimeMode::Container);
+        }
+        assert_eq!(
+            plain.level_image(Level::Eval(&plain.eval[0])),
+            Some("ci:latest"),
+            "the top-level fallback is unchanged: an evaluator's own image still wins"
+        );
+        assert_eq!(plain.level_image(Level::WrapUp), Some("img:latest"));
     }
 
     #[test]

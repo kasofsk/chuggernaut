@@ -7,7 +7,10 @@ document that is live is §3's sequencing rule — the epoch is a counter, not a
 reservation — which it adopted from
 [#313](313-workload-identity-image-builds.md) and which every epoch bump since
 has followed. No slice table: this document sequences an epoch, not a set of
-slices.
+slices. One mechanic the body describes has since moved: the per-level `image`
+fallback it counts in four dispatcher call sites is one accessor,
+`JobType::level_image` (job #507); the three `pub image: Option<String>`
+declaration sites its argument rests on are unchanged.
 
 Written against the tree at `fce9e33` and re-verified at `e5723c7`, which adds
 only this file. Every claim about current behavior below was read out of

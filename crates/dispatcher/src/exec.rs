@@ -33,9 +33,10 @@ use agent::{AgentRunConfig, McpServerConfig};
 use chrono::Utc;
 use std::collections::HashMap;
 use std::time::Duration;
+use types::job_type::Level;
 use types::{
-    EscalationAction, EvalResult, Evaluator, Job, JobState, JobType, ReworkReason, Task, TaskKind,
-    TaskPhase, TaskResolution, TaskResult, TaskState, WorkType, parse_duration,
+    EscalationAction, EvalResult, Job, JobState, JobType, ReworkReason, Task, TaskKind, TaskPhase,
+    TaskResolution, TaskResult, TaskState, WorkType, parse_duration,
 };
 
 pub(crate) use crate::decide::work::{INFRA_LOSS_REASON, INFRA_RELAUNCH_CAP, provider_name};
@@ -429,7 +430,8 @@ impl Core {
                         predecessor.as_deref(),
                     )
                     .await?;
-                let (mcp_servers, mut files) = self.channel_mcp(&env, job_type.image.as_deref());
+                let image = job_type.level_image(Level::Work).map(String::from);
+                let (mcp_servers, mut files) = self.channel_mcp(&env, image.as_deref());
                 files.extend(
                     self.ssh_credential_files(
                         owner,
@@ -443,7 +445,7 @@ impl Core {
                 let audit = workload.merge_into(&mut env, &mut files);
                 self.record_workload_identities(&mut task, audit).await?;
                 let config = AgentRunConfig {
-                    image: job_type.image.clone(),
+                    image,
                     prompt,
                     model: job
                         .model
@@ -462,7 +464,7 @@ impl Core {
                     session_id: session_id.clone().unwrap_or_default(),
                     node: job_type.placement_node().map(String::from),
                     permissions: agent::PermissionProfile::Work,
-                    runtime_env: job_type.runtime_env().map(String::from),
+                    runtime_env: job_type.level_runtime_env(Level::Work).map(String::from),
                 };
                 let provider = self.provider.clone();
                 let tx = self.self_tx.clone().expect("spawned core");
@@ -529,7 +531,7 @@ impl Core {
                         &job.branch,
                         &job_type,
                         &job_type.work.secrets,
-                        job_type.image.clone(),
+                        Level::Work,
                         run,
                         ChannelRole::Work { task_id },
                         work_timeout,
@@ -2188,13 +2190,6 @@ pub(crate) fn rework_context_block(
         block.push('\n');
     }
     block
-}
-
-/// The image an evaluator's task runs, `None` when neither level declares one
-/// — which under `runtime.mode: host` is the host task the absence selects
-/// (design #309 §1), and which validation refuses in container mode.
-pub(crate) fn eval_image(job_type: &JobType, evaluator: &Evaluator) -> Option<String> {
-    evaluator.image.clone().or_else(|| job_type.image.clone())
 }
 
 #[cfg(test)]

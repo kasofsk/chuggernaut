@@ -34,10 +34,11 @@ use crate::decide::eval as decide_eval;
 use crate::decide::merge_gate;
 use crate::decide::wrapup;
 use crate::effects::Effect;
-use crate::exec::{ChannelRole, INFRA_RELAUNCH_CAP, eval_image, task_timeout};
+use crate::exec::{ChannelRole, INFRA_RELAUNCH_CAP, task_timeout};
 use crate::interpret::Outcome;
 use agent::AgentRunConfig;
 use chrono::Utc;
+use types::job_type::Level;
 use types::{
     EvalResult, Evaluator, EvaluatorType, Job, JobState, ReworkReason, Task, TaskKind, TaskPhase,
     TaskResult, TaskState, WorkType, WrapUpMode,
@@ -623,7 +624,7 @@ impl Core {
                         branch,
                         &job_type,
                         &evaluator.secrets,
-                        eval_image(&job_type, evaluator),
+                        Level::Eval(evaluator),
                         run,
                         ChannelRole::Eval {
                             task_id,
@@ -887,7 +888,9 @@ impl Core {
         {
             prompt = format!("{pred}{prompt}");
         }
-        let image = eval_image(&job_type, evaluator);
+        let image = job_type
+            .level_image(Level::Eval(evaluator))
+            .map(String::from);
         let (mcp_servers, mut files) = self.channel_mcp(&env, image.as_deref());
         files.extend(
             self.ssh_credential_files(
@@ -936,7 +939,9 @@ impl Core {
             session_id: session_id.unwrap_or_default(),
             node: job_type.placement_node().map(String::from),
             permissions: agent::PermissionProfile::Review,
-            runtime_env: job_type.runtime_env().map(String::from),
+            runtime_env: job_type
+                .level_runtime_env(Level::Eval(evaluator))
+                .map(String::from),
         };
         let provider = self.provider.clone();
         let harvest = self.harvester();
@@ -1858,11 +1863,6 @@ impl Core {
         .await?;
 
         let placement = self.placement_guard();
-        let image = job_type
-            .wrap_up
-            .image
-            .clone()
-            .or_else(|| job_type.image.clone());
         let mut config = self
             .command_launch_config(
                 owner,
@@ -1871,7 +1871,7 @@ impl Core {
                 &default_branch,
                 &job_type,
                 &job_type.wrap_up.secrets,
-                image,
+                Level::WrapUp,
                 run,
                 ChannelRole::Work { task_id },
                 timeout,

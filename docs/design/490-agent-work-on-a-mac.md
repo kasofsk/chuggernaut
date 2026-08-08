@@ -33,6 +33,14 @@ the teardown it said to keep as it stood would have deleted every host
 transcript before the harvest could read it, so it now spares the CLI's own
 config directory and the secrets half is unchanged ([the job #497
 correction](#correction--2026-08-08-job-497-d6-amended-the-teardown-spared-the-clis-own-tree)).
+**Slice 6's machinery is in the tree** — `.chug/jobs/mac-proof.yaml` and its work
+prompt, built by job #502 ([that
+correction](#correction--2026-08-08-job-502-slice-6-needed-machinery-and-the-appended-ci-refuses-an-xcode-job-type))
+— and the platform gap it found is closed: a container level of a host job type
+is handed no `runtime.env`, so the appended `ci` evaluator runs as the ordinary
+container task its own image makes it ([the job #507
+correction](#correction--2026-08-08-job-507-the-launch-path-now-scopes-runtimeenv-to-the-level-it-launches)).
+What remains for slice 6 is the run itself, on the air.
 No other decision was overturned. Three things changed:
 
 - **M3 made slice 4's work required rather than confirmatory.** `claude` is
@@ -1196,3 +1204,50 @@ the baseline the second gets diffed against, so the prompt captures
 `delete` and `shutdown all`, and writes the raw captures to the task's output
 archive rather than only into prose. A task that tidied up after itself would
 have measured nothing.
+
+## Correction — 2026-08-08, job #507 (the launch path now scopes `runtime.env` to the level it launches)
+
+Appended by the `code` slice the [job #502
+correction](#correction--2026-08-08-job-502-slice-6-needed-machinery-and-the-appended-ci-refuses-an-xcode-job-type)
+named and deliberately did not take. That section's present-tense description of
+the gap is history as of this one: **a container level of a host job type is now
+handed no `runtime.env`**, so `mac-proof`'s appended `ci` evaluator is an
+ordinary Linux container launch and the "host work, container CI, one job" case
+of [#309](309-host-native-execution.md) §1 runs end to end. Slice 6's row is
+unchanged and still `Proposed` — the proof is a job that runs on the air, and
+this is only the platform half that lets it reach Done.
+
+**What the fix is, and where it lives.** `types::JobType` gained the per-level
+accessors the resolution rule always implied: `level_image`, `level_mode` and
+`level_runtime_env`, each taking a `Level` (`Work`, `Eval(&Evaluator)`,
+`WrapUp`). A level's **own** `image` resolves it to container mode, and a level
+whose mode differs from the job type's inherits no `runtime`. `runtime_env()` is
+now private, so a launch site cannot ask the job-type-level question by accident
+— which is exactly how the defect survived: validation knew the rule
+(`crates/types/src/job_type.rs`) and three launch sites
+(`crates/dispatcher/src/eval.rs`, `crates/dispatcher/src/exec.rs`,
+`crates/dispatcher/src/launch_queue.rs`) each read the job type's declaration
+unconditionally. `Core::command_launch_config` now takes the `Level` rather than
+a pre-resolved image, so the image and the runtime come from one rule; the
+dispatcher's own `eval_image` helper is gone into `JobType::level_image`.
+
+**Container mode is deliberately untouched**, and that is the narrow reading the
+[#309 precedence rule](309-host-native-execution.md#coexistence-on-a-mixed-fleet)
+supports rather than the broad one — and #309's own head and body now say so,
+corrected in this job. Under `mode: container` an `image` and an `env` **layer** — that is
+[#373](373-project-toolchains.md) Decision 2's whole cell — so a level naming its
+own image there still gets the declared environment; dropping it would have
+silently taken the toolchain away from the `ci` evaluator of every nix-layered
+container job type. The rule that fires is the one `docs/spec.md` §1.1's
+`mode: host` row states: a level carrying its own image "is a container task
+regardless and does not inherit `runtime`".
+
+**What was untestable before and is asserted now.** The unit half is in
+`crates/types/src/job_type.rs` — a host job type's work level yields its
+`xcode:` reference and its explicit-image evaluator yields `None`, the mirror
+case where no level declares an image, and container mode's layering. The launch
+half is `crates/dispatcher/tests/runtime_levels.rs`, tier 2: a `mac-proof`-shaped
+job driven from release to Done, asserting the work run carries `xcode:26.5` and
+no image while the `ci` evaluator's launch config carries an image and no
+`runtime_env`. It fails against the previous tree with `Some("xcode:26.5")`,
+which is the assertion the four slices before it never made.
