@@ -536,6 +536,7 @@ async fn announced_capabilities_reach_the_backend() {
         resources_enforced: false,
         leases: Vec::new(),
         envs: vec!["xcode:26.5".into()],
+        agent_cli: true,
     };
     let mut with_caps = announce("mac", 1, "0.1.0+mac");
     with_caps.capabilities = Some(host.clone());
@@ -547,10 +548,18 @@ async fn announced_capabilities_reach_the_backend() {
     wait_until(|| backend.registered().len() >= 2).await;
 
     assert_eq!(backend.advertised("mac"), Some(host));
+    assert!(
+        backend.advertised("mac").is_some_and(|c| c.agent_cli),
+        "the announce carries the agent-CLI probe (design #490 D3)"
+    );
     assert_eq!(
         backend.advertised("nuc"),
         Some(types::NodeCapabilities::absent()),
         "a daemon predating the field reads container-only"
+    );
+    assert!(
+        backend.advertised("nuc").is_some_and(|c| !c.agent_cli),
+        "a daemon predating the probe promises no agent CLI"
     );
     assert_invariants_of(&sink);
 }

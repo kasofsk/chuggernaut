@@ -625,8 +625,9 @@ swap)
   CHANNEL_BIN="${WORKER_CHANNEL_BINARY:-/usr/local/lib/chuggernaut/chuggernaut-channel}"
   # The HOST copy's path, which is build-worker.sh's `HOST_CHANNEL_BIN` and must
   # stay in step with it: no run spec carries this, so the two defaults ARE the
-  # agreement (design #490 D2 leaves the daemon's own config variable to slice 4,
-  # which is the first thing that reads the file).
+  # agreement (design #490 D2 leaves the daemon's own config variable to slice 5,
+  # which is the first thing that reads the file — slice 4 probed the agent CLI
+  # and left this one alone).
   HOST_CHANNEL_BIN="${WORKER_HOST_CHANNEL_BINARY:-/usr/local/lib/chuggernaut/chuggernaut-channel-host}"
   REFRESH_SCRIPT="${WORKER_REFRESH_SCRIPT:-/usr/local/lib/chuggernaut/worker-refresh.sh}"
   SWAP_UNIT="${WORKER_UNIT:-chug-worker.service}"

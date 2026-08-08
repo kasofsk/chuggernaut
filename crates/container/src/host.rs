@@ -18,8 +18,10 @@
 //! CoreSimulator's global device state rather than as the collision fix, and is
 //! **enforced here**: a launch arriving while another task is live is refused as
 //! `NoCapacity`. Phase 1 also serves **command work only**: a launch carrying
-//! agent shape is refused, now on what this node cannot yet provide rather than
-//! on the transcript path, which design #490 slice 1 resolves by session id.
+//! agent shape is refused here on its shape alone, until design #490 slice 5
+//! replaces this test with a launch-time capability test — neither the
+//! transcript (slice 1) nor the node's capabilities (slices 3 and 4) is the
+//! reason any more.
 //!
 //! A launch **declaring an image is refused** (#309 §1, P1): the image's absence
 //! is what selects this backend, so one that carries an image was misrouted and
@@ -549,11 +551,12 @@ impl HostBackend {
         if config.env.contains_key(AGENT_CONFIG_VAR) {
             return Err(BackendError::Launch(format!(
                 "node {} serves host mode and this launch sets {AGENT_CONFIG_VAR}, which is agent \
-                 shape — design #322 §2 serves work.type: command only on a host node. The \
-                 transcript is no longer the reason: design #490 slice 1 resolves it by session \
-                 id rather than from agent::transcript_path's computed slug. What this node still \
-                 lacks is a host channel binary and a discovered agent CLI (#490 D2/D3), and \
-                 slice 5 replaces this test with one that says which",
+                 shape — design #322 §2 serves work.type: command only on a host node. Neither the \
+                 transcript nor this node's capabilities is the reason any more (#490 slice 1 \
+                 resolves the transcript by session id, slice 3 installs the host channel binary, \
+                 slice 4 discovers the agent CLI and refuses by name in the daemon before this \
+                 backend is reached): the refusal stands on the shape alone until #490 slice 5 \
+                 replaces it with a launch-time capability test",
                 self.node
             )));
         }

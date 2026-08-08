@@ -272,9 +272,9 @@ async fn an_image_carrying_launch_is_refused() {
 }
 
 /// Design #322 §2: phase 1 serves `work.type: command` only, and the
-/// restriction is **enforced at the node** rather than documented. Since #490
-/// slice 1 the refusal names what the node cannot yet provide rather than the
-/// transcript path, which is now resolved by session id.
+/// restriction is **enforced at the node** rather than documented. The refusal
+/// names the slice that replaces it (#490 slice 5), the capabilities having
+/// landed in slices 1, 3 and 4.
 #[tokio::test]
 async fn an_agent_shaped_launch_is_refused() {
     let root = temp_root("agent-shape");
@@ -290,7 +290,7 @@ async fn an_agent_shaped_launch_is_refused() {
         "agent shape on a host node is a hard refusal, never retried capacity: {err}"
     );
     let text = err.to_string();
-    for named in [AGENT_CONFIG_VAR, "work.type: command", "#490 D2/D3"] {
+    for named in [AGENT_CONFIG_VAR, "work.type: command", "#490 slice 5"] {
         assert!(text.contains(named), "the refusal names {named}: {text}");
     }
     assert!(

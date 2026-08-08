@@ -338,8 +338,9 @@ pub const REFRESH_STAGE_CANCELLED: &str = "cancelled";
 
 /// What a node can do, as opposed to how much of it (design #309 §4): the
 /// execution modes it serves, the platform it runs on, whether it enforces a
-/// task's resource limits, the exclusive resources it holds, and the
-/// node-interpreted environments it discovered it can serve.
+/// task's resource limits, the exclusive resources it holds, the
+/// node-interpreted environments it discovered it can serve, and whether it
+/// discovered an agent CLI (design #490 D3).
 ///
 /// Carried on both [`PingOk`] and [`WorkerAnnounce`] as an `Option`, additively,
 /// so a daemon predating the field needs no coordination and reads as
@@ -371,6 +372,11 @@ pub struct NodeCapabilities {
     /// build rather than a node fact and is never listed.
     #[serde(default)]
     pub envs: Vec<String>,
+    /// Whether this node discovered an agent CLI on the daemon's own `PATH`, and
+    /// so could serve an agent host launch (design #490 D3). Absent ⇒ `false`:
+    /// a daemon predating the field ran no probe, so it promises nothing.
+    #[serde(default)]
+    pub agent_cli: bool,
 }
 
 /// [`NodeCapabilities::platform`] for a node that named none (design #309 §4).
@@ -396,6 +402,7 @@ impl Default for NodeCapabilities {
             resources_enforced: resources_enforced_default(),
             leases: Vec::new(),
             envs: Vec::new(),
+            agent_cli: false,
         }
     }
 }
@@ -1331,6 +1338,7 @@ mod tests {
             resources_enforced: false,
             leases: vec!["kvm".into()],
             envs: vec!["xcode:26.5".into()],
+            agent_cli: true,
         }
     }
 
@@ -1355,6 +1363,7 @@ mod tests {
         );
         assert!(json.contains(r#""modes":["container","host"]"#), "{json}");
         assert!(json.contains(r#""envs":["xcode:26.5"]"#), "{json}");
+        assert!(json.contains(r#""agent_cli":true"#), "{json}");
 
         let ping = PingOk {
             running: 0,
@@ -1394,6 +1403,10 @@ mod tests {
             absent.envs.is_empty(),
             "a node that named no environment serves none (design #322 §3)"
         );
+        assert!(
+            !absent.agent_cli,
+            "a node that ran no probe cannot serve an agent host launch (design #490 D3)"
+        );
         assert!(absent.serves(RuntimeMode::Container));
         assert!(!absent.serves(RuntimeMode::Host), "fails closed");
 
@@ -1414,6 +1427,12 @@ mod tests {
                 .unwrap()
                 .resources_enforced,
             "a node that does not say otherwise enforces limits"
+        );
+        assert!(
+            !serde_json::from_str::<NodeCapabilities>(r#"{"modes":["host"]}"#)
+                .unwrap()
+                .agent_cli,
+            "a daemon predating the probe advertises no agent CLI"
         );
         assert_eq!(ObservedCapabilities::default().effective(), absent);
     }

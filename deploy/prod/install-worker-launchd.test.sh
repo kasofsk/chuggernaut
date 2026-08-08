@@ -97,7 +97,7 @@ run
 [ "$rc" -eq 0 ] || fail "the happy path must install: $(cat "$WORK/out")"
 [ -f "$PLIST" ] || fail "no plist was written"
 
-MAC_PATH=/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+MAC_PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME_DIR/.local/bin"
 sed -n '/^  PLIST_TEXT="<?xml/,/^<\/plist>"$/p' "$BUILDER" |
 	sed -e '1s|^  PLIST_TEXT="||' -e '$s|"$||' -e 's|\\"|"|g' \
 		-e 's|\$AGENT_LABEL|com.chuggernaut.worker|g' \
@@ -139,6 +139,38 @@ grep -qF "<key>PATH</key><string>$MAC_PATH</string>" "$PLIST" ||
 	fail "a toolchain already on the agent's PATH must not be prepended again"
 printf "WORKER_NODE='air'\n" > "$ENV_FILE"
 echo "ok: the run spec's WORKER_CARGO directory leads the agent's PATH, once"
+
+# ── Case 1b: the agent CLI's directory is on the PATH this renders ────────────
+# M3, pinned as a test (design #490 slice 0, job #492): on gumbo-air-0 `claude`
+# is at ~/.local/bin/claude and `PATH=$AGENT_PATH command -v claude` found
+# NOTHING, so the daemon's boot probe (#490 D3) would report the CLI absent with
+# the CLI installed and working, and D5 would refuse every agent host launch by
+# name. Asked as element membership in the rendered PATH rather than by running
+# `command -v` under it: the entries below ~/.local/bin are the REAL /usr/bin
+# and /usr/local/bin of whatever host runs this suite, and the gate's own agent
+# image carries a `claude` in one of them — a resolution check would pass there
+# for a reason no worker mac shares.
+mkdir -p "$HOME_DIR/.local/bin"
+printf '#!/bin/sh\necho 2.1.198\n' > "$HOME_DIR/.local/bin/claude"
+chmod +x "$HOME_DIR/.local/bin/claude"
+rm -f "$PLIST"
+run
+[ "$rc" -eq 0 ] || fail "the happy path must install: $(cat "$WORK/out")"
+RENDERED_PATH="$(sed -n 's|.*<key>PATH</key><string>\(.*\)</string>.*|\1|p' "$PLIST")"
+[ -n "$RENDERED_PATH" ] || fail "no PATH could be read out of the rendered plist"
+case ":$RENDERED_PATH:" in
+*":$HOME_DIR/.local/bin:"*) ;;
+*) fail "the agent CLI's install directory is on none of the entries this agent gives the daemon ('$RENDERED_PATH') — #490 D3's probe would report the CLI absent and D5 would refuse every agent host launch by name" ;;
+esac
+[ -x "$HOME_DIR/.local/bin/claude" ] ||
+	fail "the fixture CLI is not runnable, so this case pinned nothing"
+rm -f "$HOME_DIR/.local/bin/claude"
+
+# The same directory in build-worker.sh's rendering, because a node converted by
+# hand and a node the deploy converts must not differ in what they can serve.
+grep -qF 'NODE_HOME/.local/bin' "$BUILDER" ||
+	fail "build-worker.sh renders a macOS agent whose PATH cannot resolve the agent CLI — the two installers must carry one PATH (#490 D3)"
+echo "ok: the agent CLI's directory is on the PATH both installers render"
 
 # ── Case 2: it cannot be installed on the Mini ────────────────────────────────
 # Job #467's finding: install-launchd.sh globs its template directory, so a

@@ -1311,7 +1311,14 @@ else
   # generation the node has ever run, and a previous one's "worker up" would
   # pass a daemon that never came up. Safe there and only there — the old agent
   # is gone and the new one has not been asked to start.
-  AGENT_PATH="${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
+  # The tail entry is the login user's `~/.local/bin`, where the agent CLI's own
+  # installer puts `claude`. A host AGENT task has no image to carry one, so the
+  # daemon resolves it on THIS PATH and advertises what it found (design #490
+  # D3); it rides last because a user-writable directory ahead of /usr/bin would
+  # reselect tools for every host task. The hand-run macOS installer under
+  # ./launchd-worker/ spells the same list — the two renderings are one shape,
+  # and its suite diffs them.
+  AGENT_PATH="${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$NODE_HOME/.local/bin}"
   case ":$AGENT_PATH:" in
     *":$CARGO_DIR:"*) ;;
     *) AGENT_PATH="$CARGO_DIR:$AGENT_PATH" ;;

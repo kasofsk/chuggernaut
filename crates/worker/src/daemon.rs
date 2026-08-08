@@ -10,6 +10,7 @@
 //! Containers survive daemon restarts: the dispatcher's poll-based `wait`
 //! (fleet backend) re-attaches via `inspect` on the existing container id.
 
+use crate::agent_cli::AgentCli;
 use crate::capacity::Capacity;
 use crate::config::{WorkerConfig, WorkerMode};
 use crate::nix::{NIX_ENV_PREFIX, NixRoots, REAP_AGE_MIN, Realised, flake_installable};
@@ -242,6 +243,11 @@ struct WorkerState {
     /// launch's `xcode:<version>` resolves against. Empty on every node that
     /// serves no host mode, and on a Mac with none installed.
     xcodes: Xcodes,
+    /// The agent CLI this node discovered on the daemon's own `PATH` at boot
+    /// (design #490 D3), which an agent-shaped host launch is admitted against.
+    /// Absent on every node that serves no host mode, and on a host node whose
+    /// `PATH` carries none.
+    agent_cli: AgentCli,
     /// What this node advertises it can do (design #309 §4), derived once from
     /// `WORKER_MODES` and the discovery above at start. Reported on both
     /// transports, so the pull and the push halves cannot disagree.
@@ -455,6 +461,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     let capacity = run_capacity(&config);
     let announce_now = Arc::new(tokio::sync::Notify::new());
     let xcodes = discover_xcodes(&config.node, &config.modes);
+    let agent_cli = discover_agent_cli(&config.node, &config.modes);
 
     let state = Arc::new(WorkerState {
         node: config.node.clone(),
@@ -469,8 +476,9 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         nix: nix.clone(),
         nix_rooted: std::sync::Mutex::new(HashMap::new()),
         host_mode: serves_host(&config.modes),
-        capabilities: node_capabilities(&config.modes, &xcodes),
+        capabilities: node_capabilities(&config.modes, &xcodes, &agent_cli),
         xcodes,
+        agent_cli,
         refresh_script: config.refresh_script.clone(),
         refresh_git_url: config.refresh_git_url.clone(),
         refresh_git_key: config.refresh_git_key.clone(),
@@ -555,7 +563,11 @@ fn serves_container(modes: &[WorkerMode]) -> bool {
 /// `WORKER_MODES` and its discovered environments. `resources_enforced` follows
 /// container capability: the Docker `HostConfig` is what enforces
 /// `resources.cpu`/`memory`, and a host-only node has none.
-fn node_capabilities(modes: &[WorkerMode], xcodes: &Xcodes) -> types::worker::NodeCapabilities {
+fn node_capabilities(
+    modes: &[WorkerMode],
+    xcodes: &Xcodes,
+    agent_cli: &AgentCli,
+) -> types::worker::NodeCapabilities {
     let mut served = Vec::new();
     if serves_container(modes) {
         served.push(types::job_type::RuntimeMode::Container);
@@ -568,13 +580,42 @@ fn node_capabilities(modes: &[WorkerMode], xcodes: &Xcodes) -> types::worker::No
         envs.is_empty() || serves_host(modes),
         "only a host-capable node discovers an environment"
     );
+    debug_assert!(
+        !agent_cli.present() || serves_host(modes),
+        "only a host-capable node probes for the agent CLI"
+    );
     types::worker::NodeCapabilities {
         modes: served,
         platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
         resources_enforced: serves_container(modes),
         leases: Vec::new(),
         envs,
+        agent_cli: agent_cli.present(),
     }
+}
+
+/// The agent CLI a host-capable node serves agent work with, probed once at boot
+/// against the daemon's own `PATH` (design #490 D3). Finding none is a warning
+/// rather than a refused boot, for the reason D5 gives: the refusal belongs at
+/// the launch that asked, so a Mac without a CLI keeps every container and
+/// command-host slot it has.
+fn discover_agent_cli(node: &str, modes: &[WorkerMode]) -> AgentCli {
+    if !serves_host(modes) {
+        return AgentCli::default();
+    }
+    let cli = AgentCli::discover();
+    match cli.path() {
+        Some(path) => {
+            tracing::info!(node = %node, path = %path.display(), "discovered the agent CLI")
+        }
+        None => tracing::warn!(
+            node = %node,
+            bin = %crate::agent_cli::AGENT_CLI_BIN,
+            "host mode is on and this node discovered no agent CLI on the daemon's own PATH — an \
+             agent-shaped host launch will be refused by name (design #490 D3)"
+        ),
+    }
+    cli
 }
 
 /// The Xcodes a host-capable node serves, scanned once at boot because the
@@ -998,32 +1039,15 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
                     message: format!("node {} is refreshing — launch will be retried", state.node),
                 })?;
             let req: WorkerLaunchRequest = parse(payload)?;
-            let mut files = Vec::with_capacity(req.files.len());
-            for f in req.files {
-                let contents = match f.source {
-                    FileSource::Inline { data_b64 } => {
-                        b64_decode(&data_b64).map_err(|e| WorkerError::Launch { message: e })?
-                    }
-                    FileSource::LocalArtifact { name } => state
-                        .artifacts
-                        .get(&name)
-                        .cloned()
-                        .ok_or_else(|| WorkerError::Launch {
-                            message: format!(
-                                "unknown local artifact {name:?} on node {} (have: {:?})",
-                                state.node,
-                                state.artifacts.keys().collect::<Vec<_>>()
-                            ),
-                        })?,
-                };
-                files.push(InjectedFile {
-                    container_path: f.container_path,
-                    contents,
-                    mode: f.mode,
-                    artifact: None,
-                });
-            }
+            let files = launch_files(state, req.files)?;
             let mut env = req.env;
+            admit_agent_cli(
+                &state.node,
+                state.host_mode,
+                &state.agent_cli,
+                req.image.as_deref(),
+                &env,
+            )?;
             inject_cache_env(&mut env, state.cache_enabled);
             inject_toolchain_env(&mut env, state.kvm.as_ref());
             let rooted = realise_for_launch(state, &mut env, req.runtime_env.as_deref()).await?;
@@ -1052,6 +1076,43 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
         }
         .await,
     )
+}
+
+/// The files a launch injects, with each `LocalArtifact` reference substituted
+/// for the node's own copy. An artifact this node does not hold refuses the
+/// launch naming the ones it does, rather than launching a task missing a file
+/// it was promised.
+fn launch_files(
+    state: &WorkerState,
+    files: Vec<types::worker::WireFile>,
+) -> Result<Vec<InjectedFile>, WorkerError> {
+    let mut injected = Vec::with_capacity(files.len());
+    for f in files {
+        let contents =
+            match f.source {
+                FileSource::Inline { data_b64 } => {
+                    b64_decode(&data_b64).map_err(|e| WorkerError::Launch { message: e })?
+                }
+                FileSource::LocalArtifact { name } => state
+                    .artifacts
+                    .get(&name)
+                    .cloned()
+                    .ok_or_else(|| WorkerError::Launch {
+                        message: format!(
+                            "unknown local artifact {name:?} on node {} (have: {:?})",
+                            state.node,
+                            state.artifacts.keys().collect::<Vec<_>>()
+                        ),
+                    })?,
+            };
+        injected.push(InjectedFile {
+            container_path: f.container_path,
+            contents,
+            mode: f.mode,
+            artifact: None,
+        });
+    }
+    Ok(injected)
 }
 
 /// Inject the three cache variables spec §3.1 ("Node-local build caching")
@@ -1214,6 +1275,24 @@ fn resolve_xcode_env<'a>(
         )));
     }
     xcodes.resolve(node, version).map_err(launch_refused)
+}
+
+/// Whether this node can serve the launch's agent shape, asked here for the
+/// same reason `resolve_xcode_env` is: the node's discovered facts resolve in
+/// the daemon, so the backends stay ignorant of them (design #490 D3/D5). A
+/// container launch carries its CLI in its image and is never asked.
+fn admit_agent_cli(
+    node: &str,
+    host_mode: bool,
+    agent_cli: &AgentCli,
+    image: Option<&str>,
+    env: &HashMap<String, String>,
+) -> Result<(), WorkerError> {
+    let agent_shaped = env.contains_key(container::host::AGENT_CONFIG_VAR);
+    if image.is_some() || !host_mode || !agent_shaped || agent_cli.present() {
+        return Ok(());
+    }
+    Err(launch_refused(agent_cli.missing(node)))
 }
 
 /// Point the task at the Xcode that was resolved: `DEVELOPER_DIR` selects the
@@ -2091,12 +2170,13 @@ mod tests {
         use types::job_type::RuntimeMode;
 
         let none = Xcodes::default();
-        let default = node_capabilities(&crate::config::default_modes(), &none);
+        let no_cli = AgentCli::default();
+        let default = node_capabilities(&crate::config::default_modes(), &none, &no_cli);
         assert_eq!(default.modes, vec![RuntimeMode::Container]);
         assert!(default.resources_enforced);
         assert_eq!(
             default,
-            node_capabilities(&[], &none),
+            node_capabilities(&[], &none, &no_cli),
             "declaring nothing is the same node"
         );
         assert_eq!(
@@ -2108,11 +2188,11 @@ mod tests {
             "only the platform separates a container-only node from the absent reading"
         );
 
-        let both = node_capabilities(&[WorkerMode::Host, WorkerMode::Container], &none);
+        let both = node_capabilities(&[WorkerMode::Host, WorkerMode::Container], &none, &no_cli);
         assert_eq!(both.modes, vec![RuntimeMode::Container, RuntimeMode::Host]);
         assert!(both.resources_enforced, "it still has a docker daemon");
 
-        let host_only = node_capabilities(&[WorkerMode::Host], &none);
+        let host_only = node_capabilities(&[WorkerMode::Host], &none, &no_cli);
         assert_eq!(host_only.modes, vec![RuntimeMode::Host]);
         assert!(
             !host_only.resources_enforced,
@@ -2125,6 +2205,93 @@ mod tests {
             "a live node names its platform: {}",
             host_only.platform
         );
+        assert!(
+            !default.agent_cli && !both.agent_cli && !host_only.agent_cli,
+            "a node that discovered no CLI advertises none (design #490 D3)"
+        );
+    }
+
+    /// A fixture `PATH` with the agent CLI on it, so every assertion about the
+    /// probe says the same thing on the Linux evaluator as it would on the air.
+    fn fixture_agent_cli(name: &str) -> (PathBuf, AgentCli) {
+        let root =
+            std::env::temp_dir().join(format!("chug-daemon-cli-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = crate::agent_cli::path_fixture(&root, "local-bin", Some(0o755));
+        let cli = AgentCli::discover_on(Some(&crate::agent_cli::fixture_path(&[dir])));
+        assert!(cli.present(), "the fixture PATH carries a runnable CLI");
+        (root, cli)
+    }
+
+    /// Discovery is scoped to the nodes that can use it (design #490 D3): a
+    /// container-only node probes nothing and advertises nothing — its CLI comes
+    /// out of the agent image — and a host node that found one says so.
+    #[test]
+    fn only_a_host_capable_node_advertises_an_agent_cli() {
+        assert!(
+            !discover_agent_cli("nuc", &crate::config::default_modes()).present(),
+            "a container-only node never reads the daemon's PATH for a CLI"
+        );
+        let (root, cli) = fixture_agent_cli("advertise");
+        let capable = node_capabilities(
+            &[WorkerMode::Container, WorkerMode::Host],
+            &Xcodes::default(),
+            &cli,
+        );
+        assert!(capable.agent_cli);
+        assert!(
+            !node_capabilities(
+                &[WorkerMode::Container],
+                &Xcodes::default(),
+                &AgentCli::default()
+            )
+            .agent_cli,
+            "a container-only node's advertisement is unchanged"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The launch a node cannot serve is refused BY NAME (design #490 D5), and
+    /// only that launch: a container launch carries its CLI in its image, and a
+    /// command host launch needs none.
+    #[test]
+    fn an_agent_launch_without_a_cli_is_refused_naming_it() {
+        let agent_env = HashMap::from([(
+            container::host::AGENT_CONFIG_VAR.to_string(),
+            "/chuggernaut/claude".to_string(),
+        )]);
+        let none = AgentCli::default();
+
+        let refusal = admit_agent_cli("air", true, &none, None, &agent_env).unwrap_err();
+        let WorkerError::Launch { message } = &refusal else {
+            panic!("an unservable launch is refused, never requeued as capacity: {refusal:?}");
+        };
+        assert!(
+            message.contains(crate::agent_cli::AGENT_CLI_BIN),
+            "{message}"
+        );
+        assert!(message.contains("air"), "{message}");
+
+        assert!(
+            admit_agent_cli("air", true, &none, Some("chug-agent:latest"), &agent_env).is_ok(),
+            "a container launch carries its own CLI in the image"
+        );
+        assert!(
+            admit_agent_cli("air", true, &none, None, &HashMap::new()).is_ok(),
+            "a command host launch needs no CLI (design #322 §2)"
+        );
+        assert!(
+            admit_agent_cli("nuc", false, &none, None, &agent_env).is_ok(),
+            "a node serving no host mode routes this nowhere near the host backend"
+        );
+
+        let (root, cli) = fixture_agent_cli("admit");
+        assert!(
+            admit_agent_cli("air", true, &cli, None, &agent_env).is_ok(),
+            "a node that discovered a CLI is not the one refusing here"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     /// A node offering `host` — alone or beside `container` — whose capacity is
@@ -2673,9 +2840,13 @@ mod tests {
         );
         let host = discover_xcodes("air", &[WorkerMode::Container, WorkerMode::Host]);
         assert!(
-            node_capabilities(&[WorkerMode::Container, WorkerMode::Host], &host)
-                .modes
-                .contains(&types::job_type::RuntimeMode::Host),
+            node_capabilities(
+                &[WorkerMode::Container, WorkerMode::Host],
+                &host,
+                &AgentCli::default()
+            )
+            .modes
+            .contains(&types::job_type::RuntimeMode::Host),
             "an Xcode-less host node still boots and still serves both modes"
         );
     }
@@ -2686,10 +2857,15 @@ mod tests {
     #[test]
     fn advertised_envs_are_the_discovered_set() {
         let (root, xcodes) = fixture_xcodes("advertise");
-        let capabilities = node_capabilities(&[WorkerMode::Host], &xcodes);
+        let capabilities = node_capabilities(&[WorkerMode::Host], &xcodes, &AgentCli::default());
         assert_eq!(capabilities.envs, vec!["xcode:26.5".to_string()]);
         assert_eq!(
-            node_capabilities(&[WorkerMode::Container], &Xcodes::default()).envs,
+            node_capabilities(
+                &[WorkerMode::Container],
+                &Xcodes::default(),
+                &AgentCli::default()
+            )
+            .envs,
             Vec::<String>::new(),
             "a nix node advertises no environment: a flake ref is not a node fact"
         );
@@ -2961,8 +3137,10 @@ mod tests {
                     &[WorkerMode::Container]
                 },
                 &Xcodes::default(),
+                &AgentCli::default(),
             ),
             xcodes: Xcodes::default(),
+            agent_cli: AgentCli::default(),
             refresh_script: Some(script),
             refresh_git_url: Some("git@example.invalid:acme/chug.git".into()),
             refresh_git_key: git_key,

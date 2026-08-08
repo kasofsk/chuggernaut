@@ -601,6 +601,7 @@ fn host_capable() -> types::worker::NodeCapabilities {
         resources_enforced: false,
         leases: Vec::new(),
         envs: vec!["xcode:26.5".into()],
+        agent_cli: true,
     }
 }
 
@@ -641,10 +642,18 @@ async fn ping_advertised_capabilities_reach_the_fleet() {
         Some(host_capable()),
         "the ping's advertisement is what the fleet reads"
     );
+    assert!(
+        fleet.node_capabilities("mac").is_some_and(|c| c.agent_cli),
+        "a node that discovered an agent CLI says so (design #490 D3)"
+    );
     assert_eq!(
         fleet.node_capabilities("nuc"),
         Some(types::worker::NodeCapabilities::absent()),
         "a node that says nothing reads container-only with limits enforced"
+    );
+    assert!(
+        fleet.node_capabilities("nuc").is_some_and(|c| !c.agent_cli),
+        "a daemon predating the probe promises no agent CLI"
     );
     assert_eq!(fleet.node_capabilities("absent-node"), None);
     capable.abort();

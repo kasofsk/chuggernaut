@@ -821,7 +821,9 @@ Two consequences worth knowing before you convert one:
   and carries an empty artifact map. That is the correct state and is about the
   **injected** copy: only a `FileSource::LocalArtifact` launch reads it, and a
   node that creates no container makes none. Nothing reads the host copy yet
-  either; #490 slice 4 is what teaches the daemon to.
+  either — lifting the command-only rule is #490 slice 5, together with the
+  daemon-side config variable D2 left open; slice 4 landed the agent-CLI probe
+  beside this file, not a reader for it.
 - **On Linux the worker image is still built**, because #440 D6 holds there and
   that image is the only place a Linux node's daemon binary comes from. So
   "needs no docker at all" is a **Darwin** property; a host-only Linux node

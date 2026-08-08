@@ -9,6 +9,7 @@
 //! binary, agent images) are provisioned node-locally at deploy time and
 //! referenced by name; see `types::worker`.
 
+pub mod agent_cli;
 pub mod backend;
 pub mod capacity;
 pub mod config;

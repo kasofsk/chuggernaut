@@ -1,6 +1,6 @@
 # Design — agent work on a Mac
 
-Status: IMPLEMENTED IN PART — D1–D7 decided; slice 0 measured, M3 came back no, slices 1–3 landed, slices 4–6 unbuilt.
+Status: IMPLEMENTED IN PART — D1–D7 decided; slice 0 measured, M3 came back no and slice 4 answered it, slices 1–4 landed, slices 5–6 unbuilt.
 
 Written against the tree at `d556a6c` (job #489's `code` merge, the last commit
 touching source before this branch): every claim below was read out of the
@@ -22,16 +22,19 @@ limits.
 rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
 
-**Slices 0–3 are done; 4–6 are not started.** M1, M2, M4 and M5 held; M3
-came back **no**; M7 is deferred to slice 6. **M6 is now answerable but not
-answered**: slice 2 built the instrument that answers it and recorded the
+**Slices 0–4 are done; 5–6 are not started.** M1, M2, M4 and M5 held; M3
+came back **no** and slice 4 is the answer to it — the CLI's install directory is
+on the `PATH` both macOS installers render, so an agent already installed keeps
+the old one until its plist is re-rendered. M7 is deferred to slice 6. **M6 is
+now answerable but not answered**: slice 2 built the instrument that answers it and recorded the
 procedure ([the job #494 correction](#correction--2026-08-08-job-494-slice-2-landed-and-how-m6-gets-answered)),
 whose precondition is a deploy carrying slice 1. No decision was overturned.
 Three things changed:
 
-- **M3 makes slice 4's work required rather than confirmatory.** `claude` is
-  installed on `gumbo-air-0` and is not on the daemon's `PATH`, so D3's probe
-  would find nothing and D5 would refuse every agent host launch by name.
+- **M3 made slice 4's work required rather than confirmatory.** `claude` is
+  installed on `gumbo-air-0` and was not on the daemon's `PATH`, so D3's probe
+  would have found nothing and D5 would have refused every agent host launch by
+  name; slice 4 landed the `PATH` alongside the probe (below).
 - **Candidate 1 is now rejected on correctness, not only on fragility.** The CLI
   slugifies the *resolved realpath*, so a computed slug is wrong today on any
   task root reached through a symlink — which is the ordinary shape on macOS.
@@ -84,9 +87,25 @@ node's userland is not the container's. Each is asked its **own** executor's
 question before anything is installed: the injected copy against the container's
 architecture, the host copy by being **run** on the node, with an ELF in the host
 slot refused by name as the other half of the pair. Nothing **reads** the new
-file yet — that is slice 4, which also owns the daemon-side config variable D2
-left open; a container-only node's deploy is unchanged, and a host-capable one
-differs by exactly one `docker cp` (asserted as a delta in both suites).
+file yet, and slice 4 did not change that: the daemon-side config variable D2
+left open belongs with the launch that execs the file, which is slice 5. A
+container-only node's deploy is unchanged, and a host-capable one differs by
+exactly one `docker cp` (asserted as a delta in both suites).
+
+**What slice 4 landed** (job #496): `worker::agent_cli` probes the daemon's own
+`PATH` for an executable `claude` at boot, on a host-capable node only, and
+`NodeCapabilities` carries the answer as a new `agent_cli` flag — additive,
+defaulting to **false** when absent, so a daemon predating the probe reads as
+unable to serve agent work. No `WORKER_RPC_VERSION` bump. An agent-shaped host
+launch on a node that found none is refused **by name** in the daemon, naming the
+`PATH` searched — before `HostBackend::admit`, whose blanket `CLAUDE_CONFIG_DIR`
+refusal is untouched and is slice 5's to replace. And M3's remedy: both macOS
+renderings (`deploy/prod/install-worker-launchd.sh` and
+`deploy/prod/build-worker.sh`) now carry the login user's `~/.local/bin` at the
+**tail** of the default `AGENT_PATH` — the tail because that `PATH` is every host
+task's too, and a user-writable directory ahead of `/usr/bin` would silently
+reselect `git` or `ssh`. Installing the CLI stays the operator's step (D3); what
+moved is the directory the daemon looks in.
 
 This document is [#322](./322-macos-native-runtime.md) P2's **agent half**,
 which that design files as *"Later, deliberately"*. It is being taken up early
@@ -635,7 +654,7 @@ different decision on the other side of a "no".
 | **1** | `code` | D1/D1a: `ContainerBackend::find_file` across both backends, the worker RPC pair, the fakes; the harvest resolves then `copy_file_chunked`s; unknown-op falls back to the computed path | The surface table in D1a; **no** `WORKER_RPC_VERSION` bump; proven on container agent jobs, which this changes — and it **repairs a live defect**, so a work-agent transcript over `MAX_COPY_FILE_BYTES` harvested whole is an acceptance criterion available today | 0 (M1), #322 W4 (job #489) | **Landed** (job #491) |
 | **2** | `code` | D1b: zero **and** several become an error-level miss carrying a `transcript-missing` marker artifact; the escalation is armed only if M6 said it is safe — and M6's premise is already false, so the escalation is not armed until slice 1 has removed the known cause | `Harvester::collect_agent`'s return, its best-effort charter unchanged; a fourth `ArtifactKind` (`crates/store/src/artifacts.rs`) and its ripple — `crates/api/src/routes.rs`'s content type, `web/src/api/envelopes.ts`'s hand-written union, `web/src/components/TaskArtifacts.tsx`'s label map | 1 | **Landed** (job #494) |
 | **3** | `code` | D2: a host-capable node keeps `--bin chuggernaut-channel` in `NATIVE_BINS`, installs it at its own path, and proves it runs on the node. #480's `e_machine` guard on the injected copy is untouched | both deploy scripts; the two-executor rule | 0 (M2) | **Landed** (job #495) |
-| **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent — **and put the CLI on that `PATH`**, which M3 says it is not | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump; `AGENT_PATH`/`WORKER_PATH` in `deploy/prod/install-worker-launchd.sh` | 0 (M3), 3 | Proposed |
+| **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent — **and put the CLI on that `PATH`**, which M3 says it is not | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump; `AGENT_PATH`/`WORKER_PATH` in `deploy/prod/install-worker-launchd.sh` | 0 (M3), 3 | **Landed** (job #496) |
 | **5** | `code` | D5: `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` test becomes a launch-time capability test; `validate_host_serves_commands_only` lifts | `HostBackend::admit`; spec §1.1's host row | 4 | Proposed |
 | **6** | `code` | The first agent host task actually run on `gumbo-air-0`, with the transcript resolved and harvested end to end; **M5's authenticated residual and M7 are settled here** | none — this is the confirmation | 5 | Proposed |
 

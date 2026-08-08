@@ -40,10 +40,20 @@ DOMAIN="gui/$(id -u)"
 # The paths and the PATH build-worker.sh gives a macOS node, spelled the same
 # way so the two renderings stay one shape (nix/chug-node/chug-worker-unit.test.sh
 # pins the Linux pair; deploy/prod/install-worker-launchd.test.sh pins this one).
+#
+# The login user's `~/.local/bin` is on that PATH because the agent CLI a host
+# AGENT task execs is resolved as a bare `claude` on the DAEMON's own PATH
+# (design #490 D3) — a host task has no image to carry one — and that directory
+# is where the CLI's own installer puts it. Measured on gumbo-air-0 (#490 M3):
+# `claude` at /Users/worksalot/.local/bin/claude, resolvable on the login PATH
+# and on none of the entries below it, so without this the node discovers no CLI
+# at boot and refuses every agent host launch by name. It rides LAST because it
+# is user-writable: this PATH is also every host task's, and a directory ahead of
+# /usr/bin would silently reselect `git` or `ssh` for work that never asked.
 ENV_FILE="${WORKER_ENV_FILE:-$HOME/chuggernaut-worker/worker.env}"
 BINARY="${WORKER_BINARY:-/usr/local/bin/chuggernaut}"
 LOG="$HOME/Library/Logs/chuggernaut/worker.log"
-AGENT_PATH="${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
+AGENT_PATH="${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin}"
 
 if [ "$(uname -s)" != Darwin ]; then
   echo "install-worker-launchd: this host is not Darwin — a launchd agent supervises the daemon on macOS only, and on Linux the unit is nix/chug-node/'s or build-worker.sh's (design #440 D2); REFUSING" >&2

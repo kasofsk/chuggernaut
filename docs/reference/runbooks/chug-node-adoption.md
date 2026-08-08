@@ -413,11 +413,20 @@ Two things to know before converting one:
   execs rather than a container, so on a mac it comes out of the same native
   build as the daemon and the deploy proves it by **running** it there. The two
   paths exist because the two executors ask opposite questions (D2), and a
-  dual-mode mac holds both. Nothing reads the host copy yet — probing an agent
-  CLI is slice 4 and lifting the command-only rule is slice 5 — so this is
-  provisioning ahead of use, which is deliberate: D5 puts the resulting refusal
-  at launch rather than at boot, and a boot-time refusal would take a dual-mode
-  node's container capacity down with it.
+  dual-mode mac holds both. Nothing reads the host copy yet — lifting the
+  command-only rule is slice 5 — so this is provisioning ahead of use, which is
+  deliberate: D5 puts the resulting refusal at launch rather than at boot, and a
+  boot-time refusal would take a dual-mode node's container capacity down with
+  it.
+- **A host-capable node probes for the agent CLI at boot**, since #490 slice 4:
+  it looks for an executable `claude` on the daemon's own `PATH` and advertises
+  the answer as `NodeCapabilities.agent_cli`, warning (never refusing) when it
+  finds none. On a mac that `PATH` is the launchd agent's, so the CLI has to sit
+  on it: the default now carries the login user's `~/.local/bin`, where the
+  CLI's own installer puts it, **and an agent already installed keeps the PATH
+  it was rendered with** — re-run the installer (or a deploy that renders the
+  plist) after installing the CLI, then check the boot log for
+  `discovered the agent CLI`.
 - **"No docker at all" is a Darwin property.** On Linux the worker image is
   still built, because #440 D6 holds there and that image is the only place a
   Linux node's daemon binary comes from. A host-only Linux node skips the agent
