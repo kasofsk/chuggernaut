@@ -1,6 +1,6 @@
 # Design — agent work on a Mac
 
-Status: PROPOSED — D1 through D7 decided, seven slices, nothing implemented.
+Status: PROPOSED — D1–D7 decided; slice 0 measured, M3 came back no, slices 1–6 unbuilt.
 
 Written against the tree at `d556a6c` (job #489's `code` merge, the last commit
 touching source before this branch): every claim below was read out of the
@@ -11,7 +11,34 @@ slugifier measurement, which was run against an unauthenticated CLI and is
 labelled where it appears. [What must be measured on the air
 first](#what-must-be-measured-on-the-air-first) gathers every remaining
 unverified fact, the decision it holds up, and what that decision becomes if it
-turns out false.
+turns out false. **That table has since been answered** — read it together with
+[the slice 0 correction](#correction--2026-08-08-job-492-slice-0-measured-d1s-recorded-limit-and-a-live-transcript-loss-defect),
+which supersedes the preceding paragraph's "one exception" and D1's recorded
+limits.
+
+## Current state
+
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+rewritten to current truth whenever anything below it changes. Everything after
+this section is append-only — the original argument, never edited.*
+
+**Slice 0 is done and nothing else is started.** M1, M2, M4 and M5 held; M3 came
+back **no**; M6 and M7 are deferred to the slices that own the behaviour they
+gate (2 and 6). No decision was overturned. Three things changed:
+
+- **M3 makes slice 4's work required rather than confirmatory.** `claude` is
+  installed on `gumbo-air-0` and is not on the daemon's `PATH`, so D3's probe
+  would find nothing and D5 would refuse every agent host launch by name.
+- **Candidate 1 is now rejected on correctness, not only on fragility.** The CLI
+  slugifies the *resolved realpath*, so a computed slug is wrong today on any
+  task root reached through a symlink — which is the ordinary shape on macOS.
+- **Slice 1 repairs a live production defect and is no longer only an enabler
+  for host mode.** Work-agent transcripts are being silently dropped on the
+  container fleet right now, by `copy_file`'s worker-RPC size bound, at a rate
+  the artifact store makes measurable. That also makes M6's premise already
+  false, which is slice 2's problem.
+
+The correction below carries the evidence for each.
 
 This document is [#322](./322-macos-native-runtime.md) P2's **agent half**,
 which that design files as *"Later, deliberately"*. It is being taken up early
@@ -554,16 +581,242 @@ different decision on the other side of a "no".
 
 ## Slices
 
-| # | Type | Scope | Contract | Depends |
-| --- | --- | --- | --- | --- |
-| **0** | `design` or operator | M1–M7 measured on `gumbo-air-0`, recorded as a correction to this document | Each row answered yes/no with the command that answered it | none |
-| **1** | `code` | D1/D1a: `ContainerBackend::find_file` across both backends, the worker RPC pair, the fakes; the harvest resolves then `copy_file_chunked`s; unknown-op falls back to the computed path | The surface table in D1a; **no** `WORKER_RPC_VERSION` bump; proven on container agent jobs, which this changes | 0 (M1), #322 W4 (job #489) |
-| **2** | `code` | D1b: zero **and** several become an error-level miss carrying a `transcript-missing` marker artifact; the escalation is armed only if M6 said it is safe | `Harvester::collect_agent`'s return, its best-effort charter unchanged; a fourth `ArtifactKind` (`crates/store/src/artifacts.rs`) and its ripple — `crates/api/src/routes.rs`'s content type, `web/src/api/envelopes.ts`'s hand-written union, `web/src/components/TaskArtifacts.tsx`'s label map | 1 |
-| **3** | `code` | D2: a host-capable node keeps `--bin chuggernaut-channel` in `NATIVE_BINS`, installs it at its own path, and proves it runs on the node. #480's `e_machine` guard on the injected copy is untouched | both deploy scripts; the two-executor rule | 0 (M2) |
-| **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump | 0 (M3), 3 |
-| **5** | `code` | D5: `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` test becomes a launch-time capability test; `validate_host_serves_commands_only` lifts | `HostBackend::admit`; spec §1.1's host row | 4 |
-| **6** | `code` | The first agent host task actually run on `gumbo-air-0`, with the transcript resolved and harvested end to end | none — this is the confirmation | 5 |
+| # | Type | Scope | Contract | Depends | Status |
+| --- | --- | --- | --- | --- | --- |
+| **0** | `design` or operator | M1–M7 measured on `gumbo-air-0`, recorded as a correction to this document | Each row answered yes/no with the command that answered it | none | **Landed** (job #492) |
+| **1** | `code` | D1/D1a: `ContainerBackend::find_file` across both backends, the worker RPC pair, the fakes; the harvest resolves then `copy_file_chunked`s; unknown-op falls back to the computed path | The surface table in D1a; **no** `WORKER_RPC_VERSION` bump; proven on container agent jobs, which this changes — and it **repairs a live defect**, so a work-agent transcript over `MAX_COPY_FILE_BYTES` harvested whole is an acceptance criterion available today | 0 (M1), #322 W4 (job #489) | Proposed |
+| **2** | `code` | D1b: zero **and** several become an error-level miss carrying a `transcript-missing` marker artifact; the escalation is armed only if M6 said it is safe — and M6's premise is already false, so the escalation is not armed until slice 1 has removed the known cause | `Harvester::collect_agent`'s return, its best-effort charter unchanged; a fourth `ArtifactKind` (`crates/store/src/artifacts.rs`) and its ripple — `crates/api/src/routes.rs`'s content type, `web/src/api/envelopes.ts`'s hand-written union, `web/src/components/TaskArtifacts.tsx`'s label map | 1 | Proposed |
+| **3** | `code` | D2: a host-capable node keeps `--bin chuggernaut-channel` in `NATIVE_BINS`, installs it at its own path, and proves it runs on the node. #480's `e_machine` guard on the injected copy is untouched | both deploy scripts; the two-executor rule | 0 (M2) | Proposed |
+| **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent — **and put the CLI on that `PATH`**, which M3 says it is not | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump; `AGENT_PATH`/`WORKER_PATH` in `deploy/prod/install-worker-launchd.sh` | 0 (M3), 3 | Proposed |
+| **5** | `code` | D5: `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` test becomes a launch-time capability test; `validate_host_serves_commands_only` lifts | `HostBackend::admit`; spec §1.1's host row | 4 | Proposed |
+| **6** | `code` | The first agent host task actually run on `gumbo-air-0`, with the transcript resolved and harvested end to end; **M5's authenticated residual and M7 are settled here** | none — this is the confirmation | 5 | Proposed |
 
 Slice 6 is not ceremony, and neither is slice 0. Every decision above rests on
 reading the tree; nothing here has been observed end to end, and this design
 should not be called IMPLEMENTED until it has.
+
+## Correction — 2026-08-08, job #492 (slice 0 measured, D1's recorded limit, and a live transcript-loss defect)
+
+Appended by the job that ran slice 0. Nothing above is edited except the head.
+The shell measurements were taken by the operator on `gumbo-air-0` and on the
+operator's Mac (macOS 26.5.1, arm64); the production survey was read out of this
+platform's own artifact store across jobs #478–#489; the code citations were
+re-read at `6c35c5d` while writing this. No decision above is overturned. One
+becomes required rather than confirmatory, one gains a stronger argument, and one
+turns out to be repairing a defect that is already happening.
+
+### The M table, answered
+
+**Where** is part of every answer. *On the air* (`gumbo-air-0`), *on a Mac* (the
+operator's) and *in production* (the container fleet, worker-proxied) are three
+different claims, and a verdict that blurs them proves less than it looks like it
+does. The first table is the one that matters; the qualifications are below it.
+
+| # | Verdict | Where | What answered it |
+| --- | --- | --- | --- |
+| **M1** | **yes** | production **and** a Mac | Job #490's own evaluator task — an authenticated agent run, 1,168,237 cache-read tokens — harvested a **317,723-byte** `session.jsonl` at the path `Harvester::collect_agent` computed from the platform's own `--session-id`. Two macOS runs confirm the file is named for the supplied id, and `find -name '{session_id}.jsonl'` returns exactly one match |
+| **M2** | **yes**, with the launcher untested | a Mac | `cargo test -p chuggernaut-channel --test stdio` passes natively in 0.98s. That test *is* the measurement (`crates/chuggernaut-channel/tests/stdio.rs`): it spawns the real built binary, drives newline-delimited JSON-RPC over stdio and asserts the NATS submission lands. Nothing in the binary is container-shaped — `JobContext::from_env` (`crates/chuggernaut-channel/src/server.rs`) reads env and stdio and nothing else |
+| **M3** | **NO** | the air | `AGENT_PATH` defaults to `/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` (`deploy/prod/install-worker-launchd.sh`), and the installed plist prepends `/run/current-system/sw/bin`. `claude` on the air is at `/Users/worksalot/.local/bin/claude` (2.1.198). `PATH=$AGENT_PATH command -v claude` finds nothing; it resolves only on the login `PATH` |
+| **M4** | **yes** | the air **and** a Mac | The CLI created `CLAUDE_CONFIG_DIR` and wrote the transcript inside a `0700` task directory owned by the daemon's user; 11,387 bytes on the air |
+| **M5** | **yes**, qualified | the air **and** a Mac | Run under `env -i` with an isolated `HOME`: **zero** files created outside `CLAUDE_CONFIG_DIR` |
+| **M6** | **deferred to slice 2** | — | Not measurable before a host agent task exists, and it has been overtaken: the production finding below shows the premise is **already false** on the container path |
+| **M7** | **deferred to slice 6** | — | Simulator cross-task interference needs two host tasks and a simulator; slice 6 is the first point at which either exists |
+
+**M2's residual, stated because the row's wording asks for more than the test
+gives.** M2 asks whether a Mach-O `chuggernaut-channel` runs as a stdio MCP
+server *launched by the CLI*. The test proves the binary speaks MCP over stdio
+as a native Mach-O and reaches NATS; the CLI as the process that launches it is
+not exercised, because the air has no channel binary installed at all
+(`/usr/local/bin` there holds only the `chuggernaut` daemon) — which is exactly
+what slice 3 fixes, and slice 6 is where the CLI-as-launcher half is observed.
+D2 is not re-opened by this: the residual is about who spawns the process, not
+about whether a Mach-O can serve the protocol, and it was the second that D2
+called unverified.
+
+**M5's qualification, which is the one that matters for D6.** The runs were
+unauthenticated. The platform does not authenticate the CLI by an interactive
+login: `Core::inject_platform_agent_secrets`
+(`crates/dispatcher/src/exec.rs`) injects every secret under the reserved
+`global/agents` scope into every agent container, env-named by the secret, and
+prod names that secret `CLAUDE_CODE_OAUTH_TOKEN` (`deploy/prod/README.md`). So
+**no keychain write is expected** — an env-carried credential has nothing to
+store — but none has been observed either, and "expected" is the word this whole
+section exists to distrust. D6 stands; its premise is measured for the
+unauthenticated case and assumed for the authenticated one, and slice 6 is where
+the assumption is discharged by re-running the `env -i` sweep with the token set.
+
+**M3 is the one that changes work rather than confirming it.** D3 decided this on
+`AGENT_PATH`, which is the correct side of the branch — but it reads as a
+precaution, and the measurement makes it a prerequisite. Without it, D5's refusal
+fires by name on **every** agent host launch while a working CLI sits installed
+on the node: loud, correct, and useless. The gap is named precisely: the operator's
+`~/.local/bin` is not on the daemon's `PATH` and nothing in this repo puts it there.
+
+The knob already exists, which shrinks slice 4 rather than growing it.
+`AGENT_PATH` is `${WORKER_PATH:-…}` (`deploy/prod/install-worker-launchd.sh`),
+so a node's env file can extend the daemon's `PATH` today without a code change;
+the prepend of `/run/current-system/sw/bin` is that same script deriving
+`dirname` from the env file's `WORKER_CARGO`. Slice 4 therefore chooses between
+three shapes and should say which and why: extend the shipped default, set
+`WORKER_PATH` per node, or move the CLI install onto a directory the default
+already carries. D3's rule — installation and `PATH` move together, never one
+without the other — is what makes any of the three acceptable and doing neither
+half not.
+
+### D1's recorded limits: one was false, and the one that remains is narrower
+
+D1's measurement notes say the runs "were **not authenticated** … so the
+directory and file names are real, but no transcript **content** was produced".
+**The second half is false.** An unauthenticated run writes a full transcript: 8
+lines / **10,071 bytes** on macOS, **11,387 bytes** on the air. What an
+unauthenticated run lacks is **model output**, not a transcript — the CLI frames
+the session, records its own refusal and closes the file.
+
+The limit that actually remains, in its place: those runs exercise **path
+construction and a session's opening frame**, not the working record of a long
+session, so they say nothing about a transcript's size, growth or content under
+load. M1 is what covers that half, and it covers it from production rather than
+from a shell: 317,723 bytes of authenticated transcript at the computed path.
+
+D1's other recorded limit — "measured on the operator's Mac, not on
+`gumbo-air-0`" — is now **closed** by M4: the same behaviour was reproduced on
+the air, including the byte count.
+
+### A fourth measurement row: the slug is of the **resolved realpath**
+
+| what was run | result |
+| --- | --- |
+| on the air, cwd `/tmp/m45-chug/task/workspace` | one directory in `projects/`, named `-private-tmp-m45-chug-task-workspace` |
+
+macOS `/tmp` is a symlink to `/private/tmp`. So the CLI slugifies the cwd it
+**resolves**, not the cwd string it was handed.
+
+**This converts D1's rejection of candidate 1 from a fragility argument into a
+correctness one**, and the new argument is the stronger of the two because it
+does not wait on anybody changing anything. D1 rejects "compute the slug" on the
+ground that it pins the platform to an external tool's undocumented behaviour and
+fails silently *when that behaviour moves*. It is wrong **now**: a slugifier
+implementing the documented character rule would have to replicate symlink
+resolution as well, and on any task root reached through a symlink it would
+compute a directory that does not exist and find nothing — silently, which is
+the precise failure class this design exists to prevent. D1's measurement notes
+say the character rule "held" on a deep path and that candidate 1 is therefore
+*feasible*; that sentence is correct about the character rule and incomplete as a
+description of the algorithm.
+
+Two follow-ons, neither of which disturbs D1 itself — resolving by session id
+never asks what the directory is called, so D1 is immune to the whole question:
+
+- **The host root's own realpath is worth checking per node.** `HOST_ROOT_DEFAULT`
+  is `/var/lib/chuggernaut/host-tasks` (`crates/container/src/host.rs`), overridden
+  by `WORKER_HOST_ROOT` (`crates/worker/src/config.rs`). On macOS `/var` is
+  itself a symlink into `/private/var`, by the same mechanism that produced the
+  row above — so the shipped default is a symlinked path on the one platform this
+  design is for. Nothing breaks under D1; it is named here so that nobody
+  re-derives a computed path later and is surprised by it.
+- **D1a's unknown-op fallback is candidate 1 in miniature, and must not be taken
+  on a host launch.** D1a decides that a daemon answering `unknown op` falls back
+  to today's computed exact path. That is sound where it applies — an unrefreshed
+  node is a container node, whose cwd is `/workspace` with no symlink in it — and
+  it is *unsound* on a host node, where the cwd is under the host root. Slice 1
+  should scope the fallback to container launches rather than to "any unknown-op
+  reply". This is a constraint on how the decision is implemented, not a change
+  to it.
+
+### The production finding: the transcript loss is not latent, it is happening
+
+D1a argues for `find_file` plus the **existing** `copy_file_chunked` partly on
+the ground that `collect_agent` uses the unchunked `copy_file`, so "on a
+worker-proxied node a transcript past that bound already comes back as a refusal
+rather than an artifact", and that D4/D6's hours-long sessions "make that latent
+limit a certainty here". **It is not latent. It is happening now, on the
+container path, and it has been for weeks.**
+
+`MAX_COPY_FILE_BYTES` is `(MAX_REQUEST_BYTES - COPY_FILE_ENVELOPE_BYTES) / 4 * 3`
+= **690,432** bytes (`crates/store/src/worker.rs`). Surveying every agent task's
+artifacts across jobs #478–#489:
+
+- Roughly **fifty** transcripts were harvested. The largest is **673,149 bytes**.
+  **Not one exceeds 690,432.** Across a sample that size, a distribution that
+  genuinely stops 17KB short of a bound is not a distribution, it is a ceiling.
+- The agent tasks with **no** `session.jsonl` at all — only `stdout.log` — are
+  overwhelmingly **task 1**, the *work* agent: missing on #478, #479, #480, #481,
+  #483, #484, #485, #487 and #489. Task 1 is the longest-running session in a job
+  and produces the most valuable record. Evaluator tasks, which are shorter,
+  almost always survive.
+
+The mechanism is unambiguous in the code, and every step of it was re-read:
+
+1. `Harvester::collect_agent` (`crates/platform-ops/src/harvest.rs`) calls
+   `self.backend.copy_file(id, &path)`.
+2. On a worker-proxied node that routes to the RPC — `FleetBackend`'s
+   `NodeHandle::Worker` arm (`crates/worker/src/backend.rs`). The whole prod
+   fleet is worker-proxied, so the in-process `NodeHandle::Docker` arm beside it,
+   which applies no such bound, is not the path production takes.
+3. The daemon measures the file **before** encoding its reply and refuses one
+   over the bound with `COPY_FILE_TOO_LARGE` (`copy_file` in
+   `crates/worker/src/daemon.rs`, via `copy_file_over_bound`).
+4. `collect_agent`'s `Err` arm is a `tracing::warn!`. The job stays green, no
+   artifact is stored, and nothing in the operator UI says a record was lost.
+
+So the exact failure class #490 exists to prevent — the run looks healthy and the
+record is missing — is a **live, recurring, silent data-loss defect on the
+fleet's normal path**, not a hazard specific to host mode.
+
+**One detail of the brief that led to this correction is worth fixing here**,
+since D1b turns on which branch reports what. The over-size refusal surfaces on
+the **`Err`** arm ("transcript copy failed: {e}"), not on the `Ok(None)` arm
+whose text reads "agent may not have started". Both are `warn`, both leave the
+job green and the artifact absent, so the *operator-visible* outcome is
+identical and the loss is real either way — but the two are distinguishable in
+the logs, and a survey looking only at `Ok(None)` would have measured the wrong
+population. Slice 2's marker artifact should therefore name **which** of the two
+happened; "no transcript" is not one condition.
+
+**What this changes for slice 1.** Its standing, first: it is no longer only an
+enabler for host mode, it repairs a production defect, and that gives it an
+acceptance criterion that needs no host task and no Mac — *a work-agent
+transcript larger than 690,432 bytes is harvested whole on an ordinary container
+job*. D1a already said slice 1 "changes the container path" and had to be proven
+there; this says what proving it means.
+
+Second, the bound it moves to. `copy_file_chunked` takes a caller-chosen
+ceiling, and `collect_output`'s is `store::MAX_BLOB_BYTES` — 16 MiB
+(`crates/store/src/artifacts.rs`). Slice 1 should choose that ceiling
+deliberately rather than by copying the neighbour, because D4 and D6 both say
+agent sessions run for hours and 16 MiB is a bound a long session can plausibly
+reach. Whatever it picks, a transcript over it must not be dropped the way one
+over 690,432 is being dropped today; that is the same defect one order of
+magnitude up, and re-creating it silently would be the worse outcome.
+
+An in-situ datum on how fast that number arrives, measured inside this very
+document's own run: this `design` job's work transcript passed **298,180 bytes**
+within its first ten tool calls — 43% of the cap, before a line of the document
+was written — and stood at **516,468 bytes**, 75% of it, by the time the document
+was committed. That is a `design` job that read a dozen files and wrote one, and
+it comes within 174KB of losing its own record. D4's and D6's agentic debugging
+sessions are the long ones.
+
+**What this changes for slice 2.** M6's premise — "a legitimate run never yields
+a session id that resolves to no transcript" — is **already false today**, at a
+measurable rate, for a reason that is not the agent failing to start. Two
+consequences:
+
+- Slice 2 designs against real data rather than a hypothesis. The rate is
+  readable straight out of the artifact store, and it will change under slice 1,
+  which is itself the measurement of whether slice 1 worked.
+- The escalation D1b stages behind M6 stays **unarmed** until slice 1 has removed
+  this cause. Arming it first would escalate a known platform bug once per long
+  job, which is noise rather than signal. The `transcript-missing` marker is the
+  right instrument for the interval, and the ordering — slice 1 before slice 2 —
+  was already the stated dependency; this makes it a correctness ordering rather
+  than a convenience.
+
+The honest limit on the inference: the survey establishes a ceiling and a
+distribution, not a per-job causal chain, because a green job's `warn` lines are
+not retained per task in the artifact store. A task-1 miss whose logs show
+`Ok(None)` rather than the `Err` arm would mean a second cause exists alongside
+this one. Slice 1's acceptance criterion settles it either way — if transcripts
+over the bound start arriving and task-1 misses stop, the cause was the bound; if
+they keep happening, slice 2 has a second thing to find, and it will have the
+marker artifact to find it with.
