@@ -56,3 +56,7 @@ Doc-reread: docs/design/322-macos-native-runtime.md
 Doc-reread: deploy/prod/README.md
 Doc-reread: docs/reference/runbooks/adhoc-deploy.md
 Doc-reread: docs/reference/runbooks/chug-node-adoption.md
+
+Doc-reread: CLAUDE.md
+Doc-reread: docs/reference/style.md
+Doc-reread: docs/reference/testing.md

@@ -293,7 +293,7 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-24 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
+25 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
 a throwaway repo against stubbed
 `cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
@@ -358,6 +358,17 @@ these suites cover.
 - Each suite runs with `CHUG_CI_SHELL_SUITES=0`, so the real `ci.sh` that
   `ci.test.sh` drives does not recurse into the suites again. Setting it to 0 by
   hand opts the stage out, announced.
+- **The stage drives every suite as `sh "$suite"`, and one case names its shell
+  anyway.** A suite that invokes its subject as `sh "$SUT"` measures the subject
+  under dash here and says nothing about the shell that actually runs it in
+  production — macOS `/bin/sh` is bash. `build-worker.test.sh` case 2c2c-shells
+  runs the host-mode capacity shape under `sh` *and* `bash` explicitly for that
+  reason: the mis-parse it pins (job #501) is one dash gets right, so under the
+  stage's own shell the failing input stayed green. Name a shell only when the
+  divergence is the thing under test, and say so where the case is written; the
+  class itself is gated ahead of this stage by
+  `.chug/tasks/check-shell-quoting.sh`, whose own suite adds 0.16s
+  (measured 2026-08-08) and whose fixtures name bash for the same reason.
 - **The gate's Debian container is the authoritative environment.** These suites
   assume GNU tooling and Linux path semantics, so a hand-run on macOS reds some
   of them spuriously (BSD `sed` rejecting GNU label syntax in

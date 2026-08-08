@@ -552,6 +552,45 @@ for _max in 4 ""; do
 done
 echo "ok: host mode names the WORKER_SLOTS_MAX half alone when that is the wrong one"
 
+# ── Case 2c2c-shells: the PASSING capacity shape reaches the host-root probe ───
+# The only case in this file that names a shell, and it has to: the bug it pins
+# is bash-only. The refusal message above interpolated
+# `${WORKER_SLOTS_MAX:-<unset: … this node's CPU count>}` inside double quotes,
+# and bash parses quotes inside that default word — so the apostrophe opened a
+# quoted run that swallowed the whole host-root pre-flight into the `if
+# WORKER_SLOTS_MAX != 1` branch above it. The block then ran only when the
+# capacity check FAILED; on the passing shape a host node must declare
+# (WORKER_SLOTS_MAX=1) it was skipped and $HOST_ROOT_PROBE died unbound under
+# `set -u`, aborting the deploy in its own pre-flight. dash, zsh and ksh all
+# parse the line correctly and the file stays syntactically valid under bash
+# too (`bash -n` passes — it just binds the wrong lines), so neither the other
+# cases here nor an `sh -n` sweep can see it: CI's /bin/sh is dash, while
+# production runs this script under macOS /bin/sh, which IS bash (update.sh on
+# the Mini, and operators from their laptops). Hence both shells, explicitly.
+command -v bash > /dev/null 2>&1 \
+  || fail "bash is required: this case pins a mis-parse only bash makes"
+for _shell in sh bash; do
+  : > "$LOG"
+  set +e
+  PATH="$BIN:$PATH" \
+    WORKER_SSH=worksalot@nuc \
+    WORKER_NATS_URL=nats://10.0.0.1:4222 \
+    CHUG_WORKER_NODE=nuc \
+    WORKER_MODES=container,host \
+    WORKER_SLOTS=1 \
+    WORKER_SLOTS_MAX=1 \
+    "$_shell" "$SUT" > "$WORK/modes-ok-$_shell.out" 2>&1
+  rc=$?
+  set -e
+  grep -qF "unbound variable" "$WORK/modes-ok-$_shell.out" \
+    && fail "under $_shell the host-mode block left a variable unbound: $(cat "$WORK/modes-ok-$_shell.out")"
+  [ "$rc" -eq 0 ] \
+    || fail "under $_shell the capacity shape a host node must declare aborted the deploy (rc=$rc): $(cat "$WORK/modes-ok-$_shell.out")"
+  grep_log "mkdir -p '/var/lib/chuggernaut/host-tasks'"
+  started || fail "under $_shell a host node that passes every pre-flight must reach the daemon restart"
+done
+echo "ok: the passing host capacity shape reaches the host-root probe under sh and bash"
+
 # ── Case 2c2d: the host root is declarable, per node, and refused when it is not
 # creatable (design #322 W2). `HostBackend::new` creates the root while the
 # daemon builds its backends at boot, so a root the login user cannot create is

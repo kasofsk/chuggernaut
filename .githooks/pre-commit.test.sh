@@ -181,6 +181,34 @@ commit "$repo" "duplicated"
 check "a clone rejects the commit" 1 "$RC" "commit REJECTED"
 check "the rejection names the bypass" 1 "$RC" "git commit --no-verify"
 
+# --- case 5b: shell quoting — a staged shell file with a quoted default ----
+# The real gate, not a stub: the point of the case is that the hook reaches it
+# with the STAGED shell files and acts on its exit code. A repo whose only
+# staged change is Rust must never pay for it.
+repo="$(new_repo shell_quoting)"
+mkdir -p "$repo/.chug/tasks" "$repo/deploy" "$repo/src"
+cp "$TASKS/check-shell-quoting.sh" "$repo/.chug/tasks/check-shell-quoting.sh"
+chmod +x "$repo/.chug/tasks/check-shell-quoting.sh"
+printf 'MSG="max is %s${MAX:-the CPU count of this node}%s"\n' "'" "'" > "$repo/deploy/ok.sh"
+git -C "$repo" add -A
+commit "$repo" "a clean shell file"
+check "a shell file with no quote in its default commits" 0 "$RC"
+
+printf 'MSG="max is %s${MAX:-this node%ss CPU count}%s"\n' "'" "'" "'" > "$repo/deploy/bad.sh"
+git -C "$repo" add deploy/bad.sh
+commit "$repo" "a quoted default"
+check "a quote inside a \${VAR:-word} default rejects the commit" 1 "$RC" "commit REJECTED"
+check "the rejection names the two shells" 1 "$RC" "bash reads it and dash does not"
+
+git -C "$repo" reset -q deploy/bad.sh
+rm -f "$repo/deploy/bad.sh"
+printf 'fn main() {}\n' > "$repo/src/main.rs"
+git -C "$repo" add src/main.rs
+commit "$repo" "rust only"
+check "a commit staging no shell file commits" 0 "$RC"
+check_text "and never ran the shell-quoting gate" "" \
+	"$(grep -o 'shell-quoting' "$OUT" || true)"
+
 # --- case 6: comment lint — rule 1 rejects, old doc-comment debt does not --
 repo="$(new_repo comments)"
 mkdir -p "$repo/.chug/tasks" "$repo/src"

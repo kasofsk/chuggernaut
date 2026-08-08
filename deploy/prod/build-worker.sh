@@ -769,7 +769,7 @@ if [ -n "$MODES" ]; then
       CAP_BAD="WORKER_SLOTS is '${WORKER_SLOTS:-<unset: daemon default 4>}'"
     fi
     if [ "${WORKER_SLOTS_MAX:-}" != "1" ]; then
-      CAP_MAX="WORKER_SLOTS_MAX is '${WORKER_SLOTS_MAX:-<unset: daemon default is this node's CPU count>}'"
+      CAP_MAX="WORKER_SLOTS_MAX is '${WORKER_SLOTS_MAX:-<unset: daemon default is the CPU count of this node>}'"
       if [ -n "$CAP_BAD" ]; then
         CAP_BAD="$CAP_BAD and $CAP_MAX"
       else

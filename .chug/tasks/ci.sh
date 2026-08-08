@@ -606,6 +606,27 @@ comments_gate() {
 	.chug/tasks/check-comments.sh
 }
 
+# --- shell-quoting gate (job #501) -------------------------------------------
+# Delegates to .chug/tasks/check-shell-quoting.sh: a quote inside the word of a
+# `${VAR:-word}` expansion, which bash reads and dash does not — every operator
+# spelling, every parameter form, in the contexts where the two shells diverge
+# silently. The script's header carries the measured table. It is here rather
+# than folded into a syntax sweep because no syntax sweep can see it — the file
+# is valid POSIX either way — and because THIS gate is the dash half of the
+# disagreement: `sh` is what runs every *.test.sh suite below, while macOS
+# /bin/sh (deploy/prod/update.sh, and every operator laptop) is bash. Pure shell
+# + awk over the tracked shell files, ~0.13s whole-tree (measured 2026-08-08 on
+# the agent-rust container), so it is unconditional and sits
+# before the Rust early-exit: the diffs that carry deploy scripts are exactly
+# the ones that never reach cargo.
+shell_quoting_gate() {
+	[ -x .chug/tasks/check-shell-quoting.sh ] || {
+		echo "!!! ci: .chug/tasks/check-shell-quoting.sh is missing or not executable"
+		exit 1
+	}
+	.chug/tasks/check-shell-quoting.sh
+}
+
 # --- doc-fact gate (design #415 D6 checks 1-4) -------------------------------
 # Delegates to .chug/tasks/check-doc-facts.sh: a backticked path claim resolves
 # against `git ls-files`, a backticked constant asserted with a value agrees
@@ -866,6 +887,11 @@ duplication_gate
 # Comment lint, same placement and for the same reason: a web-only diff never
 # reaches the cargo section, and TSX is as able to carry banned prose as Rust.
 comments_gate
+# Shell quoting, same placement and unconditional. It has to run before the
+# shell suites rather than lean on them: those suites are driven as `sh`, which
+# is the shell that reads the construct CORRECTLY, so a suite exercising the
+# exact failing input stays green while production breaks.
+shell_quoting_gate
 # Doc facts, same placement and unconditional: a doc-only diff is exactly the
 # diff that lands a stale path or a stale constant, and it never reaches cargo.
 # ~0.6s for the whole tree.

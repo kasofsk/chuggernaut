@@ -84,17 +84,40 @@ the absence of a workflow file.
   stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
   diff touching Rust paths runs the cargo gate, and a doc/config-only diff runs
   neither and gates in seconds.
-- `.chug/tasks/ci.sh` also runs seven pure-shell gates **before** those diff-aware
+- `.chug/tasks/ci.sh` also runs eight pure-shell gates **before** those diff-aware
   stages, so a web-only or docs-only change is still gated: the `.chug/jobs/*.yaml`
   version-skew check (spec §14.3 — **advisory and early**, see below), the
   `docs/reference/modules.md` registry check (`.chug/tasks/check-modules.sh`),
   `.chug/tasks/check-duplication.sh` — copy-paste
   detection via a pinned `jscpd@5.0.5` at `threshold: 0` (docs/reference/style.md Tier 1;
   ~30ms for the whole repo, so it is unconditional) — `.chug/tasks/check-comments.sh`,
-  the comment lint, `.chug/tasks/check-doc-facts.sh`, the doc-fact gate,
+  the comment lint, `.chug/tasks/check-shell-quoting.sh`, the shell-quoting gate,
+  `.chug/tasks/check-doc-facts.sh`, the doc-fact gate,
   `.chug/tasks/doc-staleness.sh`, the staleness ledger, and
-  since #385 **the repo's 24 `*.test.sh` shell suites**.
+  since #385 **the repo's 25 `*.test.sh` shell suites**.
   Any clone fails the gate.
+- **A quote inside the word of a `${VAR:-word}` expansion is a gate, because
+  CI's shell and production's disagree about it.** bash parses quotes inside
+  that word and dash does not, so the same line binds different code in the two
+  shells while staying valid POSIX in both — no `sh -n` sweep can see it, and in
+  the instance that motivated the gate `bash -n` passed too. CI's `/bin/sh` is
+  dash and it drives every `*.test.sh` suite as `sh "$suite"`, so a suite
+  exercising the exact failing input stays green; `deploy/prod/build-worker.sh`
+  is run from `deploy/prod/update.sh` on the Mini and from operator laptops,
+  both macOS, where `/bin/sh` **is** bash. `.chug/tasks/check-shell-quoting.sh`
+  (job #501) is a lexical scan over tracked `*.sh` plus `.githooks/pre-commit`,
+  ~0.13s whole-tree (measured 2026-08-08) and unconditional. **It gates the
+  class, not one spelling of it**: every operator (`-` `=` `+` `?`, with or
+  without the leading colon) and every parameter form (a name, `${1:-…}`,
+  `${@:-…}`), in the two contexts where the divergence is silent — inside double
+  quotes, and inside a heredoc body with a plain delimiter. Three neighbours are
+  measured to be safe and are deliberately *not* flagged: an **unquoted**
+  expansion (POSIX expands its word like any other, so the shells agree and an
+  unbalanced quote is a loud error in dash too), a **quoted-delimiter** heredoc
+  (nothing expands), and a `$(…)` inside the word (a fresh parsing context,
+  quoted normally in both). The fix is always the prose rewritten, never the
+  quote escaped. The pre-commit hook runs it too, scoped to the staged shell
+  files.
 - **A doc's claims about the tree are gated on every job, whole-tree, as an
   error.** `.chug/tasks/check-doc-facts.sh` resolves every backticked path claim
   in every tracked `*.md` against `git ls-files`, and every backticked constant
@@ -224,7 +247,8 @@ the absence of a workflow file.
 - **The fast half of that gate also runs at the commit.** `.githooks/pre-commit`
   formats staged Rust/web files with `rustfmt`/`prettier` and re-stages them,
   then runs the comment lint (`--staged` mode), the registry check, the
-  duplication check, the doc-fact check (`--staged`, +0.16s) and the staleness
+  duplication check, the shell-quoting check (staged shell files only), the
+  doc-fact check (`--staged`, +0.16s) and the staleness
   ledger (`--staged`, advisory) over the staged
   diff — ~2s, so an agent learns about
   a stray `//` before it exits instead of a rework cycle later. `prettier` runs

@@ -117,6 +117,27 @@ that debt is what the pending checks will pin down.
   debt (~500 over-long doc comments), so it judges only blocks a diff adds a
   line inside: edit a doc comment and you trim it.
 
+- **No quote inside the word of a `${VAR:-word}` shell expansion.** *(live:
+  `.chug/tasks/check-shell-quoting.sh` scans tracked `*.sh` plus
+  `.githooks/pre-commit` from `.chug/tasks/ci.sh`, unconditionally and before
+  the Rust early-exit — job #501.)* bash parses quotes inside that word and dash
+  does not, so one line binds different code in the two shells while staying
+  valid POSIX in both. Rewrite the prose without the quote, or move the quoted
+  text outside the expansion; escaping it is not the fix. **The rule is the
+  class**, so read it with no spelling privileged: any of the operators `-` `=`
+  `+` `?`, with or without the leading colon (`${V-w}` diverges exactly as
+  `${V:-w}` does), and any parameter form — a name, a positional `${1:-w}`, a
+  special `${@:-w}`. It applies in the two contexts where the divergence is
+  silent, inside double quotes and inside a plain-delimiter heredoc body; an
+  unquoted expansion, a quoted-delimiter heredoc and a `$(…)` inside the word
+  are each measured to mean the same thing in both shells and are not flagged.
+  *Why:* the gate runs dash and production's macOS `/bin/sh` is bash, so this is
+  the one divergence a green CI actively conceals — it moved a whole host-mode
+  pre-flight in `deploy/prod/build-worker.sh` into the branch above it, and the
+  guard then ran only when its own check failed. A gate that measured one
+  spelling while reading as the class would be the same failure again, one
+  character away.
+
 - **No duplicated code: zero clones.** *(live: `.chug/tasks/check-duplication.sh`
   runs `jscpd@5.0.5` — pinned exactly — over the whole repo from `.chug/tasks/ci.sh`,
   unconditionally and before the Rust early-exit, at `threshold: 0`. Config:
