@@ -1094,10 +1094,11 @@ fi
 # job #487 stopped building and this restores.
 #
 # A host-only node used to be handed NO channel binary at all, on the ground that
-# `Core::channel_mcp`'s only two callers are agent-shaped while host mode serves
-# `work.type: command` only — twice enforced, in the job type's field rules
-# (`validate_host_serves_commands_only`) and again in `HostBackend::admit`. #490
-# slice 5 lifts exactly that restriction, and #490 D5 puts the resulting refusal
+# `Core::channel_mcp`'s only two callers are agent-shaped while host mode served
+# `work.type: command` only — twice enforced, in the job type's field rules and
+# again in `HostBackend::admit`. #490
+# slice 5 lifted exactly that restriction: the field rule is gone, the admission
+# test asks this node's capabilities instead, and #490 D5 puts the refusal
 # at LAUNCH rather than at boot, so the binary has to be on the node before the
 # daemon that reads it is: a boot-time refusal would take a dual-mode node's
 # container capacity down with it.

@@ -1,6 +1,6 @@
 # Design — agent work on a Mac
 
-Status: IMPLEMENTED IN PART — D1–D7 decided; slice 0 measured, M3 came back no and slice 4 answered it, slices 1–4 landed, slices 5–6 unbuilt.
+Status: IMPLEMENTED IN PART — D1–D7 decided; slice 0 measured, M3 came back no and slice 4 answered it, slices 1–5 landed, slice 6 unbuilt.
 
 Written against the tree at `d556a6c` (job #489's `code` merge, the last commit
 touching source before this branch): every claim below was read out of the
@@ -22,14 +22,18 @@ limits.
 rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
 
-**Slices 0–4 are done; 5–6 are not started.** M1, M2, M4 and M5 held; M3
+**Slices 0–5 are done; 6 is not started.** M1, M2, M4 and M5 held; M3
 came back **no** and slice 4 is the answer to it — the CLI's install directory is
 on the `PATH` both macOS installers render, so an agent already installed keeps
 the old one until its plist is re-rendered. M7 is deferred to slice 6. **M6 is
 now answerable but not answered**: slice 2 built the instrument that answers it and recorded the
 procedure ([the job #494 correction](#correction--2026-08-08-job-494-slice-2-landed-and-how-m6-gets-answered)),
-whose precondition is a deploy carrying slice 1. No decision was overturned.
-Three things changed:
+whose precondition is a deploy carrying slice 1. **D6 was amended** in slice 5 —
+the teardown it said to keep as it stood would have deleted every host
+transcript before the harvest could read it, so it now spares the CLI's own
+config directory and the secrets half is unchanged ([the job #497
+correction](#correction--2026-08-08-job-497-d6-amended-the-teardown-spared-the-clis-own-tree)).
+No other decision was overturned. Three things changed:
 
 - **M3 made slice 4's work required rather than confirmatory.** `claude` is
   installed on `gumbo-air-0` and was not on the daemon's `PATH`, so D3's probe
@@ -80,15 +84,17 @@ beside the injected `/usr/local/lib/chuggernaut/chuggernaut-channel`, whose
 back in `NATIVE_BINS` unconditionally, since between them the two rules cover
 every legal `WORKER_MODES` (this is job #487's condition reversed, and its
 premise — that host mode is command-only, so nothing reads the file — is what
-[slice 5](#slices) removes). On **Darwin** the host copy comes out of the node's
+[slice 5](#slices) removed). On **Darwin** the host copy comes out of the node's
 own `cargo build` and the injected one out of the image; on **Linux** both are
 the same bytes out of the same image, staged and guarded separately because the
 node's userland is not the container's. Each is asked its **own** executor's
 question before anything is installed: the injected copy against the container's
 architecture, the host copy by being **run** on the node, with an ELF in the host
-slot refused by name as the other half of the pair. Nothing **reads** the new
-file yet, and slice 4 did not change that: the daemon-side config variable D2
-left open belongs with the launch that execs the file, which is slice 5. A
+slot refused by name as the other half of the pair. Nothing **read** the new
+file until slice 5, which is where the daemon-side config variable D2 left open
+belongs: a host agent launch's MCP config names that path, and
+`HostBackend::admit` stats it per launch and refuses when nothing runnable is
+there. A
 container-only node's deploy is unchanged, and a host-capable one differs by
 exactly one `docker cp` (asserted as a delta in both suites).
 
@@ -97,15 +103,52 @@ exactly one `docker cp` (asserted as a delta in both suites).
 `NodeCapabilities` carries the answer as a new `agent_cli` flag — additive,
 defaulting to **false** when absent, so a daemon predating the probe reads as
 unable to serve agent work. No `WORKER_RPC_VERSION` bump. An agent-shaped host
-launch on a node that found none is refused **by name** in the daemon, naming the
-`PATH` searched — before `HostBackend::admit`, whose blanket `CLAUDE_CONFIG_DIR`
-refusal is untouched and is slice 5's to replace. And M3's remedy: both macOS
+launch on a node that found none was refused **by name** in the daemon, naming the
+`PATH` searched, ahead of `HostBackend::admit`'s blanket `CLAUDE_CONFIG_DIR`
+refusal — slice 5 replaced both with the single capability test in `admit`, which
+still carries the daemon-composed text naming that `PATH`. And M3's remedy: both macOS
 renderings (`deploy/prod/install-worker-launchd.sh` and
 `deploy/prod/build-worker.sh`) now carry the login user's `~/.local/bin` at the
 **tail** of the default `AGENT_PATH` — the tail because that `PATH` is every host
 task's too, and a user-writable directory ahead of `/usr/bin` would silently
 reselect `git` or `ssh`. Installing the CLI stays the operator's step (D3); what
 moved is the directory the daemon looks in.
+
+**What slice 5 landed** (job #497), which is the slice that actually permits
+agent work on a Mac. `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` refusal is now a
+test of the node's `AgentCapability` — the CLI the daemon discovered (D3) and a
+runnable channel binary of the node's own (D2) — refusing **by name** whichever
+is absent and admitting the launch when neither is. The daemon still discovers
+and now hands both facts to the backend at construction, the way it already
+hands it `Supervision`, so slice 4's `admit_agent_cli` is gone rather than
+duplicated: one place judges an agent-shaped launch, which is what D5 names.
+`validate_host_serves_commands_only` is deleted, so a `mode: host` job type may
+declare `work.type: agent` (and `human`); the `image` and `runtime.env` rules
+under `mode: host` are untouched, and an evaluator declaring its own image still
+resolves to container mode — host work, container CI, one job, asserted as its
+own test.
+
+Three things had to follow for such a launch to be able to run at all, none of
+them named in the slices, all of them found by writing the test that admits one:
+`Core::channel_mcp` routes on the launch's `image` — the selector every backend
+routes on — and for a host task **injects nothing** and names
+`/usr/local/lib/chuggernaut/chuggernaut-channel-host`, the path slice 3
+installs, since an MCP config's `command` is file *contents* that no backend
+rebases (which is also why the path is a constant rather than the deploy's
+`WORKER_HOST_CHANNEL_BINARY` knob: overriding that relocates the install away
+from where a launch execs it, and the capability refusal is what says so).
+`CLAUDE_CONFIG_DIR` joins the two variables whose **values** the host backend
+rebases (#322 §2's fourth surface) — without it every agent host launch was
+refused by `rebase_env`, and with it the CLI's transcript tree lands inside the
+task directory where slice 1's `find_file` looks, which took **amending D6**:
+the wrapper's teardown deleted that tree whole at process exit, so it now
+reclaims the injected tree's entries and spares the CLI's own config directory
+([the job #497 correction](#correction--2026-08-08-job-497-d6-amended-the-teardown-spared-the-clis-own-tree)).
+And the agent's **command**
+resolves its three `/chuggernaut` paths through `$CHUG_HOST_CREDS`, because a
+launch's `cmd` is the one surface the rebase does not reach — the same
+indirection `bootstrap_cmd` uses for the clone destination. Container launches
+are byte-identical through all three.
 
 This document is [#322](./322-macos-native-runtime.md) P2's **agent half**,
 which that design files as *"Later, deliberately"*. It is being taken up early
@@ -655,7 +698,7 @@ different decision on the other side of a "no".
 | **2** | `code` | D1b: zero **and** several become an error-level miss carrying a `transcript-missing` marker artifact; the escalation is armed only if M6 said it is safe — and M6's premise is already false, so the escalation is not armed until slice 1 has removed the known cause | `Harvester::collect_agent`'s return, its best-effort charter unchanged; a fourth `ArtifactKind` (`crates/store/src/artifacts.rs`) and its ripple — `crates/api/src/routes.rs`'s content type, `web/src/api/envelopes.ts`'s hand-written union, `web/src/components/TaskArtifacts.tsx`'s label map | 1 | **Landed** (job #494) |
 | **3** | `code` | D2: a host-capable node keeps `--bin chuggernaut-channel` in `NATIVE_BINS`, installs it at its own path, and proves it runs on the node. #480's `e_machine` guard on the injected copy is untouched | both deploy scripts; the two-executor rule | 0 (M2) | **Landed** (job #495) |
 | **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent — **and put the CLI on that `PATH`**, which M3 says it is not | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump; `AGENT_PATH`/`WORKER_PATH` in `deploy/prod/install-worker-launchd.sh` | 0 (M3), 3 | **Landed** (job #496) |
-| **5** | `code` | D5: `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` test becomes a launch-time capability test; `validate_host_serves_commands_only` lifts | `HostBackend::admit`; spec §1.1's host row | 4 | Proposed |
+| **5** | `code` | D5: `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` test becomes a launch-time capability test; `validate_host_serves_commands_only` lifts | `HostBackend::admit`; spec §1.1's host row | 4 | **Landed** (job #497) |
 | **6** | `code` | The first agent host task actually run on `gumbo-air-0`, with the transcript resolved and harvested end to end; **M5's authenticated residual and M7 are settled here** | none — this is the confirmation | 5 | Proposed |
 
 Slice 6 is not ceremony, and neither is slice 0. Every decision above rests on
@@ -980,3 +1023,46 @@ case says is not a defect. That sentence is only true because step 4's last two
 branches are marked; before them, a size refusal and a degrade onto an empty
 computed path both landed in the same silent bucket as a run that never started
 an agent.
+
+## Correction — 2026-08-08, job #497 (D6 amended: the teardown spared the CLI's own tree)
+
+**D6 said "keep #322's teardown as it stands", and as it stood it deleted the
+transcript before anything could harvest it.** Found in review of slice 5, in
+the tree rather than on hardware: `CLAUDE_CONFIG_DIR` is `/chuggernaut/claude`
+(`crates/agent/src/lib.rs`), which the host backend rebases to
+`{task_dir}/chuggernaut/claude` — and `supervised_cmd`'s wrapper deleted
+`{task_dir}/chuggernaut` whole, as its first act after the command returned,
+*before* writing `exit_code`. `ClaudeProvider::run` awaits `backend.wait`, which
+polls for that file, and only then does the harvest resolve the transcript. So
+every agent host task would have landed on `MissBranch::Zero` — an error log and
+a `transcript-missing.json` marker — on every run, with slice 1's `find_file`
+looking into a directory that no longer existed. `spawn_reaper`'s repeat of the
+teardown had the same effect one path over.
+
+**The amendment: the teardown reclaims the injected tree's *entries*, sparing
+`container::host::AGENT_STATE_DIR` (`claude`).** D6's guarantee is that the
+**secrets** do not outlive the task, and it is intact: the ssh identity, the ADC
+document and the MCP config carrying the NATS credential are all deleted at
+process exit exactly as before. What changed is one leaf that holds no injected
+credential at all — the CLI's own config directory, which is a *harvested
+artifact* and therefore takes the lifetime `logs` and `copy_file` already have:
+inside the 0700 task directory until `ContainerBackend::remove` reclaims the
+whole of it. #322 §2's teardown note already states that ordering as the
+intended one for anything the harvest must read after the process is gone.
+
+Two consequences worth recording. **M5 gets sharper, not weaker**: the premise
+"the CLI writes nothing it must not leak outside `CLAUDE_CONFIG_DIR`" now also
+bounds what sits in the task directory between exit and removal, so a CLI that
+writes a credential *into* its config dir extends that item's window from the
+process to the task — still contained, still 0700, and still the thing M5
+measures. And the leaf name is now a cross-crate contract: `container` cannot
+depend on `agent`, so `ClaudeProvider`'s own test asserts
+`CLAUDE_CONFIG_DIR == "{WIRE_CHUGGERNAUT}/{AGENT_STATE_DIR}"` — a rename on
+either side would delete the transcript again, silently.
+
+The regression is asserted at both tiers that can express it: the wrapper's own
+teardown in `crates/container/src/host.rs` (the injected credential gone, the
+transcript readable, `reclaim_credentials` sparing the same leaf), and end to
+end in `crates/container/tests/host_backend.rs`, where an admitted agent-shaped
+launch writes a transcript through `$CLAUDE_CONFIG_DIR` and the test resolves it
+with `find_file` and reads it with `copy_file` **after** the task has exited.

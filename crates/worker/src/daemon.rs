@@ -243,11 +243,6 @@ struct WorkerState {
     /// launch's `xcode:<version>` resolves against. Empty on every node that
     /// serves no host mode, and on a Mac with none installed.
     xcodes: Xcodes,
-    /// The agent CLI this node discovered on the daemon's own `PATH` at boot
-    /// (design #490 D3), which an agent-shaped host launch is admitted against.
-    /// Absent on every node that serves no host mode, and on a host node whose
-    /// `PATH` carries none.
-    agent_cli: AgentCli,
     /// What this node advertises it can do (design #309 §4), derived once from
     /// `WORKER_MODES` and the discovery above at start. Reported on both
     /// transports, so the pull and the push halves cannot disagree.
@@ -438,7 +433,8 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         None => NatsStore::connect(&config.nats_url).await?,
     };
 
-    let backend = local_backend(&config).await?;
+    let agent_cli = discover_agent_cli(&config.node, &config.modes);
+    let backend = local_backend(&config, &agent_cli).await?;
     let cache_enabled = config.cache_dir.is_some();
     let kvm = kvm_grant(&config);
     let nix = nix_roots(&config)?;
@@ -461,7 +457,6 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     let capacity = run_capacity(&config);
     let announce_now = Arc::new(tokio::sync::Notify::new());
     let xcodes = discover_xcodes(&config.node, &config.modes);
-    let agent_cli = discover_agent_cli(&config.node, &config.modes);
 
     let state = Arc::new(WorkerState {
         node: config.node.clone(),
@@ -478,7 +473,6 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         host_mode: serves_host(&config.modes),
         capabilities: node_capabilities(&config.modes, &xcodes, &agent_cli),
         xcodes,
-        agent_cli,
         refresh_script: config.refresh_script.clone(),
         refresh_git_url: config.refresh_git_url.clone(),
         refresh_git_key: config.refresh_git_key.clone(),
@@ -673,9 +667,12 @@ async fn enforce_host_supervision(
 /// host-only node never needs a docker daemon. A node declaring both gets
 /// [`crate::route::RoutedBackend`] over the two, so the mode resolves per
 /// launched task rather than per node.
-async fn local_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
+async fn local_backend(
+    config: &WorkerConfig,
+    agent_cli: &AgentCli,
+) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
     let host: Option<Arc<dyn ContainerBackend>> = if serves_host(&config.modes) {
-        Some(host_backend(config).await?)
+        Some(host_backend(config, agent_cli).await?)
     } else {
         None
     };
@@ -693,8 +690,13 @@ async fn local_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend
 
 /// The node's host backend, and the two boot-time refusals a node advertising
 /// `host` has to survive first: the capacity rule #309 §2 option (iii) needs,
-/// and the supervision #440 D3 needs.
-async fn host_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
+/// and the supervision #440 D3 needs. What it can serve an **agent** launch
+/// with is not one of them — design #490 D5 refuses that at the launch that
+/// asked, so a Mac missing a capability keeps every other slot it has.
+async fn host_backend(
+    config: &WorkerConfig,
+    agent_cli: &AgentCli,
+) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
     enforce_host_capacity(config.slots, config.slots_max)?;
     let supervision = enforce_host_supervision(&config.node).await?;
     tracing::info!(
@@ -703,13 +705,28 @@ async fn host_backend(config: &WorkerConfig) -> Result<Arc<dyn ContainerBackend>
         wire_paths = %format!("{} and {} map into each task directory", container::WIRE_WORKSPACE, container::WIRE_CHUGGERNAUT),
         supervision = ?supervision,
         modes = ?config.modes,
+        host_channel = %container::CHANNEL_PATH_HOST,
+        agent_cli = ?agent_cli.path(),
         "host execution enabled — launches carrying no image run as host processes here"
     );
     Ok(Arc::new(container::host::HostBackend::new(
         config.node.clone(),
         config.host_root.clone(),
         supervision,
+        agent_capability(&config.node, agent_cli, container::CHANNEL_PATH_HOST),
     )?))
+}
+
+/// What this node can serve an agent host launch with (design #490 D5), as the
+/// backend is told it: the daemon discovers, and hands over both the answer and
+/// the refusal to give when it is a no.
+fn agent_capability(
+    node: &str,
+    agent_cli: &AgentCli,
+    host_channel: impl Into<PathBuf>,
+) -> container::host::AgentCapability {
+    let cli_absent = (!agent_cli.present()).then(|| agent_cli.missing(node));
+    container::host::AgentCapability::new(cli_absent, host_channel)
 }
 
 /// The node's local docker backend, wired with everything the node's own config
@@ -1041,13 +1058,6 @@ async fn launch(state: &WorkerState, payload: &[u8]) -> WorkerReply<LaunchOk> {
             let req: WorkerLaunchRequest = parse(payload)?;
             let files = launch_files(state, req.files)?;
             let mut env = req.env;
-            admit_agent_cli(
-                &state.node,
-                state.host_mode,
-                &state.agent_cli,
-                req.image.as_deref(),
-                &env,
-            )?;
             inject_cache_env(&mut env, state.cache_enabled);
             inject_toolchain_env(&mut env, state.kvm.as_ref());
             let rooted = realise_for_launch(state, &mut env, req.runtime_env.as_deref()).await?;
@@ -1275,24 +1285,6 @@ fn resolve_xcode_env<'a>(
         )));
     }
     xcodes.resolve(node, version).map_err(launch_refused)
-}
-
-/// Whether this node can serve the launch's agent shape, asked here for the
-/// same reason `resolve_xcode_env` is: the node's discovered facts resolve in
-/// the daemon, so the backends stay ignorant of them (design #490 D3/D5). A
-/// container launch carries its CLI in its image and is never asked.
-fn admit_agent_cli(
-    node: &str,
-    host_mode: bool,
-    agent_cli: &AgentCli,
-    image: Option<&str>,
-    env: &HashMap<String, String>,
-) -> Result<(), WorkerError> {
-    let agent_shaped = env.contains_key(container::host::AGENT_CONFIG_VAR);
-    if image.is_some() || !host_mode || !agent_shaped || agent_cli.present() {
-        return Ok(());
-    }
-    Err(launch_refused(agent_cli.missing(node)))
 }
 
 /// Point the task at the Xcode that was resolved: `DEVELOPER_DIR` selects the
@@ -2252,21 +2244,18 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// The launch a node cannot serve is refused BY NAME (design #490 D5), and
-    /// only that launch: a container launch carries its CLI in its image, and a
-    /// command host launch needs none.
+    /// The capability the daemon hands the host backend carries the refusal a
+    /// node with no CLI owes an agent launch, BY NAME (design #490 D5) — the
+    /// daemon discovers, and the backend is told both the answer and the words.
     #[test]
-    fn an_agent_launch_without_a_cli_is_refused_naming_it() {
-        let agent_env = HashMap::from([(
-            container::host::AGENT_CONFIG_VAR.to_string(),
-            "/chuggernaut/claude".to_string(),
-        )]);
-        let none = AgentCli::default();
+    fn the_capability_a_node_without_a_cli_hands_over_refuses_naming_it() {
+        let (root, cli) = fixture_agent_cli("capability");
+        let channel = crate::agent_cli::path_fixture(&root, "lib", Some(0o755))
+            .join(crate::agent_cli::AGENT_CLI_BIN);
 
-        let refusal = admit_agent_cli("air", true, &none, None, &agent_env).unwrap_err();
-        let WorkerError::Launch { message } = &refusal else {
-            panic!("an unservable launch is refused, never requeued as capacity: {refusal:?}");
-        };
+        let message = agent_capability("air", &AgentCli::default(), &channel)
+            .refusal("air")
+            .expect("a node that discovered no CLI cannot serve an agent launch");
         assert!(
             message.contains(crate::agent_cli::AGENT_CLI_BIN),
             "{message}"
@@ -2274,22 +2263,10 @@ mod tests {
         assert!(message.contains("air"), "{message}");
 
         assert!(
-            admit_agent_cli("air", true, &none, Some("chug-agent:latest"), &agent_env).is_ok(),
-            "a container launch carries its own CLI in the image"
-        );
-        assert!(
-            admit_agent_cli("air", true, &none, None, &HashMap::new()).is_ok(),
-            "a command host launch needs no CLI (design #322 §2)"
-        );
-        assert!(
-            admit_agent_cli("nuc", false, &none, None, &agent_env).is_ok(),
-            "a node serving no host mode routes this nowhere near the host backend"
-        );
-
-        let (root, cli) = fixture_agent_cli("admit");
-        assert!(
-            admit_agent_cli("air", true, &cli, None, &agent_env).is_ok(),
-            "a node that discovered a CLI is not the one refusing here"
+            agent_capability("air", &cli, &channel)
+                .refusal("air")
+                .is_none(),
+            "a node holding both halves refuses nothing"
         );
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -3140,7 +3117,6 @@ mod tests {
                 &AgentCli::default(),
             ),
             xcodes: Xcodes::default(),
-            agent_cli: AgentCli::default(),
             refresh_script: Some(script),
             refresh_git_url: Some("git@example.invalid:acme/chug.git".into()),
             refresh_git_key: git_key,

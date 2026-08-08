@@ -623,6 +623,17 @@ pub const WIRE_WORKSPACE: &str = "/workspace";
 /// (`InjectedFile::container_path`, spec §4.1).
 pub const WIRE_CHUGGERNAUT: &str = "/chuggernaut";
 
+/// Where an agent **container** gets the channel binary injected and execs it
+/// as its MCP server (spec §4.2).
+pub const CHANNEL_PATH_CONTAINER: &str = "/usr/local/bin/chuggernaut-channel";
+
+/// Where a **host** agent task's CLI execs the same server: a real path on the
+/// node, installed by `deploy/prod/build-worker.sh` and never injected, because
+/// the launch cannot carry a binary the node's own userland runs (design #490
+/// D2). It is no wire path — an MCP config's `command` is file *contents*, which
+/// no backend rebases — so both halves name this one constant.
+pub const CHANNEL_PATH_HOST: &str = "/usr/local/lib/chuggernaut/chuggernaut-channel-host";
+
 /// Task-side variable naming the clone destination, set by a backend that maps
 /// [`WIRE_WORKSPACE`] elsewhere (design #322 §2). One name, so the injection
 /// site and the script consuming it cannot drift.

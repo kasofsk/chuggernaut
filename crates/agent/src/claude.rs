@@ -71,8 +71,10 @@ impl ClaudeProvider {
     /// by path: the CLI accepts a file for `--mcp-config`, and the payload
     /// carries the NATS credential, which must never enter argv.
     fn claude_invocation(config: &AgentRunConfig) -> Invocation {
+        let prompt_path = claude_invocation_path(PROMPT_PATH, config.image.as_deref());
+        let settings_path = claude_invocation_path(SETTINGS_PATH, config.image.as_deref());
         let mut command = format!(
-            "claude -p \"$(cat {PROMPT_PATH})\" --settings {SETTINGS_PATH} \
+            "claude -p \"$(cat {prompt_path})\" --settings {settings_path} \
              --output-format stream-json --verbose --session-id {}",
             shell_quote(&config.session_id)
         );
@@ -90,7 +92,10 @@ impl ClaudeProvider {
         }];
         if !config.mcp_servers.is_empty() {
             let json = mcp_config_json(&config.mcp_servers);
-            command.push_str(&format!(" --mcp-config {MCP_CONFIG_PATH}"));
+            command.push_str(&format!(
+                " --mcp-config {}",
+                claude_invocation_path(MCP_CONFIG_PATH, config.image.as_deref())
+            ));
             files.push(InjectedFile {
                 container_path: MCP_CONFIG_PATH.to_string(),
                 contents: json.into_bytes(),
@@ -350,6 +355,23 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// One injected `/chuggernaut` file as the launch's own shell resolves it: the
+/// wire path itself in a container, and this task's own directory on a host
+/// node, whose `cmd` is the one surface design #322 §2's rebase does not reach.
+///
+/// Routed by the image's presence, the selector every backend already routes on
+/// (#309 §1), so a container's command line is unchanged to the byte.
+fn claude_invocation_path(wire: &str, image: Option<&str>) -> String {
+    match image {
+        Some(_) => wire.to_string(),
+        None => wire.replacen(
+            container::WIRE_CHUGGERNAUT,
+            &format!("\"${}\"", container::host::CREDS_VAR),
+            1,
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -448,16 +470,63 @@ mod tests {
         }
     }
 
-    /// The variable a host node reads as agent shape (design #322 §2's
-    /// launch-time refusal) is the one this provider sets. `container` cannot
-    /// depend on `agent`, so the two are held together from this side.
+    /// The variable a host node reads as agent shape — the capability test
+    /// design #490 D5 put where the refusal was, and the rebase that puts the
+    /// transcript inside the task directory — is the one this provider sets.
+    /// `container` cannot depend on `agent`, so the two are held together here.
     #[test]
-    fn the_config_dir_variable_is_the_one_a_host_node_refuses_on() {
+    fn the_config_dir_variable_is_the_one_a_host_node_reads_as_agent_shape() {
         assert_eq!(
             container::host::AGENT_CONFIG_VAR,
             "CLAUDE_CONFIG_DIR",
-            "this launch sets that name (above), and a host node refuses a launch carrying it — \
-             a rename on either side makes the refusal silently stop firing"
+            "this launch sets that name (above); a rename on either side makes a host node stop \
+             testing its capability and stop rebasing the transcript tree"
+        );
+        assert_eq!(
+            crate::CLAUDE_CONFIG_DIR,
+            format!(
+                "{}/{}",
+                container::WIRE_CHUGGERNAUT,
+                container::host::AGENT_STATE_DIR
+            ),
+            "the leaf a host teardown spares is the tree this launch points the CLI at — a rename \
+             on either side deletes the transcript before the harvest reads it (#490 D6)"
+        );
+    }
+
+    /// Design #490 D5: a host task's command resolves its `/chuggernaut` paths
+    /// through the task's own shell, because `cmd` is the one surface #322 §2's
+    /// rebase never touches — and a container's command line is unchanged to the
+    /// byte, which is what routing on the image's presence buys.
+    #[test]
+    fn a_host_invocation_resolves_its_paths_through_the_tasks_own_directory() {
+        let mut host = config();
+        host.image = None;
+        let inv = ClaudeProvider::claude_invocation(&host);
+        let creds = format!("\"${}\"", container::host::CREDS_VAR);
+        for wire in [PROMPT_PATH, SETTINGS_PATH, MCP_CONFIG_PATH] {
+            let resolved = wire.replacen(container::WIRE_CHUGGERNAUT, &creds, 1);
+            assert!(inv.command.contains(&resolved), "{}", inv.command);
+        }
+        assert!(
+            !inv.command
+                .contains(&format!(" {}", container::WIRE_CHUGGERNAUT)),
+            "no bare wire path survives into a host command: {}",
+            inv.command
+        );
+        assert_eq!(
+            inv.files
+                .iter()
+                .filter(|f| f.container_path.starts_with(container::WIRE_CHUGGERNAUT))
+                .count(),
+            inv.files.len(),
+            "the injected paths stay wire paths — those the backend does rebase"
+        );
+
+        let container_command = ClaudeProvider::claude_invocation(&config()).command;
+        assert!(
+            container_command.contains(PROMPT_PATH) && !container_command.contains(&creds),
+            "{container_command}"
         );
     }
 

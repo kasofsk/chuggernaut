@@ -397,27 +397,31 @@ from a conversion and from every self-refresh after it:
 | `chuggernaut/agent` + `agent-rust` | a job type resolving to `runtime.mode: host` cannot declare an `image:` (`crates/types/src/job_type.rs`), so nothing here launches one |
 | `chuggernaut/worker` (Darwin only) | the daemon is compiled natively, and the image's only other passenger is the channel binary this node does not take |
 | the container-platform probe | there is no injected binary to judge |
-| the **injected** `chuggernaut-channel` | read by an agent **container** (`Core::channel_mcp`, whose two callers are both agent-shaped), and this node runs none. Its **host** copy is a different artifact and the node *does* get one — next bullet |
+| the **injected** `chuggernaut-channel` | read by an agent **container** (`Core::channel_mcp`, whose two callers are both agent-shaped), and this node runs none — a host agent launch is named the node's own copy and injected nothing (#490 D2). That **host** copy is a different artifact and the node *does* get one — next bullet |
 | the refresh disk pre-flight | it exists to protect an image build; there is none |
 
 Two things to know before converting one:
 
 - **The daemon warns once at boot** — `channel binary unavailable` — and carries
   an empty artifact map. That is the correct state, not a gap: only a
-  `FileSource::LocalArtifact` launch reads it, and a command-only node never
-  makes one. The warning is about the **injected** path, which is the only one
-  the daemon reads today.
+  `FileSource::LocalArtifact` launch reads it, and a container-less node never
+  makes one. The warning is about the **injected** path only; the node's own
+  host copy is a separate artifact the daemon reads per launch, never at boot —
+  next bullet.
 - **It does get a channel binary of its own**, since
   [#490](../../design/490-agent-work-on-a-mac.md) slice 3: a second artifact at
   `/usr/local/lib/chuggernaut/chuggernaut-channel-host`, which **this node**
   execs rather than a container, so on a mac it comes out of the same native
   build as the daemon and the deploy proves it by **running** it there. The two
   paths exist because the two executors ask opposite questions (D2), and a
-  dual-mode mac holds both. Nothing reads the host copy yet — lifting the
-  command-only rule is slice 5 — so this is provisioning ahead of use, which is
-  deliberate: D5 puts the resulting refusal at launch rather than at boot, and a
+  dual-mode mac holds both. Since slice 5 it is **read**: an agent host launch's
+  MCP config names that exact path, and a node holding no runnable file there
+  refuses the launch by name — at the launch and not at boot, because a
   boot-time refusal would take a dual-mode node's container capacity down with
-  it.
+  it. So the path is a contract, not a preference: `WORKER_HOST_CHANNEL_BINARY`
+  relocates what the deploy **installs** and nothing else, and installing
+  elsewhere means every agent host launch is refused naming the path it looked
+  at.
 - **A host-capable node probes for the agent CLI at boot**, since #490 slice 4:
   it looks for an executable `claude` on the daemon's own `PATH` and advertises
   the answer as `NodeCapabilities.agent_cli`, warning (never refusing) when it

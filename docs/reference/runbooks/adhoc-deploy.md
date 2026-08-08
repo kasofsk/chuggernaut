@@ -119,9 +119,10 @@ well, at `/usr/local/lib/chuggernaut/chuggernaut-channel-host` (design
 node's own native build on Darwin, out of the image on Linux, where the node and
 the container are the same platform. It is checked by the question its own
 executor asks — by being *run* on the node, with a Linux ELF found in that slot
-on a mac refused by name as the other half of the pair. Nothing reads it yet —
-slice 3 only puts the file there — so a refusal here is about a bad deploy, not
-about a task that was going to run.
+on a mac refused by name as the other half of the pair. An agent host launch's
+MCP config names that exact path and the backend stats it per launch, so a
+refusal here is about a bad deploy **and** about every agent host task the node
+would have run.
 Either way it installs the daemon binary with an environment
 file and a systemd unit (Linux) or launchd agent (macOS), and asks the
 supervisor to restart it (design

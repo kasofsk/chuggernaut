@@ -17,11 +17,20 @@
 //! Option (iii) — one host task per node, `slots: 1` — stays for phase 1 on
 //! CoreSimulator's global device state rather than as the collision fix, and is
 //! **enforced here**: a launch arriving while another task is live is refused as
-//! `NoCapacity`. Phase 1 also serves **command work only**: a launch carrying
-//! agent shape is refused here on its shape alone, until design #490 slice 5
-//! replaces this test with a launch-time capability test — neither the
-//! transcript (slice 1) nor the node's capabilities (slices 3 and 4) is the
-//! reason any more.
+//! `NoCapacity`. **Agent** work is served since design #490 slice 5, and what
+//! was a refusal of the shape is now a test of this node's [`AgentCapability`]:
+//! an agent-shaped launch runs when the node holds both halves — the CLI the
+//! daemon discovered on its own `PATH` (#490 D3) and the node's own channel
+//! binary (#490 D2) — and is refused **by name** when either is absent. The
+//! capability is handed in at construction like [`Supervision`] is: the daemon
+//! discovers node facts, this backend is told them.
+//!
+//! The channel binary is **node-provisioned, never injected** (#490 D2): the
+//! launch carries no channel file at all, and the CLI execs the node's own copy
+//! at [`crate::CHANNEL_PATH_HOST`], which the launch's MCP config names because
+//! that config is file *contents* and no backend rebases those. Injection could
+//! not work either — the container's `/usr/local/bin` is outside the mapping —
+//! and which binary runs here is the node's fact, not the dispatcher's.
 //!
 //! A launch **declaring an image is refused** (#309 §1, P1): the image's absence
 //! is what selects this backend, so one that carries an image was misrouted and
@@ -54,9 +63,20 @@ use std::sync::{Arc, Mutex};
 
 /// Where each wire prefix lands inside a task directory (design #322 §2): the
 /// clone under `workspace/`, the injected credential tree under
-/// `chuggernaut/`, which is deleted the moment the command returns.
+/// `chuggernaut/`, whose injected files are deleted the moment the command
+/// returns.
 const WORKSPACE_DIR: &str = "workspace";
 const CHUGGERNAUT_DIR: &str = "chuggernaut";
+
+/// The one leaf of that tree a teardown spares: the agent CLI's own config
+/// directory, which holds the transcript the harvest resolves **after** the
+/// process has exited (design #490 D6 amendment).
+///
+/// It is a harvested artifact rather than an injected credential, so its
+/// lifetime is the task directory's — reclaimed by
+/// [`ContainerBackend::remove`], exactly the bound `logs` and `copy_file`
+/// already have.
+pub const AGENT_STATE_DIR: &str = "claude";
 
 /// The total wire-path mapping, as pairs. Anything a path or an env value names
 /// outside these two prefixes is refused rather than reaching the node's own
@@ -68,15 +88,79 @@ const WIRE_PREFIXES: [(&str, &str); 2] = [
 ];
 
 /// The variables whose *values* name a wire path inline — design #322 §2's
-/// fourth surface, `GIT_SSH_COMMAND` naming `SSH_ID_PATH` and
-/// `GOOGLE_APPLICATION_CREDENTIALS` naming its ADC document. A prefix in any
-/// other value is refused, which is what catches a third consumer.
-const WIRE_PATH_VALUE_VARS: [&str; 2] = ["GIT_SSH_COMMAND", "GOOGLE_APPLICATION_CREDENTIALS"];
+/// fourth surface, `GIT_SSH_COMMAND` naming `SSH_ID_PATH`,
+/// `GOOGLE_APPLICATION_CREDENTIALS` naming its ADC document, and since #490
+/// slice 5 [`AGENT_CONFIG_VAR`] naming the tree the CLI writes its transcript
+/// into. A prefix in any other value is refused, which is what catches a fourth
+/// consumer.
+const WIRE_PATH_VALUE_VARS: [&str; 3] = [
+    "GIT_SSH_COMMAND",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    AGENT_CONFIG_VAR,
+];
 
 /// `agent::CLAUDE_CONFIG_DIR`'s variable, which is the shape of an agent
 /// launch. Spelled out because `container` does not depend on `agent`; that
 /// crate's own test asserts the two still agree.
 pub const AGENT_CONFIG_VAR: &str = "CLAUDE_CONFIG_DIR";
+
+/// What this node needs in hand to serve an **agent** host launch (design #490
+/// D5): the CLI the daemon discovered on its own `PATH` (D3), and the node's own
+/// channel binary (D2).
+///
+/// Told to the backend rather than discovered by it, and absence refuses the
+/// launch that asked rather than the boot — a Mac that cannot serve agent work
+/// still serves every container and command host launch it has.
+#[derive(Debug, Clone)]
+pub struct AgentCapability {
+    cli_absent: Option<String>,
+    channel: PathBuf,
+}
+
+impl AgentCapability {
+    /// This node's two halves: why it has no agent CLI (`None` when it found
+    /// one), and where its own channel binary is installed.
+    pub fn new(cli_absent: Option<String>, channel: impl Into<PathBuf>) -> Self {
+        Self {
+            cli_absent,
+            channel: channel.into(),
+        }
+    }
+
+    /// Why an agent-shaped launch cannot run here, naming the half that is
+    /// missing, or `None` when both are in hand. Public so a node's assembled
+    /// capability is testable without spawning a task.
+    pub fn refusal(&self, node: &str) -> Option<String> {
+        if let Some(cli) = &self.cli_absent {
+            return Some(cli.clone());
+        }
+        (!runnable_file(&self.channel)).then(|| {
+            format!(
+                "launch is agent-shaped ({AGENT_CONFIG_VAR}) and node {node} holds no runnable \
+                 channel binary at {} — a host task's MCP server is the node's own file rather \
+                 than the injected {} a container execs, because nothing can inject a binary this \
+                 node's userland runs (design #490 D2); refused here rather than run as an agent \
+                 with no update_status and no submit_result, since deploy/prod/build-worker.sh is \
+                 what installs it",
+                self.channel.display(),
+                crate::CHANNEL_PATH_CONTAINER
+            )
+        })
+    }
+}
+
+/// Whether a node-installed path is something a task could actually exec: a
+/// regular file, following symlinks, that carries an execute bit.
+fn runnable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether a launch is agent-shaped, named once so the admission test and the
+/// `CLAUDE_CONFIG_DIR` rebase read the same selector.
+fn agent_shaped(config: &ContainerLaunchConfig) -> bool {
+    config.env.contains_key(AGENT_CONFIG_VAR)
+}
 
 /// The node's host root when `WORKER_HOST_ROOT` is unset — worker-writable node
 /// state beside the other `/var/lib/chuggernaut` leaves, never a nix store path.
@@ -116,7 +200,12 @@ const REMOVING_PREFIX: &str = ".removing-";
 /// a shell command.
 const EXIT_TMP_VAR: &str = "CHUG_HOST_EXIT_TMP";
 const EXIT_VAR: &str = "CHUG_HOST_EXIT";
-const CREDS_VAR: &str = "CHUG_HOST_CREDS";
+
+/// Where [`crate::WIRE_CHUGGERNAUT`] actually is for this task, which is what a
+/// **command** naming one of its files has to resolve through: the cmd is no
+/// rebased surface, so the task's own shell does it (design #322 §2, as
+/// [`crate::WORKSPACE_VAR`] does for the clone destination).
+pub const CREDS_VAR: &str = "CHUG_HOST_CREDS";
 
 /// The only two variables a host task takes from the daemon, and it takes them
 /// **by name** (design #440 D8). `PATH` because a host node's toolchain is
@@ -447,6 +536,9 @@ pub struct HostBackend {
     /// rather than probed here — the daemon probes once at boot and refuses to
     /// serve `host` at all when the node has none.
     supervision: Supervision,
+    /// What this node can serve an agent launch with (design #490 D5),
+    /// assembled by the daemon from the machine itself.
+    agent: AgentCapability,
     /// Serializes the whole of [`ContainerBackend::launch`], so the
     /// one-task-per-node check and the task directory it publishes cannot race
     /// a second concurrent launch on the daemon's op semaphore.
@@ -466,6 +558,7 @@ impl HostBackend {
         node: impl Into<String>,
         root: impl Into<PathBuf>,
         supervision: Supervision,
+        agent: AgentCapability,
     ) -> Result<Self, BackendError> {
         let root = root.into();
         std::fs::create_dir_all(&root)
@@ -475,6 +568,7 @@ impl HostBackend {
             node: node.into(),
             root,
             supervision,
+            agent,
             launching: tokio::sync::Mutex::new(()),
             live: Arc::new(Mutex::new(HashSet::new())),
             counter: AtomicU64::new(0),
@@ -534,11 +628,11 @@ impl HostBackend {
         Some(status_after_restart(meta.as_ref(), observed.as_deref()))
     }
 
-    /// Whether this node may take the launch: it must be a host launch, it must
-    /// not be agent-shaped, and it must be the only one. The exclusion is #309
-    /// §2 option (iii) **enforced**: `NoCapacity` is transient, so the
-    /// dispatcher queues and retries (§3.5) rather than spending the retry
-    /// budget.
+    /// Whether this node may take the launch: it must be a host launch, this
+    /// node must hold what an agent-shaped one needs, and it must be the only
+    /// one. The exclusion is #309 §2 option (iii) **enforced**: `NoCapacity` is
+    /// transient, so the dispatcher queues and retries (§3.5) rather than
+    /// spending the retry budget.
     async fn admit(&self, config: &ContainerLaunchConfig) -> Result<(), BackendError> {
         if let Some(image) = config.image.as_deref() {
             return Err(BackendError::Launch(format!(
@@ -548,17 +642,10 @@ impl HostBackend {
                 self.node
             )));
         }
-        if config.env.contains_key(AGENT_CONFIG_VAR) {
-            return Err(BackendError::Launch(format!(
-                "node {} serves host mode and this launch sets {AGENT_CONFIG_VAR}, which is agent \
-                 shape — design #322 §2 serves work.type: command only on a host node. Neither the \
-                 transcript nor this node's capabilities is the reason any more (#490 slice 1 \
-                 resolves the transcript by session id, slice 3 installs the host channel binary, \
-                 slice 4 discovers the agent CLI and refuses by name in the daemon before this \
-                 backend is reached): the refusal stands on the shape alone until #490 slice 5 \
-                 replaces it with a launch-time capability test",
-                self.node
-            )));
+        if agent_shaped(config)
+            && let Some(reason) = self.agent.refusal(&self.node)
+        {
+            return Err(BackendError::Launch(reason));
         }
         if let Some(held) = self.list_managed_running().await?.first() {
             return Err(BackendError::NoCapacity(format!(
@@ -873,11 +960,13 @@ fn process_start_time(pid: i32) -> Option<String> {
     }
 }
 
-/// Wrap the launch command so the **task itself** records its exit status, and
-/// sheds whatever the `systemd-run` client borrowed to find its bus. The
-/// daemon's own supervisor is only a backstop: a task must survive the daemon
-/// being swapped under it (spec §3.1 drain guarantee), and a `wait` this
-/// process performed would not.
+/// Wrap the launch command so the **task itself** records its exit status,
+/// sheds what the `systemd-run` client borrowed to find its bus, and empties
+/// its injected credential tree one level down — sparing [`AGENT_STATE_DIR`]
+/// for the harvest that runs after the process exits (design #490 D6
+/// amendment). The daemon's own supervisor is only a backstop: a task must
+/// survive the daemon being swapped under it (spec §3.1 drain guarantee), and a
+/// `wait` this process performed would not.
 fn supervised_cmd(
     cmd: &[String],
     borrowed: &BTreeMap<String, OsString>,
@@ -892,7 +981,9 @@ fn supervised_cmd(
         "sh".to_string(),
         "-c".to_string(),
         format!(
-            "{shed}\"$@\"; s=$?; rm -rf \"${CREDS_VAR}\"; printf %s \"$s\" > \"${EXIT_TMP_VAR}\" \
+            "{shed}\"$@\"; s=$?; find \"${CREDS_VAR}\" -mindepth 1 -maxdepth 1 \
+             ! -name {AGENT_STATE_DIR} -exec rm -rf {{}} + 2>/dev/null; \
+             printf %s \"$s\" > \"${EXIT_TMP_VAR}\" \
              && mv \"${EXIT_TMP_VAR}\" \"${EXIT_VAR}\"; exit $s"
         ),
         "sh".to_string(),
@@ -1195,14 +1286,35 @@ fn sweep_detached_in(root: &Path) -> std::io::Result<()> {
     failure.map_or(Ok(()), Err)
 }
 
-/// Delete a task's mapped `/chuggernaut` tree, which the task's own wrapper
-/// already deleted (design #322 §2 teardown point 2). The daemon repeating it
-/// at the terminal state is what covers a wrapper killed before it got there.
+/// Delete what a task's mapped `/chuggernaut` tree holds, which the task's own
+/// wrapper already deleted (design #322 §2 teardown point 2), sparing
+/// [`AGENT_STATE_DIR`] exactly as that wrapper does. The daemon repeating the
+/// teardown at the terminal state covers a wrapper killed before it got there,
+/// and `remove` reclaims the spared leaf with the rest of the task directory.
 fn reclaim_credentials(dir: &Path) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(dir.join(CHUGGERNAUT_DIR)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
+    let creds = dir.join(CHUGGERNAUT_DIR);
+    let entries = match std::fs::read_dir(&creds) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut failure = None;
+    for entry in entries.flatten() {
+        if entry.file_name() == std::ffi::OsStr::new(AGENT_STATE_DIR) {
+            continue;
+        }
+        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+        let path = entry.path();
+        let result = if is_dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(e) = result {
+            failure.get_or_insert(e);
+        }
     }
+    failure.map_or(Ok(()), Err)
 }
 
 /// A reclaim's failure, or `None` when it succeeded or the path was already
@@ -1504,7 +1616,7 @@ fn read_fully(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize
     Ok(filled)
 }
 
-/// Reap the spawned child, re-delete the credential tree the wrapper deletes
+/// Reap the spawned child, re-empty the credential tree the wrapper empties
 /// first, and, only if that wrapper never got to it, write the exit code.
 /// Leaving the live set **last** is what closes the window in which a
 /// just-exited task would otherwise read as gone.
@@ -1618,6 +1730,10 @@ mod tests {
         let creds = dir.join(CHUGGERNAUT_DIR);
         std::fs::create_dir_all(creds.join("ssh")).unwrap();
         std::fs::write(creds.join("ssh").join("id"), b"a private key").unwrap();
+        std::fs::write(creds.join("mcp-config.json"), b"a nats credential").unwrap();
+        let transcript = creds.join(AGENT_STATE_DIR).join("projects");
+        std::fs::create_dir_all(&transcript).unwrap();
+        std::fs::write(transcript.join("s.jsonl"), b"a transcript").unwrap();
         let out = std::process::Command::new(&wrapped[0])
             .args(&wrapped[1..])
             .env(EXIT_TMP_VAR, dir.join(EXIT_CODE_TMP))
@@ -1628,9 +1744,20 @@ mod tests {
         assert_eq!(out.code(), Some(7), "the wrapper preserves the exit status");
         assert_eq!(read_exit_code(&dir), Some(7));
         assert!(
-            !creds.exists(),
-            "the credential tree is deleted at process exit, before the exit code is written \
-             (design #322 §2 teardown)"
+            !creds.join("ssh").exists() && !creds.join("mcp-config.json").exists(),
+            "every injected credential is deleted at process exit, before the exit code is \
+             written (design #322 §2 teardown)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(transcript.join("s.jsonl")).unwrap(),
+            "a transcript",
+            "the agent CLI's own tree outlives the process the harvest reads it after \
+             (design #490 D6 amendment)"
+        );
+        reclaim_credentials(&dir).unwrap();
+        assert!(
+            transcript.join("s.jsonl").exists(),
+            "the daemon's repeat of the teardown spares the same leaf"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2534,7 +2661,13 @@ mod tests {
         std::fs::write(leftover.join("nested").join("big"), b"target/").unwrap();
         std::fs::create_dir_all(root.join("host-2-0")).unwrap();
 
-        let backend = HostBackend::new("w1", &root, Supervision::ProcessGroup).unwrap();
+        let backend = HostBackend::new(
+            "w1",
+            &root,
+            Supervision::ProcessGroup,
+            AgentCapability::new(None, crate::CHANNEL_PATH_HOST),
+        )
+        .unwrap();
         assert!(!leftover.exists(), "a detached tree is reclaimed at boot");
         assert_eq!(
             backend.task_ids().unwrap(),
@@ -2549,7 +2682,13 @@ mod tests {
     #[test]
     fn ids_outside_the_root_are_not_found() {
         let root = std::env::temp_dir().join(format!("chug-host-ids-{}", std::process::id()));
-        let backend = HostBackend::new("w1", &root, Supervision::ProcessGroup).unwrap();
+        let backend = HostBackend::new(
+            "w1",
+            &root,
+            Supervision::ProcessGroup,
+            AgentCapability::new(None, crate::CHANNEL_PATH_HOST),
+        )
+        .unwrap();
         assert_eq!(
             backend.task_dir(&"w1/host-1-0".to_string()).unwrap(),
             root.join("host-1-0")

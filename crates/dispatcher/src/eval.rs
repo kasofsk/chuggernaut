@@ -887,7 +887,8 @@ impl Core {
         {
             prompt = format!("{pred}{prompt}");
         }
-        let (mcp_servers, mut files) = self.channel_mcp(&env);
+        let image = eval_image(&job_type, evaluator);
+        let (mcp_servers, mut files) = self.channel_mcp(&env, image.as_deref());
         files.extend(
             self.ssh_credential_files(
                 owner,
@@ -919,7 +920,7 @@ impl Core {
         self.record_workload_identities_for(owner, project, seq, task_id, audit)
             .await?;
         let config = AgentRunConfig {
-            image: eval_image(&job_type, evaluator),
+            image,
             prompt,
             model: evaluator
                 .model

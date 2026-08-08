@@ -429,7 +429,7 @@ impl Core {
                         predecessor.as_deref(),
                     )
                     .await?;
-                let (mcp_servers, mut files) = self.channel_mcp(&env);
+                let (mcp_servers, mut files) = self.channel_mcp(&env, job_type.image.as_deref());
                 files.extend(
                     self.ssh_credential_files(
                         owner,
@@ -1861,30 +1861,49 @@ impl Core {
     pub(crate) fn channel_mcp(
         &self,
         env: &HashMap<String, String>,
+        image: Option<&str>,
     ) -> (Vec<McpServerConfig>, Vec<container::InjectedFile>) {
         let Some(bytes) = &self.channel_binary else {
             return (vec![], vec![]);
         };
-        let path = "/usr/local/bin/chuggernaut-channel";
-        let mcp_env: HashMap<String, String> = ["NATS_URL", "NATS_CREDS"]
-            .iter()
-            .filter_map(|k| env.get(*k).map(|v| (k.to_string(), v.clone())))
-            .collect();
-        (
-            vec![McpServerConfig {
-                name: "chuggernaut-channel".into(),
-                command: path.into(),
-                args: vec![],
-                env: mcp_env,
-            }],
+        channel_mcp_for(bytes, env, image)
+    }
+}
+
+/// The channel MCP entry a launch gets, routed by the **same selector every
+/// backend routes on** — the image's presence (design #309 §1). A container
+/// carries the binary injected; a host task execs the node's own copy, which
+/// design #490 D2 provisions node-side and this call therefore only names.
+fn channel_mcp_for(
+    bytes: &[u8],
+    env: &HashMap<String, String>,
+    image: Option<&str>,
+) -> (Vec<McpServerConfig>, Vec<container::InjectedFile>) {
+    let mcp_env: HashMap<String, String> = ["NATS_URL", "NATS_CREDS"]
+        .iter()
+        .filter_map(|k| env.get(*k).map(|v| (k.to_string(), v.clone())))
+        .collect();
+    let (path, files) = match image {
+        Some(_) => (
+            container::CHANNEL_PATH_CONTAINER,
             vec![container::InjectedFile {
-                container_path: path.into(),
-                contents: bytes.clone(),
+                container_path: container::CHANNEL_PATH_CONTAINER.into(),
+                contents: bytes.to_vec(),
                 mode: 0o755,
                 artifact: Some(types::worker::ARTIFACT_CHANNEL.into()),
             }],
-        )
-    }
+        ),
+        None => (container::CHANNEL_PATH_HOST, vec![]),
+    };
+    (
+        vec![McpServerConfig {
+            name: "chuggernaut-channel".into(),
+            command: path.into(),
+            args: vec![],
+            env: mcp_env,
+        }],
+        files,
+    )
 }
 
 /// Selects the channel tool set (§4.2), the §7.4 credential scope, and the
@@ -2185,8 +2204,38 @@ mod tests {
     //! recover-or-reset lookup over a real bare repo. The end-to-end resume
     //! (crash-after-push → retry recovers + prompt notes it) is exercised in
     //! Tier-2 (`tests/execution.rs`).
-    use super::recover_or_reset_branch;
+    use super::{channel_mcp_for, recover_or_reset_branch};
     use test_utils::repo::TempRepo;
+
+    /// Design #490 D2: the channel binary rides into a **container** and is
+    /// named, never sent, for a **host** task — routed by the image's presence,
+    /// the one selector every backend routes on, so per-task placement decides
+    /// this too (#361, #490 D4).
+    #[test]
+    fn a_host_launch_names_the_nodes_own_channel_binary_and_injects_nothing() {
+        let env = std::collections::HashMap::from([("NATS_URL".to_string(), "nats://x".into())]);
+
+        let (servers, files) = channel_mcp_for(b"ELF", &env, Some("chuggernaut/agent-rust:prod"));
+        assert_eq!(servers[0].command, container::CHANNEL_PATH_CONTAINER);
+        assert_eq!(files[0].container_path, container::CHANNEL_PATH_CONTAINER);
+        assert_eq!(files[0].contents, b"ELF");
+
+        let (servers, files) = channel_mcp_for(b"ELF", &env, None);
+        assert_eq!(
+            servers[0].command,
+            container::CHANNEL_PATH_HOST,
+            "a host task execs the node's own copy, which slice 3 installed"
+        );
+        assert!(
+            files.is_empty(),
+            "and carries no channel file: nothing can inject a binary the node's userland runs"
+        );
+        assert_eq!(
+            servers[0].env.get("NATS_URL").map(String::as_str),
+            Some("nats://x"),
+            "the credential env is the same in both modes"
+        );
+    }
 
     async fn tip(repo: &TempRepo, branch: &str) -> String {
         repo.manager

@@ -45,7 +45,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use container::host::{
-    AGENT_CONFIG_VAR, HOST_ROOT_DEFAULT, HostBackend, ScopeManager, Supervision,
+    AGENT_CONFIG_VAR, AgentCapability, HOST_ROOT_DEFAULT, HostBackend, ScopeManager, Supervision,
 };
 use container::{ContainerBackend, ContainerLaunchConfig, ContainerStatus, InjectedFile};
 use std::collections::HashMap;
@@ -65,7 +65,29 @@ fn temp_root(name: &str) -> std::path::PathBuf {
 }
 
 fn backend(root: &std::path::Path) -> HostBackend {
-    HostBackend::new("w1", root.join("tasks"), Supervision::ProcessGroup).unwrap()
+    HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        Supervision::ProcessGroup,
+        capability(root),
+    )
+    .unwrap()
+}
+
+/// A node holding both halves an agent host launch needs (design #490 D5): a
+/// discovered CLI, and a runnable channel binary of its own.
+fn capability(root: &std::path::Path) -> AgentCapability {
+    AgentCapability::new(None, runnable(root, "chuggernaut-channel-host"))
+}
+
+/// A file the node could exec, which is the question the capability asks of its
+/// channel binary rather than whether the path exists.
+fn runnable(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = root.join(name);
+    std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
 }
 
 /// One task's directory, which is what every wire path a launch names is
@@ -271,31 +293,136 @@ async fn an_image_carrying_launch_is_refused() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
-/// Design #322 §2: phase 1 serves `work.type: command` only, and the
-/// restriction is **enforced at the node** rather than documented. The refusal
-/// names the slice that replaces it (#490 slice 5), the capabilities having
-/// landed in slices 1, 3 and 4.
+/// Design #490 D5: agent shape is no longer the question — a node holding both
+/// capabilities runs the launch, and `CLAUDE_CONFIG_DIR` rebases into the task's
+/// own tree, which is where the transcript D1 resolves has to land.
+///
+/// The transcript is read **after** the task exited, because the wrapper's
+/// credential teardown runs first and sparing that leaf is what makes the
+/// harvest possible at all (D6 amendment).
 #[tokio::test]
-async fn an_agent_shaped_launch_is_refused() {
-    let root = temp_root("agent-shape");
+async fn an_agent_shaped_launch_runs_on_a_node_that_can_serve_one() {
+    let root = temp_root("agent-served");
     let backend = backend(&root);
+    let seen = root.join("config-dir.seen");
+    let config_dir = format!("{}/claude", container::WIRE_CHUGGERNAUT);
+    let session = "6f1c-session.jsonl";
 
-    let mut config = cfg("true");
+    let mut config = cfg(&format!(
+        "printf %s \"${AGENT_CONFIG_VAR}\" > {} && mkdir -p \
+         \"${AGENT_CONFIG_VAR}/projects/-workspace\" && printf 'a transcript' > \
+         \"${AGENT_CONFIG_VAR}/projects/-workspace/{session}\"",
+        seen.display()
+    ));
     config
         .env
-        .insert(AGENT_CONFIG_VAR.to_string(), "/chuggernaut/claude".into());
-    let err = backend.launch(config).await.unwrap_err();
+        .insert(AGENT_CONFIG_VAR.to_string(), config_dir.clone());
+    config.files.push(InjectedFile {
+        container_path: format!("{}/mcp-config.json", container::WIRE_CHUGGERNAUT),
+        contents: b"a nats credential".to_vec(),
+        mode: 0o600,
+        artifact: None,
+    });
+    let id = backend.launch(config).await.unwrap();
+    assert_eq!(
+        settle(&backend, &id).await,
+        0,
+        "an agent-shaped host launch is admitted since #490 slice 5"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&seen).unwrap(),
+        task_dir(&root, &id)
+            .join("chuggernaut/claude")
+            .display()
+            .to_string(),
+        "the CLI writes its transcript inside the task directory, not at a path no mac has"
+    );
+
+    let dir = format!("{config_dir}/projects");
+    let resolved = backend.find_file(&id, &dir, session).await.unwrap();
+    assert_eq!(
+        resolved,
+        vec![format!("{dir}/-workspace/{session}")],
+        "the harvest resolves the transcript in the tree the rebase put it in"
+    );
+    assert_eq!(
+        backend
+            .copy_file_chunked(&id, &resolved[0], 1 << 20)
+            .await
+            .unwrap(),
+        Some(b"a transcript".to_vec()),
+        "and reads it the way the harvest does, after the task exited — the teardown spares \
+         the CLI's own tree"
+    );
+    assert_eq!(
+        backend
+            .copy_file(
+                &id,
+                &format!("{}/mcp-config.json", container::WIRE_CHUGGERNAUT)
+            )
+            .await
+            .unwrap(),
+        None,
+        "while every injected credential beside it is gone (design #322 §2 teardown)"
+    );
+
+    backend.remove(&id).await.unwrap();
+    assert!(
+        !task_dir(&root, &id).exists(),
+        "and the spared tree is reclaimed with the task directory, one step later"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// The refusal that replaced the shape test names the capability that is
+/// missing, one arm each: the CLI the daemon discovered (design #490 D3) and the
+/// node's own channel binary (D2). A command host launch is never asked.
+#[tokio::test]
+async fn an_agent_shaped_launch_is_refused_by_missing_capability() {
+    let root = temp_root("agent-capability");
+    let agent_env = |mut config: ContainerLaunchConfig| {
+        config
+            .env
+            .insert(AGENT_CONFIG_VAR.to_string(), "/chuggernaut/claude".into());
+        config
+    };
+
+    let no_cli = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        Supervision::ProcessGroup,
+        AgentCapability::new(
+            Some("node w1 discovered no claude on the daemon's own PATH".into()),
+            runnable(&root, "chuggernaut-channel-host"),
+        ),
+    )
+    .unwrap();
+    let err = no_cli.launch(agent_env(cfg("true"))).await.unwrap_err();
     assert!(
         matches!(err, container::BackendError::Launch(_)),
-        "agent shape on a host node is a hard refusal, never retried capacity: {err}"
+        "an unservable launch is a hard refusal, never retried capacity: {err}"
     );
+    assert!(err.to_string().contains("claude"), "{err}");
+
+    let no_channel = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        Supervision::ProcessGroup,
+        AgentCapability::new(None, root.join("absent-channel")),
+    )
+    .unwrap();
+    let err = no_channel.launch(agent_env(cfg("true"))).await.unwrap_err();
     let text = err.to_string();
-    for named in [AGENT_CONFIG_VAR, "work.type: command", "#490 slice 5"] {
-        assert!(text.contains(named), "the refusal names {named}: {text}");
-    }
     assert!(
-        backend.list_managed_running().await.unwrap().is_empty(),
-        "a refused launch leaves no task behind"
+        text.contains("absent-channel") && text.contains("#490 D2"),
+        "the refusal names the file this node is missing: {text}"
+    );
+
+    let id = no_channel.launch(cfg("true")).await.unwrap();
+    assert_eq!(
+        settle(&no_channel, &id).await,
+        0,
+        "a command host launch needs neither capability"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -351,8 +478,14 @@ async fn injected_credentials_land_in_the_task_tree_and_die_with_the_command() {
         "the rebased GIT_SSH_COMMAND names the file the launch actually wrote"
     );
     assert!(
-        !dir.join("chuggernaut").exists(),
-        "the credential tree dies with the command, earlier than remove (#322 §2 teardown)"
+        !dir.join("chuggernaut/ssh").exists(),
+        "the credentials die with the command, earlier than remove (#322 §2 teardown)"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.join("chuggernaut")).unwrap().count(),
+        0,
+        "and nothing else is left behind: the tree survives empty only so an agent task's \
+         config directory can (design #490 D6 amendment), and this launch made none"
     );
     assert!(
         dir.join("output.log").exists(),
@@ -972,7 +1105,8 @@ async fn a_host_task_runs_in_its_own_supervision_unit() {
         return;
     };
     let root = temp_root("scope");
-    let backend = HostBackend::new("w1", root.join("tasks"), supervision).unwrap();
+    let backend =
+        HostBackend::new("w1", root.join("tasks"), supervision, capability(&root)).unwrap();
 
     let gate = root.join("release-scope");
     let id = backend
@@ -1028,7 +1162,8 @@ async fn a_scoped_task_is_handed_the_dollars_its_command_was_written_with() {
         return;
     };
     let root = temp_root("verbatim");
-    let backend = HostBackend::new("w1", root.join("tasks"), supervision).unwrap();
+    let backend =
+        HostBackend::new("w1", root.join("tasks"), supervision, capability(&root)).unwrap();
 
     let seen = root.join("shell.pid");
     let id = backend
@@ -1104,7 +1239,8 @@ async fn a_setsid_escapee_is_staged_under_a_scope_as_well() {
         return;
     };
     let root = temp_root("staging-scope");
-    let backend = HostBackend::new("w1", root.join("tasks"), supervision).unwrap();
+    let backend =
+        HostBackend::new("w1", root.join("tasks"), supervision, capability(&root)).unwrap();
     let pidfile = root.join("escapee.pid");
 
     let id = backend
@@ -1216,7 +1352,8 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
         return;
     };
     let root = temp_root("escapee");
-    let backend = HostBackend::new("w1", root.join("tasks"), supervision).unwrap();
+    let backend =
+        HostBackend::new("w1", root.join("tasks"), supervision, capability(&root)).unwrap();
 
     let pidfile = root.join("escapee.pid");
     let id = backend

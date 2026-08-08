@@ -529,7 +529,6 @@ impl JobType {
         match self.work.r#type {
             WorkType::Agent => {
                 errs.extend(self.validate_top_level_image(ctx(WorkType::Agent)));
-                errs.extend(self.validate_host_serves_commands_only());
                 if self.work.prompt.is_none() {
                     errs.push(FieldRuleError::Required {
                         field: "work.prompt",
@@ -583,7 +582,6 @@ impl JobType {
                 }
             }
             WorkType::Human => {
-                errs.extend(self.validate_host_serves_commands_only());
                 if self.work.prompt.is_none() {
                     errs.push(FieldRuleError::Required {
                         field: "work.prompt",
@@ -863,26 +861,6 @@ impl JobType {
             }),
             _ => None,
         }
-    }
-
-    /// Design #322 §2's phase-1 restriction as a field rule (N2): a host job
-    /// type is command work until #490 slice 5 lifts the rule, the capabilities
-    /// it waited on having landed in slices 1, 3 and 4.
-    ///
-    /// It fails the author's own CI rather than a task at runtime; the node
-    /// refuses an agent-shaped host launch as well (`container::host`), which
-    /// covers a job type that reaches a host node by a `placement.node` pin.
-    fn validate_host_serves_commands_only(&self) -> Option<FieldRuleError> {
-        (self.resolved_mode() == RuntimeMode::Host).then(|| FieldRuleError::Invalid {
-            field: "work.type",
-            context: format!("job type '{}' (runtime.mode: host)", self.name),
-            reason: "runtime.mode: host serves work.type: command only until #490 slice 5 \
-                     replaces the node's shape-based refusal with a launch-time capability test \
-                     (design #322 §2); neither the transcript nor the node's capabilities is the \
-                     obstacle now — #490 slice 1 resolves the transcript by session id, slice 3 \
-                     installs the host channel binary and slice 4 discovers the agent CLI"
-                .into(),
-        })
     }
 
     /// The `runtime:` block's field rules (spec §1.1, design #309 §3, #373
@@ -2238,40 +2216,50 @@ min_dispatcher: 5
         );
     }
 
-    /// Design #322 N2: a host job type is command work, and the rule fails the
-    /// author's own CI rather than a task at runtime. Container mode is
-    /// untouched — every existing agent job type validates exactly as before.
+    /// Design #490 slice 5 lifts #322 N2: a host job type may declare agent
+    /// work, since the node now refuses by capability rather than by shape. The
+    /// rules that rule sat beside are untouched — `image` and `runtime.env`
+    /// under `mode: host` still fire.
     #[test]
-    fn host_mode_serves_command_work_only() {
-        let host_agent =
-            jt_with_image_and_runtime("", "  mode: host\n  env: \"nix:.#chug-mobile\"\n");
-        let invalid = host_agent
-            .validate()
-            .into_iter()
-            .find(|e| {
-                matches!(
-                    e,
-                    FieldRuleError::Invalid {
-                        field: "work.type",
-                        ..
-                    }
-                )
-            })
-            .expect("an agent host job type is refused at validate");
-        assert!(
-            invalid.to_string().contains("work.type: command"),
-            "the rule says what to declare instead: {invalid}"
+    fn host_mode_serves_agent_work_too() {
+        assert_eq!(
+            jt_with_image_and_runtime("", "  mode: host\n  env: \"nix:.#chug-mobile\"\n")
+                .validate(),
+            vec![],
+            "an agent host job type validates since #490 slice 5"
         );
-
         assert_eq!(
             jt_host("  env: \"nix:.#chug-mobile\"\n").validate(),
             vec![],
-            "command work under host mode is the shape phase 1 serves"
+            "command work under host mode is unchanged"
         );
         assert_eq!(
             jt_with_runtime("  mode: container\n  env: \"nix:.#chug-mobile\"\n").validate(),
             vec![],
-            "an agent job type in container mode is untouched by the rule"
+            "an agent job type in container mode is untouched"
+        );
+
+        assert!(
+            jt_with_runtime("  mode: host\n  env: \"nix:.#chug-mobile\"\n")
+                .validate()
+                .contains(&FieldRuleError::Disallowed {
+                    field: "image",
+                    context: "work.type: agent".into(),
+                }),
+            "a host task still has no image"
+        );
+        assert!(
+            jt_with_image_and_runtime("", "  mode: host\n")
+                .validate()
+                .iter()
+                .any(|e| matches!(
+                    e,
+                    FieldRuleError::Required {
+                        field: "runtime.env",
+                        ..
+                    }
+                )),
+            "an agent host job type still declares the environment it runs against"
         );
     }
 
@@ -2287,6 +2275,28 @@ min_dispatcher: 5
                 }
             )),
             "a host task with no declared environment runs against the node's bare PATH: {errs:?}"
+        );
+    }
+
+    /// Placement is per **task**, not per job (design #361, #490 D4): a host
+    /// **agent** job type whose `ci` evaluator declares an image is host work
+    /// and container CI, exactly as the command-work case below is.
+    #[test]
+    fn an_evaluator_resolves_its_own_mode_under_a_host_agent_job_type() {
+        let yaml = format!(
+            "name: mobile\nmin_dispatcher: {}\nwork:\n  type: agent\n  prompt: p.md\n\
+             runtime:\n  mode: host\n  env: \"nix:.#chug-mobile\"\n\
+             eval:\n  - name: ci\n    type: command\n    run: ./.chug/tasks/ci.sh\n    \
+             image: chuggernaut/agent-rust:prod\n",
+            crate::version::RUNTIME_SCHEMA_EPOCH
+        );
+        let jt = JobType::parse(&yaml).unwrap();
+        assert_eq!(jt.validate(), vec![]);
+        assert_eq!(jt.image, None, "the work task carries no image: it is host");
+        assert_eq!(
+            jt.eval[0].image.as_deref(),
+            Some("chuggernaut/agent-rust:prod"),
+            "and the evaluator carries its own, which resolves it to container mode"
         );
     }
 
