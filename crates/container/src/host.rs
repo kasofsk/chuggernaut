@@ -814,18 +814,39 @@ fn contained(dir: &Path, path: &Path) -> bool {
     })
 }
 
-/// The earliest **mention** of a wire prefix in a value, as `(prefix, local,
-/// offset)`. Whether the mention is a wire path or a lookalike that continues
-/// into another segment is [`substitute_wire_paths`]'s question.
-fn first_wire_prefix(value: &str) -> Option<(&'static str, &'static str, usize)> {
+/// Where a wire prefix may begin: the start of the value, or one of the
+/// delimiters that ends the previous token in the command lines and paths these
+/// values carry — ASCII whitespace, `=`, `:`, or either quote. Every other
+/// character, letters and `-` and `.` included, continues a path segment, so the
+/// prefix is that segment's tail rather than a path of its own.
+fn begins_a_path(value: &str, at: usize) -> bool {
+    value[..at]
+        .chars()
+        .next_back()
+        .is_none_or(|c| c.is_ascii_whitespace() || matches!(c, '=' | ':' | '"' | '\''))
+}
+
+/// The earliest **mention** of a wire prefix at or after `from`, as `(prefix,
+/// local, offset)`, where a mention is an occurrence that [`begins_a_path`] —
+/// `/kasofsk/chuggernaut.git` holds none. Whether a mention is a wire path or a
+/// lookalike that continues into another segment is [`substitute_wire_paths`]'s
+/// question.
+fn first_wire_prefix(value: &str, from: usize) -> Option<(&'static str, &'static str, usize)> {
     WIRE_PREFIXES
         .iter()
-        .filter_map(|(prefix, local)| value.find(prefix).map(|at| (*prefix, *local, at)))
+        .filter_map(|(prefix, local)| {
+            value[from..]
+                .match_indices(prefix)
+                .map(|(at, _)| from + at)
+                .find(|at| begins_a_path(value, *at))
+                .map(|at| (*prefix, *local, at))
+        })
         .min_by_key(|(_, _, at)| *at)
 }
 
 /// The launch env with every wire path in a **value** rebased — design #322
-/// §2's fourth surface. A prefix in any other variable is refused: that
+/// §2's fourth surface. A [`first_wire_prefix`] mention in any other variable
+/// is refused: that
 /// assertion is what catches a third consumer interpolating a wire path into a
 /// value instead of letting the credential silently point at nothing.
 fn rebase_env(
@@ -859,30 +880,32 @@ fn rebase_env(
 }
 
 /// Every wire path in one value replaced by the directory it maps to, in a
-/// single left-to-right pass so a task directory whose own name holds a prefix
-/// is never rescanned; `None` when the value mentions neither prefix.
+/// single left-to-right pass over the original value — so what precedes an
+/// occurrence stays readable to [`begins_a_path`] and a task directory whose own
+/// name holds a prefix is never rescanned; `None` when the value mentions
+/// neither prefix.
 ///
 /// A mention that continues into another segment (`/workspaces`) is a
 /// lookalike, and is refused on the same boundary [`rebase_path`] requires
 /// rather than rewritten into a path the node does not have.
 fn substitute_wire_paths(dir: &Path, value: &str) -> Result<Option<String>, String> {
     let mut out = String::with_capacity(value.len());
-    let mut rest = value;
+    let mut start = 0;
     let mut found = false;
-    while let Some((prefix, local, at)) = first_wire_prefix(rest) {
-        let tail = &rest[at + prefix.len()..];
-        if !matches!(tail.chars().next(), None | Some('/')) {
+    while let Some((prefix, local, at)) = first_wire_prefix(value, start) {
+        let tail_at = at + prefix.len();
+        if !matches!(value[tail_at..].chars().next(), None | Some('/')) {
             return Err(format!(
                 "{value:?} continues {prefix:?} into another path segment — {}",
-                unmapped(&rest[at..])
+                unmapped(&value[at..])
             ));
         }
         found = true;
-        out.push_str(&rest[..at]);
+        out.push_str(&value[start..at]);
         out.push_str(&dir.join(local).to_string_lossy());
-        rest = tail;
+        start = tail_at;
     }
-    out.push_str(rest);
+    out.push_str(&value[start..]);
     Ok(found.then_some(out))
 }
 
@@ -1988,6 +2011,86 @@ mod tests {
                 dir.join(CHUGGERNAUT_DIR).display()
             ))
         );
+    }
+
+    /// A prefix inside a longer path segment is no mention of a wire path (job
+    /// #505): every job carries a `REPO_URL` whose repository name ends
+    /// `/chuggernaut.git`, and reading that as one refused every host launch in
+    /// this repository at the first end-to-end attempt.
+    #[test]
+    fn a_prefix_inside_a_longer_segment_is_not_a_wire_path() {
+        let dir = Path::new("/var/lib/chuggernaut/host-tasks/host-5-0");
+        let repo_url = "ssh://git@100.116.243.42:2222/kasofsk/chuggernaut.git";
+        for untouched in [
+            repo_url,
+            "https://github.com/kasofsk/workspace.git",
+            "https://github.com/kasofsk/my-workspace.git",
+            "job/chuggernaut-505",
+        ] {
+            assert_eq!(
+                substitute_wire_paths(dir, untouched).unwrap(),
+                None,
+                "a prefix continuing a longer segment is neither rebased nor refused: {untouched}"
+            );
+        }
+
+        let env = HashMap::from([("REPO_URL".to_string(), repo_url.to_string())]);
+        assert_eq!(
+            rebase_env(dir, &env).unwrap(),
+            env,
+            "the launch admits a repository whose name holds a prefix"
+        );
+
+        assert_eq!(
+            substitute_wire_paths(dir, &format!("git clone {repo_url} /workspace")).unwrap(),
+            Some(format!(
+                "git clone {repo_url} {}",
+                dir.join(WORKSPACE_DIR).display()
+            )),
+            "a real mention after a skipped one is still found"
+        );
+        assert_eq!(
+            substitute_wire_paths(dir, "/workspace/chuggernaut-cache").unwrap(),
+            Some(format!(
+                "{}/chuggernaut-cache",
+                dir.join(WORKSPACE_DIR).display()
+            )),
+            "what follows a rebased path is that path's own segment, not a second mention"
+        );
+    }
+
+    /// Each variable that carries a wire path inline is rebased on the boundary
+    /// job #505 tightened, so narrowing what counts as a mention did not narrow
+    /// this allowlist's three members away.
+    #[test]
+    fn every_wire_path_value_var_still_rebases() {
+        let dir = Path::new("/var/lib/chuggernaut/host-tasks/host-6-0");
+        for (name, value, expected) in [
+            (
+                "GIT_SSH_COMMAND",
+                format!("ssh -i {}/ssh/id", crate::WIRE_CHUGGERNAUT),
+                format!("ssh -i {}/ssh/id", dir.join(CHUGGERNAUT_DIR).display()),
+            ),
+            (
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                format!("{}/cloud/gcp-deployer/adc.json", crate::WIRE_CHUGGERNAUT),
+                dir.join(CHUGGERNAUT_DIR)
+                    .join("cloud/gcp-deployer/adc.json")
+                    .display()
+                    .to_string(),
+            ),
+            (
+                AGENT_CONFIG_VAR,
+                format!("{}/{AGENT_STATE_DIR}", crate::WIRE_CHUGGERNAUT),
+                dir.join(CHUGGERNAUT_DIR)
+                    .join(AGENT_STATE_DIR)
+                    .display()
+                    .to_string(),
+            ),
+        ] {
+            let env = HashMap::from([(name.to_string(), value)]);
+            assert_eq!(rebase_env(dir, &env).unwrap()[name], expected, "{name}");
+        }
     }
 
     fn daemon_env() -> HashMap<String, String> {

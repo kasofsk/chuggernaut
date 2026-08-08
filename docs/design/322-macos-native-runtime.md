@@ -142,7 +142,7 @@ argument and its dependency.
 | Phase | What | State |
 | --- | --- | --- |
 | **W1** | Backend polymorphism: the provided `managed_running_total`, `Arc<dyn ContainerBackend>`, `WORKER_MODES` parsing | **Landed** (job #434), as #309 P0's slice 1 rather than as macOS work |
-| **W2** | The host backend **including the rebase**, on one Mac at `slots: 1` | **Landed** (job #434) for the backend, the task dir under `WORKER_HOST_ROOT` and the exit-status wrapper, and **Landed** (job #485) for the rest: the `CHUG_WORKSPACE` indirection, the total `/workspace` + `/chuggernaut` mapping over all four surfaces, the credential-tree teardown, the agent-shaped-launch refusal, and `WORKER_HOST_ROOT` forwarded per node with a boot-time refusal. That refusal is **gone** since [#490](490-agent-work-on-a-mac.md) slice 5 — the launch is admitted and a node lacking the agent CLI or its own channel binary refuses by naming the missing half — and the teardown now spares the CLI's config directory so the harvest can read the transcript out of it (#490 D6 amendment). Still **Linux-proven only** — nothing here has run on a Mac |
+| **W2** | The host backend **including the rebase**, on one Mac at `slots: 1` | **Landed** (job #434) for the backend, the task dir under `WORKER_HOST_ROOT` and the exit-status wrapper, and **Landed** (job #485) for the rest: the `CHUG_WORKSPACE` indirection, the total `/workspace` + `/chuggernaut` mapping over all four surfaces, the credential-tree teardown, the agent-shaped-launch refusal, and `WORKER_HOST_ROOT` forwarded per node with a boot-time refusal. That refusal is **gone** since [#490](490-agent-work-on-a-mac.md) slice 5 — the launch is admitted and a node lacking the agent CLI or its own channel binary refuses by naming the missing half — and the teardown now spares the CLI's config directory so the harvest can read the transcript out of it (#490 D6 amendment). The env-value surface refused every launch carrying this repository's `REPO_URL` until job #505 gave the prefix match a left-hand boundary — see [the 2026-08-08 correction](#correction--2026-08-08-job-505-the-env-value-assertion-had-no-left-hand-boundary). Still **Linux-proven only** — nothing here has run on a Mac |
 | **W3** | macOS hardening: symlink containment, `simctl`-scoped teardown, the retention sweep | Proposed — nothing macOS-specific is in the tree. The rebase refuses a `..` component lexically (job #485), so containment after **symlink** resolution is the piece left, in `rebase_path` (`crates/container/src/host.rs`) |
 | **N1** | `docs/spec.md`: the host column, the host node kind, `/workspace` as a logical path | **Partly landed** (job #485) — §4.1 says `/workspace` and `/chuggernaut` are virtual wire paths, §1.1's host row carries the field rules and, since [#490](490-agent-work-on-a-mac.md) slice 5, an unrestricted `work.type`, §3.1's mode-routing paragraph no longer claims the one-task rule is a `/workspace` collision, and `docs/reference/crates.md`'s container row follows. Open: §3.1's host **node kind** and its stale trait listing, and the Appendix's "macOS bare metal dispatchers" still reading as undesigned rather than pointing here |
 | **N2** | The `runtime: { mode, env }` schema, its field rules, the epoch bump and both validate rules | **Landed** — (job #401) for #373's container-mode need, (job #478) for the host row's own field rules as #309 P1, and (job #485) for N2's own `mode: host` requires `work.type: command` rule, which rode beside the node-side refusal W2 landed in the same job. Both are **deleted** since [#490](490-agent-work-on-a-mac.md) slice 5; the `image` and `runtime.env` rules under `mode: host` are what remain |
@@ -1219,3 +1219,38 @@ Per docs/reference/style.md's contract-first rule, each slice names the contract
   evaluator (§[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)).
   A Mac-only fleet is not a supported shape, and nothing currently says so out
   loud.
+
+## Correction — 2026-08-08, job #505 (the env-value assertion had no left-hand boundary)
+
+Appended by the job that fixed the defect the **first** end-to-end host launch
+ever attempted on this platform hit, in its first second. Nothing above is
+edited; §[2](#2-workspace-as-a-virtual-wire-path)'s argument is right and its
+implementation was not.
+
+§2 says the two prefixes "are asserted at rebase time to appear nowhere in a
+task's env except as a path". The tree asserted something wider: an occurrence
+**anywhere** in a value was a mention, and only the right-hand side was checked
+for a segment boundary. `REPO_URL` — injected into every job by the dispatcher,
+and a URL rather than a path — is
+`ssh://git@…/kasofsk/chuggernaut.git` in this repository, whose
+`/chuggernaut.git` matched, failed the right-hand check, and refused the launch
+with a message about a path segment nobody had written. Job #504, the mac-proof
+run [#490](490-agent-work-on-a-mac.md) slice 6 exists to perform, never started.
+
+The rule the assertion needed all along is that a prefix mentions a path only
+where a path can **begin**: at the start of the value, or after one of the
+delimiters that ends the previous token in the values the allowlist actually
+carries — ASCII whitespace, `=`, `:`, or a quote. Everything else, letters and
+`-` and `.` included, continues a segment, so a repository named `chuggernaut`
+— or one named `workspace`, whose URL does contain the prefix `/workspace` and
+which only the left-hand boundary rejects — is not a wire path in any sense and
+is passed through untouched. The right-hand boundary is unchanged and still refuses a genuine
+lookalike (`/workspaces`, `/chuggernaut-old`), which is the case that must not
+be weakened to make the proof pass.
+
+The trade this exposes is worth stating: an occurrence the boundary rule
+rejects is silent, where one it accepts in a variable outside the allowlist is
+loud. The accept set is therefore widened only for a delimiter some real value
+uses, never for a character a file name may contain — the note under
+`crates/container/src/host.rs` in [docs/implementation-notes.md](../implementation-notes.md)
+is where that reasoning is kept in step with the code.
