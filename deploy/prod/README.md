@@ -1089,9 +1089,11 @@ Notes:
   swap copying it forward (#440 D6/D7). Declaring `host` now **routes** work: since
   #309 P2 (jobs #483, #484) a node's modes ride its ping and announce, and the
   dispatcher places a host launch — one carrying no image — only onto a node
-  advertising `host`, with no pin needed. What still gates real host work is
-  that no node in this fleet names it and no job type declares
-  `runtime.mode: host`; both are operator steps, not code. It **is** additive
+  advertising `host`, with no pin needed. `.chug/jobs/mac-proof.yaml` (design
+  [#490](../../docs/design/490-agent-work-on-a-mac.md) slice 6) is the one job
+  type declaring `runtime.mode: host`, and `gumbo-air-0` has advertised `host`
+  since 2026-08-08, so what still gates real host work is an operator releasing
+  that job — an operator step, not code. It **is** additive
   since #309 P1 (job #479): a node naming both constructs both backends and
   routes each launch by whether it carries an image, and one naming only `host`
   needs no Docker and refuses any launch that carries one. What every node naming

@@ -104,8 +104,11 @@ What is still missing on the macOS side: W3's
 symlink containment (the rebase refuses a `..` component but resolves no
 symlink), the `simctl`-scoped teardown, the retention sweep,
 N3's runbook and N1's remaining spec edits (§3.1's host node kind and
-its trait listing, the Appendix entry). **No node in the fleet runs macOS host tasks and no
-job type declares `mode: host`** — both are operator steps. W1 is exactly what
+its trait listing, the Appendix entry). **No macOS host task has run yet**, and
+`.chug/jobs/mac-proof.yaml` — the machinery
+[#490](490-agent-work-on-a-mac.md) slice 6 needs, which that document's job #502
+correction records — is the one job type declaring `mode: host`; releasing it is
+an operator step. W1 is exactly what
 [#309](309-host-native-execution.md) P0's first slice landed (job #434), N2's
 schema is what job #401 landed for [#373](373-project-toolchains.md), and W5 is
 what [#440](440-native-worker-daemon.md) slice 3 landed (job #460) — so this

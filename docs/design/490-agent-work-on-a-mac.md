@@ -1066,3 +1066,133 @@ transcript readable, `reclaim_credentials` sparing the same leaf), and end to
 end in `crates/container/tests/host_backend.rs`, where an admitted agent-shaped
 launch writes a transcript through `$CLAUDE_CONFIG_DIR` and the test resolves it
 with `find_file` and reads it with `copy_file` **after** the task has exited.
+
+## Correction — 2026-08-08, job #502 (slice 6 needed machinery, and the appended `ci` refuses an `xcode:` job type)
+
+Appended by the job that built slice 6's **machinery**. Nothing above is edited,
+including the head and slice 6's own row: the machinery is not the confirmation,
+so the row stays `Proposed` and the head stays as it is until the proof has
+actually run on the air. A later `docs` job flips both and links this section
+from the head.
+
+### Slice 6's stated contract — "none — this is the confirmation" — was wrong
+
+Every other slice's row names a contract; slice 6's names none, on the reasoning
+that a confirmation builds nothing. That reasoning skipped a step. A job type is
+repo-versioned config that must **merge** before a job of that type can be
+created (`docs/spec.md` §1.1), and `.chug/jobs/` declared **zero** job types with
+`mode: host`. So slice 5 left the tree in a state where the node would admit an
+agent host launch and nothing in the repo could ask for one. Slice 6 had a config
+half, and it was invisible because the row said there was nothing to build.
+
+What this job landed, and it is only the machinery:
+
+- `.chug/jobs/mac-proof.yaml` — `runtime: {mode: host, env: "xcode:26.5"}`, no
+  top-level `image:` (disallowed under host mode, where `runtime.env` is
+  required — `crates/types/src/job_type.rs`), `work: {type: agent}` because the
+  agent host path and its transcript are slice 6's subject and a command would
+  prove neither, `wrap_up: {type: none}` because the branch carries no commits,
+  and `placement: {node: air}` for the reason `.chug/jobs/android-proof.yaml`
+  pins `nuc` — the air is the only node whose Xcode and simulators are the thing
+  under test, and an unpinned release would satisfy `host` on some future second
+  Mac and prove nothing about this one. `min_dispatcher` is the runtime block's
+  epoch, which is a field rule and **not** a statement that host mode is served:
+  the real prerequisite is a deploy carrying slice 5.
+- `.chug/prompts/work/mac-proof.md` — the agent's instructions.
+
+It is deliberately **not** in `.chug/jobs/_defaults.yaml` and no other job type
+gains `mode: host`. Releasing it stays an operator act, because it is an
+authenticated agent running on a Mac's login user with no container boundary.
+
+### The appended `ci` evaluator cannot pass under an `xcode:` job type
+
+Found while checking the worked case rather than assuming it, and it is a
+platform gap no config can close.
+
+[D4](#d4--one-host-task-per-node-stays) states the case as settled: a host job
+type's work task goes to the Mac while the `ci` evaluator
+`.chug/jobs/_defaults.yaml` appends carries an explicit image and resolves to
+container mode — host work, container CI, one job. Mode resolution does work that
+way, and `crates/types/src/job_type.rs` asserts it. **What no test asserts is
+which `runtime.env` each level's launch is handed**, and the answer is: the job
+type's, unconditionally.
+
+1. A command evaluator's launch reads `job_type.runtime_env()` beside the
+   evaluator's own image (`crates/dispatcher/src/launch_queue.rs`); an agent
+   evaluator's does the same (`crates/dispatcher/src/eval.rs`). Neither consults
+   the mode that level resolved to.
+2. The worker daemon's launch handler resolves the declared environment for every
+   launch through one path, container and host alike
+   (`crates/worker/src/daemon.rs`). Its `xcode:` arm refuses only when the
+   **node** serves no host mode — the air does — so it resolves the version
+   against the node's installed Xcodes and injects a macOS `DEVELOPER_DIR` and
+   `CHUG_ENV_PATH` into the container's environment.
+3. The §4.1 bootstrap prelude then refuses, because `CHUG_ENV_PATH` names a
+   directory no Linux container can see (`crates/container/src/lib.rs`): *"this
+   node realised it somewhere this container cannot see"*, exit 1, before
+   `.chug/tasks/ci.sh` runs a line.
+4. And the evaluator is not overridable. A job type declaring its own `ci` does
+   not replace the project default, it **collides** with it and fails
+   `JobType::with_defaults` (`crates/types/src/job_type.rs`), so there is no
+   config-level way to drop it, rename it or give it a different environment.
+
+**This is right for `nix:` and wrong for `xcode:`, which is why it survived.**
+Both existing tests of the worked case declare `nix:.#chug-mobile`, and a nix
+environment genuinely is realised node-side and mounted into a container
+([#373](373-project-toolchains.md) P2) — a container CI evaluator under a host
+job type gets a usable toolchain. An Xcode is the one environment that cannot
+cross that boundary, which is [#322](322-macos-native-runtime.md)'s whole
+premise. So the gap is exactly as wide as the case this design is for, and it
+reaches every `mode: host` + `xcode:` job type in this repo, not just this one.
+
+**What it costs slice 6, precisely.** Less than it looks. A work agent task's
+transcript and output archive are harvested in the same spawned task that ran it,
+before the job reaches evaluation at all (`crates/dispatcher/src/exec.rs`,
+`crates/platform-ops/src/harvest.rs`) — so slice 6's actual subject, an agent host
+task run end to end with its transcript resolved and harvested, is observable
+from a released `mac-proof` job today. What the job does **not** do is finish: the
+red `ci` evaluator escalates it instead of taking it to Done, and with
+`rework_budget` at its default of 0 it escalates once rather than looping. A proof
+that merges nothing loses little by escalating; a proof whose report is
+indistinguishable from a platform failure loses a lot, which is why this is
+recorded here rather than absorbed.
+
+**The fix is a `code` slice and it is not this one.** Scope a launch's
+`runtime_env` to the mode that launch resolves to: a level carrying its own
+`image` has opted back into container mode — `validate_top_level_image`'s own doc
+comment says exactly that — and should not inherit a host-only environment
+reference. The narrower alternative, having the daemon's `xcode:` arm refuse a
+**container** launch as well as a host-modeless node, is worth doing on its own
+merits (`crates/worker/src/xcode.rs`'s contract is that no launch falls through to
+an unusable toolchain, and this one falls through to an unreachable one), but it
+is not sufficient: it converts a confusing bootstrap refusal into a named launch
+refusal and leaves the evaluator just as red. Only the first makes a host job type
+green.
+
+### What the prompt measures, and what it refuses to settle
+
+M5 and M7 are the two rows the M table left open, and slice 6's row promises both
+are "settled here". One of them cannot be, and the prompt says so rather than
+producing a number that reads like an answer.
+
+**M5** is measurable in one run and this is the run that can do it: job #492's
+zero-residual result was taken under `env -i` with an isolated home and an
+**unauthenticated** CLI, not under the daemon. The prompt asks for a list rather
+than a verdict — a `find -newer` sweep of the daemon user's home against a
+reference file the platform wrote at launch (so it predates the CLI process, which
+the agent's own "before" snapshot cannot), named probes of the directories an
+agent harness actually writes to, and the login keychain's mtime either side. It
+also requires the attribution limit be stated: the daemon and an operator's login
+session run beside the task, so a `-newer` hit proves a file changed during the
+window and not that this task changed it. `security find-generic-password` is
+restricted to attribute-only form, because `-w`/`-g` return the secret and can
+raise a GUI prompt on a headless node.
+
+**M7 cannot be answered by one host task**, and the row that says it is settled
+here is the second thing this correction corrects. The question is whether state
+one task leaves disturbs the *next*, which needs two. What one run can produce is
+the baseline the second gets diffed against, so the prompt captures
+`simctl list devices`/`list runtimes` as JSON before and after, forbids `erase`,
+`delete` and `shutdown all`, and writes the raw captures to the task's output
+archive rather than only into prose. A task that tidied up after itself would
+have measured nothing.

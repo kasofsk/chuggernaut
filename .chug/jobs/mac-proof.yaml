@@ -1,0 +1,103 @@
+# The Mac proof — design #490 slice 6's machinery, on demand. Releasing it runs
+# ONE agent host task on the air: the first agent work this platform has ever run
+# outside a container, against the node's own Xcode and iOS simulators. The agent
+# proves the path with `xcrun simctl`, then measures what it leaves behind —
+# #490's M5 (the authenticated CLI's residual outside CLAUDE_CONFIG_DIR) and M7
+# (simulator state one task leaves for the next). See .chug/prompts/work/mac-proof.md.
+#
+# It is deliberately NOT in .chug/jobs/_defaults.yaml and not wired into any
+# gate — android-proof.yaml's shape, gcp-proof.yaml's and coverage.yaml's before
+# it. Releasing it is an operator act on purpose: this is an authenticated agent
+# running directly on a Mac's login user with no container boundary, and the
+# question it answers is one you ask after touching the node, not on every push.
+#
+# THE PREREQUISITE IS A DEPLOY, NOT A MERGE. min_dispatcher below is the runtime
+# block's epoch and says nothing about host mode being *served*; what this job
+# type actually needs is a dispatcher and a worker carrying #490 slice 5 (job
+# #497), which is what permits an agent-shaped host launch at all.
+#
+# THE APPENDED `ci` EVALUATOR CANNOT PASS UNDER THIS JOB TYPE, and that is a
+# platform gap this config cannot close. Every level's launch is handed the job
+# type's runtime.env regardless of the mode that level resolves to
+# (crates/dispatcher/src/launch_queue.rs, crates/dispatcher/src/eval.rs), so the
+# ci evaluator — a container launch, because .chug/jobs/_defaults.yaml gives it
+# an explicit image — arrives at the node declaring `xcode:26.5`. The daemon
+# resolves it against the node's installed Xcode and injects a macOS
+# DEVELOPER_DIR/CHUG_ENV_PATH (crates/worker/src/daemon.rs), and the §4.1
+# bootstrap prelude then refuses because no Linux container can see that
+# directory (crates/container/src/lib.rs). The evaluator is NOT overridable: a
+# job type declaring its own `ci` collides with the project default and fails
+# JobType::with_defaults. So a released mac-proof job runs its work task, gets
+# its stdout and transcript harvested, and then ESCALATES on a red ci rather
+# than reaching Done. The work task's report is the deliverable and survives
+# that; docs/design/490-agent-work-on-a-mac.md's job #502 correction records the
+# mechanism and names the code slice that fixes it.
+#
+# The deliverable is the task's STDOUT plus its output archive: the dispatcher
+# harvests an agent work task's logs into its `stdout.log` artifact and
+# /workspace/chug-output.tar.gz into its `output.tar.gz` one (spec §3.2,
+# crates/platform-ops/src/harvest.rs), and a worker keeps only the final 700 KiB
+# of stdout, so the prompt prints its summary last on the failing path as much
+# as the passing one. The archive is what a SECOND run diffs against: M7 needs
+# two host tasks and one run cannot answer it.
+name: mac-proof
+display_name: Mac proof
+description: Run the first agent host task on the air against Xcode 26.5, and measure what it leaves behind. A report, not a change; nothing is merged.
+# Epoch 4 is required by the `runtime:` block below — a non-container mode
+# drops silently on a dispatcher that does not parse the block (spec §14.3), so
+# the field rule demands the declaration that parks the job instead.
+min_dispatcher: 4
+runtime:
+  # No top-level `image:` anywhere in this file: it is DISALLOWED under
+  # mode: host (spec §1.1 field-rules table) because a host task has no root
+  # filesystem to name. `env` is REQUIRED for the mirror-image reason — without
+  # it a host task runs against whatever the node's bare PATH happens to be.
+  mode: host
+  # Matched EXACTLY against what the node discovered, never as a prefix:
+  # `xcode:26` does not select 26.5 (crates/worker/src/xcode.rs). The air
+  # advertises `xcode:26.5` and nothing else, and a version it cannot serve is
+  # refused by name at launch rather than built against xcode-select's target.
+  env: "xcode:26.5"
+work:
+  # An AGENT, not a command — the one thing that makes this different from
+  # android-proof and gcp-proof, and the whole subject of slice 6: the agent
+  # host path, its Mach-O MCP channel and its transcript. A script would prove
+  # the Mac and none of that. Permitted since #490 slice 5 deleted
+  # `validate_host_serves_commands_only` (job #497).
+  type: agent
+  prompt: .chug/prompts/work/mac-proof.md
+  # No inline `review:`: there is nothing to author, so there is nothing for a
+  # reviewer to iterate on, and a second CLI session inside the task would
+  # contaminate the M5 residual this task exists to measure.
+wrap_up:
+  # A proof produces a report, not a change: the branch carries no commits, so
+  # eval-pass goes straight to Done with the branch discarded (spec §3.3 step
+  # 12). android-proof.yaml's shape, coverage.yaml's before it.
+  type: none
+# Pinned by NODE NAME because the air is the only host-capable node, exactly as
+# android-proof.yaml pins `nuc` for the only node with /dev/kvm. Placement by
+# capability already exists — #309 P2 slice 6 excludes a launch from every node
+# not advertising its mode — so the pin is not what routes the host work; it is
+# what keeps the proof on the node whose Xcode and simulators are the subject.
+# An unpinned release could satisfy `host` on some future second Mac and prove
+# nothing about this one.
+placement:
+  node: air
+resources:
+  # NEITHER cpu NOR memory, deliberately. A host task is not cgroup-bounded
+  # (#490 D7, #309 §7) and HostBackend::admit logs a per-launch warning naming
+  # whichever of the two a host launch declares — declaring one here would buy
+  # that warning on every run in exchange for a bound the node will not apply.
+  #
+  # 45m, and short on purpose rather than generous. D4 gives a host-capable node
+  # ONE task slot node-wide, and #440 slice 3 has a running host task decline the
+  # daemon's own swap, so an over-generous timeout on a proof costs the node its
+  # container capacity and its updates for the duration. Every wait in the prompt
+  # is bounded well inside this, so a hung simulator boot fails its rung by name
+  # instead of being killed here.
+  task_timeout: 45m
+# rework_budget is omitted — for agent work it is legal and defaults to 0, which
+# is what a proof wants: a failed proof is a FINDING, and reworking it would
+# spend another authenticated agent session on the node's only host slot to learn
+# the same thing. It is also what keeps the ci gap above from looping. work_retries
+# and eval_retries stay at their defaults for the same reason.

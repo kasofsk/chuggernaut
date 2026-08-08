@@ -60,3 +60,8 @@ Doc-reread: docs/reference/runbooks/chug-node-adoption.md
 Doc-reread: CLAUDE.md
 Doc-reread: docs/reference/style.md
 Doc-reread: docs/reference/testing.md
+
+Doc-reread: docs/design/490-agent-work-on-a-mac.md
+Doc-reread: docs/design/322-macos-native-runtime.md
+Doc-reread: docs/spec.md
+Doc-reread: deploy/prod/README.md
