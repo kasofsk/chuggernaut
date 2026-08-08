@@ -65,6 +65,7 @@ from being the one everyone forgets (design
 | [`docs/design/373-project-toolchains.md`](design/373-project-toolchains.md) | Project-supplied toolchains: nix environments in container mode |
 | [`docs/design/415-knowledge-architecture.md`](design/415-knowledge-architecture.md) | Knowledge architecture: one definition per concept, and prose that cannot go quietly stale |
 | [`docs/design/440-native-worker-daemon.md`](design/440-native-worker-daemon.md) | The natively-supervised worker daemon |
+| [`docs/design/490-agent-work-on-a-mac.md`](design/490-agent-work-on-a-mac.md) | Agent work on a Mac: finding a transcript without predicting its path, and what one host task per node buys |
 
 ## The target factoring
 

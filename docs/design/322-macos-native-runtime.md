@@ -137,7 +137,7 @@ argument and its dependency.
 | **W5** | Refresh precondition: decline a refresh while a host task runs | **Landed** (job #460) generically, as [#440](440-native-worker-daemon.md) slice 3 — §6's phase-1 mitigation, plus a swap-boundary re-check that phase never asked for |
 | **N3** | The macOS node runbook in `deploy/prod/README.md` | Proposed |
 | **P1** | `NodeCapabilities` on ping/announce + the `choose_placement` predicate | **Landed** (job #489) for this phase's `envs` field, additively; the rest arrived generically as #309 P2 — the record on `PingOk`/`WorkerAnnounce` ingested in `probe_worker` (job #483), carrying `modes`, `platform`, `resources_enforced` and `leases`, and the predicate filtering placement by `modes` (job #484). `envs` is advertised, **not** filtered on: capability-filtered placement is later, and the remainder is [#367](367-android-emulator-execution.md) A3's `features` field, still Proposed |
-| **P2** | Per-task launchd jobs, agent work on a Mac, device leases, signing | Later, deliberately |
+| **P2** | Per-task launchd jobs, agent work on a Mac, device leases, signing | Later, deliberately — except the **agent half**, taken up early in [#490](./490-agent-work-on-a-mac.md) because agentic simulator debugging asked for it. That design decides the transcript question §2 left as "a computed slugifier" (a backend operation resolves the file by the session id the platform itself supplies, instead), keeps one host task per node, and leaves per-task launchd jobs and device leases here |
 
 ## Corrections to the brief and to #309
 
