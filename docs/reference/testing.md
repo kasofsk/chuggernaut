@@ -293,7 +293,7 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-23 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
+24 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
 a throwaway repo against stubbed
 `cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.

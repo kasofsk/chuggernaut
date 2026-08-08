@@ -175,6 +175,23 @@ deploy/prod/install-launchd.sh uninstall  # remove all agents
 tail -f ~/Library/Logs/chuggernaut/*.log
 ```
 
+**What those logs contain, and why it is a setting.** The binary filters on
+`RUST_LOG` and its default directive is `error`, so a service started without
+one writes **only** `ERROR` lines — every `warn!` and `info!` is discarded, and
+the absence of a warning in such a log is a statement about the filter and not
+about the system (#270 fixed this for the worker; #493 for these two). So
+`run-dispatcher.sh` and `run-api.sh` apply `RUST_LOG=info,async_nats=warn`
+after sourcing `chuggernaut.env` — the same string `build-worker.sh` writes into
+every worker node's environment file (§6), so **all three services resolve their
+level by one rule**. A `RUST_LOG` line in `chuggernaut.env` **wins** over that
+default; the plists deliberately carry none, since launchd's
+`EnvironmentVariables` would shadow the env file instead of yielding to it.
+Raise it per subsystem rather than globally — a directive names the emitting
+crate, so `info,dispatcher=debug` and `info,api=debug` are the two here — and
+`launchctl kickstart -k` the service to pick it up. Both take
+effect on the next deploy or restart — this is deployment config, not a
+running-process knob.
+
 ### Cloning a platform repo (SSH front)
 
 Platform repos live behind the SSH front (port 2222). Access is by a **CA-signed
@@ -1129,7 +1146,8 @@ Notes:
      start reads it). Without it the binary's tracing default is `error` and the
      daemon's log says *nothing* about a refresh — the silence deploy #267 was
      reconstructed around. An override survives a refresh because it is
-     declared, not because the swap copies it.
+     declared, not because the swap copies it. The dispatcher and the api reach
+     the same string by the same rule, from their own wrappers (§2).
   3. **The supervisor keeps the swap's own record.** The swap installs a binary
      and restarts the unit (#440 D6), so a replacement that will not start says
      why in `journalctl -u chug-worker` (Linux) or the launchd agent's

@@ -14,6 +14,12 @@ set -a
 . "$HERE/chuggernaut.env"
 set +a
 
+# Same rule, same default string as run-dispatcher.sh and the worker fleet, so
+# all three services resolve their level one way (#270, #493). An unset
+# RUST_LOG means ERROR-only, and a chuggernaut.env value wins over this.
+: "${RUST_LOG:=info,async_nats=warn}"
+export RUST_LOG
+
 # Serve the SPA from the host UI dir that web-publish rsyncs into (README §7),
 # not from a baked-in image copy. NATS_URL/KEYS_DIR/SESSION_TTL come from the
 # sourced env; bind loopback only — Tailscale Serve / cloudflared front :8080
