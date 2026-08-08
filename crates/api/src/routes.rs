@@ -1452,6 +1452,7 @@ pub async fn artifact_get(
         store::ArtifactKind::SessionTranscript => "application/x-ndjson",
         store::ArtifactKind::Stdout => "text/plain; charset=utf-8",
         store::ArtifactKind::Output => "application/gzip",
+        store::ArtifactKind::TranscriptMissing => "application/json",
     };
     Ok((
         StatusCode::OK,

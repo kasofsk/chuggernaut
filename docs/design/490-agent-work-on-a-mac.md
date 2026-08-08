@@ -1,6 +1,6 @@
 # Design — agent work on a Mac
 
-Status: IMPLEMENTED IN PART — D1–D7 decided; slice 0 measured, M3 came back no, slice 1 landed, slices 2–6 unbuilt.
+Status: IMPLEMENTED IN PART — D1–D7 decided; slice 0 measured, M3 came back no, slices 1–2 landed, slices 3–6 unbuilt.
 
 Written against the tree at `d556a6c` (job #489's `code` merge, the last commit
 touching source before this branch): every claim below was read out of the
@@ -22,9 +22,12 @@ limits.
 rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
 
-**Slices 0 and 1 are done; 2–6 are not started.** M1, M2, M4 and M5 held; M3 came
-back **no**; M6 and M7 are deferred to the slices that own the behaviour they
-gate (2 and 6). No decision was overturned. Three things changed:
+**Slices 0, 1 and 2 are done; 3–6 are not started.** M1, M2, M4 and M5 held; M3
+came back **no**; M7 is deferred to slice 6. **M6 is now answerable but not
+answered**: slice 2 built the instrument that answers it and recorded the
+procedure ([the job #494 correction](#correction--2026-08-08-job-494-slice-2-landed-and-how-m6-gets-answered)),
+whose precondition is a deploy carrying slice 1. No decision was overturned.
+Three things changed:
 
 - **M3 makes slice 4's work required rather than confirmatory.** `claude` is
   installed on `gumbo-air-0` and is not on the daemon's `PATH`, so D3's probe
@@ -54,9 +57,16 @@ naming the loss rather than dropped. `find_file` is bounded at
 `container::FIND_FILE_MATCHES_MAX` matches and, on a host node, by scan depth and
 entries visited as well. **No `WORKER_RPC_VERSION` bump**: a daemon that does not
 know the op answers `unknown op`, and the caller falls back to the computed path
-— for a **container** launch only, per the realpath finding below. Zero and
-several matches stay log-and-continue; making them loud is slice 2's, and it
-still needs the fourth `ArtifactKind`.
+— for a **container** launch only, per the realpath finding below.
+
+**What slice 2 landed** (job #494): zero matches and several matches are logged
+at **error**, and every miss — including a resolution that never answered —
+stores the fourth `ArtifactKind`, `transcript-missing.json`, naming the branch
+that refused, the session id, the directory searched and, for several, the paths
+found. `Harvester::collect_agent` returns that outcome on an `AgentHarvest`
+rather than raising it, and `TranscriptMiss::escalation` is **written and
+unarmed** — `ESCALATION_ARMED` is `false`, so no job's state can change on this
+outcome until M6 is answered.
 
 This document is [#322](./322-macos-native-runtime.md) P2's **agent half**,
 which that design files as *"Later, deliberately"*. It is being taken up early
@@ -603,7 +613,7 @@ different decision on the other side of a "no".
 | --- | --- | --- | --- | --- | --- |
 | **0** | `design` or operator | M1–M7 measured on `gumbo-air-0`, recorded as a correction to this document | Each row answered yes/no with the command that answered it | none | **Landed** (job #492) |
 | **1** | `code` | D1/D1a: `ContainerBackend::find_file` across both backends, the worker RPC pair, the fakes; the harvest resolves then `copy_file_chunked`s; unknown-op falls back to the computed path | The surface table in D1a; **no** `WORKER_RPC_VERSION` bump; proven on container agent jobs, which this changes — and it **repairs a live defect**, so a work-agent transcript over `MAX_COPY_FILE_BYTES` harvested whole is an acceptance criterion available today | 0 (M1), #322 W4 (job #489) | **Landed** (job #491) |
-| **2** | `code` | D1b: zero **and** several become an error-level miss carrying a `transcript-missing` marker artifact; the escalation is armed only if M6 said it is safe — and M6's premise is already false, so the escalation is not armed until slice 1 has removed the known cause | `Harvester::collect_agent`'s return, its best-effort charter unchanged; a fourth `ArtifactKind` (`crates/store/src/artifacts.rs`) and its ripple — `crates/api/src/routes.rs`'s content type, `web/src/api/envelopes.ts`'s hand-written union, `web/src/components/TaskArtifacts.tsx`'s label map | 1 | Proposed |
+| **2** | `code` | D1b: zero **and** several become an error-level miss carrying a `transcript-missing` marker artifact; the escalation is armed only if M6 said it is safe — and M6's premise is already false, so the escalation is not armed until slice 1 has removed the known cause | `Harvester::collect_agent`'s return, its best-effort charter unchanged; a fourth `ArtifactKind` (`crates/store/src/artifacts.rs`) and its ripple — `crates/api/src/routes.rs`'s content type, `web/src/api/envelopes.ts`'s hand-written union, `web/src/components/TaskArtifacts.tsx`'s label map | 1 | **Landed** (job #494) |
 | **3** | `code` | D2: a host-capable node keeps `--bin chuggernaut-channel` in `NATIVE_BINS`, installs it at its own path, and proves it runs on the node. #480's `e_machine` guard on the injected copy is untouched | both deploy scripts; the two-executor rule | 0 (M2) | Proposed |
 | **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent — **and put the CLI on that `PATH`**, which M3 says it is not | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump; `AGENT_PATH`/`WORKER_PATH` in `deploy/prod/install-worker-launchd.sh` | 0 (M3), 3 | Proposed |
 | **5** | `code` | D5: `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` test becomes a launch-time capability test; `validate_host_serves_commands_only` lifts | `HostBackend::admit`; spec §1.1's host row | 4 | Proposed |
@@ -838,3 +848,96 @@ this one. Slice 1's acceptance criterion settles it either way — if transcript
 over the bound start arriving and task-1 misses stop, the cause was the bound; if
 they keep happening, slice 2 has a second thing to find, and it will have the
 marker artifact to find it with.
+
+## Correction — 2026-08-08, job #494 (slice 2 landed, and how M6 gets answered)
+
+Appended by the job that ran slice 2. Nothing above is edited except the head and
+the slice table's own row. No decision is overturned: D1b is implemented as
+written, including its staging — the escalation is written and **unarmed**.
+
+### What is loud now, and what is merely recorded
+
+| branch | level | marker | why |
+| --- | --- | --- | --- |
+| resolution returned **zero** | `error` | yes, `"branch": "zero"` | D1b: the agent named a session and the file it must have written is not resolvable |
+| resolution returned **several** | `error` | yes, `"branch": "several"`, naming every path | D1b: one session id names one transcript, and the store keys one per task |
+| resolution **never answered** | `warn` | yes, `"branch": "unresolvable"`, carrying the error | an unreachable node, or a host task on an N-1 daemon with no computed-path degrade — a reporting miss, not a platform break |
+| resolution named one path and the **copy** produced nothing | `error` when the path was over the blob ceiling, `warn` otherwise | yes, `"branch": "uncopied"`, naming the path, plus `"lost": true` on the ceiling refusal | the record the platform had already resolved is gone: over the ceiling it is lost outright, and a transport miss or an N-1 degrade onto a computed path that holds nothing loses it for this run |
+
+The last two rows are not in D1b's text and are a deliberate reading of it: D1b
+separates absence from ambiguity and says nothing about the two ways a run ends
+with no stored transcript *without* the resolution having refused anything. Both
+are marked because the operator-visible outcome is identical — no transcript —
+and their `"reason"` field is absent because `transcript_unresolved` is D1b's
+code for the two refusals only, which is also why neither can escalate.
+
+Marking the fourth row is what makes the marker's absence mean something. The
+`uncopied` branch is where #492's measured cause lived — a transcript past the
+copy bound — and it is also the shape an N-1 container node produces today, since
+slice 1's computed-path degrade succeeds at *resolving* and the computed path may
+hold nothing. Left unmarked, those two would have been silent absences
+indistinguishable from a run that named no session, which is the class this
+design exists to make loud. Only the level splits, and it splits the way slice 1
+already had it: over the ceiling the platform refused and the record is lost, so
+`error`; a transport miss is an ordinary reporting failure, so `warn`.
+
+The surfaces the fourth `ArtifactKind` reached, which is the ripple D1b
+predicted: `crates/store/src/artifacts.rs` (the variant, `as_str`/`parse`, and
+`bucket_for` — the marker is an audit record, so it lives in `artifacts` and a
+revoke never deletes it), `crates/api/src/routes.rs` (`application/json`),
+`web/src/api/envelopes.ts` (the hand-written union), and
+`web/src/components/TaskArtifacts.tsx` (the label map, and *not* the `BINARY`
+list — the marker is meant to be read in place). Plus the return-shape change
+D1b asks for: `Harvester::collect_agent` now returns an `AgentHarvest`
+(`crates/platform-ops/src/harvest.rs`), which absorbed the `collect` wrapper
+whose only job was to hide the result text, and its three callers —
+`crates/dispatcher/src/exec.rs`, `crates/dispatcher/src/eval.rs`,
+`crates/dispatcher/src/forge_ingest/triage.rs` — read fields off it.
+
+### M6's measurement procedure, and why it could not be run here
+
+M6 asks whether a legitimate run can yield a session id and no transcript.
+Job #492 measured absence at **15.5%** (284 agent tasks across jobs 450–489,
+44 without a transcript), and that number **cannot answer M6**: its cause was
+the `copy_file` size bound, and the largest surviving transcript was 686,799 bytes
+against a 690,432-byte cap, none above it. Slice 1 removed that cause — and slice
+1 is **merged, not deployed**. Prod ran `9016dc3` (job #487) when this was
+written; slice 1 is `71361dc`. Every absence measured before the next deploy is
+still measuring the old defect.
+
+So the procedure is:
+
+1. **Precondition — deploy.** Prod must be running a build that carries slice 1
+   (`71361dc`) *and* job #493's `RUST_LOG` default, without which the harvest's
+   log lines are invisible on the fleet whatever level they are emitted at. The
+   marker artifact is what makes the answer readable regardless, which is why it
+   is the instrument rather than the logs.
+2. **Wait for a population**, counted in agent tasks rather than days: #492's
+   sample was 284 tasks over 40 jobs. Fewer than ~100 tasks says nothing about a
+   rate that may be low single digits.
+3. **Count the markers.** Every way of ending an agent task with a session id and
+   no stored transcript now leaves an artifact, so the answer is a listing rather
+   than a log grep: for each agent task in the window, is `transcript-missing.json`
+   present, and what is its `branch`? The residual rate is markers ÷ agent tasks.
+4. **Split it by branch, because only two branches are M6's question.**
+   `"zero"` and `"several"` are D1b's refusals and are what M6 asks about.
+   `"uncopied"` with `"lost": true` is #492's cause — a transcript past the blob
+   ceiling — and its count is the check on whether slice 1's raise to 16 MiB was
+   enough. `"uncopied"` without it and `"unresolvable"` are transport and
+   N-1-degrade misses: they say a node needs refreshing, not that a run failed to
+   write a transcript.
+5. **Read the verdict off those two counts.** Zero markers with `"zero"` or
+   `"several"` over a real population is M6 = **yes**, and D1b's escalation
+   becomes armable by flipping `ESCALATION_ARMED` in
+   `crates/platform-ops/src/harvest.rs` and having the dispatcher act on
+   `TranscriptMiss::escalation` from the spawned harvest task. Any such marker is
+   M6 = **no**, and D1b already decided what that means: the escalation is never
+   armed and the marker is the permanent answer.
+
+The absence to compare against is still the artifact store's, not the marker's —
+and the marker is what makes that comparison read cleanly: a task with neither a
+transcript nor a marker means the run named no session at all, which D1b's first
+case says is not a defect. That sentence is only true because step 4's last two
+branches are marked; before them, a size refusal and a degrade onto an empty
+computed path both landed in the same silent bucket as a run that never started
+an agent.

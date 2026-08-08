@@ -2613,6 +2613,72 @@ async fn agent_run_captures_transcript_logs_and_measured_usage() {
     assert_invariants_of(&rig.invariants);
 }
 
+/// Design #490 D1b: a run that names a session whose transcript resolves to
+/// nothing leaves a `transcript-missing` marker in the job's own artifact list,
+/// naming the branch that refused — and nothing else changes, because D1b's
+/// escalation is staged behind M6 and unarmed. The fake provider reports the
+/// session id it was handed; no transcript is ever written for it.
+#[tokio::test]
+async fn a_transcript_that_resolves_to_nothing_is_marked_in_the_artifact_list() {
+    let (identity, _public) = store::secrets::generate_age_keypair();
+    let Some(rig) = rig_with_artifacts(Some(identity.clone())).await else {
+        return;
+    };
+    commit_work(&rig);
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok":true}"#.to_vec());
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let tasks = rig.store.tasks().await.unwrap();
+    let log = tasks.list_for_job("acme", "api", job.id).await.unwrap();
+    let work = log.iter().find(|t| t.phase == TaskPhase::Work).unwrap();
+    let session_id = work.session_id.clone().expect("the run named a session");
+
+    let artifacts = rig
+        .store
+        .artifacts(store::ArtifactCrypto::with_identity(&identity).unwrap())
+        .await
+        .unwrap();
+    let kinds = artifacts
+        .list_for_task("acme", "api", job.id, work.id)
+        .await
+        .unwrap();
+    assert!(
+        kinds.contains(&store::ArtifactKind::TranscriptMissing),
+        "the miss must be visible in the artifact list: {kinds:?}"
+    );
+    assert!(
+        !kinds.contains(&store::ArtifactKind::SessionTranscript),
+        "nothing resolved, so no transcript is stored"
+    );
+
+    let marker = artifacts
+        .get(
+            "acme",
+            "api",
+            job.id,
+            work.id,
+            store::ArtifactKind::TranscriptMissing,
+        )
+        .await
+        .unwrap()
+        .expect("the marker is readable");
+    let marker: serde_json::Value = serde_json::from_slice(&marker).unwrap();
+    assert_eq!(marker["branch"], "zero");
+    assert_eq!(marker["session_id"], session_id);
+    assert_eq!(marker["reason"], "transcript_unresolved");
+
+    assert_eq!(
+        work.state,
+        types::TaskState::Done,
+        "a reporting miss never fails the task that produced it"
+    );
+    assert_invariants_of(&rig.invariants);
+}
+
 /// Design #362 S1, the scope decision: a **work** container's
 /// `/workspace/chug-output.tar.gz` is harvested and listed on its task, and
 /// neither evaluator container — both of which this fake backend shows the very

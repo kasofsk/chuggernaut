@@ -1,15 +1,16 @@
-import { useEffect, useRef, useState } from 'react'
-import { api, type ArtifactKind, type Task } from '../api'
-import { SkeletonLines } from './Skeleton'
+import { useEffect, useRef, useState } from "react";
+import { api, type ArtifactKind, type Task } from "../api";
+import { SkeletonLines } from "./Skeleton";
 
 const LABELS: Record<ArtifactKind, string> = {
-  'session.jsonl': 'transcript',
-  'stdout.log': 'logs',
-  'output.tar.gz': 'output',
-}
+  "session.jsonl": "transcript",
+  "stdout.log": "logs",
+  "output.tar.gz": "output",
+  "transcript-missing.json": "transcript missing",
+};
 
 /** Kinds that are opaque binary: offered as a download, never as text. */
-const BINARY: ArtifactKind[] = ['output.tar.gz']
+const BINARY: ArtifactKind[] = ["output.tar.gz"];
 
 /**
  * Links to whatever a task left behind. Availability is per-task, so it is
@@ -24,25 +25,25 @@ export function TaskArtifacts({
   open,
   onOpen,
 }: {
-  owner: string
-  project: string
-  seq: number
-  task: Task
-  open: ArtifactKind | null
-  onOpen: (kind: ArtifactKind | null) => void
+  owner: string;
+  project: string;
+  seq: number;
+  task: Task;
+  open: ArtifactKind | null;
+  onOpen: (kind: ArtifactKind | null) => void;
 }) {
-  const [kinds, setKinds] = useState<ArtifactKind[]>([])
+  const [kinds, setKinds] = useState<ArtifactKind[]>([]);
 
-  const terminal = task.state === 'Done' || task.state === 'Failed'
+  const terminal = task.state === "Done" || task.state === "Failed";
   useEffect(() => {
-    if (!terminal) return
+    if (!terminal) return;
     api
       .artifacts(owner, project, seq, task.id)
       .then((r) => setKinds(r.artifacts))
-      .catch(() => setKinds([]))
-  }, [owner, project, seq, task.id, terminal])
+      .catch(() => setKinds([]));
+  }, [owner, project, seq, task.id, terminal]);
 
-  if (kinds.length === 0) return <span className="dim">—</span>
+  if (kinds.length === 0) return <span className="dim">—</span>;
 
   return (
     <span className="artifact-links">
@@ -57,13 +58,17 @@ export function TaskArtifacts({
             {LABELS[k]}
           </a>
         ) : (
-          <button key={k} className="linklike" onClick={() => onOpen(open === k ? null : k)}>
+          <button
+            key={k}
+            className="linklike"
+            onClick={() => onOpen(open === k ? null : k)}
+          >
             {LABELS[k]}
           </button>
         ),
       )}
     </span>
-  )
+  );
 }
 
 /**
@@ -80,37 +85,37 @@ export function ArtifactViewer({
   kind,
   onClose,
 }: {
-  owner: string
-  project: string
-  seq: number
-  task: Task
-  kind: ArtifactKind
-  onClose: () => void
+  owner: string;
+  project: string;
+  seq: number;
+  task: Task;
+  kind: ArtifactKind;
+  onClose: () => void;
 }) {
-  const [text, setText] = useState<string | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const paneRef = useRef<HTMLDivElement>(null)
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const paneRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    paneRef.current?.scrollIntoView({ block: 'nearest' })
-  }, [])
+    paneRef.current?.scrollIntoView({ block: "nearest" });
+  }, []);
 
   useEffect(() => {
-    let cancelled = false
-    setText(null)
-    setError(null)
+    let cancelled = false;
+    setText(null);
+    setError(null);
     api
       .artifactText(owner, project, seq, task.id, kind)
       .then((t) => {
-        if (!cancelled) setText(t)
+        if (!cancelled) setText(t);
       })
       .catch((e) => {
-        if (!cancelled) setError(String(e))
-      })
+        if (!cancelled) setError(String(e));
+      });
     return () => {
-      cancelled = true
-    }
-  }, [owner, project, seq, task.id, kind])
+      cancelled = true;
+    };
+  }, [owner, project, seq, task.id, kind]);
 
   return (
     <div className="artifact-viewer" ref={paneRef}>
@@ -129,5 +134,5 @@ export function ArtifactViewer({
       {!text && !error && <SkeletonLines n={4} />}
       {text && <pre className="artifact-body">{text}</pre>}
     </div>
-  )
+  );
 }

@@ -472,12 +472,12 @@ impl Core {
                 tokio::spawn(async move {
                     let (exit_code, usage) = match provider.run(config, on_launch).await {
                         Ok(out) => {
-                            let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
+                            let harvested = harvest.collect_agent(&o, &p, seq, task_id, &out).await;
                             if let Some(id) = &out.container_id {
                                 harvest.collect_output(&o, &p, seq, task_id, id).await;
                                 harvest.dispose(seq, task_id, id).await;
                             }
-                            (out.exit_code, usage)
+                            (out.exit_code, harvested.usage)
                         }
                         Err(agent::AgentError::Backend(container::BackendError::NoCapacity(
                             reason,

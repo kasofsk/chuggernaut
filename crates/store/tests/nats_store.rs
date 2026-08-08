@@ -652,11 +652,29 @@ async fn seed_every_kind(arts: &store::ArtifactStore, seq: u64, task: u64) {
         ),
         (store::ArtifactKind::Stdout, b"log"),
         (store::ArtifactKind::Output, b"tarball"),
+        (
+            store::ArtifactKind::TranscriptMissing,
+            &b"{\"branch\":\"zero\"}"[..],
+        ),
     ] {
         arts.put("acme", "api", seq, task, kind, body)
             .await
             .unwrap();
     }
+}
+
+/// The kinds a task's artifacts list reports, sorted so the assertion does not
+/// depend on bucket iteration order.
+async fn listed_kinds(arts: &store::ArtifactStore, seq: u64, task: u64) -> Vec<&'static str> {
+    let mut kinds: Vec<&'static str> = arts
+        .list_for_task("acme", "api", seq, task)
+        .await
+        .unwrap()
+        .iter()
+        .map(|k| k.as_str())
+        .collect();
+    kinds.sort_unstable();
+    kinds
 }
 
 /// Design #362 R1/R2: an output is stored, read and listed like any other
@@ -681,15 +699,15 @@ async fn outputs_are_gc_able_without_touching_the_audit_record() {
         seed_every_kind(&arts, seq, task).await;
     }
 
-    let mut kinds: Vec<&str> = arts
-        .list_for_task("acme", "api", 42, 7)
-        .await
-        .unwrap()
-        .iter()
-        .map(|k| k.as_str())
-        .collect();
-    kinds.sort_unstable();
-    assert_eq!(kinds, ["output.tar.gz", "session.jsonl", "stdout.log"]);
+    assert_eq!(
+        listed_kinds(&arts, 42, 7).await,
+        [
+            "output.tar.gz",
+            "session.jsonl",
+            "stdout.log",
+            "transcript-missing.json"
+        ]
+    );
     assert_eq!(
         arts.get("acme", "api", 42, 7, store::ArtifactKind::Output)
             .await
@@ -713,6 +731,7 @@ async fn outputs_are_gc_able_without_touching_the_audit_record() {
     for kind in [
         store::ArtifactKind::SessionTranscript,
         store::ArtifactKind::Stdout,
+        store::ArtifactKind::TranscriptMissing,
     ] {
         assert!(
             arts.get("acme", "api", 42, 7, kind)

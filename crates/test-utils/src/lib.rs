@@ -75,6 +75,10 @@ struct FakeBackendState {
     /// a test scripts the N-1 daemon that answers `unknown op` (design #490
     /// D1a), so the caller's fallback is exercised.
     find_file_fail: Option<String>,
+    /// When set, `copy_file` fails with `BackendError::Other` carrying it — how
+    /// a test scripts a path that resolved and could not be read (design #490
+    /// D1b), the over-band refusal included.
+    copy_file_fail: Option<String>,
     /// Returned by `logs` (and sliced by `logs_tail`) for every container.
     logs: Vec<u8>,
     /// When set, `logs_tail` sleeps this long before returning — a stand-in
@@ -199,6 +203,17 @@ impl FakeBackend {
     )]
     pub fn fail_find_file(&self, reason: impl Into<String>) {
         self.state.lock().unwrap().find_file_fail = Some(reason.into());
+    }
+
+    /// Make `copy_file` fail with `BackendError::Other` — how a test scripts a
+    /// read that refuses (the over-band ceiling) or never arrives, on a path
+    /// that resolved (design #490 D1b's uncopied branch).
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
+    pub fn fail_copy_file(&self, reason: impl Into<String>) {
+        self.state.lock().unwrap().copy_file_fail = Some(reason.into());
     }
 
     /// Script what `logs` returns for every container (and what `logs_tail`
@@ -581,6 +596,9 @@ impl ContainerBackend for FakeBackend {
     ) -> Result<Option<Vec<u8>>, BackendError> {
         let mut st = self.state.lock().unwrap();
         st.copied.push(path.to_string());
+        if let Some(reason) = &st.copy_file_fail {
+            return Err(BackendError::Other(reason.clone()));
+        }
         Ok(st.files.get(path).cloned())
     }
 

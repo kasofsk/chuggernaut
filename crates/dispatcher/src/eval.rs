@@ -943,7 +943,7 @@ impl Core {
         tokio::spawn(async move {
             match provider.run(config, on_launch).await {
                 Ok(out) => {
-                    let usage = harvest.collect(&o, &p, seq, task_id, &out).await;
+                    let harvested = harvest.collect_agent(&o, &p, seq, task_id, &out).await;
                     if let Some(id) = &out.container_id {
                         harvest.dispose(seq, task_id, id).await;
                     }
@@ -956,7 +956,7 @@ impl Core {
                             exit: TaskExit {
                                 exit_code: out.exit_code,
                                 eval_json: None,
-                                usage,
+                                usage: harvested.usage,
                                 assessment: None,
                                 launch_error: None,
                                 log_tail: None,

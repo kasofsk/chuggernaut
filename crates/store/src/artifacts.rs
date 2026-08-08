@@ -34,6 +34,10 @@ pub enum ArtifactKind {
     /// The archive a work container left at `/workspace/chug-output.tar.gz`
     /// (design #362 Decision 2). Lives in its own bucket, on its own clock.
     Output,
+    /// The marker a run leaves when it named a session and the harvest could
+    /// not resolve its transcript (design #490 D1b), naming which branch
+    /// refused. Its presence is the miss, readable from the job's artifact list.
+    TranscriptMissing,
 }
 
 impl ArtifactKind {
@@ -42,6 +46,7 @@ impl ArtifactKind {
             ArtifactKind::SessionTranscript => "session.jsonl",
             ArtifactKind::Stdout => "stdout.log",
             ArtifactKind::Output => "output.tar.gz",
+            ArtifactKind::TranscriptMissing => "transcript-missing.json",
         }
     }
 
@@ -50,6 +55,7 @@ impl ArtifactKind {
             "session.jsonl" => Some(ArtifactKind::SessionTranscript),
             "stdout.log" => Some(ArtifactKind::Stdout),
             "output.tar.gz" => Some(ArtifactKind::Output),
+            "transcript-missing.json" => Some(ArtifactKind::TranscriptMissing),
             _ => None,
         }
     }
@@ -222,7 +228,9 @@ impl ArtifactStore {
     fn bucket_for(&self, kind: ArtifactKind) -> &ObjectStore {
         match kind {
             ArtifactKind::Output => &self.outputs,
-            ArtifactKind::SessionTranscript | ArtifactKind::Stdout => &self.obj,
+            ArtifactKind::SessionTranscript
+            | ArtifactKind::Stdout
+            | ArtifactKind::TranscriptMissing => &self.obj,
         }
     }
 
@@ -448,11 +456,33 @@ mod tests {
             ArtifactKind::SessionTranscript,
             ArtifactKind::Stdout,
             ArtifactKind::Output,
+            ArtifactKind::TranscriptMissing,
         ] {
             assert_eq!(ArtifactKind::parse(k.as_str()), Some(k));
         }
         assert_eq!(ArtifactKind::parse("passwd"), None);
         assert_eq!(ArtifactKind::parse("output.tar"), None);
+        assert_eq!(ArtifactKind::parse("transcript-missing"), None);
+    }
+
+    /// The marker is part of the audit record (design #490 D1b): it says a
+    /// transcript is absent and why, so it belongs beside the transcripts in
+    /// the `artifacts` bucket rather than on the outputs' shorter clock.
+    #[test]
+    fn the_transcript_marker_is_keyed_like_any_audit_artifact() {
+        let key = keys::artifact_key(
+            "acme",
+            "api",
+            42,
+            7,
+            ArtifactKind::TranscriptMissing.as_str(),
+        );
+        assert_eq!(key, "acme.api.42.7.transcript-missing.json");
+        let prefix = keys::artifact_task_prefix("acme", "api", 42, 7);
+        assert_eq!(
+            key.strip_prefix(&prefix).and_then(ArtifactKind::parse),
+            Some(ArtifactKind::TranscriptMissing)
+        );
     }
 
     /// The output kind carries two dots, so the key layout has to survive a

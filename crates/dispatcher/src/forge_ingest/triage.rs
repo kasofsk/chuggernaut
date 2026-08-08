@@ -185,12 +185,11 @@ impl Core {
         tokio::spawn(async move {
             let (exit_code, assessment, usage) = match provider.run(config, on_launch).await {
                 Ok(out) => {
-                    let (assessment, usage) =
-                        harvest.collect_agent(&o, &p, seq, task_id, &out).await;
+                    let harvested = harvest.collect_agent(&o, &p, seq, task_id, &out).await;
                     if let Some(id) = &out.container_id {
                         harvest.dispose(seq, task_id, id).await;
                     }
-                    (out.exit_code, assessment, usage)
+                    (out.exit_code, harvested.result, harvested.usage)
                 }
                 Err(e) => {
                     tracing::error!("triage agent run failed: {e}");
