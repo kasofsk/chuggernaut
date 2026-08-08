@@ -1,6 +1,6 @@
 # Design — agent work on a Mac
 
-Status: IMPLEMENTED IN PART — D1–D7 decided; slice 0 measured, M3 came back no, slices 1–2 landed, slices 3–6 unbuilt.
+Status: IMPLEMENTED IN PART — D1–D7 decided; slice 0 measured, M3 came back no, slices 1–3 landed, slices 4–6 unbuilt.
 
 Written against the tree at `d556a6c` (job #489's `code` merge, the last commit
 touching source before this branch): every claim below was read out of the
@@ -22,7 +22,7 @@ limits.
 rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
 
-**Slices 0, 1 and 2 are done; 3–6 are not started.** M1, M2, M4 and M5 held; M3
+**Slices 0–3 are done; 4–6 are not started.** M1, M2, M4 and M5 held; M3
 came back **no**; M7 is deferred to slice 6. **M6 is now answerable but not
 answered**: slice 2 built the instrument that answers it and recorded the
 procedure ([the job #494 correction](#correction--2026-08-08-job-494-slice-2-landed-and-how-m6-gets-answered)),
@@ -67,6 +67,26 @@ found. `Harvester::collect_agent` returns that outcome on an `AgentHarvest`
 rather than raising it, and `TranscriptMiss::escalation` is **written and
 unarmed** — `ESCALATION_ARMED` is `false`, so no job's state can change on this
 outcome until M6 is answered.
+
+**What slice 3 landed**, in `deploy/prod/build-worker.sh` and
+`deploy/prod/worker-refresh.sh` only — no Rust changed. A host-capable node is
+handed a **second** channel binary at `/usr/local/lib/chuggernaut/chuggernaut-channel-host`,
+beside the injected `/usr/local/lib/chuggernaut/chuggernaut-channel`, whose
+`e_machine` guard is untouched. Both scripts derive `serves_host` beside
+`serves_container`, in the daemon's own spelling; `--bin chuggernaut-channel` is
+back in `NATIVE_BINS` unconditionally, since between them the two rules cover
+every legal `WORKER_MODES` (this is job #487's condition reversed, and its
+premise — that host mode is command-only, so nothing reads the file — is what
+[slice 5](#slices) removes). On **Darwin** the host copy comes out of the node's
+own `cargo build` and the injected one out of the image; on **Linux** both are
+the same bytes out of the same image, staged and guarded separately because the
+node's userland is not the container's. Each is asked its **own** executor's
+question before anything is installed: the injected copy against the container's
+architecture, the host copy by being **run** on the node, with an ELF in the host
+slot refused by name as the other half of the pair. Nothing **reads** the new
+file yet — that is slice 4, which also owns the daemon-side config variable D2
+left open; a container-only node's deploy is unchanged, and a host-capable one
+differs by exactly one `docker cp` (asserted as a delta in both suites).
 
 This document is [#322](./322-macos-native-runtime.md) P2's **agent half**,
 which that design files as *"Later, deliberately"*. It is being taken up early
@@ -614,7 +634,7 @@ different decision on the other side of a "no".
 | **0** | `design` or operator | M1–M7 measured on `gumbo-air-0`, recorded as a correction to this document | Each row answered yes/no with the command that answered it | none | **Landed** (job #492) |
 | **1** | `code` | D1/D1a: `ContainerBackend::find_file` across both backends, the worker RPC pair, the fakes; the harvest resolves then `copy_file_chunked`s; unknown-op falls back to the computed path | The surface table in D1a; **no** `WORKER_RPC_VERSION` bump; proven on container agent jobs, which this changes — and it **repairs a live defect**, so a work-agent transcript over `MAX_COPY_FILE_BYTES` harvested whole is an acceptance criterion available today | 0 (M1), #322 W4 (job #489) | **Landed** (job #491) |
 | **2** | `code` | D1b: zero **and** several become an error-level miss carrying a `transcript-missing` marker artifact; the escalation is armed only if M6 said it is safe — and M6's premise is already false, so the escalation is not armed until slice 1 has removed the known cause | `Harvester::collect_agent`'s return, its best-effort charter unchanged; a fourth `ArtifactKind` (`crates/store/src/artifacts.rs`) and its ripple — `crates/api/src/routes.rs`'s content type, `web/src/api/envelopes.ts`'s hand-written union, `web/src/components/TaskArtifacts.tsx`'s label map | 1 | **Landed** (job #494) |
-| **3** | `code` | D2: a host-capable node keeps `--bin chuggernaut-channel` in `NATIVE_BINS`, installs it at its own path, and proves it runs on the node. #480's `e_machine` guard on the injected copy is untouched | both deploy scripts; the two-executor rule | 0 (M2) | Proposed |
+| **3** | `code` | D2: a host-capable node keeps `--bin chuggernaut-channel` in `NATIVE_BINS`, installs it at its own path, and proves it runs on the node. #480's `e_machine` guard on the injected copy is untouched | both deploy scripts; the two-executor rule | 0 (M2) | **Landed** (job #495) |
 | **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent — **and put the CLI on that `PATH`**, which M3 says it is not | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump; `AGENT_PATH`/`WORKER_PATH` in `deploy/prod/install-worker-launchd.sh` | 0 (M3), 3 | Proposed |
 | **5** | `code` | D5: `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` test becomes a launch-time capability test; `validate_host_serves_commands_only` lifts | `HostBackend::admit`; spec §1.1's host row | 4 | Proposed |
 | **6** | `code` | The first agent host task actually run on `gumbo-air-0`, with the transcript resolved and harvested end to end; **M5's authenticated residual and M7 are settled here** | none — this is the confirmation | 5 | Proposed |

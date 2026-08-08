@@ -607,7 +607,11 @@ installed: the daemon must exec on the node, and the channel binary must exec in
 a container — on Darwin that is read off its object header against the
 architecture `docker version --format '{{.Server.Arch}}/{{.Server.Os}}'` reports,
 because a binary that cannot exec inside a container produces no error the
-operator ever sees.
+operator ever sees. A **host-capable** node has a third artifact under the same
+rule and gets it the other way round: its own `chuggernaut-channel-host`, which
+this node execs, so on a mac it comes out of the native build and is checked by
+being **run** ([#490](../../docs/design/490-agent-work-on-a-mac.md) D2; "A
+host-only mac needs no docker" below).
 **A node's own configuration may own the supervision half instead**, which is
 what slice 7 added: a NixOS node declares the unit with
 `chug.node.daemon.enable` ([`nix/chug-node/`](../../nix/chug-node/), off by
@@ -627,8 +631,10 @@ when the daemon was itself a container. **Converting a node is what puts it back
 on the self-refresh path:** since
 [#440](../../docs/design/440-native-worker-daemon.md) slice 6 the swap installs
 the daemon binary out of the image the build phase just made — on a **mac**, out
-of the Mach-O daemon that node compiled in its own build phase, while
-`chuggernaut-channel` still comes out of the image there too — and asks the
+of the Mach-O daemon that node compiled in its own build phase, while the
+**injected** `chuggernaut-channel` still comes out of the image there too, and a
+host-capable mac's own `chuggernaut-channel-host` comes out of that same native
+build (the two-executor rule above) — and asks the
 supervisor to restart, so a converted node updates itself again. A converted mac
 whose run spec carries no reachable `WORKER_CARGO` (or whose cargo cannot find
 `rustc` on the agent's `PATH`) **refuses its own build by name** and stays on the
@@ -785,19 +791,37 @@ the third from its
 `build-worker.sh` reads it with the daemon's own rule (`serves_container` in
 `crates/worker/src/daemon.rs`: names `container`, or names nothing at all). A
 node that names only `host` gets **no** socket check, **no** agent images, **no**
-container-platform probe and **no** `chuggernaut-channel` binary — because
-`local_backend` returns its host backend before it ever opens a docker endpoint,
-a host job type cannot declare an `image:`, and the channel binary is injected
-into *agent* containers only (`Core::channel_mcp`), while host mode serves
-`work.type: command` alone. On Darwin the daemon is compiled natively, so
-nothing is left that needs docker and **the worker image is skipped too**.
+container-platform probe and **no injected** `chuggernaut-channel` binary —
+because `local_backend` returns its host backend before it ever opens a docker
+endpoint, a host job type cannot declare an `image:`, and the channel binary is
+injected into *agent* containers only (`Core::channel_mcp`), of which this node
+creates none. On Darwin the daemon is compiled natively, so nothing is left that
+needs docker and **the worker image is skipped too**.
+
+**It does get a channel binary of its own, at its own path.** Design
+[#490](../../docs/design/490-agent-work-on-a-mac.md) D2: a node that names `host`
+is handed `/usr/local/lib/chuggernaut/chuggernaut-channel-host`, which **the node
+execs itself** — the agent CLI spawns it as a stdio MCP server in the node's own
+process tree for a host agent task. It is a second artifact, never a rename of
+the first: the injected copy at
+`/usr/local/lib/chuggernaut/chuggernaut-channel` must be a Linux ELF and this one
+must run on the node, so a dual-mode mac holds both and each is checked against
+the question **its own executor** asks — the injected one against the container's
+architecture (its object header), the host one by being **run** here. On a mac
+the host copy comes out of the node's own `cargo build`, which is why
+`--bin chuggernaut-channel` is compiled on a host-capable node again (job #487
+dropped it while host mode was command-only; #490 D2 makes the node the reader).
+On Linux both copies are the same bytes out of the same image — the node's kernel
+is the container's — and are still staged and guarded separately, because the
+node's userland is not the container's.
 
 Two consequences worth knowing before you convert one:
 
-- **The daemon logs one warning at boot** — `channel binary unavailable` — and
-  carries an empty artifact map. That is the correct state: only a
-  `FileSource::LocalArtifact` launch reads it, and a command-only node never
-  makes one.
+- **The daemon still logs one warning at boot** — `channel binary unavailable` —
+  and carries an empty artifact map. That is the correct state and is about the
+  **injected** copy: only a `FileSource::LocalArtifact` launch reads it, and a
+  node that creates no container makes none. Nothing reads the host copy yet
+  either; #490 slice 4 is what teaches the daemon to.
 - **On Linux the worker image is still built**, because #440 D6 holds there and
   that image is the only place a Linux node's daemon binary comes from. So
   "needs no docker at all" is a **Darwin** property; a host-only Linux node

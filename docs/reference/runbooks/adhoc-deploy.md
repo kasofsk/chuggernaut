@@ -103,15 +103,26 @@ Linux node**, extracts the daemon binary from the new `worker` image. A
 instead, because the worker image is a Linux container and what `docker cp`
 lifts out of it is an ELF file launchd loops on (#440's
 [2026-08-07 correction](../../design/440-native-worker-daemon.md#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476)).
-**Only the daemon splits.** `chuggernaut-channel` is injected into agent
-containers and never runs on the node, so it comes out of the worker image on
-both platforms — a mac's own Mach-O copy leaves every agent's MCP server
-`pending` and its evaluators without `submit_eval` (#440's
+**On a container-only node the daemon is the only artifact that splits.** The
+**injected** `chuggernaut-channel` is read by an agent container and never runs
+on the node, so it comes out of the worker image on both platforms — a mac's own
+Mach-O copy leaves every agent's MCP server `pending` and its evaluators without
+`submit_eval` (#440's
 [2026-08-08 correction](../../design/440-native-worker-daemon.md#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)),
 which is why a Darwin deploy also reads the node's container architecture off
 `docker version --format '{{.Server.Arch}}/{{.Server.Os}}'` and refuses a staged
 binary that does not match it.
-Either way it installs the binary with an environment
+A node whose `WORKER_MODES` names `host` gets a **second** channel binary as
+well, at `/usr/local/lib/chuggernaut/chuggernaut-channel-host` (design
+[#490](../../design/490-agent-work-on-a-mac.md) D2) — and that one splits the
+**other** way, because **this node** execs it rather than a container: out of the
+node's own native build on Darwin, out of the image on Linux, where the node and
+the container are the same platform. It is checked by the question its own
+executor asks — by being *run* on the node, with a Linux ELF found in that slot
+on a mac refused by name as the other half of the pair. Nothing reads it yet —
+slice 3 only puts the file there — so a refusal here is about a bad deploy, not
+about a task that was going to run.
+Either way it installs the daemon binary with an environment
 file and a systemd unit (Linux) or launchd agent (macOS), and asks the
 supervisor to restart it (design
 [#440](../../design/440-native-worker-daemon.md) D2/D6). A node still running

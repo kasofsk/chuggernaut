@@ -75,38 +75,43 @@ build_worker_run_spec_per_node() {
 }
 build_worker_run_spec_per_node
 
-# ── does this node name a container runtime at all (design #309 §1) ──────────
+# ── which runtimes this node names (design #309 §1) ──────────────────────────
 # Every docker step below serves CONTAINER launches — the socket the daemon
 # would dial, the three images, the channel binary it injects into agent
 # containers — and a node naming only `host` serves none of them:
 # `local_backend` constructs the host backend and RETURNS before it opens a
 # docker endpoint (crates/worker/src/daemon.rs), so `WORKER_DOCKER_ENDPOINT` is
 # never read and no image is ever launched. A host job type cannot declare one
-# either (crates/types/src/job_type.rs `validate_top_level_image`), and host mode
-# serves `work.type: command` only — which is the one launch path that never
-# carries the channel binary (`Core::channel_mcp` has exactly two callers, both
-# agent-shaped: crates/dispatcher/src/exec.rs and eval.rs).
+# either (crates/types/src/job_type.rs `validate_top_level_image`).
 #
-# The answer is derived HERE, once, in the daemon's own spelling
-# (`serves_container`: names `container`, or names nothing at all). A second
-# spelling of that rule is the bug to avoid — a deploy that disagrees with the
+# HOST capability is the second question, and it is a different one: design #490
+# D2 gives a host-capable node its OWN chuggernaut-channel binary, at its own
+# path, executed by the NODE rather than injected into a container. The two
+# answers are independent — a dual-mode mac wants both files — so both are
+# derived HERE, once, in the daemon's own spelling (`serves_container`: names
+# `container`, or names nothing at all; `serves_host`: names `host`). A second
+# spelling of either rule is the bug to avoid — a deploy that disagrees with the
 # node it is converting either refuses a legal node or hands a docker-less one a
 # spec it cannot serve.
 #
-# Only the ANSWER is derived here. WORKER_MODES is still VALIDATED further down,
-# where it always was, so an unparseable value refuses in the same place with the
-# same message — and this scan cannot be fooled by one, because it matches whole
-# comma-separated entries (`hostt` names no mode here either).
+# Only the ANSWERS are derived here. WORKER_MODES is still VALIDATED further
+# down, where it always was, so an unparseable value refuses in the same place
+# with the same message — and this scan cannot be fooled by one, because it
+# matches whole comma-separated entries (`hostt` names no mode here either).
 MODES="${WORKER_MODES:-}"
 MODES="${MODES#"${MODES%%[![:space:]]*}"}"
 MODES="${MODES%"${MODES##*[![:space:]]}"}"
 SERVES_CONTAINER=1
+SERVES_HOST=""
 case ",$(printf '%s' "$MODES" | tr -d '[:space:]')," in
   *,container,*) ;;
   *,host,*) SERVES_CONTAINER="" ;;
 esac
+case ",$(printf '%s' "$MODES" | tr -d '[:space:]')," in
+  *,host,*) SERVES_HOST=1 ;;
+esac
 if [ -z "$SERVES_CONTAINER" ]; then
-  echo "build-worker: WORKER_MODES='$MODES' names no container runtime, so $NODE serves host commands only (design #309 §1) — this deploy skips the docker socket check, the agent images and the channel binary, and the daemon it installs never opens a docker endpoint"
+  echo "build-worker: WORKER_MODES='$MODES' names no container runtime, so $NODE serves host launches only (design #309 §1) — this deploy skips the docker socket check, the agent images and the INJECTED channel binary, and the daemon it installs never opens a docker endpoint. Its own host chuggernaut-channel is still installed, at its own path (design #490 D2)"
 fi
 
 # DOCKER_BUILDKIT=1 requests the in-daemon BuildKit builder so the Dockerfiles'
@@ -196,6 +201,13 @@ fi
 # layout on the host makes both defaults correct with no code change (#440 §4).
 BIN_DIR=/usr/local/bin
 LIB_DIR=/usr/local/lib/chuggernaut
+# The HOST channel binary is a second artifact beside that one, never a
+# replacement for it (design #490 D2): the injected copy is a Linux ELF every
+# agent container execs, this one is whatever THIS node execs, and a dual-mode
+# mac holds both. The `-host` suffix names the executor, which is the only thing
+# that distinguishes them — same file name, same directory, and the pair sorts
+# together in an `ls` (docs/reference/style.md Tier 2 rule 4).
+HOST_CHANNEL_BIN="$LIB_DIR/chuggernaut-channel-host"
 # Where the daemon reads its NATS credential and its git key off the NODE. The
 # `:ro` bind of $HOME/chuggernaut-worker/keys is gone with the container, and the
 # boundary it was pretending to give with it — the bind SOURCE was a directory in
@@ -492,13 +504,18 @@ fi
 # the ssh shell's PATH, not the operator's — the same reason WORKER_CARGO had to
 # be declared absolute in the first place.
 #
-# A host-only node compiles the daemon ALONE. Its native chuggernaut-channel was
-# always discarded — the installed copy comes out of the image, because a Mach-O
-# is what no Linux container can exec (#480) — and here there is no container to
-# inject one into either, so building it would be minutes of the node's own cargo
-# spent on a file nothing reads.
+# BOTH binaries, on every mac, and the channel half is job #487's condition
+# reversed. #487 dropped it from a host-only node and its reasoning was sound
+# against the mode it was written for: "there is no container to inject one into
+# either, so building it would be minutes of the node's own cargo spent on a file
+# nothing reads" — true while host mode serves `work.type: command` only. Design
+# #490 D2 kills that premise: the reader is the NODE, which execs this Mach-O
+# itself for a host agent task, so a host-capable mac wants exactly the file #487
+# stopped building. A container-serving mac has always built it and still
+# discards it (its injected copy comes out of the image, #480), so with
+# `serves_container` and `serves_host` between them covering every legal
+# WORKER_MODES, the list is unconditional again.
 NATIVE_BINS="--bin chuggernaut --bin chuggernaut-channel"
-[ -n "$SERVES_CONTAINER" ] || NATIVE_BINS="--bin chuggernaut"
 if [ "$NODE_OS" = Darwin ]; then
   git archive --format=tar HEAD > "$CTX"
   [ -s "$CTX" ] || { echo "build-worker: empty build context for the native daemon build — aborting" >&2; exit 1; }
@@ -1057,24 +1074,43 @@ fi
 # deploy. A mode that made it root-only would turn #390's guard into a guard that
 # silently passes, which is the failure it exists to prevent.
 #
-# A HOST-ONLY NODE IS HANDED NO CHANNEL BINARY AT ALL, and that is the honest
-# default rather than a gap: the file is injected by `Core::channel_mcp`, whose
-# only two callers are the agent work arm and the agent evaluator
-# (crates/dispatcher/src/exec.rs, crates/dispatcher/src/eval.rs), while a host
-# node serves `work.type: command` only — twice enforced, in the job type's own
-# field rules and again in `HostBackend::admit`. The command path's launch config
-# carries inline ssh credentials and nothing else
-# (`Core::command_launch_config`), so it never names an artifact. A daemon whose
-# channel binary is absent warns once at boot and leaves its artifact map empty
-# (crates/worker/src/daemon.rs), which only a `FileSource::LocalArtifact` launch
-# would ever notice. Installing one anyway would put a binary nothing on the node
-# can use where a later reader has to work out why.
+# A HOST-CAPABLE NODE GETS A SECOND CHANNEL BINARY, at $HOST_CHANNEL_BIN, and it
+# is the same rule applied to a third executor rather than an exception to it
+# (design #490 D2). The injected copy above is read by a CONTAINER; this one is
+# spawned by the agent CLI as a stdio MCP server in the node's own process tree,
+# so it must run on the NODE — a Mach-O on a mac, exactly the file the injected
+# path refuses. Injecting it instead is not merely wrong but impossible:
+# `rebase_path` (crates/container/src/host.rs) maps `/workspace/*` and
+# `/chuggernaut/*` and refuses everything else, and the injection point is
+# `/usr/local/bin/chuggernaut-channel`.
+#
+# The two are decided independently, so a dual-mode mac installs both and a
+# container-only node's output is byte-identical to what it has always been. On
+# LINUX the two executors coincide — the node's kernel is the container's — so
+# both copies are the same bytes out of the same image, staged twice under the
+# two names because they are two artifacts with two guards, not one file with two
+# links. On DARWIN they diverge: the injected copy comes out of the image and the
+# host copy out of the native build the tree compiled above, which is the copy
+# job #487 stopped building and this restores.
+#
+# A host-only node used to be handed NO channel binary at all, on the ground that
+# `Core::channel_mcp`'s only two callers are agent-shaped while host mode serves
+# `work.type: command` only — twice enforced, in the job type's field rules
+# (`validate_host_serves_commands_only`) and again in `HostBackend::admit`. #490
+# slice 5 lifts exactly that restriction, and #490 D5 puts the resulting refusal
+# at LAUNCH rather than at boot, so the binary has to be on the node before the
+# daemon that reads it is: a boot-time refusal would take a dual-mode node's
+# container capacity down with it.
 if [ "$NODE_OS" = Linux ]; then
   REMOTE_STAGE="CID=\$(docker create chuggernaut/worker:$TAG)
 docker cp \"\$CID:/usr/local/bin/chuggernaut\" \"\$STAGE/chuggernaut\""
   if [ -n "$SERVES_CONTAINER" ]; then
     REMOTE_STAGE="$REMOTE_STAGE
 docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel\""
+  fi
+  if [ -n "$SERVES_HOST" ]; then
+    REMOTE_STAGE="$REMOTE_STAGE
+docker cp \"\$CID:/usr/local/lib/chuggernaut/chuggernaut-channel\" \"\$STAGE/chuggernaut-channel-host\""
   fi
   REMOTE_STAGE="$REMOTE_STAGE
 docker cp \"\$CID:/usr/local/lib/chuggernaut/worker-refresh.sh\" \"\$STAGE/worker-refresh.sh\"
@@ -1106,9 +1142,16 @@ else
   # node exists in order not to need.
   REMOTE_STAGE="install -m 0755 '$BUILD_DIR/target/release/chuggernaut' \"\$STAGE/chuggernaut\"
 install -m 0755 '$BUILD_DIR/src/deploy/prod/worker-refresh.sh' \"\$STAGE/worker-refresh.sh\""
+  # The HOST copy is the one artifact a mac takes out of its OWN build rather
+  # than out of the image — the exact inverse of the line below it, and for the
+  # exact inverse reason (design #490 D2's two-executor rule).
+  if [ -n "$SERVES_HOST" ]; then
+    REMOTE_STAGE="$REMOTE_STAGE
+install -m 0755 '$BUILD_DIR/target/release/chuggernaut-channel' \"\$STAGE/chuggernaut-channel-host\""
+  fi
   REMOTE_CHANNEL_CHECK=":"
   if [ -z "$SERVES_CONTAINER" ]; then
-    echo "build-worker: $NODE gets no chuggernaut-channel binary — that file is injected into AGENT containers only (crates/dispatcher/src/exec.rs \`Core::channel_mcp\`) and a host node serves commands only, so a copy here would be bytes nothing on the node can use"
+    echo "build-worker: $NODE gets no INJECTED chuggernaut-channel binary — that file is read by an agent CONTAINER (crates/dispatcher/src/exec.rs \`Core::channel_mcp\`) and this node names no container runtime; the native Mach-O it execs ITSELF is installed at $HOST_CHANNEL_BIN instead (design #490 D2)"
   else
     NODE_DOCKER_PLATFORM="$(ssh "$WORKER_SSH" "docker version --format '{{.Server.Arch}}/{{.Server.Os}}' 2> /dev/null || true" < /dev/null | tr -d '[:space:]')"
     case "$NODE_DOCKER_PLATFORM" in
@@ -1129,8 +1172,7 @@ docker rm \"\$CID\" >/dev/null"
     # instead: ELF magic, and the e_machine the node's containers run. `od` is
     # POSIX and on both platforms; e_machine is two little-endian bytes at file
     # offset 18, so aarch64 (0xb7) reads back `b700` and x86-64 (0x3e) `3e00`.
-    REMOTE_CHANNEL_CHECK="chug_magic() { od -A n -v -t x1 -j \"\$2\" -N \"\$3\" \"\$1\" 2> /dev/null | tr -d '[:space:]'; }
-chug_channel_ok() { [ \"\$(chug_magic \"\$1\" 0 4)\" = 7f454c46 ] && [ \"\$(chug_magic \"\$1\" 18 2)\" = \"\$2\" ]; }
+    REMOTE_CHANNEL_CHECK="chug_channel_ok() { [ \"\$(chug_magic \"\$1\" 0 4)\" = 7f454c46 ] && [ \"\$(chug_magic \"\$1\" 18 2)\" = \"\$2\" ]; }
 if ! chug_channel_ok \"\$STAGE/chuggernaut-channel\" $CHANNEL_ELF_MACHINE; then
   CHAN_MAGIC=\$(chug_magic \"\$STAGE/chuggernaut-channel\" 0 4)
   case \"\$CHAN_MAGIC\" in
@@ -1146,7 +1188,43 @@ fi
 REMOTE_PUT_CHANNEL=""
 [ -z "$SERVES_CONTAINER" ] || REMOTE_PUT_CHANNEL="chug_put 0755 \"\$STAGE/chuggernaut-channel\" '$LIB_DIR/chuggernaut-channel'
 "
+# ── and the HOST copy, asked the question ITS executor asks (design #490 D2) ──
+# That executor is the node, so the node RUNS it — the same 126/127 question the
+# Linux arm above asks of the injected copy, and the one the Darwin arm cannot
+# ask of it. `chuggernaut-channel` takes no `--version` (it is an MCP server that
+# reads its job context out of the environment and then speaks newline-delimited
+# JSON-RPC on stdin, crates/chuggernaut-channel/src/server.rs), so a run with no
+# context exits non-zero either way and only 126/127 means the kernel would not
+# load it.
+#
+# On a mac the object header is read FIRST, and it is the mirror image of the
+# guard above rather than a second dialect of it: it reuses the same `chug_magic`
+# and refuses an ELF, because on a dual-mode node the overwhelmingly likely wrong
+# file here is the OTHER one of the pair. Exec alone would refuse it too, but
+# with "a foreign architecture, a missing dynamic loader, or a broken build" —
+# sending the operator after a toolchain problem that is not there.
+REMOTE_HOST_CHANNEL_CHECK=":"
+REMOTE_PUT_HOST_CHANNEL=""
+if [ -n "$SERVES_HOST" ]; then
+  REMOTE_HOST_CHANNEL_CHECK=""
+  if [ "$NODE_OS" = Darwin ]; then
+    REMOTE_HOST_CHANNEL_CHECK="if [ \"\$(chug_magic \"\$STAGE/chuggernaut-channel-host\" 0 4)\" = 7f454c46 ]; then
+  echo \"build-worker: the staged host chuggernaut-channel binary is a Linux ELF, and this mac execs it ITSELF — the agent CLI spawns it as a stdio MCP server in the node's own process tree (design #490 D2), so it must be the Mach-O this node's cargo just built. An ELF here is the INJECTED copy in the host slot, which is the other half of the same pair (#480): that one belongs at $LIB_DIR/chuggernaut-channel and comes out of chuggernaut/worker:$TAG. REFUSING (live daemon untouched, nothing installed).\" >&2
+  exit 1
+fi
+"
+  fi
+  REMOTE_HOST_CHANNEL_CHECK="${REMOTE_HOST_CHANNEL_CHECK}if \"\$STAGE/chuggernaut-channel-host\" < /dev/null > /dev/null 2>&1; then HOST_CHAN_RC=0; else HOST_CHAN_RC=\$?; fi
+if [ \"\$HOST_CHAN_RC\" = 126 ] || [ \"\$HOST_CHAN_RC\" = 127 ]; then
+  echo \"build-worker: the staged host chuggernaut-channel binary cannot be executed on this node (exit \$HOST_CHAN_RC: a foreign architecture, a missing dynamic loader, or a broken build) — THIS NODE execs that file, the agent CLI spawning it as a stdio MCP server for a host agent task (design #490 D2), so a copy that will not load leaves the task with no update_status and no submit_result at all. REFUSING (live daemon untouched, nothing installed).\" >&2
+  exit 1
+fi"
+  REMOTE_PUT_HOST_CHANNEL="chug_put 0755 \"\$STAGE/chuggernaut-channel-host\" '$HOST_CHANNEL_BIN'
+"
+  echo "build-worker: $NODE serves host launches, so it is also handed its own chuggernaut-channel at $HOST_CHANNEL_BIN — the node execs that one itself, and it is checked against that question rather than against a container's (design #490 D2)"
+fi
 REMOTE_INSTALL="set -e
+chug_magic() { od -A n -v -t x1 -j \"\$2\" -N \"\$3\" \"\$1\" 2> /dev/null | tr -d '[:space:]'; }
 chug_dir() { mkdir -p \"\$1\" 2>/dev/null || sudo -n mkdir -p \"\$1\"; }
 chug_put() { install -m \"\$1\" \"\$2\" \"\$3\" 2>/dev/null || sudo -n install -m \"\$1\" \"\$2\" \"\$3\"; }
 STAGE=\$(mktemp -d)
@@ -1157,11 +1235,12 @@ if ! \"\$STAGE/chuggernaut\" --version > /dev/null 2>&1; then
   exit 1
 fi
 $REMOTE_CHANNEL_CHECK
+$REMOTE_HOST_CHANNEL_CHECK
 chug_dir '$BIN_DIR'
 chug_dir '$LIB_DIR'
 chug_dir '$ENV_DIR'
 chug_put 0755 \"\$STAGE/chuggernaut\" '$BIN_DIR/chuggernaut'
-${REMOTE_PUT_CHANNEL}chug_put 0755 \"\$STAGE/worker-refresh.sh\" '$LIB_DIR/worker-refresh.sh'
+${REMOTE_PUT_CHANNEL}${REMOTE_PUT_HOST_CHANNEL}chug_put 0755 \"\$STAGE/worker-refresh.sh\" '$LIB_DIR/worker-refresh.sh'
 cat > \"\$STAGE/worker.env\" <<'CHUG_WORKER_ENV'
 ${SPEC_ENV}CHUG_WORKER_ENV
 chug_put 0644 \"\$STAGE/worker.env\" '$ENV_FILE'"

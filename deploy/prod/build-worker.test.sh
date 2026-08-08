@@ -2415,8 +2415,10 @@ docker_surface | grep -vF "docker rm -f chug-worker" | grep -vF "docker inspect 
   || fail "a host-only node still issues docker: $(cat "$WORK/hostonly-docker-left.txt")"
 
 # And it is still a deploy: the daemon is compiled, installed, given its run
-# spec and restarted.
-grep_log "build --release --locked"
+# spec and restarted. BOTH binaries are compiled again — job #487 dropped the
+# channel binary here on the ground that nothing on a host-only node would ever
+# read it, which design #490 D2 falsifies by making the NODE the reader.
+grep_log "build --release --locked --bin chuggernaut --bin chuggernaut-channel"
 grep_log "chug_put 0755 \"\$STAGE/chuggernaut\" '/usr/local/bin/chuggernaut'"
 grep_log "chug_put 0755 \"\$STAGE/worker-refresh.sh\" '/usr/local/lib/chuggernaut/worker-refresh.sh'"
 case "$(env_file)" in
@@ -2425,14 +2427,17 @@ case "$(env_file)" in
 esac
 started || fail "a host-only node must still have its daemon restarted"
 
-# The channel binary is the one artifact it does NOT get, and installing nothing
-# is deliberate: `Core::channel_mcp` (crates/dispatcher/src/exec.rs) is the only
-# injector and both its callers are agent-shaped, while a host node serves
-# `work.type: command` only. The daemon warns once and carries an empty artifact
-# map, which only a `FileSource::LocalArtifact` launch would notice.
-if grep -qF "chuggernaut-channel" "$LOG"; then
-  fail "a host-only node must be handed no chuggernaut-channel binary at all"
+# The INJECTED channel binary is the one artifact it does NOT get, and that half
+# is unchanged: `Core::channel_mcp` (crates/dispatcher/src/exec.rs) is the only
+# injector, both its callers are agent-shaped, and this node creates no container
+# to inject into. What it DOES get is the other half of the pair — its own native
+# channel binary at its own path (design #490 D2), because a host agent task
+# execs that one in the node's own process tree.
+if grep -qF "chug_put 0755 \"\$STAGE/chuggernaut-channel\" '/usr/local/lib/chuggernaut/chuggernaut-channel'" "$LOG"; then
+  fail "a host-only node must be handed no INJECTED chuggernaut-channel binary"
 fi
+grep_log "install -m 0755 '/Users/op/chuggernaut-worker/build/target/release/chuggernaut-channel' \"\$STAGE/chuggernaut-channel-host\""
+grep_log "chug_put 0755 \"\$STAGE/chuggernaut-channel-host\" '/usr/local/lib/chuggernaut/chuggernaut-channel-host'"
 
 # The host guard set is untouched — this change must not buy docker-freedom with
 # a weaker host node.
@@ -2494,14 +2499,90 @@ for _img in "chuggernaut/agent:prod" "chuggernaut/agent-rust:prod"; do
     fail "a host-only node launches no image — $_img must not be built"
   fi
 done
-if grep -qF "chuggernaut-channel" "$LOG"; then
-  fail "a host-only Linux node must not extract or install the channel binary"
+if grep -qF "chug_put 0755 \"\$STAGE/chuggernaut-channel\" '/usr/local/lib/chuggernaut/chuggernaut-channel'" "$LOG"; then
+  fail "a host-only Linux node must not install the INJECTED channel binary"
 fi
+# It IS handed the host copy, out of that same image: on Linux the node's kernel
+# is the container's, so the two executors coincide and the bytes are the same —
+# staged twice under two names because they are two artifacts with two guards
+# (design #490 D2), and only the host one is installed here.
+grep_log '"$CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$STAGE/chuggernaut-channel-host"'
+grep_log "chug_put 0755 \"\$STAGE/chuggernaut-channel-host\" '/usr/local/lib/chuggernaut/chuggernaut-channel-host'"
 if grep -qF -- "[ -S '" "$LOG"; then
   fail "a host-only node never dials a docker socket — the socket check must be skipped"
 fi
 started || fail "a host-only Linux node must still have its daemon restarted"
-echo "ok: a host-only Linux node builds only the image its own daemon comes out of"
+echo "ok: a host-only Linux node builds only the image its own daemon comes out of, and takes its host channel binary out of it"
+
+# ── Case 8d: a DUAL-MODE mac ends up with BOTH channel binaries ───────────────
+# The acceptance shape of design #490 D2: two executors, two artifacts, two
+# paths, two guards, neither weakening the other. The injected copy is the Linux
+# ELF out of the image (#480, untouched); the host copy is the Mach-O this node's
+# own cargo built, which #487 stopped building and slice 3 restores. Injecting
+# the host one instead is not merely wrong but impossible — `rebase_path`
+# (crates/container/src/host.rs) maps `/workspace/*` and `/chuggernaut/*` and
+# refuses everything else, and the injection point is /usr/local/bin.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=container,host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  sh "$SUT" > "$WORK/dualmac.out" 2>&1
+
+grep_log "build --release --locked --bin chuggernaut --bin chuggernaut-channel"
+grep_log '"$CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$STAGE/chuggernaut-channel"'
+grep_log "install -m 0755 '/Users/op/chuggernaut-worker/build/target/release/chuggernaut-channel' \"\$STAGE/chuggernaut-channel-host\""
+grep_log "chug_put 0755 \"\$STAGE/chuggernaut-channel\" '/usr/local/lib/chuggernaut/chuggernaut-channel'"
+grep_log "chug_put 0755 \"\$STAGE/chuggernaut-channel-host\" '/usr/local/lib/chuggernaut/chuggernaut-channel-host'"
+# The two paths must be DISTINCT — one file at one path is the whole defect this
+# slice avoids, and a mac holding only the ELF is #480's state again.
+if grep -qF "install -m 0755 '/Users/op/chuggernaut-worker/build/target/release/chuggernaut-channel' \"\$STAGE/chuggernaut-channel\"" "$LOG"; then
+  fail "the mac's own Mach-O must never be staged as the INJECTED copy (#480)"
+fi
+if grep -qF '"$CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$STAGE/chuggernaut-channel-host"' "$LOG"; then
+  fail "a mac's host copy must not come out of the Linux image"
+fi
+grep -qF "handed its own chuggernaut-channel at /usr/local/lib/chuggernaut/chuggernaut-channel-host" "$WORK/dualmac.out" \
+  || fail "the operator must be told the node gets a second, node-executed channel binary and where"
+echo "ok: a dual-mode mac gets the image's Linux ELF for injection and its own Mach-O for host execution"
+
+# ── Case 8e: the HOST copy is asked ITS executor's question, before installing ──
+# The mirror image of case 2s6's guard, on the same node: the injected copy is
+# judged by object header because a mac never execs it, and the host copy is
+# judged by EXECUTING it because a mac is exactly what execs it. The ELF read in
+# front of that is not a second dialect — it names the one substitution that is
+# actually likely on a dual-mode node, the other half of the pair.
+grep_log "\"\$STAGE/chuggernaut-channel-host\" < /dev/null"
+grep_log "HOST_CHAN_RC\" = 126"
+grep_log "chug_magic \"\$STAGE/chuggernaut-channel-host\" 0 4)\" = 7f454c46"
+grep_log "REFUSING (live daemon untouched, nothing installed)"
+host_probe_line="$(line_of "\"\$STAGE/chuggernaut-channel-host\" < /dev/null")"
+host_put_line="$(line_of "chug_put 0755 \"\$STAGE/chuggernaut-channel-host\" '/usr/local/lib/chuggernaut/chuggernaut-channel-host'")"
+[ -n "$host_probe_line" ] && [ -n "$host_put_line" ] || fail "expected both the host channel check and its install in the log"
+[ "$host_probe_line" -lt "$host_put_line" ] || fail "the host channel binary must be checked BEFORE anything is installed"
+# The refusal must precede the DAEMON's install too, not just its own: a node
+# refused here keeps the daemon it is running.
+daemon_put_line="$(line_of "chug_put 0755 \"\$STAGE/chuggernaut\" '/usr/local/bin/chuggernaut'")"
+[ -n "$daemon_put_line" ] || fail "expected the daemon install in the log"
+[ "$host_probe_line" -lt "$daemon_put_line" ] || fail "a host channel refusal must leave the live daemon untouched"
+# A container-only mac is asked none of it: there is no host copy to judge.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  sh "$SUT" > /dev/null 2>&1
+if grep -qF "chuggernaut-channel-host" "$LOG"; then
+  fail "a container-only node must not be handed, or asked about, a host channel binary"
+fi
+echo "ok: the host channel binary must exec on the node, checked before any install"
 
 # ── Case 8c: a container-capable node is byte-identical to today ──────────────
 # The acceptance bar for this change: every node in the fleet today names either
@@ -2540,8 +2621,16 @@ PATH="$BIN:$PATH" \
   WORKER_SLOTS_MAX=1 \
   sh "$SUT" > /dev/null 2>&1
 docker_surface > "$WORK/surface-dual.txt"
-diff "$WORK/surface-unset.txt" "$WORK/surface-dual.txt" > /dev/null \
-  || fail "a dual-mode node must issue exactly the docker calls an unset node does"
-echo "ok: container-only and dual-mode nodes are byte-identical to an unset node"
+# A dual-mode node is host-CAPABLE, so since design #490 D2 it differs by exactly
+# one docker call — the second extraction that stages its host channel binary —
+# and the delta is asserted rather than tolerated: anything else moving is the
+# regression this case has always been here to catch.
+diff "$WORK/surface-unset.txt" "$WORK/surface-dual.txt" > "$WORK/surface-dual-diff.txt" || true
+dual_lost="$(sed -n 's/^< //p' "$WORK/surface-dual-diff.txt")"
+dual_added="$(sed -n 's/^> //p' "$WORK/surface-dual-diff.txt")"
+[ -z "$dual_lost" ] || fail "a dual-mode node must not lose a docker call an unset node makes: $dual_lost"
+[ "$dual_added" = 'docker cp "$CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$STAGE/chuggernaut-channel-host"' ] \
+  || fail "a dual-mode node's only extra docker call is staging its host channel binary (#490 D2); got: $dual_added"
+echo "ok: a container-only node is byte-identical to an unset node, and a dual-mode one adds only its host channel binary"
 
 echo "ALL PASS"

@@ -274,6 +274,10 @@ MAC_BUILD_DIR="$WORK/nativebuild"
 mac_build_reset() { rm -rf "$MAC_BUILD_DIR"; mkdir -p "$MAC_BUILD_DIR"; }
 # A staging directory as the build phase leaves it: the two binaries, the tree's
 # copy of this script, and the SHA the swap checks against the image's label.
+# $FAKE_NATIVE_CHANNEL_KIND stages the mac's own chuggernaut-channel as something
+# the NODE cannot exec — `noexec` is a binary the kernel would not load (the
+# 126/127 the host guard reads), `elf` is the injected Linux copy sitting in the
+# host slot, which is the substitution design #490 D2's mirror-image guard names.
 mac_build_stage() {
   mac_build_reset
   mkdir -p "$MAC_BUILD_DIR/target/release" "$MAC_BUILD_DIR/src/deploy/prod"
@@ -281,6 +285,13 @@ mac_build_stage() {
     printf '#!/bin/sh\nexit 0\n' > "$MAC_BUILD_DIR/target/release/$b"
     chmod +x "$MAC_BUILD_DIR/target/release/$b"
   done
+  case "${FAKE_NATIVE_CHANNEL_KIND:-}" in
+    noexec) printf '#!/chug/no/such/interpreter\n' > "$MAC_BUILD_DIR/target/release/chuggernaut-channel" ;;
+    elf)
+      printf '\177ELF\002\001\001\000' > "$MAC_BUILD_DIR/target/release/chuggernaut-channel"
+      printf '\000\000\000\000\000\000\000\000\003\000\267\000' >> "$MAC_BUILD_DIR/target/release/chuggernaut-channel"
+      ;;
+  esac
   printf '#!/bin/sh\n# staged worker-refresh.sh\n' > "$MAC_BUILD_DIR/src/deploy/prod/worker-refresh.sh"
   printf '%s\n' "${1:-abc123}" > "$MAC_BUILD_DIR/native.sha"
 }
@@ -317,8 +328,11 @@ NATIVE="$WORK/native"
 mkdir -p "$NATIVE/bin" "$NATIVE/lib"
 DAEMON_BIN="$NATIVE/bin/chuggernaut"
 CHANNEL_BIN="$NATIVE/lib/chuggernaut-channel"
+# The fourth artifact on a host-capable node (design #490 D2): the channel binary
+# THIS NODE execs, at its own path beside the one it injects into containers.
+HOST_CHANNEL_BIN="$NATIVE/lib/chuggernaut-channel-host"
 NODE_SCRIPT="$NATIVE/lib/worker-refresh.sh"
-native_swap_reset() { rm -f "$DAEMON_BIN" "$CHANNEL_BIN" "$NODE_SCRIPT"; }
+native_swap_reset() { rm -f "$DAEMON_BIN" "$CHANNEL_BIN" "$HOST_CHANNEL_BIN" "$NODE_SCRIPT"; }
 
 # Where the swap's `mktemp -d` staging dir lands, so a case can assert the swap
 # removed it. Its own dir because "is it gone" is only decidable if nothing else
@@ -1387,21 +1401,23 @@ fi
 grep_out "phase build-daemon"
 [ -x "$MAC_BUILD_DIR/target/release/chuggernaut" ] || fail "the daemon must still be compiled and staged"
 [ "$(cat "$MAC_BUILD_DIR/native.sha")" = abc123 ] || fail "the staged build must still record its SHA"
-# And the channel binary is not even COMPILED: it was always discarded on a mac
-# (#480), and here there is no container to inject one into either.
-grep_log "cargo build --release --locked --bin chuggernaut ["
-if grep -qF -- "--bin chuggernaut-channel" "$LOG"; then
-  fail "a host-only node must not spend its own cargo on a channel binary nothing reads"
-fi
-echo "ok: a host-only mac refreshes with no docker call, no disk pre-flight and no channel binary"
+# And the channel binary IS compiled again — job #487 dropped it here because
+# nothing on a host-only node would read it, and design #490 D2 makes the NODE
+# the reader: it execs its own Mach-O for a host agent task. On a mac that is the
+# only place those bytes can come from, since the image is Linux (#480).
+grep_log "cargo build --release --locked --bin chuggernaut --bin chuggernaut-channel ["
+[ -x "$MAC_BUILD_DIR/target/release/chuggernaut-channel" ] \
+  || fail "a host-capable node must compile the channel binary it execs itself (#490 D2)"
+echo "ok: a host-only mac refreshes with no docker call and no disk pre-flight, and compiles the channel binary it execs itself"
 set_free_kb 60000000
 
-# ── Case 5a: the swap on that node installs two artifacts, not three ──────────
+# ── Case 5a: the swap on that node installs the HOST channel binary, not the ──
+# ── injected one ──────────────────────────────────────────────────────────────
 # `Core::channel_mcp` (crates/dispatcher/src/exec.rs) is the only injector of
-# that file and both its callers are agent-shaped, while host mode serves
-# `work.type: command` only — twice enforced, in the job type's field rules and
-# in `HostBackend::admit`. So installing nothing is the honest default: a binary
-# nothing on the node can use is a thing to explain later.
+# that file and both its callers are agent-shaped, so a node that creates no
+# container is handed no injected copy — unchanged. What design #490 D2 adds is
+# the other half of the pair at its own path: the binary this node execs itself
+# when the agent CLI spawns it as a stdio MCP server for a host agent task.
 : > "$LOG"
 native_swap_reset
 mac_build_stage abc123
@@ -1411,6 +1427,7 @@ PATH="$MACBIN:$BIN:$PATH" \
   WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
   WORKER_DAEMON_BIN="$DAEMON_BIN" \
   WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_HOST_CHANNEL_BINARY="$HOST_CHANNEL_BIN" \
   WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
   WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
   sh "$SUT" swap prod > "$OUT" 2>&1 \
@@ -1419,13 +1436,78 @@ PATH="$MACBIN:$BIN:$PATH" \
 [ -z "$(docker_calls)" ] || fail "a host-only swap issued docker: $(docker_calls)"
 [ -x "$DAEMON_BIN" ] || fail "the daemon must still be installed"
 [ -s "$NODE_SCRIPT" ] || fail "this script must still be installed"
-[ -e "$CHANNEL_BIN" ] && fail "a host-only node must be handed no channel binary"
+[ -e "$CHANNEL_BIN" ] && fail "a host-only node must be handed no INJECTED channel binary"
+[ -x "$HOST_CHANNEL_BIN" ] || fail "a host-capable node must be handed the channel binary it execs itself"
+cmp -s "$MAC_BUILD_DIR/target/release/chuggernaut-channel" "$HOST_CHANNEL_BIN" \
+  || fail "the host channel binary must be the Mach-O this node's own cargo built"
+grep_out "installed $HOST_CHANNEL_BIN from the native build staged at $MAC_BUILD_DIR"
 grep_log "launchctl kickstart"
 # The generation check DEGRADES rather than disappearing: there is no image label
 # to cross-check against, so the staging directory must exist and the SHA it
 # names is reported instead of assumed.
 grep_out "installing the native daemon staged at $MAC_BUILD_DIR for abc123"
-echo "ok: a host-only swap installs the daemon and this script, and no channel binary"
+echo "ok: a host-only swap installs the daemon, this script and the node's OWN channel binary"
+
+# ── Case 5a1: a host channel binary that will not exec REFUSES the swap ───────
+# The mirror image of case 3g0a's guard: that one refuses a Mach-O in the
+# INJECTED slot because a container execs it, this one refuses anything the NODE
+# cannot exec because the node is what execs this one. Both leave the live daemon
+# on the generation it has (design #440 D4's trade), and both refuse before the
+# first rename.
+: > "$LOG"
+native_swap_reset
+FAKE_NATIVE_CHANNEL_KIND=noexec mac_build_stage abc123
+set +e
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_MODES=host \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_HOST_CHANNEL_BINARY="$HOST_CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a host channel binary that cannot exec must refuse the swap"
+grep_out "cannot be executed on this node"
+grep_out "REFUSING swap"
+for f in "$DAEMON_BIN" "$HOST_CHANNEL_BIN" "$NODE_SCRIPT"; do
+  [ -e "$f" ] && fail "a refused swap must install nothing, and $f was installed"
+done
+if grep -qF "launchctl kickstart" "$LOG"; then
+  fail "the refusal must come before the restart"
+fi
+echo "ok: a host channel binary the node cannot exec refuses the swap, with nothing installed"
+
+# ── Case 5a2: an ELF in the host slot is named as the OTHER half of the pair ──
+# On a dual-mode mac the likely wrong file here is the injected copy, and exec
+# alone would refuse it as "a foreign architecture, a missing dynamic loader, or
+# a broken build" — sending the operator after a toolchain problem that is not
+# there. So the object header is read first and the refusal names the swap.
+: > "$LOG"
+native_swap_reset
+FAKE_NATIVE_CHANNEL_KIND=elf mac_build_stage abc123
+set +e
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_MODES=host \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_HOST_CHANNEL_BINARY="$HOST_CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  sh "$SUT" swap prod > "$OUT" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a Linux ELF in the host slot must refuse the swap"
+grep_out "is a Linux ELF, and this mac execs it ITSELF"
+grep_out "belongs at $CHANNEL_BIN"
+[ -e "$HOST_CHANNEL_BIN" ] && fail "a refused swap must install nothing"
+[ -e "$DAEMON_BIN" ] && fail "a refused swap must install nothing"
+echo "ok: an ELF in the host slot refuses by name, pointing at the injected path it belongs to"
 
 # ── Case 5b: with nothing staged, that swap still refuses ────────────────────
 # Losing the image label must not turn the check into a pass: a mac with no
@@ -1486,23 +1568,65 @@ PATH="$BIN:$PATH" \
   WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
   WORKER_DAEMON_BIN="$DAEMON_BIN" \
   WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_HOST_CHANNEL_BINARY="$HOST_CHANNEL_BIN" \
   WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
   sh "$SUT" swap prod > "$OUT" 2>&1 \
   || fail "a host-only Linux node must still swap"
 grep_log "docker cp fakecid:/usr/local/bin/chuggernaut"
 grep_log "docker cp fakecid:/usr/local/lib/chuggernaut/worker-refresh.sh"
-if grep -qF "chuggernaut-channel" "$LOG"; then
-  fail "a host-only Linux node must neither extract nor install the channel binary"
+# On LINUX both copies are the same bytes out of the same image — the node's
+# kernel is the container's — but they are still two artifacts with two guards
+# and two paths (design #490 D2), and only the HOST one is installed here.
+grep -q "docker cp fakecid:/usr/local/lib/chuggernaut/chuggernaut-channel .*/chuggernaut-channel-host$" "$LOG" \
+  || fail "a host-capable Linux node must stage its host channel binary out of the image"
+if grep -q "docker cp fakecid:/usr/local/lib/chuggernaut/chuggernaut-channel .*/chuggernaut-channel$" "$LOG"; then
+  fail "a host-only Linux node must not stage the INJECTED channel binary"
 fi
 [ -x "$DAEMON_BIN" ] || fail "the daemon must still be installed"
-[ -e "$CHANNEL_BIN" ] && fail "a host-only node must be handed no channel binary"
-echo "ok: a host-only Linux node builds only the image its daemon comes out of"
+[ -e "$CHANNEL_BIN" ] && fail "a host-only node must be handed no INJECTED channel binary"
+[ -x "$HOST_CHANNEL_BIN" ] || fail "a host-capable Linux node must be handed the channel binary it execs itself"
+echo "ok: a host-only Linux node builds only the image its daemon comes out of, and takes its host channel binary out of it"
+
+# ── Case 5e: a DUAL-MODE mac ends up with BOTH channel binaries ──────────────
+# Design #490 D2's acceptance shape, on the self-refresh side: two executors, two
+# artifacts, two paths, two guards, neither weakening the other. The injected
+# copy still rides out of the image and is still judged against the CONTAINER's
+# architecture (#480, untouched); the host copy is the Mach-O this node's own
+# cargo built and is judged by being RUN here.
+: > "$LOG"
+native_swap_reset
+mac_build_stage abc123
+PATH="$MACBIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_MODES="container, host" \
+  WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
+  WORKER_DAEMON_BIN="$DAEMON_BIN" \
+  WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+  WORKER_HOST_CHANNEL_BINARY="$HOST_CHANNEL_BIN" \
+  WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  FAKE_CHANNEL_KIND=elf-arm64 \
+  sh "$SUT" swap prod > "$OUT" 2>&1 \
+  || fail "a dual-mode mac must swap"
+[ -x "$CHANNEL_BIN" ] || fail "a dual-mode mac must still be handed the INJECTED channel binary"
+[ -x "$HOST_CHANNEL_BIN" ] || fail "a dual-mode mac must also be handed the one it execs itself"
+cmp -s "$CHANNEL_BIN" "$HOST_CHANNEL_BIN" \
+  && fail "the two channel binaries have opposite platforms and must never be the same file"
+cmp -s "$MAC_BUILD_DIR/target/release/chuggernaut-channel" "$HOST_CHANNEL_BIN" \
+  || fail "the host copy must be the Mach-O this node's own cargo built"
+grep_log "docker cp fakecid:/usr/local/lib/chuggernaut/chuggernaut-channel"
+grep_out "and $CHANNEL_BIN from chuggernaut/worker:prod"
+grep_out "installed $HOST_CHANNEL_BIN from the native build staged at $MAC_BUILD_DIR"
+echo "ok: a dual-mode mac holds the image's Linux ELF for injection and its own Mach-O for host execution"
 
 # ── Case 5d: a container-capable node is byte-identical to today ──────────────
 # The acceptance bar: every node in the fleet today names either nothing or
-# `container,host`, and none may see a docker call move. Both spellings are
-# compared against UNSET, which is what the fleet actually runs and the one
-# baseline that cannot drift out of step with the script.
+# `container,host`, and none may see a docker call move — except the one call
+# design #490 D2 adds to a HOST-capable node, which is asserted as a delta below
+# rather than tolerated. Both spellings are compared against UNSET, which is what
+# the fleet actually runs and the one baseline that cannot drift out of step with
+# the script.
+HOST_EXTRA_CP='docker cp fakecid:/usr/local/lib/chuggernaut/chuggernaut-channel <stage>'
 for _phase_args in "build abc123 prod" "swap prod"; do
   _first=""
   for _modes in "" "container" "container, host"; do
@@ -1516,20 +1640,33 @@ for _phase_args in "build abc123 prod" "swap prod"; do
       WORKER_SWAP_CONTAINER_MARKER="$NOT_CONTAINER" \
       WORKER_DAEMON_BIN="$DAEMON_BIN" \
       WORKER_CHANNEL_BINARY="$CHANNEL_BIN" \
+      WORKER_HOST_CHANNEL_BINARY="$HOST_CHANNEL_BIN" \
       WORKER_REFRESH_SCRIPT="$NODE_SCRIPT" \
       sh "$SUT" $_phase_args > /dev/null 2>&1 \
       || fail "'$_phase_args' must succeed with WORKER_MODES='$_modes'"
-    docker_calls > "$WORK/surface-$(printf '%s' "$_modes" | tr -dc 'a-z').txt"
+    _surface="$WORK/surface-$(printf '%s' "$_modes" | tr -dc 'a-z').txt"
+    docker_calls > "$_surface"
     if [ -z "$_first" ]; then
-      _first="$WORK/surface-$(printf '%s' "$_modes" | tr -dc 'a-z').txt"
+      _first="$_surface"
       [ -s "$_first" ] || fail "the '$_phase_args' baseline must issue docker calls to compare against"
-    else
-      diff "$_first" "$WORK/surface-$(printf '%s' "$_modes" | tr -dc 'a-z').txt" > /dev/null \
-        || fail "WORKER_MODES='$_modes' changed the docker calls of '$_phase_args'"
+      continue
     fi
+    diff "$_first" "$_surface" > "$WORK/surface-diff.txt" || true
+    _lost="$(sed -n 's/^< //p' "$WORK/surface-diff.txt")"
+    _added="$(sed -n 's/^> //p' "$WORK/surface-diff.txt")"
+    [ -z "$_lost" ] \
+      || fail "WORKER_MODES='$_modes' LOST a docker call of '$_phase_args': $_lost"
+    # Only the SWAP stages artifacts, so only it grows a call; the build phase
+    # makes the same images whatever runtimes the node names.
+    _want=""
+    case "$_modes:$_phase_args" in
+      *host*:swap*) _want="$HOST_EXTRA_CP" ;;
+    esac
+    [ "$_added" = "$_want" ] \
+      || fail "WORKER_MODES='$_modes' changed the docker calls of '$_phase_args': got '$_added', wanted '$_want'"
   done
 done
-echo "ok: container-only and dual-mode nodes issue exactly the docker calls an unset node does"
+echo "ok: a container-only node issues exactly the docker calls an unset node does, and a host-capable one adds only its own channel binary"
 
 # ── Case 4: unknown phase is a hard error ────────────────────────────────────
 if PATH="$BIN:$PATH" sh "$SUT" frobnicate 2>/dev/null; then

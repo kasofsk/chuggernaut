@@ -27,10 +27,16 @@
 #   WORKER_GIT_KEY          ssh private key for the node credential
 #   WORKER_NODE, WORKER_SLOTS, WORKER_CACHE_DIR   reported, never re-applied
 #   WORKER_REFRESH_DISK_FREE_GB_MIN / _DISK_PATH   disk pre-flight (see below)
-#   WORKER_DAEMON_BIN / WORKER_CHANNEL_BINARY / WORKER_REFRESH_SCRIPT
-#     where the swap installs the three artifacts it extracts from the new worker
-#     image; the defaults are the paths build-worker.sh installs to and the ones
-#     crates/worker/src/config.rs already defaults to
+#   WORKER_DAEMON_BIN / WORKER_CHANNEL_BINARY / WORKER_HOST_CHANNEL_BINARY /
+#   WORKER_REFRESH_SCRIPT
+#     where the swap installs the artifacts it stages — three on a
+#     container-only node, four when WORKER_MODES names `host`; the defaults are
+#     the paths build-worker.sh installs to and the ones
+#     crates/worker/src/config.rs already defaults to. The first three come out
+#     of the new worker image (the daemon excepted on Darwin, below). The HOST
+#     channel copy is the odd one: the node execs it ITSELF, so it comes out of
+#     the image on Linux and out of the node's OWN native build on Darwin, where
+#     the image's Linux ELF is not something the mac can start (design #490 D2)
 #   WORKER_UNIT / WORKER_AGENT_LABEL   what the swap asks the supervisor to restart
 #   WORKER_CARGO / WORKER_BUILD_DIR   DARWIN ONLY: the node's Rust toolchain and
 #     the tree + target dir it compiles the daemon in, because the worker image
@@ -68,14 +74,24 @@ refresh_phase() {
 # could disagree with the daemon this script is about to replace.
 #
 # What follows from it: a host-only node launches no image, so it builds no agent
-# image, and it is handed no chuggernaut-channel binary — that file is injected
-# into AGENT containers only (`Core::channel_mcp`, whose two callers are both
-# agent-shaped) and host mode serves `work.type: command` alone.
+# image, and it is handed no INJECTED chuggernaut-channel binary — that file is
+# read by an agent CONTAINER (`Core::channel_mcp`, whose two callers are both
+# agent-shaped) and this node creates none.
+#
+# HOST capability is the second question and is asked separately, in the daemon's
+# other spelling (`serves_host`: names `host`). Design #490 D2 gives a
+# host-capable node its own chuggernaut-channel at its own path, executed by THIS
+# NODE rather than injected, so a dual-mode mac wants both files and the two
+# answers must not be collapsed into one.
 NODE_MODES="$(printf '%s' "${WORKER_MODES:-}" | tr -d '[:space:]')"
 SERVES_CONTAINER=1
+SERVES_HOST=""
 case ",$NODE_MODES," in
   *,container,*) ;;
   *,host,*) SERVES_CONTAINER="" ;;
+esac
+case ",$NODE_MODES," in
+  *,host,*) SERVES_HOST=1 ;;
 esac
 
 # Whether a refresh here builds a container image AT ALL, which is not the same
@@ -497,13 +513,16 @@ build)
   # workspace compile. The exec check is the point of the exercise — a binary
   # that will not run here must never reach the install.
   #
-  # A host-only node compiles the daemon ALONE. The native chuggernaut-channel
-  # was always thrown away — the installed copy rides out of the image, because a
-  # Mach-O is what no Linux container can exec (#480) — and on this node there is
-  # no container to inject one into either, so building it spends the node's own
-  # cargo on a file nothing will read.
+  # BOTH binaries, on every mac, and the channel half is job #487's condition
+  # reversed. #487 dropped it from a host-only node against a premise that was
+  # true then — "on this node there is no container to inject one into either, so
+  # building it spends the node's own cargo on a file nothing will read" — and
+  # design #490 D2 kills it: the reader is the NODE, which execs this Mach-O
+  # itself for a host agent task. A container-serving mac has always built it and
+  # still discards it (its injected copy rides out of the image, #480), so with
+  # `serves_container` and `serves_host` between them covering every legal
+  # WORKER_MODES the list is unconditional again.
   NATIVE_BINS="--bin chuggernaut --bin chuggernaut-channel"
-  [ -n "$SERVES_CONTAINER" ] || NATIVE_BINS="--bin chuggernaut"
   if [ -n "$NATIVE_DAEMON" ]; then
     refresh_phase "build-daemon"
     git -C "$TMP" archive --format=tar FETCH_HEAD > "$TMP/native.tar"
@@ -604,6 +623,11 @@ swap)
   # stock node needs none of these set.
   DAEMON_BIN="${WORKER_DAEMON_BIN:-/usr/local/bin/chuggernaut}"
   CHANNEL_BIN="${WORKER_CHANNEL_BINARY:-/usr/local/lib/chuggernaut/chuggernaut-channel}"
+  # The HOST copy's path, which is build-worker.sh's `HOST_CHANNEL_BIN` and must
+  # stay in step with it: no run spec carries this, so the two defaults ARE the
+  # agreement (design #490 D2 leaves the daemon's own config variable to slice 4,
+  # which is the first thing that reads the file).
+  HOST_CHANNEL_BIN="${WORKER_HOST_CHANNEL_BINARY:-/usr/local/lib/chuggernaut/chuggernaut-channel-host}"
   REFRESH_SCRIPT="${WORKER_REFRESH_SCRIPT:-/usr/local/lib/chuggernaut/worker-refresh.sh}"
   SWAP_UNIT="${WORKER_UNIT:-chug-worker.service}"
   SWAP_AGENT_LABEL="${WORKER_AGENT_LABEL:-com.chuggernaut.worker}"
@@ -679,15 +703,14 @@ swap)
   # refusal changes no node; without it the operator gets a bare `sudo: a
   # password is required` from half-way through an install instead.
   #
-  # The channel binary is on that list only when this node injects one. A
-  # host-only node installs the daemon and this script and nothing else, so
-  # demanding a writable /usr/local/lib/chuggernaut for a file it will not write
-  # would refuse a node over a permission it never exercises.
-  if [ -n "$SERVES_CONTAINER" ]; then
-    set -- "$DAEMON_BIN" "$CHANNEL_BIN" "$REFRESH_SCRIPT"
-  else
-    set -- "$DAEMON_BIN" "$REFRESH_SCRIPT"
-  fi
+  # Each channel path is on that list only when this node writes that one: the
+  # injected copy when it serves containers, the host copy when it serves host
+  # launches (design #490 D2), both on a dual-mode node. Demanding a writable
+  # path for a file this node will never write would refuse it over a permission
+  # it never exercises.
+  set -- "$DAEMON_BIN" "$REFRESH_SCRIPT"
+  [ -z "$SERVES_CONTAINER" ] || set -- "$@" "$CHANNEL_BIN"
+  [ -z "$SERVES_HOST" ] || set -- "$@" "$HOST_CHANNEL_BIN"
   for _p in "$@"; do
     _d="$(dirname "$_p")"
     while [ ! -d "$_d" ]; do _d="$(dirname "$_d")"; done
@@ -736,6 +759,7 @@ swap)
   }
   trap 'RC=$?; swap_cleanup; exit "$RC"' EXIT
   SWAP_CHANNEL_FROM=""
+  SWAP_HOST_CHANNEL_FROM=""
   if [ "$SUPERVISOR" = launchd ]; then
     BUILD_DIR="${WORKER_BUILD_DIR:-$HOME/chuggernaut-worker/build}"
     if [ -n "$SERVES_CONTAINER" ]; then
@@ -758,8 +782,16 @@ swap)
       fi
       echo "worker-refresh: installing the native daemon staged at $BUILD_DIR for $SWAP_STAGED_SHA — this node names no container runtime, so there is no worker image label to cross-check that generation against (design #309 §1)"
     fi
+    SWAP_FROM="the native build staged at $BUILD_DIR for $SWAP_STAGED_SHA"
     cp "$BUILD_DIR/target/release/chuggernaut" "$SWAP_STAGE/chuggernaut"
     cp "$BUILD_DIR/src/deploy/prod/worker-refresh.sh" "$SWAP_STAGE/worker-refresh.sh"
+    # The HOST copy is the one artifact a mac takes out of its OWN build — the
+    # exact inverse of the extraction below it, for the exact inverse reason
+    # (design #490 D2): the node execs this one, so it must be the Mach-O.
+    if [ -n "$SERVES_HOST" ]; then
+      cp "$BUILD_DIR/target/release/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel-host"
+      SWAP_HOST_CHANNEL_FROM="$SWAP_FROM"
+    fi
     if [ -n "$SERVES_CONTAINER" ]; then
       SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
       docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
@@ -767,7 +799,6 @@ swap)
       SWAP_CID=""
       SWAP_CHANNEL_FROM="chuggernaut/worker:$TAG"
     fi
-    SWAP_FROM="the native build staged at $BUILD_DIR for $SWAP_STAGED_SHA"
   else
     SWAP_CID="$(docker create "chuggernaut/worker:$TAG")"
     docker cp "$SWAP_CID:/usr/local/bin/chuggernaut" "$SWAP_STAGE/chuggernaut"
@@ -775,13 +806,22 @@ swap)
       docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel"
       SWAP_CHANNEL_FROM="chuggernaut/worker:$TAG"
     fi
+    # On LINUX the two executors coincide — the node's kernel IS the container's
+    # — so both copies are the same bytes out of the same image. Staged twice
+    # under the two names because they are two artifacts with two guards, not one
+    # file with two links.
+    if [ -n "$SERVES_HOST" ]; then
+      docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/chuggernaut-channel" "$SWAP_STAGE/chuggernaut-channel-host"
+      SWAP_HOST_CHANNEL_FROM="chuggernaut/worker:$TAG"
+    fi
     docker cp "$SWAP_CID:/usr/local/lib/chuggernaut/worker-refresh.sh" "$SWAP_STAGE/worker-refresh.sh"
     docker rm "$SWAP_CID" > /dev/null
     SWAP_CID=""
     SWAP_FROM="chuggernaut/worker:$TAG"
   fi
   SWAP_FILES="chuggernaut worker-refresh.sh"
-  [ -z "$SERVES_CONTAINER" ] || SWAP_FILES="chuggernaut chuggernaut-channel worker-refresh.sh"
+  [ -z "$SERVES_CONTAINER" ] || SWAP_FILES="$SWAP_FILES chuggernaut-channel"
+  [ -z "$SERVES_HOST" ] || SWAP_FILES="$SWAP_FILES chuggernaut-channel-host"
   # shellcheck disable=SC2086
   for f in $SWAP_FILES; do
     if [ ! -s "$SWAP_STAGE/$f" ]; then
@@ -814,9 +854,13 @@ swap)
   # Not asked at all on a host-only node, which staged no such file: the question
   # is "can the container this file is injected into exec it", and there is no
   # such container.
+  #
+  # Defined out here because BOTH channel guards read an object header and there
+  # is one way to do it: `od` is POSIX and on both platforms, and e_machine is
+  # two little-endian bytes at file offset 18.
+  swap_magic() { od -A n -v -t x1 -j "$2" -N "$3" "$1" 2> /dev/null | tr -d '[:space:]'; }
   [ -z "$SERVES_CONTAINER" ] || chmod +x "$SWAP_STAGE/chuggernaut-channel"
   if [ -n "$SERVES_CONTAINER" ] && [ "$SUPERVISOR" = launchd ]; then
-    swap_magic() { od -A n -v -t x1 -j "$2" -N "$3" "$1" 2> /dev/null | tr -d '[:space:]'; }
     SWAP_DOCKER_PLATFORM="$(docker version --format '{{.Server.Arch}}/{{.Server.Os}}' 2> /dev/null | tr -d '[:space:]' || true)"
     case "$SWAP_DOCKER_PLATFORM" in
       arm64/linux | aarch64/linux) SWAP_ELF_MACHINE=b700 ;;
@@ -840,6 +884,30 @@ swap)
     fi
   fi
 
+  # And the HOST channel binary is asked the question ITS executor asks, which is
+  # the third one on this node: the agent CLI spawns it as a stdio MCP server in
+  # this node's own process tree for a host agent task (design #490 D2), so THIS
+  # NODE execs it and the node is what runs it here — on both platforms, unlike
+  # the injected copy above, whose real question a mac cannot ask at all. On a mac
+  # the object header is read first, and it is the mirror image of that guard
+  # rather than a second dialect of it: an ELF in the host slot is the OTHER half
+  # of the pair (#480), and exec alone would refuse it with "a foreign
+  # architecture, a missing dynamic loader, or a broken build" — sending the
+  # operator after a toolchain problem that is not there.
+  if [ -n "$SERVES_HOST" ]; then
+    chmod +x "$SWAP_STAGE/chuggernaut-channel-host"
+    if [ "$SUPERVISOR" = launchd ] \
+      && [ "$(swap_magic "$SWAP_STAGE/chuggernaut-channel-host" 0 4)" = 7f454c46 ]; then
+      echo "worker-refresh: the host chuggernaut-channel binary from $SWAP_HOST_CHANNEL_FROM is a Linux ELF, and this mac execs it ITSELF — the agent CLI spawns it as a stdio MCP server in this node's own process tree (design #490 D2), so it must be the Mach-O this node's cargo compiled. An ELF here is the INJECTED copy in the host slot, which is the other half of the same pair (#480) and belongs at $CHANNEL_BIN; REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
+      exit 1
+    fi
+    if "$SWAP_STAGE/chuggernaut-channel-host" < /dev/null > /dev/null 2>&1; then SWAP_HOST_CHAN_RC=0; else SWAP_HOST_CHAN_RC=$?; fi
+    if [ "$SWAP_HOST_CHAN_RC" = 126 ] || [ "$SWAP_HOST_CHAN_RC" = 127 ]; then
+      echo "worker-refresh: the host chuggernaut-channel binary from $SWAP_HOST_CHANNEL_FROM cannot be executed on this node (exit $SWAP_HOST_CHAN_RC: a foreign architecture, a missing dynamic loader, or a broken build) — THIS NODE execs that file for a host agent task, so a copy that will not load leaves the task with no update_status and no submit_result at all (design #490 D2); REFUSING swap (live daemon untouched, the node stays one generation behind)" >&2
+      exit 1
+    fi
+  fi
+
   # Installed by RENAME, and that is load-bearing twice over: writing over
   # $DAEMON_BIN in place is ETXTBSY while the daemon is executing it, and
   # truncating THIS SCRIPT under the shell that is reading it feeds the shell the
@@ -858,11 +926,15 @@ swap)
   refresh_phase "swap-install"
   swap_install "$SWAP_STAGE/chuggernaut" "$DAEMON_BIN"
   [ -z "$SERVES_CONTAINER" ] || swap_install "$SWAP_STAGE/chuggernaut-channel" "$CHANNEL_BIN"
+  [ -z "$SERVES_HOST" ] || swap_install "$SWAP_STAGE/chuggernaut-channel-host" "$HOST_CHANNEL_BIN"
   swap_install "$SWAP_STAGE/worker-refresh.sh" "$REFRESH_SCRIPT"
   if [ -n "$SERVES_CONTAINER" ]; then
     echo "worker-refresh: installed $DAEMON_BIN and $REFRESH_SCRIPT from $SWAP_FROM, and $CHANNEL_BIN from $SWAP_CHANNEL_FROM (the agent containers exec that one, not this node)"
   else
     echo "worker-refresh: installed $DAEMON_BIN and $REFRESH_SCRIPT from $SWAP_FROM; no $CHANNEL_BIN, because this node names no container runtime and that file is only ever injected into an agent container"
+  fi
+  if [ -n "$SERVES_HOST" ]; then
+    echo "worker-refresh: installed $HOST_CHANNEL_BIN from $SWAP_HOST_CHANNEL_FROM — this node serves host launches and execs that one ITSELF, which is why it is a second file rather than the injected copy (design #490 D2)"
   fi
 
   # The staging dir is dead the moment the three renames land, and it must go

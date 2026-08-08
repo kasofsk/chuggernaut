@@ -338,11 +338,13 @@ docker at all — §[4c](#4c-a-host-only-mac-needs-no-docker).
    until the node is re-converted — the same failure, with the node looking
    healthy.
 
-3. **A *running* docker, because it stages the injected artifact.** Only the
-   daemon binary is the mac's to compile. `chuggernaut-channel` never runs on
+3. **A *running* docker, because it stages the injected artifact.** On a
+   container-only node the daemon binary is the only one the mac compiles for
+   itself. The **injected** `chuggernaut-channel` never runs on
    the node — the daemon injects it into every agent **container** — so it comes
    out of the worker image that node's own docker just built, and the mac's
-   Mach-O copy is the one that breaks. It breaks with no error anyone sees:
+   Mach-O copy is the one that breaks. (A node naming `host` compiles a second
+   channel binary as well, for its own use and at its own path — §4c below.) It breaks with no error anyone sees:
    Claude Code reports the MCP server as `pending`, work tasks lose
    `update_status`, and **agent evaluators fail outright** (jobs #477/#478, four
    "produced no output" escalations). The deploy reads the container
@@ -395,7 +397,7 @@ from a conversion and from every self-refresh after it:
 | `chuggernaut/agent` + `agent-rust` | a job type resolving to `runtime.mode: host` cannot declare an `image:` (`crates/types/src/job_type.rs`), so nothing here launches one |
 | `chuggernaut/worker` (Darwin only) | the daemon is compiled natively, and the image's only other passenger is the channel binary this node does not take |
 | the container-platform probe | there is no injected binary to judge |
-| `chuggernaut-channel` | injected into **agent containers** only (`Core::channel_mcp`, whose two callers are both agent-shaped), while host mode serves `work.type: command` alone — twice enforced, in the job type's field rules and in `HostBackend::admit` |
+| the **injected** `chuggernaut-channel` | read by an agent **container** (`Core::channel_mcp`, whose two callers are both agent-shaped), and this node runs none. Its **host** copy is a different artifact and the node *does* get one — next bullet |
 | the refresh disk pre-flight | it exists to protect an image build; there is none |
 
 Two things to know before converting one:
@@ -403,12 +405,25 @@ Two things to know before converting one:
 - **The daemon warns once at boot** — `channel binary unavailable` — and carries
   an empty artifact map. That is the correct state, not a gap: only a
   `FileSource::LocalArtifact` launch reads it, and a command-only node never
-  makes one. Installing a copy anyway would put bytes on the node that nothing
-  can use.
+  makes one. The warning is about the **injected** path, which is the only one
+  the daemon reads today.
+- **It does get a channel binary of its own**, since
+  [#490](../../design/490-agent-work-on-a-mac.md) slice 3: a second artifact at
+  `/usr/local/lib/chuggernaut/chuggernaut-channel-host`, which **this node**
+  execs rather than a container, so on a mac it comes out of the same native
+  build as the daemon and the deploy proves it by **running** it there. The two
+  paths exist because the two executors ask opposite questions (D2), and a
+  dual-mode mac holds both. Nothing reads the host copy yet — probing an agent
+  CLI is slice 4 and lifting the command-only rule is slice 5 — so this is
+  provisioning ahead of use, which is deliberate: D5 puts the resulting refusal
+  at launch rather than at boot, and a boot-time refusal would take a dual-mode
+  node's container capacity down with it.
 - **"No docker at all" is a Darwin property.** On Linux the worker image is
   still built, because #440 D6 holds there and that image is the only place a
   Linux node's daemon binary comes from. A host-only Linux node skips the agent
-  images and the channel binary and nothing else.
+  images and the **injected** channel binary and nothing else — it still takes
+  the image's channel binary as its **host** copy, because on Linux the node and
+  the container are the same platform and the same bytes answer both questions.
 
 Nothing here weakens a host node: `WORKER_SLOTS=1` and `WORKER_SLOTS_MAX=1`
 node-wide (#309 §2 option (iii)), a creatable `WORKER_HOST_ROOT` and the

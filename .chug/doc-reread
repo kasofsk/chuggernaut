@@ -28,3 +28,9 @@ Doc-reread: docs/spec.md
 Doc-reread: docs/implementation-notes.md
 Doc-reread: docs/design/490-agent-work-on-a-mac.md
 Doc-reread: docs/reference/crates.md
+Doc-reread: docs/spec.md
+Doc-reread: docs/reference/crates.md
+Doc-reread: docs/reference/runbooks/chug-node-adoption.md
+Doc-reread: deploy/prod/README.md
+Doc-reread: docs/design/490-agent-work-on-a-mac.md
+Doc-reread: docs/reference/runbooks/adhoc-deploy.md
