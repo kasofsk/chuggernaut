@@ -18,8 +18,8 @@
 //! CoreSimulator's global device state rather than as the collision fix, and is
 //! **enforced here**: a launch arriving while another task is live is refused as
 //! `NoCapacity`. Phase 1 also serves **command work only**: a launch carrying
-//! agent shape is refused, because `agent::transcript_path` derives its
-//! `-workspace` slug from the cwd this backend moves.
+//! agent shape is refused, now on what this node cannot yet provide rather than
+//! on the transcript path, which design #490 slice 1 resolves by session id.
 //!
 //! A launch **declaring an image is refused** (#309 §1, P1): the image's absence
 //! is what selects this backend, so one that carries an image was misrouted and
@@ -79,6 +79,16 @@ pub const AGENT_CONFIG_VAR: &str = "CLAUDE_CONFIG_DIR";
 /// The node's host root when `WORKER_HOST_ROOT` is unset — worker-writable node
 /// state beside the other `/var/lib/chuggernaut` leaves, never a nix store path.
 pub const HOST_ROOT_DEFAULT: &str = "/var/lib/chuggernaut/host-tasks";
+
+/// How deep below its starting directory [`ContainerBackend::find_file`]
+/// descends here. A transcript sits two levels down, so a tree deeper than this
+/// is refused rather than walked (`docs/reference/style.md` Tier 2 rule 3).
+const FIND_DEPTH_MAX: usize = 8;
+
+/// How many directory entries one [`ContainerBackend::find_file`] scan may
+/// visit. The second bound, because depth alone leaves a single wide directory
+/// unbounded.
+const FIND_ENTRIES_MAX: usize = 10_000;
 
 /// Merged stdout+stderr, one fd, append-only. One fd means true cross-stream
 /// ordering, which the trait's Docker-shaped caveat on
@@ -539,10 +549,11 @@ impl HostBackend {
         if config.env.contains_key(AGENT_CONFIG_VAR) {
             return Err(BackendError::Launch(format!(
                 "node {} serves host mode and this launch sets {AGENT_CONFIG_VAR}, which is agent \
-                 shape — design #322 §2 serves work.type: command only on a host node, because \
-                 agent::transcript_path derives its '-workspace' slug from the agent CLI's \
-                 slugification of the cwd and a host task's cwd is inside its task directory, so \
-                 the run would look healthy and the harvest would find nothing",
+                 shape — design #322 §2 serves work.type: command only on a host node. The \
+                 transcript is no longer the reason: design #490 slice 1 resolves it by session \
+                 id rather than from agent::transcript_path's computed slug. What this node still \
+                 lacks is a host channel binary and a discovered agent CLI (#490 D2/D3), and \
+                 slice 5 replaces this test with one that says which",
                 self.node
             )));
         }
@@ -593,6 +604,103 @@ fn rebase_path(dir: &Path, wire: &str) -> Result<PathBuf, String> {
         ));
     }
     Ok(rebased)
+}
+
+/// One rebased path back as the wire path it came from — [`rebase_path`]'s
+/// inverse, and total the same way (design #490 D1a). A path outside the task
+/// directory, or under neither local prefix, is refused by name rather than
+/// answered as a node path the dispatcher would then ask for.
+fn unrebase_path(dir: &Path, path: &Path) -> Result<String, String> {
+    if !contained(dir, path) {
+        return Err(format!(
+            "{} is outside the task directory {} — a host node answers in wire paths, so one it \
+             cannot map back is refused rather than returned raw",
+            path.display(),
+            dir.display()
+        ));
+    }
+    let rest = path
+        .strip_prefix(dir)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut components = rest.components();
+    let local = match components.next() {
+        Some(std::path::Component::Normal(name)) => name.to_string_lossy().to_string(),
+        _ => return Err(unmapped_local(path)),
+    };
+    let (wire, _) = WIRE_PREFIXES
+        .iter()
+        .find(|(_, dir_name)| *dir_name == local)
+        .ok_or_else(|| unmapped_local(path))?;
+    let below = components.as_path();
+    if below.as_os_str().is_empty() {
+        return Ok((*wire).to_string());
+    }
+    Ok(format!("{wire}/{}", below.to_string_lossy()))
+}
+
+/// How the inverse mapping refuses a path inside the task directory that lies
+/// under neither local prefix — the task's own `meta.json` and `output.log` are
+/// exactly that, and no wire path names them.
+fn unmapped_local(path: &Path) -> String {
+    format!(
+        "{} is inside the task directory but under neither {WORKSPACE_DIR}/ nor \
+         {CHUGGERNAUT_DIR}/, so it has no wire path (design #322 §2)",
+        path.display()
+    )
+}
+
+/// Every file named `name` below the wire directory `wire_dir`, answered in
+/// wire paths (design #490 D1a). Bounded three ways — depth, entries visited
+/// and matches — so an unexpected tree is a refusal rather than a walk of the
+/// node.
+fn find_in_task(dir: &Path, wire_dir: &str, name: &str) -> Result<Vec<String>, String> {
+    let root = rebase_path(dir, wire_dir)?;
+    let mut found: Vec<String> = Vec::new();
+    let mut visited = 0usize;
+    let mut pending = vec![(root, 0usize)];
+    while let Some((current, depth)) = pending.pop() {
+        let entries = match std::fs::read_dir(&current) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(format!("{}: {e}", current.display())),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("{}: {e}", current.display()))?;
+            visited += 1;
+            if visited > FIND_ENTRIES_MAX {
+                return Err(format!(
+                    "more than {FIND_ENTRIES_MAX} entries under {wire_dir}, so this scan is \
+                     refused rather than continued"
+                ));
+            }
+            let kind = entry
+                .file_type()
+                .map_err(|e| format!("{}: {e}", entry.path().display()))?;
+            if kind.is_dir() {
+                if depth == FIND_DEPTH_MAX {
+                    return Err(format!(
+                        "{wire_dir} is deeper than {FIND_DEPTH_MAX} levels, so this scan is \
+                         refused rather than continued"
+                    ));
+                }
+                pending.push((entry.path(), depth + 1));
+                continue;
+            }
+            if !kind.is_file() || entry.file_name().to_string_lossy() != name {
+                continue;
+            }
+            if found.len() >= crate::FIND_FILE_MATCHES_MAX {
+                return Err(types::worker::find_file_too_many(
+                    wire_dir,
+                    name,
+                    crate::FIND_FILE_MATCHES_MAX,
+                ));
+            }
+            found.push(unrebase_path(dir, &entry.path())?);
+        }
+    }
+    found.sort();
+    Ok(found)
 }
 
 /// How the mapping refuses a path it does not map, naming the path and both
@@ -1263,6 +1371,19 @@ impl ContainerBackend for HostBackend {
         }
     }
 
+    /// Walk this task's own directory and answer in **wire** paths (design #490
+    /// D1a): the dispatcher asks about `/chuggernaut/claude/projects` and gets
+    /// back paths it can hand straight to [`ContainerBackend::copy_file`].
+    async fn find_file(
+        &self,
+        id: &ContainerId,
+        dir: &str,
+        name: &str,
+    ) -> Result<Vec<String>, BackendError> {
+        let task_dir = self.task_dir(id)?;
+        find_in_task(&task_dir, dir, name).map_err(BackendError::Other)
+    }
+
     async fn logs(&self, id: &ContainerId) -> Result<Vec<u8>, BackendError> {
         let dir = self.task_dir(id)?;
         match std::fs::read(dir.join(OUTPUT_LOG)) {
@@ -1628,6 +1749,101 @@ mod tests {
                  boundary a path is, not silently rewritten: {err}"
             );
         }
+    }
+
+    /// The inverse mapping (design #490 D1a) is total the way [`rebase_path`]
+    /// is: every wire path round-trips, and a real path the mapping cannot
+    /// express — outside the task directory, or under neither local prefix —
+    /// is an error rather than a node path handed back as if it were a wire one.
+    #[test]
+    fn the_wire_path_mapping_round_trips_and_refuses_what_it_cannot_express() {
+        let dir = Path::new("/var/lib/chuggernaut/host-tasks/host-4-0");
+        for wire in [
+            crate::WIRE_WORKSPACE,
+            "/workspace/eval-result.json",
+            crate::WIRE_CHUGGERNAUT,
+            "/chuggernaut/claude/projects/-workspace/session.jsonl",
+        ] {
+            let rebased = rebase_path(dir, wire).unwrap();
+            assert_eq!(unrebase_path(dir, &rebased).unwrap(), wire);
+        }
+
+        for outside in [
+            Path::new("/etc/passwd"),
+            Path::new("/var/lib/chuggernaut/host-tasks/host-9-0/workspace/x"),
+        ] {
+            let err = unrebase_path(dir, outside).unwrap_err();
+            assert!(err.contains("outside the task directory"), "{err}");
+        }
+
+        for internal in [dir.to_path_buf(), dir.join(META_JSON), dir.join(OUTPUT_LOG)] {
+            let err = unrebase_path(dir, &internal).unwrap_err();
+            assert!(
+                err.contains("no wire path") || err.contains("outside"),
+                "the task's own bookkeeping has no wire path: {err}"
+            );
+        }
+    }
+
+    /// The scan a host `find_file` performs (design #490 D1a): matches come back
+    /// as **wire** paths, one is distinguishable from several, a name nothing
+    /// carries is an empty list, and both bounds refuse rather than walk on.
+    #[test]
+    fn the_host_scan_answers_in_wire_paths_and_is_bounded() {
+        let dir = std::env::temp_dir().join(format!("chug-host-find-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join(CHUGGERNAUT_DIR).join("claude/projects");
+        let name = "0d9e.jsonl";
+        std::fs::create_dir_all(projects.join("-workspace")).unwrap();
+        std::fs::write(projects.join("-workspace").join(name), b"one line").unwrap();
+        std::fs::write(projects.join("-workspace/other.jsonl"), b"not it").unwrap();
+
+        let wire_dir = format!("{}/claude/projects", crate::WIRE_CHUGGERNAUT);
+        assert_eq!(
+            find_in_task(&dir, &wire_dir, name).unwrap(),
+            vec![format!("{wire_dir}/-workspace/{name}")]
+        );
+        assert!(
+            find_in_task(&dir, &wire_dir, "absent.jsonl")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            find_in_task(&dir, crate::WIRE_WORKSPACE, name)
+                .unwrap()
+                .is_empty(),
+            "a directory that does not exist resolves to nothing, not an error"
+        );
+        assert!(
+            find_in_task(&dir, "/etc", name).is_err(),
+            "the scan is rooted by the same total mapping every other surface is"
+        );
+
+        std::fs::create_dir_all(projects.join("-elsewhere")).unwrap();
+        std::fs::write(projects.join("-elsewhere").join(name), b"a second cwd").unwrap();
+        assert_eq!(
+            find_in_task(&dir, &wire_dir, name).unwrap().len(),
+            2,
+            "several must be countable, not collapsed to one"
+        );
+
+        for n in 0..crate::FIND_FILE_MATCHES_MAX {
+            let extra = projects.join(format!("-slug-{n}"));
+            std::fs::create_dir_all(&extra).unwrap();
+            std::fs::write(extra.join(name), b"another").unwrap();
+        }
+        let err = find_in_task(&dir, &wire_dir, name).unwrap_err();
+        assert!(err.contains(types::worker::FIND_FILE_TOO_MANY), "{err}");
+
+        let mut deep = projects.join("-deep");
+        for _ in 0..=FIND_DEPTH_MAX {
+            deep = deep.join("d");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let err = find_in_task(&dir, &wire_dir, "nothing-named-this").unwrap_err();
+        assert!(err.contains(&FIND_DEPTH_MAX.to_string()), "{err}");
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A task directory whose own path holds a wire prefix must not be

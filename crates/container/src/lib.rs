@@ -251,6 +251,12 @@ impl ModeWarnings {
     }
 }
 
+/// How many matches [`ContainerBackend::find_file`] returns before it refuses
+/// (design #490 D1a, `docs/reference/style.md` Tier 2 rule 3). Small because the
+/// caller wants exactly one file and D1b already refuses "several": the count
+/// only has to be wide enough to report a small ambiguity as a count.
+pub const FIND_FILE_MATCHES_MAX: usize = 8;
+
 #[async_trait]
 pub trait ContainerBackend: Send + Sync {
     /// Launch a container; returns an opaque ID used for subsequent calls.
@@ -290,6 +296,21 @@ pub trait ContainerBackend: Send + Sync {
             found => Ok(found),
         }
     }
+    /// The wire paths of every file under `dir` whose file name is `name`
+    /// (design #490 D1a), so a caller resolves a file it knows the name of
+    /// rather than computing a path it has to guess the directory of.
+    ///
+    /// A **list**, since "several" must be distinguishable from "one", bounded
+    /// by [`FIND_FILE_MATCHES_MAX`] — past which the scan refuses with
+    /// [`types::worker::FIND_FILE_TOO_MANY`] — and node-local in both
+    /// deployments, so only the resolved paths cross the wire and the bytes
+    /// ride [`copy_file_chunked`](ContainerBackend::copy_file_chunked).
+    async fn find_file(
+        &self,
+        id: &ContainerId,
+        dir: &str,
+        name: &str,
+    ) -> Result<Vec<String>, BackendError>;
     /// Captured stdout and stderr. Read after exit; this does not follow.
     /// Call before [`remove`](ContainerBackend::remove): the container's logs
     /// and filesystem vanish with it.
@@ -956,6 +977,14 @@ mod tests {
             _: &str,
         ) -> Result<Option<Vec<u8>>, BackendError> {
             Ok(self.file.clone())
+        }
+        async fn find_file(
+            &self,
+            _: &ContainerId,
+            _: &str,
+            _: &str,
+        ) -> Result<Vec<String>, BackendError> {
+            unimplemented!()
         }
         async fn logs(&self, _: &ContainerId) -> Result<Vec<u8>, BackendError> {
             unimplemented!()

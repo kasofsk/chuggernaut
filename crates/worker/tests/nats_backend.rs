@@ -1452,6 +1452,230 @@ async fn chunked_copy_file_carries_a_multi_reply_archive() {
     daemon.abort();
 }
 
+/// A scripted worker daemon serving exactly the two ops the transcript harvest
+/// takes (design #490 D1a), over one in-memory file, with
+/// `serves_find_file: false` standing in for the N-1 node the caller must
+/// degrade against. No Docker: the point is the **wire**, so this runs wherever
+/// NATS does.
+async fn transcript_daemon(
+    store: &store::NatsStore,
+    node: &str,
+    path: &str,
+    bytes: Vec<u8>,
+    serves_find_file: bool,
+) -> tokio::task::JoinHandle<()> {
+    use store::worker::MAX_COPY_FILE_BYTES;
+    use types::worker::{
+        CopyFileChunkOk, CopyFileChunkRequest, FindFileOk, FindFileRequest, WorkerError,
+        WorkerReply, b64_encode,
+    };
+
+    let mut sub = store
+        .subscribe_requests(&store::subjects::worker_all(node))
+        .await
+        .unwrap();
+    store.client().flush().await.unwrap();
+    let path = path.to_string();
+    tokio::spawn(async move {
+        while let Some(req) = sub.next().await {
+            let body = if req.subject.ends_with(".find_file") && serves_find_file {
+                let ask: FindFileRequest = serde_json::from_slice(&req.payload).unwrap();
+                let hit = path.starts_with(&format!("{}/", ask.dir.trim_end_matches('/')))
+                    && path.ends_with(&format!("/{}", ask.name));
+                serde_json::to_vec(&WorkerReply::Ok {
+                    value: FindFileOk {
+                        paths: if hit { vec![path.clone()] } else { Vec::new() },
+                    },
+                })
+                .unwrap()
+            } else if req.subject.ends_with(".copy_file_chunk") {
+                let ask: CopyFileChunkRequest = serde_json::from_slice(&req.payload).unwrap();
+                let start = (ask.offset as usize).min(bytes.len());
+                let end = start.saturating_add(MAX_COPY_FILE_BYTES).min(bytes.len());
+                serde_json::to_vec(&WorkerReply::Ok {
+                    value: CopyFileChunkOk {
+                        data_b64: Some(b64_encode(&bytes[start..end])),
+                        total_len: bytes.len() as u64,
+                    },
+                })
+                .unwrap()
+            } else {
+                serde_json::to_vec(&WorkerReply::<()>::Err {
+                    error: WorkerError::Other {
+                        message: format!(
+                            "{} {:?} on {}",
+                            types::worker::UNKNOWN_OP,
+                            req.subject.rsplit('.').next(),
+                            req.subject
+                        ),
+                    },
+                })
+                .unwrap()
+            };
+            req.respond(body).await;
+        }
+    })
+}
+
+/// Design #490 slice 1 over the real wire, without a container runtime: the
+/// transcript is resolved by the session id the platform supplied and then read
+/// in slices, so a file **larger than** `copy_file`'s single-reply bound — the
+/// size at which the platform has been silently losing every long work-agent
+/// session — arrives whole and byte-exact.
+#[tokio::test]
+async fn the_resolved_transcript_survives_the_size_that_was_losing_it() {
+    use store::worker::{MAX_COPY_FILE_BYTES, copy_file_over_bound};
+
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let dir = "/chuggernaut/claude/projects";
+    let name = "0d9e-slice-one.jsonl";
+    let path = format!("{dir}/-workspace/{name}");
+    let size = MAX_COPY_FILE_BYTES * 2 + 17;
+    let bytes: Vec<u8> = (0..size).map(|n| (n % 251) as u8).collect();
+    let daemon = transcript_daemon(&store, "w1", &path, bytes.clone(), true).await;
+
+    let fleet = FleetBackend::new(
+        vec![DockerNodeConfig {
+            name: "w1".into(),
+            endpoint: "worker".into(),
+            slots: 4,
+        }],
+        store,
+        PlacementPolicy::default(),
+    )
+    .unwrap();
+    let id = "w1/c0ffee".to_string();
+
+    assert!(
+        copy_file_over_bound(&path, size).is_some(),
+        "this test is only meaningful for a transcript the unchunked op refuses"
+    );
+    assert_eq!(
+        fleet.find_file(&id, dir, name).await.unwrap(),
+        vec![path.clone()],
+        "the session id resolves without computing the CLI's directory slug"
+    );
+    let got = fleet
+        .copy_file_chunked(&id, &path, store::MAX_BLOB_BYTES)
+        .await
+        .unwrap()
+        .expect("the transcript is present");
+    assert_eq!(
+        got, bytes,
+        "the transcript must arrive whole and byte-exact"
+    );
+
+    assert!(
+        fleet
+            .find_file(&id, dir, "absent.jsonl")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a name nothing carries is an empty list, never an error"
+    );
+    daemon.abort();
+}
+
+/// The other half of D1a, and the reason the op ships with **no**
+/// `WORKER_RPC_VERSION` bump: a daemon that predates it answers `unknown op`
+/// rather than crashing, and the marker survives the wire into the caller's
+/// error — which is what `Harvester::computed_fallback` degrades on.
+#[tokio::test]
+async fn a_daemon_that_predates_find_file_answers_unknown_op() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let daemon = transcript_daemon(&store, "w1", "/unused", Vec::new(), false).await;
+
+    let fleet = FleetBackend::new(
+        vec![DockerNodeConfig {
+            name: "w1".into(),
+            endpoint: "worker".into(),
+            slots: 4,
+        }],
+        store,
+        PlacementPolicy::default(),
+    )
+    .unwrap();
+    let err = fleet
+        .find_file(
+            &"w1/c0ffee".to_string(),
+            "/chuggernaut/claude/projects",
+            "s.jsonl",
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(types::worker::UNKNOWN_OP) && err.contains("find_file"),
+        "the caller degrades on this text, so it must name the op: {err}"
+    );
+    daemon.abort();
+}
+
+/// Design #490 slice 1's acceptance criterion, over the real wire: a transcript
+/// **larger than** `copy_file`'s single-reply bound — the size at which the
+/// platform has been silently dropping every long work-agent session — is
+/// resolved by the session id the platform supplied and harvested whole. The
+/// last assertion is the defect itself: the same file through the unchunked op
+/// is still the named refusal the `Err` arm was warning about and discarding.
+#[tokio::test]
+async fn an_over_bound_transcript_resolves_by_session_id_and_survives_whole() {
+    use store::worker::{COPY_FILE_TOO_LARGE, MAX_COPY_FILE_BYTES};
+
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let Some((fleet, daemon)) = setup(&server, b"x").await else {
+        return;
+    };
+    let dir = "/chuggernaut/claude/projects";
+    let session = "0d9e-slice-one.jsonl";
+    let size = MAX_COPY_FILE_BYTES + 4096;
+    let id = fleet
+        .launch(suite::cfg(&format!(
+            "mkdir -p {dir}/-workspace && head -c {size} /dev/urandom > {dir}/-workspace/{session}"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(fleet.wait(&id).await.unwrap(), 0);
+
+    let resolved = fleet.find_file(&id, dir, session).await.unwrap();
+    assert_eq!(
+        resolved,
+        vec![format!("{dir}/-workspace/{session}")],
+        "the session id resolves without computing the CLI's directory slug"
+    );
+
+    let bytes = fleet
+        .copy_file_chunked(&id, &resolved[0], store::MAX_BLOB_BYTES)
+        .await
+        .unwrap()
+        .expect("the transcript is present");
+    assert_eq!(
+        bytes.len(),
+        size,
+        "a transcript over the single-reply bound must arrive whole"
+    );
+
+    let err = fleet
+        .copy_file(&id, &resolved[0])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(COPY_FILE_TOO_LARGE),
+        "the unchunked read is the call that was losing it: {err}"
+    );
+
+    suite::rm(&id);
+    daemon.abort();
+}
+
 #[tokio::test]
 async fn payload_guard_rejects_bulk_inline_files() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {

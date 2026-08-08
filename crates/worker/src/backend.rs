@@ -868,6 +868,25 @@ impl ContainerBackend for FleetBackend {
         }
     }
 
+    async fn find_file(
+        &self,
+        id: &ContainerId,
+        dir: &str,
+        name: &str,
+    ) -> Result<Vec<String>, BackendError> {
+        let node = self.route(id)?;
+        match &node.handle {
+            NodeHandle::Docker { backend } => backend.find_file(id, dir, name).await,
+            NodeHandle::Worker { rpc, .. } => {
+                let ok = rpc
+                    .find_file(id, dir, name)
+                    .await
+                    .map_err(|e| rpc_err(Some(id), e))?;
+                Ok(ok.paths)
+            }
+        }
+    }
+
     async fn logs(&self, id: &ContainerId) -> Result<Vec<u8>, BackendError> {
         let node = self.route(id)?;
         match &node.handle {

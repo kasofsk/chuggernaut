@@ -115,27 +115,131 @@ impl Harvester {
         }
 
         if let Some(session_id) = &out.session_id {
-            let path = agent::transcript_path(session_id);
-            match self.backend.copy_file(id, &path).await {
-                Ok(Some(bytes)) => {
-                    self.store(
-                        owner,
-                        project,
-                        seq,
-                        task_id,
-                        ArtifactKind::SessionTranscript,
-                        &bytes,
-                    )
-                    .await;
-                }
-                Ok(None) => tracing::warn!(
-                    "job {seq} task {task_id}: no transcript at {path} \
-                     (agent may not have started)"
-                ),
-                Err(e) => tracing::warn!("job {seq} task {task_id}: transcript copy failed: {e}"),
-            }
+            self.collect_transcript(owner, project, seq, task_id, id, session_id)
+                .await;
         }
         (result, usage)
+    }
+
+    /// Resolve the run's transcript by the session id the platform supplied
+    /// (design #490 D1) and store it, read in bounded slices so a long
+    /// session's record survives `copy_file`'s single-reply bound.
+    ///
+    /// Best-effort like the rest of the harvest: zero matches and several
+    /// matches both log and continue, which #490 slice 2 makes loud.
+    async fn collect_transcript(
+        &self,
+        owner: &str,
+        project: &str,
+        seq: u64,
+        task_id: u64,
+        id: &container::ContainerId,
+        session_id: &str,
+    ) {
+        let dir = agent::transcript_dir();
+        let name = agent::transcript_name(session_id);
+        let resolved = match self.backend.find_file(id, &dir, &name).await {
+            Ok(paths) => paths,
+            Err(e) => {
+                let Some(computed) = Self::computed_fallback(id, session_id, &e.to_string()) else {
+                    tracing::warn!(
+                        "job {seq} task {task_id}: resolving {name} under {dir} failed: {e}"
+                    );
+                    return;
+                };
+                tracing::warn!(
+                    "job {seq} task {task_id}: this node does not know find_file ({e}), so the \
+                     transcript was read from the computed path {computed} instead"
+                );
+                vec![computed]
+            }
+        };
+        let path = match resolved.as_slice() {
+            [only] => only.clone(),
+            [] => {
+                tracing::warn!(
+                    "job {seq} task {task_id}: the agent reported session {session_id} and no \
+                     file named {name} exists under {dir}"
+                );
+                return;
+            }
+            several => {
+                tracing::warn!(
+                    "job {seq} task {task_id}: {} files are named {name} under {dir} ({}) — one \
+                     session id names one transcript, so none is stored",
+                    several.len(),
+                    several.join(", ")
+                );
+                return;
+            }
+        };
+        match self
+            .backend
+            .copy_file_chunked(id, &path, store::MAX_BLOB_BYTES)
+            .await
+        {
+            Ok(Some(bytes)) => {
+                self.store(
+                    owner,
+                    project,
+                    seq,
+                    task_id,
+                    ArtifactKind::SessionTranscript,
+                    &bytes,
+                )
+                .await;
+            }
+            Ok(None) => {
+                tracing::warn!("job {seq} task {task_id}: {path} resolved and was gone by the read")
+            }
+            Err(e) => {
+                let (lost, message) =
+                    Self::transcript_copy_failure(seq, task_id, &path, &e.to_string());
+                if lost {
+                    tracing::error!("{message}");
+                } else {
+                    tracing::warn!("{message}");
+                }
+            }
+        }
+    }
+
+    /// Design #490 D1a's degrade: a daemon that does not know `find_file`
+    /// answers `unknown op`, and today's computed path is right on the container
+    /// node every such daemon is.
+    ///
+    /// Never taken for a **host** task: its cwd is under the node's host root,
+    /// and the CLI slugifies a resolved realpath (job #492), so a computed path
+    /// there would find nothing silently.
+    fn computed_fallback(
+        id: &container::ContainerId,
+        session_id: &str,
+        error: &str,
+    ) -> Option<String> {
+        (error.contains(types::worker::UNKNOWN_OP) && !container::host::names_host_task(id))
+            .then(|| agent::transcript_path(session_id))
+    }
+
+    /// The log line for a transcript copy that failed, and whether the platform
+    /// dropped a record it had resolved. The size refusal did: a session past
+    /// the artifact store's own blob ceiling has nowhere to be kept, and design
+    /// #490 exists because that loss used to be silent.
+    fn transcript_copy_failure(seq: u64, task_id: u64, path: &str, error: &str) -> (bool, String) {
+        if error.contains(types::worker::COPY_FILE_TOO_LARGE) {
+            return (
+                true,
+                format!(
+                    "job {seq} task {task_id}: the session transcript {path} was NOT stored: \
+                     {error} — a transcript over {} bytes exceeds the artifact store's blob \
+                     ceiling and this run's record is lost",
+                    store::MAX_BLOB_BYTES
+                ),
+            );
+        }
+        (
+            false,
+            format!("job {seq} task {task_id}: transcript copy failed: {error}"),
+        )
     }
 
     /// Collect the output archive a **work-side** container left at
@@ -363,6 +467,141 @@ mod tests {
             OUTPUT_PATH.starts_with(&format!("{}/", container::WIRE_WORKSPACE)),
             "{OUTPUT_PATH} is unmappable on a host node"
         );
+    }
+
+    /// An agent run whose container is `id` and whose CLI reported `session`.
+    fn agent_run(id: &str, session: &str) -> AgentOutput {
+        AgentOutput {
+            exit_code: 0,
+            container_id: Some(id.to_string()),
+            session_id: Some(session.to_string()),
+        }
+    }
+
+    /// Design #490 D1a's degrade, which is the whole reason the additive op
+    /// needs no `WORKER_RPC_VERSION` bump — and it is scoped: an unrefreshed
+    /// node is a **container** node whose computed path is right, where a host
+    /// task's cwd is under the host root and the CLI slugifies a resolved
+    /// realpath (job #492), so computing there would find nothing silently.
+    #[test]
+    fn the_computed_path_is_a_fallback_for_a_container_node_only() {
+        let unknown = format!(
+            "{} Some(\"find_file\") on chug.worker.w1.find_file",
+            types::worker::UNKNOWN_OP
+        );
+        assert_eq!(
+            Harvester::computed_fallback(&"w1/c0ffee".to_string(), "s-1", &unknown),
+            Some(agent::transcript_path("s-1"))
+        );
+        assert_eq!(
+            Harvester::computed_fallback(&"w1/host-1-0".to_string(), "s-1", &unknown),
+            None,
+            "a host task's computed path is wrong, so the degrade is not available to it"
+        );
+        for other in [
+            "node w1 unreachable",
+            "worker transport for w1/c1: timed out",
+        ] {
+            assert_eq!(
+                Harvester::computed_fallback(&"w1/c0ffee".to_string(), "s-1", other),
+                None,
+                "only a daemon that does not know the op degrades: {other}"
+            );
+        }
+    }
+
+    /// The resolution the slice exists for (design #490 D1): the transcript is
+    /// read at the path `find_file` returned, and the CLI's directory slug is
+    /// never computed on that path.
+    #[tokio::test]
+    async fn a_resolved_transcript_is_read_where_it_was_found() {
+        let backend = std::sync::Arc::new(test_utils::FakeBackend::new());
+        let resolved = format!(
+            "{}/-Users-ci-host-tasks-t-1-workspace/{}",
+            agent::transcript_dir(),
+            agent::transcript_name("s-1")
+        );
+        backend.put_file(&resolved, b"{\"type\":\"summary\"}".to_vec());
+
+        Harvester::new(backend.clone(), None)
+            .collect_agent("acme", "chug", 7, 1, &agent_run("w1/c0ffee", "s-1"))
+            .await;
+        assert_eq!(
+            backend.copied(),
+            vec![resolved],
+            "the transcript is read where it resolved, never at a computed path"
+        );
+    }
+
+    /// The same run against a daemon that answers `unknown op`: the transcript
+    /// still arrives, from the computed path.
+    #[tokio::test]
+    async fn a_daemon_without_find_file_still_yields_a_transcript() {
+        let backend = std::sync::Arc::new(test_utils::FakeBackend::new());
+        let computed = agent::transcript_path("s-1");
+        backend.put_file(&computed, b"{\"type\":\"summary\"}".to_vec());
+        backend.fail_find_file(format!(
+            "{} Some(\"find_file\") on chug.worker.w1.find_file",
+            types::worker::UNKNOWN_OP
+        ));
+
+        Harvester::new(backend.clone(), None)
+            .collect_agent("acme", "chug", 7, 1, &agent_run("w1/c0ffee", "s-1"))
+            .await;
+        assert_eq!(backend.copied(), vec![computed]);
+    }
+
+    /// Zero and several are both log-and-continue here (#490 slice 2 makes them
+    /// loud), and neither reads a file: picking one of several would be the
+    /// guess D1 removed, and there is nothing to pick from zero.
+    #[tokio::test]
+    async fn an_unresolvable_transcript_reads_nothing() {
+        let backend = std::sync::Arc::new(test_utils::FakeBackend::new());
+        Harvester::new(backend.clone(), None)
+            .collect_agent("acme", "chug", 7, 1, &agent_run("w1/c0ffee", "s-1"))
+            .await;
+        assert!(
+            backend.copied().is_empty(),
+            "nothing resolved, nothing read"
+        );
+
+        for slug in ["-workspace", "-elsewhere"] {
+            backend.put_file(
+                &format!(
+                    "{}/{slug}/{}",
+                    agent::transcript_dir(),
+                    agent::transcript_name("s-2")
+                ),
+                b"a session".to_vec(),
+            );
+        }
+        Harvester::new(backend.clone(), None)
+            .collect_agent("acme", "chug", 7, 2, &agent_run("w1/c0ffee", "s-2"))
+            .await;
+        assert!(
+            backend.copied().is_empty(),
+            "several matches for one session id is refused, not resolved by picking one"
+        );
+    }
+
+    /// A transcript past the artifact store's own blob ceiling is a **loss**,
+    /// and the loss is loud: design #490 exists because that outcome used to be
+    /// a `warn` nobody could distinguish from an agent that never started.
+    #[test]
+    fn a_transcript_over_the_ceiling_is_named_as_lost() {
+        let path = "/chuggernaut/claude/projects/-workspace/s-1.jsonl";
+        let refusal = types::worker::copy_file_too_large(
+            path,
+            store::MAX_BLOB_BYTES + 1,
+            store::MAX_BLOB_BYTES,
+        );
+        let (lost, message) = Harvester::transcript_copy_failure(7, 1, path, &refusal);
+        assert!(lost, "{message}");
+        assert!(message.contains("was NOT stored"), "{message}");
+
+        let (lost, message) = Harvester::transcript_copy_failure(7, 1, path, "node w1 unreachable");
+        assert!(!lost, "{message}");
+        assert!(message.contains("node w1 unreachable"), "{message}");
     }
 
     /// Design #362 S1's failure posture: only the size-band refusal earns the

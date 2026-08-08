@@ -107,6 +107,26 @@ pub fn copy_file_too_large(path: &str, len: usize, max_bytes: usize) -> String {
     )
 }
 
+/// How a daemon opens its reply to an op it does not know (spec §14.1). A
+/// caller degrades on this marker rather than on a version, which is what lets
+/// an additive op ship without a `WORKER_RPC_VERSION` bump.
+pub const UNKNOWN_OP: &str = "unknown op";
+
+/// Marker stamped on the [`WorkerError::Other`] returned for a `find_file`
+/// whose match count passed the scan's bound. Carried inside `Other` for the
+/// same reason [`COPY_FILE_TOO_LARGE`] is.
+pub const FIND_FILE_TOO_MANY: &str = "find_file_too_many";
+
+/// The refusal text for a resolution with more matches than the bound allows,
+/// so one marker names the condition whether the scan crossed a worker RPC or
+/// ran in-process.
+pub fn find_file_too_many(dir: &str, name: &str, max: usize) -> String {
+    format!(
+        "{FIND_FILE_TOO_MANY}: more than {max} files named {name} under {dir} — a resolution \
+         wanting one file refuses a longer list rather than returning it"
+    )
+}
+
 /// Reply envelope for every worker op.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "result", rename_all = "snake_case")]
@@ -145,6 +165,28 @@ pub struct CopyFileChunkRequest {
     pub offset: u64,
     /// Whole-file ceiling; a larger file is refused, never truncated.
     pub max_bytes: u64,
+}
+
+/// Payload for `find_file` (design #490 D1a): which files under `dir` are named
+/// `name`, so a transcript is resolved by the session id the platform supplied
+/// instead of by a path computed from an external CLI's slug. Additive op — an
+/// N-1 daemon answers [`UNKNOWN_OP`] in a [`WorkerError::Other`], which the
+/// caller degrades on.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FindFileRequest {
+    pub id: String,
+    /// Wire path of the directory the scan is rooted at.
+    pub dir: String,
+    /// The file name matched, not a pattern and never a path.
+    pub name: String,
+}
+
+/// Reply for `find_file`: the wire paths that matched, empty when none did.
+/// Bounded by `container::FIND_FILE_MATCHES_MAX` — a longer list comes back as
+/// the [`FIND_FILE_TOO_MANY`] refusal instead.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FindFileOk {
+    pub paths: Vec<String>,
 }
 
 /// Payload for `logs_tail`: cursor-paged live output (spec §4.2).

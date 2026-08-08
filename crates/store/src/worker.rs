@@ -5,10 +5,10 @@
 use crate::{NatsStore, StoreError, subjects};
 use std::time::Duration;
 use types::worker::{
-    ContainerRef, CopyFileChunkOk, CopyFileChunkRequest, CopyFileOk, CopyFileRequest, InspectOk,
-    LaunchOk, ListExitedOk, ListRunningOk, LogsOk, LogsTailOk, LogsTailRequest, PingOk,
-    RefreshCancelOk, RefreshCancelRequest, RefreshOk, RefreshRequest, SetSlotsOk, SetSlotsRequest,
-    WorkerError, WorkerLaunchRequest, WorkerReply,
+    ContainerRef, CopyFileChunkOk, CopyFileChunkRequest, CopyFileOk, CopyFileRequest, FindFileOk,
+    FindFileRequest, InspectOk, LaunchOk, ListExitedOk, ListRunningOk, LogsOk, LogsTailOk,
+    LogsTailRequest, PingOk, RefreshCancelOk, RefreshCancelRequest, RefreshOk, RefreshRequest,
+    SetSlotsOk, SetSlotsRequest, WorkerError, WorkerLaunchRequest, WorkerReply,
 };
 
 /// Requests must fit NATS's default 1MB max_payload with headroom. Launch
@@ -178,6 +178,27 @@ impl WorkerRpc {
                 path: path.into(),
                 offset,
                 max_bytes,
+            },
+            OP_TIMEOUT,
+        )
+        .await
+    }
+
+    /// Which files under `dir` are named `name` (design #490 D1a). The scan is
+    /// node-local and only the resolved paths cross the wire, so the bytes ride
+    /// [`Self::copy_file_chunk`] afterwards rather than this reply.
+    pub async fn find_file(
+        &self,
+        id: &str,
+        dir: &str,
+        name: &str,
+    ) -> std::result::Result<FindFileOk, WorkerRpcError> {
+        self.call(
+            "find_file",
+            &FindFileRequest {
+                id: id.into(),
+                dir: dir.into(),
+                name: name.into(),
             },
             OP_TIMEOUT,
         )

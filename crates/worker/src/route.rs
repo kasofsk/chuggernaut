@@ -85,6 +85,15 @@ impl ContainerBackend for RoutedBackend {
         self.owner(id).copy_file_chunked(id, path, max_bytes).await
     }
 
+    async fn find_file(
+        &self,
+        id: &ContainerId,
+        dir: &str,
+        name: &str,
+    ) -> Result<Vec<String>, BackendError> {
+        self.owner(id).find_file(id, dir, name).await
+    }
+
     async fn logs(&self, id: &ContainerId) -> Result<Vec<u8>, BackendError> {
         self.owner(id).logs(id).await
     }

@@ -263,8 +263,72 @@ pub async fn running_count_reflects_launch_and_exit(be: &dyn ContainerBackend, n
     );
 }
 
+/// Resolution by name (design #490 D1a): a backend answers which files under a
+/// directory carry a name, in the wire paths [`ContainerBackend::copy_file`]
+/// takes straight back, with one, none and several distinguishable and the
+/// bound refusing rather than returning a longer list. The container has
+/// **exited** by the time this runs, which is the constraint that rules out
+/// `exec find`.
+#[allow(
+    clippy::unwrap_used,
+    reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+)]
+pub async fn find_file_resolves_by_name(be: &dyn ContainerBackend) {
+    let name = "session.jsonl";
+    let over = container::FIND_FILE_MATCHES_MAX + 1;
+    let id = be
+        .launch(cfg(&format!(
+            "mkdir -p /projects/-workspace /two/a /two/b && \
+             echo one > /projects/-workspace/{name} && \
+             echo other > /projects/-workspace/other.jsonl && \
+             echo a > /two/a/{name} && echo b > /two/b/{name} && \
+             i=0; while [ $i -lt {over} ]; do mkdir -p /many/d-$i; \
+             echo x > /many/d-$i/{name}; i=$((i+1)); done"
+        )))
+        .await
+        .unwrap();
+    assert_eq!(be.wait(&id).await.unwrap(), 0);
+
+    let resolved = be.find_file(&id, "/projects", name).await.unwrap();
+    assert_eq!(
+        resolved,
+        vec![format!("/projects/-workspace/{name}")],
+        "one match comes back as the caller's own wire path"
+    );
+    assert_eq!(
+        be.copy_file(&id, &resolved[0]).await.unwrap().unwrap(),
+        b"one\n",
+        "a resolved path must be readable by copy_file unchanged"
+    );
+
+    assert!(
+        be.find_file(&id, "/projects", "absent.jsonl")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a name nothing carries is an empty list, not an error"
+    );
+    assert_eq!(
+        be.find_file(&id, "/two", name).await.unwrap().len(),
+        2,
+        "several must be countable, never collapsed to one"
+    );
+
+    let err = be
+        .find_file(&id, "/many", name)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        err.contains(types::worker::FIND_FILE_TOO_MANY),
+        "past the bound the scan must refuse by name: {err}"
+    );
+    rm(&id);
+}
+
 /// Run the whole contract.
 pub async fn run_all(be: &dyn ContainerBackend, node: &str) {
+    find_file_resolves_by_name(be).await;
     logs_capture_both_streams_after_exit(be, node).await;
     logs_tail_grows_while_running(be, node).await;
     exit_codes_round_trip(be).await;

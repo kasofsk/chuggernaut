@@ -179,13 +179,31 @@ pub const SETTINGS_PATH: &str = "/chuggernaut/agent-settings.json";
 /// `Dockerfile.agent` sets no `USER`.
 pub const CLAUDE_CONFIG_DIR: &str = "/chuggernaut/claude";
 
-/// Where the Claude CLI writes the transcript for a run in `/workspace`.
-///
-/// The CLI slugifies the cwd by replacing each non-alphanumeric character with
-/// `-`, including the leading `/`, so `/workspace` becomes `-workspace`.
-/// **Measured against CLI 2.1.211**, and note the published docs disagree —
-/// they describe `/workspace` mapping to `workspace` with no leading dash.
-/// `bootstrap_cmd` guarantees the cwd, and `--session-id` fixes the filename.
+/// The directory the CLI keeps one transcript directory per cwd under, which
+/// the harvest resolves inside rather than guessing the name of (design #490
+/// D1). The names below it are the CLI's own slugs and are never computed.
+pub fn transcript_dir() -> String {
+    format!("{CLAUDE_CONFIG_DIR}/projects")
+}
+
+/// The transcript's file name, which is the session id the platform itself
+/// supplied on `--session-id`. Depending on our own input is what D1 buys over
+/// depending on the CLI's output.
+pub fn transcript_name(session_id: &str) -> String {
+    format!("{session_id}.jsonl")
+}
+
+/// The **fallback** path, for a worker daemon too old to know `find_file`
+/// (design #490 D1a): the CLI slugifies its cwd by replacing each
+/// non-alphanumeric character with `-`, measured against CLI 2.1.211 while the
+/// published docs describe something else.
+/// It slugifies the **resolved realpath** (job #492), so this is wrong on any
+/// task root reached through a symlink and is only ever correct for a container
+/// launch, whose cwd is `/workspace` with no symlink in it.
 pub fn transcript_path(session_id: &str) -> String {
-    format!("{CLAUDE_CONFIG_DIR}/projects/-workspace/{session_id}.jsonl")
+    format!(
+        "{}/-workspace/{}",
+        transcript_dir(),
+        transcript_name(session_id)
+    )
 }

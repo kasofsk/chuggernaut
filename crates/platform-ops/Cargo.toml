@@ -26,6 +26,13 @@ tracing.workspace = true
 # this crate's own code takes a clock.
 [dev-dependencies]
 chrono.workspace = true
+# Tests only: the transcript-resolution cases (design #490 slice 1) drive the
+# harvest against the workspace's own scriptable `ContainerBackend` fake rather
+# than a second copy of one, and need a runtime to await it on. Both are
+# workspace dependencies already, and `test-utils` reaches no crate this one's
+# charter forbids (`boundary_guard.rs`).
+test-utils.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

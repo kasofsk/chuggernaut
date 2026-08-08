@@ -593,20 +593,9 @@ impl ContainerBackend for DockerBackend {
         path: &str,
     ) -> Result<Option<Vec<u8>>, BackendError> {
         let (node, cid) = self.route(id)?;
-        let opts = DownloadFromContainerOptionsBuilder::default()
-            .path(path)
-            .build();
-        let mut stream = node.docker.download_from_container(cid, Some(opts));
-        let mut archive = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => archive.extend_from_slice(&bytes),
-                Err(bollard::errors::Error::DockerResponseServerError {
-                    status_code: 404, ..
-                }) => return Ok(None),
-                Err(e) => return Err(map_err(id, e)),
-            }
-        }
+        let Some(archive) = download_archive(node, cid, id, path).await? else {
+            return Ok(None);
+        };
         let wanted = Path::new(path)
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
@@ -631,6 +620,22 @@ impl ContainerBackend for DockerBackend {
             }
         }
         Ok(None)
+    }
+
+    /// Resolve by streaming the `dir` tar and reading its headers (design #490
+    /// D1a): the container has **exited** by harvest time, so `exec find` is
+    /// not available and the archive endpoint is the only post-exit read.
+    async fn find_file(
+        &self,
+        id: &ContainerId,
+        dir: &str,
+        name: &str,
+    ) -> Result<Vec<String>, BackendError> {
+        let (node, cid) = self.route(id)?;
+        let Some(archive) = download_archive(node, cid, id, dir).await? else {
+            return Ok(Vec::new());
+        };
+        archive_matches(dir, name, &archive)
     }
 
     async fn logs(&self, id: &ContainerId) -> Result<Vec<u8>, BackendError> {
@@ -868,6 +873,32 @@ async fn logs_collect(node: &Node, cid: &str, id: &ContainerId) -> Result<Vec<u8
     Ok(out)
 }
 
+/// The tar the archive endpoint serves for `path`, or `None` when the endpoint
+/// answers 404 — the one transport `copy_file` and `find_file` share, so each
+/// keeps its own reading of the tar and of what an absent `path` means.
+async fn download_archive(
+    node: &Node,
+    cid: &str,
+    id: &ContainerId,
+    path: &str,
+) -> Result<Option<Vec<u8>>, BackendError> {
+    let opts = DownloadFromContainerOptionsBuilder::default()
+        .path(path)
+        .build();
+    let mut stream = node.docker.download_from_container(cid, Some(opts));
+    let mut archive = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => archive.extend_from_slice(&bytes),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 404, ..
+            }) => return Ok(None),
+            Err(e) => return Err(map_err(id, e)),
+        }
+    }
+    Ok(Some(archive))
+}
+
 fn map_err(id: &ContainerId, e: bollard::errors::Error) -> BackendError {
     match e {
         bollard::errors::Error::DockerResponseServerError {
@@ -913,6 +944,58 @@ fn build_tar(files: &[InjectedFile]) -> Result<Vec<u8>, String> {
             .map_err(|e| e.to_string())?;
     }
     builder.into_inner().map_err(|e| e.to_string())
+}
+
+/// The wire paths of the archive members named `name`, for the tar the archive
+/// endpoint roots at the requested directory's own basename (design #490 D1a).
+/// Reassembled onto the caller's `dir`, so a match is expressed in the path the
+/// caller asked about rather than in whatever the endpoint called its root.
+fn archive_matches(dir: &str, name: &str, archive: &[u8]) -> Result<Vec<String>, BackendError> {
+    let mut ar = tar::Archive::new(archive);
+    let mut found: Vec<String> = Vec::new();
+    for entry in ar
+        .entries()
+        .map_err(|e| BackendError::Other(e.to_string()))?
+    {
+        let entry = entry.map_err(|e| BackendError::Other(e.to_string()))?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| BackendError::Other(e.to_string()))?
+            .to_path_buf();
+        let matched = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .is_some_and(|n| n == name);
+        if !matched {
+            continue;
+        }
+        let Some(below) = below_archive_root(&path) else {
+            continue;
+        };
+        if found.len() >= crate::FIND_FILE_MATCHES_MAX {
+            return Err(BackendError::Other(types::worker::find_file_too_many(
+                dir,
+                name,
+                crate::FIND_FILE_MATCHES_MAX,
+            )));
+        }
+        found.push(format!("{}/{below}", dir.trim_end_matches('/')));
+    }
+    Ok(found)
+}
+
+/// One archive member's path with the root component stripped, `None` for a
+/// member that *is* the root. The endpoint names that component after the
+/// requested directory, which is the caller's `dir` and not part of what lies
+/// below it.
+fn below_archive_root(path: &Path) -> Option<String> {
+    let mut components = path.components();
+    components.next()?;
+    let rest = components.as_path();
+    (!rest.as_os_str().is_empty()).then(|| rest.to_string_lossy().to_string())
 }
 
 /// Parse "512Mi" / "4Gi" / plain bytes into bytes. The accepted grammar is
@@ -1490,6 +1573,103 @@ mod tests {
         assert!(!bare.contains_key(PROJECT_LABEL));
         assert!(!bare.contains_key(JOB_LABEL));
         assert!(!bare.contains_key(TASK_LABEL));
+    }
+
+    /// The tar the archive endpoint returns for a directory, rooted at that
+    /// directory's own basename the way docker roots it.
+    fn archive_of(root: &str, members: &[(&str, bool)]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        for (rel, is_dir) in members {
+            let mut header = tar::Header::new_gnu();
+            header.set_path(format!("{root}/{rel}")).unwrap();
+            header.set_mode(0o644);
+            header.set_size(0);
+            if *is_dir {
+                header.set_entry_type(tar::EntryType::Directory);
+            }
+            header.set_cksum();
+            builder.append(&header, std::io::empty()).unwrap();
+        }
+        builder.into_inner().unwrap()
+    }
+
+    /// Resolution over the archive endpoint (design #490 D1a): one match comes
+    /// back as the caller's own wire path, an absent name as an empty list, and
+    /// several as several — "one" and "several" must be distinguishable.
+    #[test]
+    fn archive_matches_answers_in_wire_paths_and_counts() {
+        let dir = "/chuggernaut/claude/projects";
+        let session = "0d9e-session.jsonl";
+        let archive = archive_of(
+            "projects",
+            &[
+                ("-workspace", true),
+                (&format!("-workspace/{session}"), false),
+                ("-workspace/other.jsonl", false),
+            ],
+        );
+        assert_eq!(
+            archive_matches(dir, session, &archive).unwrap(),
+            vec![format!("{dir}/-workspace/{session}")]
+        );
+        assert!(
+            archive_matches(dir, "absent.jsonl", &archive)
+                .unwrap()
+                .is_empty(),
+            "a name nothing carries resolves to nothing, not an error"
+        );
+
+        let several = archive_of(
+            "projects",
+            &[
+                (&format!("-workspace/{session}"), false),
+                (&format!("-Users-ci-elsewhere/{session}"), false),
+            ],
+        );
+        assert_eq!(
+            archive_matches(dir, session, &several).unwrap().len(),
+            2,
+            "a second cwd in the same config dir is exactly the case D1 candidate 3 died on"
+        );
+
+        let directory_only = archive_of("projects", &[(session, true)]);
+        assert!(
+            archive_matches(dir, session, &directory_only)
+                .unwrap()
+                .is_empty(),
+            "a directory with the name is not a match"
+        );
+    }
+
+    /// The bound refuses rather than returning a longer list
+    /// (docs/reference/style.md Tier 2 rule 3), and names itself so the caller can
+    /// tell a refusal from an empty scan.
+    #[test]
+    fn archive_matches_refuses_past_the_bound() {
+        let dir = "/chuggernaut/claude/projects";
+        let name = "s.jsonl";
+        let at_bound: Vec<(String, bool)> = (0..crate::FIND_FILE_MATCHES_MAX)
+            .map(|n| (format!("dir-{n}/{name}"), false))
+            .collect();
+        let members: Vec<(&str, bool)> = at_bound.iter().map(|(p, d)| (p.as_str(), *d)).collect();
+        assert_eq!(
+            archive_matches(dir, name, &archive_of("projects", &members))
+                .unwrap()
+                .len(),
+            crate::FIND_FILE_MATCHES_MAX,
+            "the bound itself still answers"
+        );
+
+        let mut over = at_bound.clone();
+        over.push((format!("dir-over/{name}"), false));
+        let members: Vec<(&str, bool)> = over.iter().map(|(p, d)| (p.as_str(), *d)).collect();
+        let err = archive_matches(dir, name, &archive_of("projects", &members))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains(types::worker::FIND_FILE_TOO_MANY) && err.contains(name),
+            "{err}"
+        );
     }
 
     #[test]

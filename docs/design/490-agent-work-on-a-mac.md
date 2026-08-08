@@ -1,6 +1,6 @@
 # Design — agent work on a Mac
 
-Status: PROPOSED — D1–D7 decided; slice 0 measured, M3 came back no, slices 1–6 unbuilt.
+Status: IMPLEMENTED IN PART — D1–D7 decided; slice 0 measured, M3 came back no, slice 1 landed, slices 2–6 unbuilt.
 
 Written against the tree at `d556a6c` (job #489's `code` merge, the last commit
 touching source before this branch): every claim below was read out of the
@@ -22,7 +22,7 @@ limits.
 rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
 
-**Slice 0 is done and nothing else is started.** M1, M2, M4 and M5 held; M3 came
+**Slices 0 and 1 are done; 2–6 are not started.** M1, M2, M4 and M5 held; M3 came
 back **no**; M6 and M7 are deferred to the slices that own the behaviour they
 gate (2 and 6). No decision was overturned. Three things changed:
 
@@ -39,6 +39,24 @@ gate (2 and 6). No decision was overturned. Three things changed:
   false, which is slice 2's problem.
 
 The correction below carries the evidence for each.
+
+**What slice 1 landed**, exactly as D1a's surface table specifies:
+`ContainerBackend::find_file(id, dir, name)` on both backends — Docker streams
+the directory's tar and reads its headers (the container has exited, so
+`exec find` is unavailable), the host backend walks the rebased directory and
+maps results back through `unrebase_path`, `rebase_path`'s new inverse — plus
+the `find_file` RPC pair, its arm in the daemon's op match, the routing, and both
+fakes. `Harvester::collect_agent` resolves and then reads with
+**`copy_file_chunked`** at the artifact store's own `MAX_BLOB_BYTES`, so the
+production defect below is repaired: a transcript over `MAX_COPY_FILE_BYTES` is
+harvested whole, and one over the new ceiling is refused at **error** level
+naming the loss rather than dropped. `find_file` is bounded at
+`container::FIND_FILE_MATCHES_MAX` matches and, on a host node, by scan depth and
+entries visited as well. **No `WORKER_RPC_VERSION` bump**: a daemon that does not
+know the op answers `unknown op`, and the caller falls back to the computed path
+— for a **container** launch only, per the realpath finding below. Zero and
+several matches stay log-and-continue; making them loud is slice 2's, and it
+still needs the fourth `ArtifactKind`.
 
 This document is [#322](./322-macos-native-runtime.md) P2's **agent half**,
 which that design files as *"Later, deliberately"*. It is being taken up early
@@ -584,7 +602,7 @@ different decision on the other side of a "no".
 | # | Type | Scope | Contract | Depends | Status |
 | --- | --- | --- | --- | --- | --- |
 | **0** | `design` or operator | M1–M7 measured on `gumbo-air-0`, recorded as a correction to this document | Each row answered yes/no with the command that answered it | none | **Landed** (job #492) |
-| **1** | `code` | D1/D1a: `ContainerBackend::find_file` across both backends, the worker RPC pair, the fakes; the harvest resolves then `copy_file_chunked`s; unknown-op falls back to the computed path | The surface table in D1a; **no** `WORKER_RPC_VERSION` bump; proven on container agent jobs, which this changes — and it **repairs a live defect**, so a work-agent transcript over `MAX_COPY_FILE_BYTES` harvested whole is an acceptance criterion available today | 0 (M1), #322 W4 (job #489) | Proposed |
+| **1** | `code` | D1/D1a: `ContainerBackend::find_file` across both backends, the worker RPC pair, the fakes; the harvest resolves then `copy_file_chunked`s; unknown-op falls back to the computed path | The surface table in D1a; **no** `WORKER_RPC_VERSION` bump; proven on container agent jobs, which this changes — and it **repairs a live defect**, so a work-agent transcript over `MAX_COPY_FILE_BYTES` harvested whole is an acceptance criterion available today | 0 (M1), #322 W4 (job #489) | **Landed** (job #491) |
 | **2** | `code` | D1b: zero **and** several become an error-level miss carrying a `transcript-missing` marker artifact; the escalation is armed only if M6 said it is safe — and M6's premise is already false, so the escalation is not armed until slice 1 has removed the known cause | `Harvester::collect_agent`'s return, its best-effort charter unchanged; a fourth `ArtifactKind` (`crates/store/src/artifacts.rs`) and its ripple — `crates/api/src/routes.rs`'s content type, `web/src/api/envelopes.ts`'s hand-written union, `web/src/components/TaskArtifacts.tsx`'s label map | 1 | Proposed |
 | **3** | `code` | D2: a host-capable node keeps `--bin chuggernaut-channel` in `NATIVE_BINS`, installs it at its own path, and proves it runs on the node. #480's `e_machine` guard on the injected copy is untouched | both deploy scripts; the two-executor rule | 0 (M2) | Proposed |
 | **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent — **and put the CLI on that `PATH`**, which M3 says it is not | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump; `AGENT_PATH`/`WORKER_PATH` in `deploy/prod/install-worker-launchd.sh` | 0 (M3), 3 | Proposed |

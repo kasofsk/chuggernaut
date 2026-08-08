@@ -272,8 +272,9 @@ async fn an_image_carrying_launch_is_refused() {
 }
 
 /// Design #322 §2: phase 1 serves `work.type: command` only, and the
-/// restriction is **enforced at the node** rather than documented — an agent
-/// host task would look healthy while its transcript harvest found nothing.
+/// restriction is **enforced at the node** rather than documented. Since #490
+/// slice 1 the refusal names what the node cannot yet provide rather than the
+/// transcript path, which is now resolved by session id.
 #[tokio::test]
 async fn an_agent_shaped_launch_is_refused() {
     let root = temp_root("agent-shape");
@@ -289,7 +290,7 @@ async fn an_agent_shaped_launch_is_refused() {
         "agent shape on a host node is a hard refusal, never retried capacity: {err}"
     );
     let text = err.to_string();
-    for named in [AGENT_CONFIG_VAR, "work.type: command", "transcript_path"] {
+    for named in [AGENT_CONFIG_VAR, "work.type: command", "#490 D2/D3"] {
         assert!(text.contains(named), "the refusal names {named}: {text}");
     }
     assert!(
@@ -402,6 +403,54 @@ async fn an_unmapped_path_is_refused_on_every_surface() {
             "copy_file must refuse {outside} by name: {err}"
         );
     }
+    backend.remove(&id).await.unwrap();
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Resolution on a host node (design #490 D1a): the scan is rooted by the same
+/// total wire mapping every other surface is, and its answers come **back** as
+/// wire paths — a resolved path is one the dispatcher hands straight to
+/// `copy_file`, never a node path that escaped the task directory.
+#[tokio::test]
+async fn find_file_answers_in_wire_paths_a_copy_can_take_back() {
+    let root = temp_root("findfile");
+    let backend = backend(&root);
+
+    let session = "0d9e-session.jsonl";
+    let workspace = container::WORKSPACE_VAR;
+    let id = backend
+        .launch(cfg(&format!(
+            "mkdir -p \"${workspace}/projects/-slug\" && printf 'a session' > \
+             \"${workspace}/projects/-slug/{session}\""
+        )))
+        .await
+        .unwrap();
+    assert_eq!(settle(&backend, &id).await, 0);
+
+    let dir = format!("{}/projects", container::WIRE_WORKSPACE);
+    let resolved = backend.find_file(&id, &dir, session).await.unwrap();
+    assert_eq!(resolved, vec![format!("{dir}/-slug/{session}")]);
+    assert_eq!(
+        backend.copy_file(&id, &resolved[0]).await.unwrap(),
+        Some(b"a session".to_vec()),
+        "a resolved path must be readable unchanged — the two surfaces speak one language"
+    );
+
+    assert!(
+        backend
+            .find_file(&id, &dir, "absent.jsonl")
+            .await
+            .unwrap()
+            .is_empty(),
+        "a name nothing carries is an empty list, never an error"
+    );
+    let err = backend
+        .find_file(&id, "/etc", session)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("/etc"), "an unmapped root is refused: {err}");
+
     backend.remove(&id).await.unwrap();
     std::fs::remove_dir_all(&root).unwrap();
 }

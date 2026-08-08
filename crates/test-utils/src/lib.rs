@@ -68,6 +68,13 @@ struct FakeBackendState {
     finished: HashMap<ContainerId, i32>,
     /// Files retrievable via copy_file, keyed by (container path).
     files: HashMap<String, Vec<u8>>,
+    /// Paths `copy_file` was asked for, in call order — how a test asserts
+    /// *which* path a caller resolved before reading it (design #490 D1a).
+    copied: Vec<String>,
+    /// When set, `find_file` fails with `BackendError::Other` carrying it — how
+    /// a test scripts the N-1 daemon that answers `unknown op` (design #490
+    /// D1a), so the caller's fallback is exercised.
+    find_file_fail: Option<String>,
     /// Returned by `logs` (and sliced by `logs_tail`) for every container.
     logs: Vec<u8>,
     /// When set, `logs_tail` sleeps this long before returning — a stand-in
@@ -171,6 +178,27 @@ impl FakeBackend {
             .unwrap()
             .files
             .insert(path.to_string(), contents.into());
+    }
+
+    /// The paths `copy_file` was asked for, in call order — how a test asserts
+    /// which path a caller read after resolving it.
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
+    pub fn copied(&self) -> Vec<String> {
+        self.state.lock().unwrap().copied.clone()
+    }
+
+    /// Make `find_file` fail with `BackendError::Other` — the way a test scripts
+    /// the daemon that does not know the op, whose reply the caller degrades on
+    /// (design #490 D1a).
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
+    pub fn fail_find_file(&self, reason: impl Into<String>) {
+        self.state.lock().unwrap().find_file_fail = Some(reason.into());
     }
 
     /// Script what `logs` returns for every container (and what `logs_tail`
@@ -551,7 +579,43 @@ impl ContainerBackend for FakeBackend {
         _id: &ContainerId,
         path: &str,
     ) -> Result<Option<Vec<u8>>, BackendError> {
-        Ok(self.state.lock().unwrap().files.get(path).cloned())
+        let mut st = self.state.lock().unwrap();
+        st.copied.push(path.to_string());
+        Ok(st.files.get(path).cloned())
+    }
+
+    /// Resolved out of the same `files` map `copy_file` reads, so a test scripts
+    /// a transcript once and both ops agree on where it is.
+    #[allow(
+        clippy::unwrap_used,
+        reason = "TODO(style): test-harness code — docs/reference/style.md's test exemption is scoped to test targets, so the debt is annotated rather than assumed."
+    )]
+    async fn find_file(
+        &self,
+        _id: &ContainerId,
+        dir: &str,
+        name: &str,
+    ) -> Result<Vec<String>, BackendError> {
+        let st = self.state.lock().unwrap();
+        if let Some(reason) = &st.find_file_fail {
+            return Err(BackendError::Other(reason.clone()));
+        }
+        let under = format!("{}/", dir.trim_end_matches('/'));
+        let mut found: Vec<String> = st
+            .files
+            .keys()
+            .filter(|p| p.starts_with(&under) && p.rsplit('/').next() == Some(name))
+            .cloned()
+            .collect();
+        found.sort();
+        if found.len() > container::FIND_FILE_MATCHES_MAX {
+            return Err(BackendError::Other(types::worker::find_file_too_many(
+                dir,
+                name,
+                container::FIND_FILE_MATCHES_MAX,
+            )));
+        }
+        Ok(found)
     }
 
     #[allow(

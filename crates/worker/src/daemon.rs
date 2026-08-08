@@ -31,10 +31,10 @@ use store::worker::{
 use store::{NatsStore, StoreError};
 use types::worker::{
     ContainerRef, CopyFileChunkOk, CopyFileChunkRequest, CopyFileOk, CopyFileRequest, FileSource,
-    InspectOk, LaunchOk, LogsOk, LogsTailOk, LogsTailRequest, PingOk, REFRESH_STAGE_CANCELLED,
-    RefreshCancelOk, RefreshCancelRequest, RefreshOk, RefreshOutcome, RefreshProgress,
-    RefreshRequest, RefreshResult, SetSlotsOk, SetSlotsRequest, WireStatus, WorkerError,
-    WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
+    FindFileOk, FindFileRequest, InspectOk, LaunchOk, LogsOk, LogsTailOk, LogsTailRequest, PingOk,
+    REFRESH_STAGE_CANCELLED, RefreshCancelOk, RefreshCancelRequest, RefreshOk, RefreshOutcome,
+    RefreshProgress, RefreshRequest, RefreshResult, SetSlotsOk, SetSlotsRequest, WireStatus,
+    WorkerError, WorkerLaunchRequest, WorkerReply, b64_decode, b64_encode,
 };
 
 /// Logs are tailed to fit the reply under NATS's 1MB max_payload after
@@ -940,6 +940,7 @@ async fn handle(state: &Arc<WorkerState>, subject: &str, payload: &[u8]) -> Vec<
         Some("inspect") => encode_reply(&inspect(state, payload).await),
         Some("copy_file") => encode_reply(&copy_file(state, payload).await),
         Some("copy_file_chunk") => encode_reply(&copy_file_chunk(state, payload).await),
+        Some("find_file") => encode_reply(&find_file(state, payload).await),
         Some("logs") => encode_reply(&logs(state, payload).await),
         Some("logs_tail") => encode_reply(&logs_tail(state, payload).await),
         Some("ping") => encode_reply(&ping(state).await),
@@ -951,10 +952,17 @@ async fn handle(state: &Arc<WorkerState>, subject: &str, payload: &[u8]) -> Vec<
         Some("refresh_cancel") => encode_reply(&refresh_cancel(state, payload).await),
         other => encode_reply::<()>(&WorkerReply::Err {
             error: WorkerError::Other {
-                message: format!("unknown op {other:?} on {subject}"),
+                message: unknown_op(other, subject),
             },
         }),
     }
+}
+
+/// How this daemon answers an op it does not know (spec §14.1): a **reply**,
+/// naming the op, opened with the marker its caller degrades on. That degrade
+/// is what lets an additive op ship without a `WORKER_RPC_VERSION` bump.
+fn unknown_op(op: Option<&str>, subject: &str) -> String {
+    format!("{} {op:?} on {subject}", types::worker::UNKNOWN_OP)
 }
 
 fn parse<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T, WorkerError> {
@@ -1446,6 +1454,24 @@ async fn copy_file_chunk(state: &WorkerState, payload: &[u8]) -> WorkerReply<Cop
                 data_b64: Some(b64_encode(&data[start..end])),
                 total_len: data.len() as u64,
             })
+        }
+        .await,
+    )
+}
+
+/// Resolve a file by name under a directory (design #490 D1a), so the caller
+/// never computes the agent CLI's directory slug. The scan runs node-local and
+/// only the resolved wire paths cross the wire.
+async fn find_file(state: &WorkerState, payload: &[u8]) -> WorkerReply<FindFileOk> {
+    reply(
+        async {
+            let req: FindFileRequest = parse(payload)?;
+            let paths = state
+                .backend
+                .find_file(&req.id, &req.dir, &req.name)
+                .await
+                .map_err(backend_err)?;
+            Ok(FindFileOk { paths })
         }
         .await,
     )
@@ -2015,6 +2041,17 @@ fn bounded_tail(text: &str, max_lines: usize, max_bytes: usize) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// An op this build does not know is a **reply** carrying the marker the
+    /// caller degrades on (design #490 D1a): the reason `find_file` needs no
+    /// `WORKER_RPC_VERSION` bump is that an N-1 daemon answers this, and the
+    /// caller then falls back rather than failing.
+    #[test]
+    fn an_unknown_op_is_answered_with_the_marker_the_caller_reads() {
+        let message = unknown_op(Some("find_file"), "req.worker.w1.find_file");
+        assert!(message.starts_with(types::worker::UNKNOWN_OP), "{message}");
+        assert!(message.contains("find_file"), "{message}");
+    }
 
     /// The golden assertion for #309 §1: a node that does not name `host`
     /// constructs the docker backend and nothing else, and no host rule can

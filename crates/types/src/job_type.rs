@@ -866,8 +866,9 @@ impl JobType {
     }
 
     /// Design #322 §2's phase-1 restriction as a field rule (N2): a host job
-    /// type is command work, because `agent::transcript_path`'s `-workspace`
-    /// slug is the agent CLI's slugification of a cwd a host task moves.
+    /// type is command work, now because the node cannot yet serve an agent
+    /// (design #490 D2/D3) rather than because of the transcript path, which
+    /// #490 slice 1 resolves by session id.
     ///
     /// It fails the author's own CI rather than a task at runtime; the node
     /// refuses an agent-shaped host launch as well (`container::host`), which
@@ -876,9 +877,10 @@ impl JobType {
         (self.resolved_mode() == RuntimeMode::Host).then(|| FieldRuleError::Invalid {
             field: "work.type",
             context: format!("job type '{}' (runtime.mode: host)", self.name),
-            reason: "runtime.mode: host serves work.type: command only — an agent task's \
-                     transcript is harvested from a path derived from the cwd, which a host task \
-                     moves (design #322 §2)"
+            reason: "runtime.mode: host serves work.type: command only — a host node has no \
+                     channel binary and no discovered agent CLI yet (design #322 §2, #490 \
+                     D2/D3); the transcript is no longer the obstacle, #490 slice 1 resolves it \
+                     by session id"
                 .into(),
         })
     }
