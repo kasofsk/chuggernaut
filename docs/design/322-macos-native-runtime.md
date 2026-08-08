@@ -1,11 +1,12 @@
 # Design — a native (macOS) execution runtime for iOS/Xcode jobs
 
 Status: PARTLY IMPLEMENTED — W2's rebase landed (job #485), and with it N2's
-`work.type: command` rule; W1 and W5 were satisfied generically by
-[#309](309-host-native-execution.md) P0 (job #434) and
+`work.type: command` rule; W4's Xcode discovery and `xcode:<version>` resolution
+landed (job #489), and P1's `envs` field with it. W1 and W5 were satisfied
+generically by [#309](309-host-native-execution.md) P0 (job #434) and
 [#440](440-native-worker-daemon.md) slice 3 (job #460), N2's schema by job #401,
-and P1 the same way but for its `envs` field — #309 P2 landed both halves, the
-record in job #483 and the `choose_placement` predicate in job #484. See [Current state](#current-state).
+and P1's other half by #309 P2 — the record in job #483 and the
+`choose_placement` predicate in job #484. See [Current state](#current-state).
 
 Written against the tree at `61b721d` (2026-07-30). Every claim about current
 behavior was read out of the source or out of [docs/spec.md](../spec.md); where
@@ -66,10 +67,33 @@ when the command returns, an agent-shaped host launch is refused at the node,
 and `WORKER_HOST_ROOT` is forwarded per node by `deploy/prod/build-worker.sh`
 with a boot-time refusal when the node cannot create it. N2's own
 `mode: host` requires `work.type: command` rule landed with it
-(`crates/types/src/job_type.rs`). What is still missing on the macOS side: W3's
+(`crates/types/src/job_type.rs`).
+
+**W4 has landed (job #489), so a host job type now has a satisfiable
+`runtime.env` on a Mac.** `crates/worker/src/xcode.rs` scans
+`/Applications/Xcode*.app` once at boot on a node whose `WORKER_MODES` names
+`host`, reads each bundle's `Contents/version.plist`, and
+`crates/worker/src/daemon.rs` forks a declared `runtime.env` on its **scheme**:
+`nix:` keeps [#373](373-project-toolchains.md) P2's realise-and-root path
+untouched, `xcode:<version>` exports `DEVELOPER_DIR` plus the `CHUG_ENV_PATH`
+the §4.1 bootstrap guard reads, and a scheme registered nowhere is refused
+naming both. Three decisions §3 left open were taken here: a version **two
+bundles claim** is advertised nowhere and refused at the launch naming both (they
+can differ in build, so picking one is the silent wrong-toolchain build the
+scheme exists to prevent); **finding no Xcode is a warning, not a refused boot**,
+because refusing would take a dual-mode Mac out of the fleet for every container
+job placed on it; and §3's unpinnable-environment record stays a **rule on the
+task script** (`docs/spec.md` §3.1), because only the task's own shell can
+produce `xcodebuild -version` and `xcrun simctl runtime list` into the captured
+stdout. The discovered set is advertised as `NodeCapabilities.envs`
+(`crates/types/src/worker.rs`), additively — `WORKER_RPC_VERSION` stays at 2 —
+and **placement still filters on `modes` only**: capability-filtered placement on
+`envs` is deliberately later. Nothing here has run on a Mac.
+
+What is still missing on the macOS side: W3's
 symlink containment (the rebase refuses a `..` component but resolves no
-symlink), the `simctl`-scoped teardown, the retention sweep, W4's Xcode
-discovery, N3's runbook and N1's remaining spec edits (§3.1's host node kind and
+symlink), the `simctl`-scoped teardown, the retention sweep,
+N3's runbook and N1's remaining spec edits (§3.1's host node kind and
 its trait listing, the Appendix entry). **No node in the fleet runs macOS host tasks and no
 job type declares `mode: host`** — both are operator steps. W1 is exactly what
 [#309](309-host-native-execution.md) P0's first slice landed (job #434), N2's
@@ -79,7 +103,7 @@ document's three cheapest phases are already paid for. W1 and N2 arrived at
 container scope; W5 is keyed on the node's mode rather than on its OS, so a
 macOS host node inherits the refusal without a line of macOS code. What remains
 is entirely macOS: W3's symlink containment, the `simctl`-scoped teardown, the
-retention sweep, Xcode discovery and the runbook — plus N1's remaining half,
+retention sweep and the runbook — plus N1's remaining half,
 §3.1's host node kind and the Appendix entry that still reads as undesigned.
 `runtime.mode: host` **validates** since
 [#309](309-host-native-execution.md) P1 (job #478) landed the host row's field
@@ -109,10 +133,10 @@ argument and its dependency.
 | **W3** | macOS hardening: symlink containment, `simctl`-scoped teardown, the retention sweep | Proposed — nothing macOS-specific is in the tree. The rebase refuses a `..` component lexically (job #485), so containment after **symlink** resolution is the piece left, in `rebase_path` (`crates/container/src/host.rs`) |
 | **N1** | `docs/spec.md`: the host column, the host node kind, `/workspace` as a logical path | **Partly landed** (job #485) — §4.1 says `/workspace` and `/chuggernaut` are virtual wire paths, §1.1's host row carries the `work.type: command` rule, §3.1's mode-routing paragraph no longer claims the one-task rule is a `/workspace` collision, and `docs/reference/crates.md`'s container row follows. Open: §3.1's host **node kind** and its stale trait listing, and the Appendix's "macOS bare metal dispatchers" still reading as undesigned rather than pointing here |
 | **N2** | The `runtime: { mode, env }` schema, its field rules, the epoch bump and both validate rules | **Landed** — (job #401) for #373's container-mode need, (job #478) for the host row's own field rules as #309 P1, and (job #485) for N2's own `mode: host` requires `work.type: command` rule, which rides beside the node-side refusal W2 landed in the same job |
-| **W4** | Node-side env-ref resolution: Xcode discovery, `xcode:<version>` → `DEVELOPER_DIR` | Proposed — the `xcode:`-is-host-only *validate* rule shipped with N2; no resolution exists |
+| **W4** | Node-side env-ref resolution: Xcode discovery, `xcode:<version>` → `DEVELOPER_DIR` | **Landed** (job #489) — boot-time discovery in `crates/worker/src/xcode.rs`, the scheme fork in `crates/worker/src/daemon.rs`, and the discovered set advertised as `NodeCapabilities.envs`. Fixture-tested only: no Mac has run it |
 | **W5** | Refresh precondition: decline a refresh while a host task runs | **Landed** (job #460) generically, as [#440](440-native-worker-daemon.md) slice 3 — §6's phase-1 mitigation, plus a swap-boundary re-check that phase never asked for |
 | **N3** | The macOS node runbook in `deploy/prod/README.md` | Proposed |
-| **P1** | `NodeCapabilities` on ping/announce + the `choose_placement` predicate | **Partly landed** generically, as #309 P2 — the record exists on `PingOk`/`WorkerAnnounce` and is ingested in `probe_worker` (job #483), carrying `modes`, `platform`, `resources_enforced` and `leases`, and the predicate filters placement by `modes` (job #484). This phase's `envs` field did not land; that remainder is [#367](367-android-emulator-execution.md) A3's `features` field, still Proposed |
+| **P1** | `NodeCapabilities` on ping/announce + the `choose_placement` predicate | **Landed** (job #489) for this phase's `envs` field, additively; the rest arrived generically as #309 P2 — the record on `PingOk`/`WorkerAnnounce` ingested in `probe_worker` (job #483), carrying `modes`, `platform`, `resources_enforced` and `leases`, and the predicate filtering placement by `modes` (job #484). `envs` is advertised, **not** filtered on: capability-filtered placement is later, and the remainder is [#367](367-android-emulator-execution.md) A3's `features` field, still Proposed |
 | **P2** | Per-task launchd jobs, agent work on a Mac, device leases, signing | Later, deliberately |
 
 ## Corrections to the brief and to #309

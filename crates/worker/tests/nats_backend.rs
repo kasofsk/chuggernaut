@@ -600,6 +600,7 @@ fn host_capable() -> types::worker::NodeCapabilities {
         platform: "macos/aarch64".into(),
         resources_enforced: false,
         leases: Vec::new(),
+        envs: vec!["xcode:26.5".into()],
     }
 }
 

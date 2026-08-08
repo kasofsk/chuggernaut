@@ -12,7 +12,8 @@
 
 use crate::capacity::Capacity;
 use crate::config::{WorkerConfig, WorkerMode};
-use crate::nix::{NixRoots, REAP_AGE_MIN, Realised, flake_installable};
+use crate::nix::{NIX_ENV_PREFIX, NixRoots, REAP_AGE_MIN, Realised, flake_installable};
+use crate::xcode::{DEVELOPER_DIR_VAR, XCODE_ENV_PREFIX, XcodeInstall, Xcodes};
 use container::docker::{DockerBackend, DockerNodeConfig, KvmGrant};
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
@@ -237,9 +238,13 @@ struct WorkerState {
     /// replaces (design #440 D4). False ⇒ a container-only node, whose work
     /// survives the swap by construction and whose refresh path is untouched.
     host_mode: bool,
+    /// The Xcodes this node discovered at boot (design #322 W4), which a host
+    /// launch's `xcode:<version>` resolves against. Empty on every node that
+    /// serves no host mode, and on a Mac with none installed.
+    xcodes: Xcodes,
     /// What this node advertises it can do (design #309 §4), derived once from
-    /// `WORKER_MODES` at start. Reported on both transports, so the pull and the
-    /// push halves cannot disagree.
+    /// `WORKER_MODES` and the discovery above at start. Reported on both
+    /// transports, so the pull and the push halves cannot disagree.
     capabilities: types::worker::NodeCapabilities,
     /// Node-local build+swap script for self-refresh (spec §3.1); `None` ⇒
     /// refresh requests are rejected as unconfigured.
@@ -449,6 +454,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
 
     let capacity = run_capacity(&config);
     let announce_now = Arc::new(tokio::sync::Notify::new());
+    let xcodes = discover_xcodes(&config.node, &config.modes);
 
     let state = Arc::new(WorkerState {
         node: config.node.clone(),
@@ -463,7 +469,8 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         nix: nix.clone(),
         nix_rooted: std::sync::Mutex::new(HashMap::new()),
         host_mode: serves_host(&config.modes),
-        capabilities: node_capabilities(&config.modes),
+        capabilities: node_capabilities(&config.modes, &xcodes),
+        xcodes,
         refresh_script: config.refresh_script.clone(),
         refresh_git_url: config.refresh_git_url.clone(),
         refresh_git_key: config.refresh_git_key.clone(),
@@ -545,10 +552,10 @@ fn serves_container(modes: &[WorkerMode]) -> bool {
 }
 
 /// This node's capability advertisement (design #309 §4), resolved from its
-/// `WORKER_MODES`. `resources_enforced` follows container capability: the Docker
-/// `HostConfig` is what enforces `resources.cpu`/`memory`, and a host-only node
-/// has none.
-fn node_capabilities(modes: &[WorkerMode]) -> types::worker::NodeCapabilities {
+/// `WORKER_MODES` and its discovered environments. `resources_enforced` follows
+/// container capability: the Docker `HostConfig` is what enforces
+/// `resources.cpu`/`memory`, and a host-only node has none.
+fn node_capabilities(modes: &[WorkerMode], xcodes: &Xcodes) -> types::worker::NodeCapabilities {
     let mut served = Vec::new();
     if serves_container(modes) {
         served.push(types::job_type::RuntimeMode::Container);
@@ -556,12 +563,41 @@ fn node_capabilities(modes: &[WorkerMode]) -> types::worker::NodeCapabilities {
     if serves_host(modes) {
         served.push(types::job_type::RuntimeMode::Host);
     }
+    let envs = xcodes.envs();
+    debug_assert!(
+        envs.is_empty() || serves_host(modes),
+        "only a host-capable node discovers an environment"
+    );
     types::worker::NodeCapabilities {
         modes: served,
         platform: format!("{}/{}", std::env::consts::OS, std::env::consts::ARCH),
         resources_enforced: serves_container(modes),
         leases: Vec::new(),
+        envs,
     }
+}
+
+/// The Xcodes a host-capable node serves, scanned once at boot because the
+/// installed bundles are the fact (design #322 W4). Finding **none** is a
+/// warning rather than a refused boot, for the reason `docs/spec.md` §3.1 gives:
+/// the refusal belongs at the launch that asked.
+fn discover_xcodes(node: &str, modes: &[WorkerMode]) -> Xcodes {
+    if !serves_host(modes) {
+        return Xcodes::default();
+    }
+    let xcodes = Xcodes::discover();
+    let envs = xcodes.envs();
+    if envs.is_empty() {
+        tracing::warn!(
+            node = %node,
+            root = %crate::xcode::INSTALL_ROOT,
+            "host mode is on and this node installs no Xcode it can serve — a launch declaring \
+             runtime.env xcode:<version> will be refused (design #322 W4)"
+        );
+    } else {
+        tracing::info!(node = %node, envs = ?envs, "discovered Xcode environments");
+    }
+    xcodes
 }
 
 /// Option (iii) — one host task per node — is **enforced** here rather than
@@ -1073,7 +1109,7 @@ async fn realise_for_launch(
     runtime_env: Option<&str>,
 ) -> Result<Option<String>, WorkerError> {
     if let Some(env_ref) = runtime_env {
-        return realise_declared_env(state, env, env_ref).await;
+        return serve_declared_env(state, env, env_ref).await;
     }
     let Some(roots) = state.nix.as_ref() else {
         return Ok(None);
@@ -1089,6 +1125,106 @@ async fn realise_for_launch(
         .await
         .map_err(launch_refused)?;
     Ok(Some(task_id))
+}
+
+/// Serve the environment the job type declared, by its **scheme** (design #322
+/// §3): `nix:` is realised and rooted, `xcode:` is resolved against the node's
+/// discovered installs, and a scheme this node cannot serve is refused naming
+/// the ones it can.
+async fn serve_declared_env(
+    state: &WorkerState,
+    env: &mut HashMap<String, String>,
+    env_ref: &str,
+) -> Result<Option<String>, WorkerError> {
+    match declared_scheme(env_ref) {
+        Some(DeclaredScheme::Nix) => realise_declared_env(state, env, env_ref).await,
+        Some(DeclaredScheme::Xcode(version)) => {
+            let install = resolve_xcode_env(&state.node, state.host_mode, &state.xcodes, version)?;
+            tracing::info!(
+                node = %state.node,
+                version = %install.version,
+                build = %install.build,
+                developer_dir = %install.developer_dir.display(),
+                "resolved a declared xcode runtime.env"
+            );
+            inject_xcode_env(env, install);
+            Ok(None)
+        }
+        None => Err(unservable_scheme(&state.node, env_ref)),
+    }
+}
+
+/// Which node-side path a declared `runtime.env` takes, by its scheme (design
+/// #322 §3). Pure, so the fork a launch turns on is asserted without a nix
+/// daemon or a Mac.
+#[derive(Debug, PartialEq, Eq)]
+enum DeclaredScheme<'a> {
+    /// `nix:<flake-ref>#<attr>` — realised and rooted, in either mode (design
+    /// #373 P2).
+    Nix,
+    /// `xcode:<version>` — resolved against the node's discovered installs, in
+    /// host mode only.
+    Xcode(&'a str),
+}
+
+/// The scheme this node serves for `env_ref`, or `None` for one no scheme claims.
+fn declared_scheme(env_ref: &str) -> Option<DeclaredScheme<'_>> {
+    if env_ref.starts_with(NIX_ENV_PREFIX) {
+        return Some(DeclaredScheme::Nix);
+    }
+    env_ref
+        .strip_prefix(XCODE_ENV_PREFIX)
+        .map(DeclaredScheme::Xcode)
+}
+
+/// The refusal for a scheme registered nowhere, naming the ones that are. A
+/// launch whose environment cannot be resolved is refused, never run against the
+/// machine's own toolchain.
+fn unservable_scheme(node: &str, env_ref: &str) -> WorkerError {
+    launch_refused(format!(
+        "launch declares runtime.env {env_ref:?}, whose scheme node {node} serves in no mode — \
+         this node resolves {NIX_ENV_PREFIX} (a flake reference) and {XCODE_ENV_PREFIX} (an \
+         installed Xcode, host mode only) and refuses everything else rather than running against \
+         the machine's own toolchain (design #322 §3)"
+    ))
+}
+
+/// The Xcode a host launch's `xcode:<version>` names, or the refusal. Held to
+/// the node's **mode** first: `xcode:` is host-only, so a node serving no host
+/// mode refuses it by name rather than injecting a path no container can see.
+fn resolve_xcode_env<'a>(
+    node: &str,
+    host_mode: bool,
+    xcodes: &'a Xcodes,
+    version: &str,
+) -> Result<&'a XcodeInstall, WorkerError> {
+    if !host_mode {
+        return Err(launch_refused(format!(
+            "launch declares runtime.env {XCODE_ENV_PREFIX}{version} and node {node} serves no \
+             host mode (WORKER_MODES) — Xcode cannot be containerized, so this is a placement bug \
+             refused rather than run (design #322 §3)"
+        )));
+    }
+    xcodes.resolve(node, version).map_err(launch_refused)
+}
+
+/// Point the task at the Xcode that was resolved: `DEVELOPER_DIR` selects the
+/// toolchain per process — never `xcode-select -s`, which mutates a machine-global
+/// symlink two tasks would fight over — and `CHUG_ENV_PATH` is what the §4.1
+/// bootstrap guard checks and puts on `PATH`.
+fn inject_xcode_env(env: &mut HashMap<String, String>, install: &XcodeInstall) {
+    env.insert(
+        DEVELOPER_DIR_VAR.to_string(),
+        install.developer_dir.display().to_string(),
+    );
+    env.insert(
+        container::RUNTIME_ENV_PATH_VAR.to_string(),
+        install.env_path().display().to_string(),
+    );
+    debug_assert!(
+        env[container::RUNTIME_ENV_PATH_VAR].starts_with(&env[DEVELOPER_DIR_VAR]),
+        "the PATH entry comes out of the selected developer directory"
+    );
 }
 
 /// Realise the environment the job type declared, for an allow-listed project
@@ -1917,12 +2053,13 @@ mod tests {
     fn advertised_capabilities_follow_worker_modes() {
         use types::job_type::RuntimeMode;
 
-        let default = node_capabilities(&crate::config::default_modes());
+        let none = Xcodes::default();
+        let default = node_capabilities(&crate::config::default_modes(), &none);
         assert_eq!(default.modes, vec![RuntimeMode::Container]);
         assert!(default.resources_enforced);
         assert_eq!(
             default,
-            node_capabilities(&[]),
+            node_capabilities(&[], &none),
             "declaring nothing is the same node"
         );
         assert_eq!(
@@ -1934,11 +2071,11 @@ mod tests {
             "only the platform separates a container-only node from the absent reading"
         );
 
-        let both = node_capabilities(&[WorkerMode::Host, WorkerMode::Container]);
+        let both = node_capabilities(&[WorkerMode::Host, WorkerMode::Container], &none);
         assert_eq!(both.modes, vec![RuntimeMode::Container, RuntimeMode::Host]);
         assert!(both.resources_enforced, "it still has a docker daemon");
 
-        let host_only = node_capabilities(&[WorkerMode::Host]);
+        let host_only = node_capabilities(&[WorkerMode::Host], &none);
         assert_eq!(host_only.modes, vec![RuntimeMode::Host]);
         assert!(
             !host_only.resources_enforced,
@@ -2373,6 +2510,155 @@ mod tests {
         );
     }
 
+    /// A fixture Mac: one Xcode under a temp root, so every assertion about the
+    /// scheme says the same thing on the Linux evaluator as it would on the air.
+    fn fixture_xcodes(name: &str) -> (PathBuf, Xcodes) {
+        let root =
+            std::env::temp_dir().join(format!("chug-daemon-xcode-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        crate::xcode::install_fixture(&root, "Xcode.app", "26.5", "17F42");
+        let xcodes = Xcodes::discover_in(&root);
+        (root, xcodes)
+    }
+
+    /// The fork a declared `runtime.env` takes is its SCHEME (design #322 §3):
+    /// `nix:` keeps design #373 P2's path whole — which is what makes a nix env
+    /// on a Linux node identical to today — `xcode:` takes the node-interpreted
+    /// one, and a scheme registered nowhere is refused naming both.
+    #[test]
+    fn a_declared_env_forks_on_its_scheme() {
+        assert_eq!(
+            declared_scheme("nix:.#chug-mobile"),
+            Some(DeclaredScheme::Nix)
+        );
+        assert_eq!(
+            declared_scheme("nix:"),
+            Some(DeclaredScheme::Nix),
+            "an empty flake ref is still nix's refusal to make, not a scheme miss"
+        );
+        assert_eq!(
+            declared_scheme("xcode:26.5"),
+            Some(DeclaredScheme::Xcode("26.5"))
+        );
+
+        for unservable in ["", "brew:llvm", "26.5", "/nix/store/aaaa-env", "XCODE:26.5"] {
+            assert_eq!(declared_scheme(unservable), None, "{unservable:?}");
+        }
+        match unservable_scheme("air", "brew:llvm") {
+            WorkerError::Launch { message } => {
+                assert!(message.contains("brew:llvm"), "{message}");
+                assert!(
+                    message.contains("nix:") && message.contains("xcode:"),
+                    "the refusal names the schemes this node DOES serve: {message}"
+                );
+            }
+            other => panic!("an unservable scheme must be Launch, got {other:?}"),
+        }
+    }
+
+    /// An `xcode:<version>` a host node installs selects that toolchain PER TASK
+    /// (design #322 §3): `DEVELOPER_DIR` rather than a machine-global
+    /// `xcode-select -s`, plus the one variable the §4.1 bootstrap guard reads,
+    /// pointed at the directory whose `bin` holds `xcodebuild`.
+    #[test]
+    fn a_declared_xcode_env_points_the_task_at_that_developer_dir() {
+        let (root, xcodes) = fixture_xcodes("resolve");
+        let developer_dir = root.join("Xcode.app").join("Contents").join("Developer");
+
+        let install = resolve_xcode_env("air", true, &xcodes, "26.5").expect("an installed Xcode");
+        assert_eq!(install.developer_dir, developer_dir);
+
+        let mut env = HashMap::from([("JOB_PROJECT".to_string(), "acme/beacon".to_string())]);
+        inject_xcode_env(&mut env, install);
+        assert_eq!(
+            env.get(DEVELOPER_DIR_VAR).map(String::as_str),
+            Some(developer_dir.display().to_string().as_str())
+        );
+        assert_eq!(
+            env.get(container::RUNTIME_ENV_PATH_VAR).map(String::as_str),
+            Some(developer_dir.join("usr").display().to_string().as_str()),
+            "the bootstrap guard's PATH entry is Developer/usr/bin: {env:?}"
+        );
+        assert_eq!(
+            xcodes.envs(),
+            vec!["xcode:26.5"],
+            "what it resolves is what it advertises"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Every node that cannot serve an `xcode:` reference refuses it BY NAME
+    /// (design #322 §3), never falling through to whatever `xcode-select` points
+    /// at: a version the node does not install, a node that serves no host mode,
+    /// and a host node with no Xcode at all.
+    #[test]
+    fn an_xcode_env_is_refused_by_name_wherever_it_cannot_be_served() {
+        let (root, xcodes) = fixture_xcodes("refusals");
+        let refusal = |host_mode: bool, xcodes: &Xcodes, version: &str| match resolve_xcode_env(
+            "air", host_mode, xcodes, version,
+        ) {
+            Err(WorkerError::Launch { message }) => message,
+            other => panic!("an xcode refusal must be Launch, got {other:?}"),
+        };
+
+        let unknown = refusal(true, &xcodes, "16.4");
+        assert!(unknown.contains("xcode:16.4"), "{unknown}");
+        assert!(
+            unknown.contains("xcode:26.5"),
+            "the refusal names what IS installed: {unknown}"
+        );
+
+        let container_only = refusal(false, &xcodes, "26.5");
+        assert!(container_only.contains("WORKER_MODES"), "{container_only}");
+        assert!(container_only.contains("containerized"), "{container_only}");
+
+        let bare = Xcodes::default();
+        assert!(bare.envs().is_empty(), "a node with none promises none");
+        assert!(
+            refusal(true, &bare, "26.5").contains("no Xcode at all"),
+            "a host node with neither scheme's environment refuses by name"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Discovery is scoped to the nodes that can use it (design #322 W4): a
+    /// container-only node scans nothing and advertises nothing, and finding no
+    /// Xcode is an empty advertisement rather than a refused boot — a dual-mode
+    /// Mac must keep serving containers.
+    #[test]
+    fn only_a_host_capable_node_discovers_and_none_is_not_a_boot_refusal() {
+        assert!(
+            discover_xcodes("nuc", &crate::config::default_modes())
+                .envs()
+                .is_empty(),
+            "a container-only node never reads /Applications"
+        );
+        let host = discover_xcodes("air", &[WorkerMode::Container, WorkerMode::Host]);
+        assert!(
+            node_capabilities(&[WorkerMode::Container, WorkerMode::Host], &host)
+                .modes
+                .contains(&types::job_type::RuntimeMode::Host),
+            "an Xcode-less host node still boots and still serves both modes"
+        );
+    }
+
+    /// What a node advertises is what it discovered (design #322 §3): the
+    /// `envs` list is the resolvable set, and a `nix:` reference is never in it
+    /// — it names a build, not a node fact.
+    #[test]
+    fn advertised_envs_are_the_discovered_set() {
+        let (root, xcodes) = fixture_xcodes("advertise");
+        let capabilities = node_capabilities(&[WorkerMode::Host], &xcodes);
+        assert_eq!(capabilities.envs, vec!["xcode:26.5".to_string()]);
+        assert_eq!(
+            node_capabilities(&[WorkerMode::Container], &Xcodes::default()).envs,
+            Vec::<String>::new(),
+            "a nix node advertises no environment: a flake ref is not a node fact"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// The refresh skip decision (spec §3.1 / #114): a node with no git URL, or
     /// a missing key file, is reported as skipped; a fully-credentialed node is
     /// not. This is the guard that turns a silent background no-op into a loud
@@ -2631,11 +2917,15 @@ mod tests {
             nix: None,
             nix_rooted: std::sync::Mutex::new(HashMap::new()),
             host_mode,
-            capabilities: node_capabilities(if host_mode {
-                &[WorkerMode::Host]
-            } else {
-                &[WorkerMode::Container]
-            }),
+            capabilities: node_capabilities(
+                if host_mode {
+                    &[WorkerMode::Host]
+                } else {
+                    &[WorkerMode::Container]
+                },
+                &Xcodes::default(),
+            ),
+            xcodes: Xcodes::default(),
             refresh_script: Some(script),
             refresh_git_url: Some("git@example.invalid:acme/chug.git".into()),
             refresh_git_key: git_key,

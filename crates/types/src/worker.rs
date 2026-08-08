@@ -296,7 +296,8 @@ pub const REFRESH_STAGE_CANCELLED: &str = "cancelled";
 
 /// What a node can do, as opposed to how much of it (design #309 §4): the
 /// execution modes it serves, the platform it runs on, whether it enforces a
-/// task's resource limits, and the exclusive resources it holds.
+/// task's resource limits, the exclusive resources it holds, and the
+/// node-interpreted environments it discovered it can serve.
 ///
 /// Carried on both [`PingOk`] and [`WorkerAnnounce`] as an `Option`, additively,
 /// so a daemon predating the field needs no coordination and reads as
@@ -322,6 +323,12 @@ pub struct NodeCapabilities {
     /// none, so an undeclared lease is never acquired.
     #[serde(default)]
     pub leases: Vec<String>,
+    /// The node-interpreted `runtime.env` references this node discovered it can
+    /// serve — the `xcode:<version>` set (design #322 §3). Absent ⇒ none, so a
+    /// node that advertised nothing promises nothing; a `nix:` reference names a
+    /// build rather than a node fact and is never listed.
+    #[serde(default)]
+    pub envs: Vec<String>,
 }
 
 /// [`NodeCapabilities::platform`] for a node that named none (design #309 §4).
@@ -346,6 +353,7 @@ impl Default for NodeCapabilities {
             platform: platform_unknown(),
             resources_enforced: resources_enforced_default(),
             leases: Vec::new(),
+            envs: Vec::new(),
         }
     }
 }
@@ -1280,6 +1288,7 @@ mod tests {
             platform: "macos/aarch64".into(),
             resources_enforced: false,
             leases: vec!["kvm".into()],
+            envs: vec!["xcode:26.5".into()],
         }
     }
 
@@ -1303,6 +1312,7 @@ mod tests {
             announce
         );
         assert!(json.contains(r#""modes":["container","host"]"#), "{json}");
+        assert!(json.contains(r#""envs":["xcode:26.5"]"#), "{json}");
 
         let ping = PingOk {
             running: 0,
@@ -1338,6 +1348,10 @@ mod tests {
         assert_eq!(absent.platform, PLATFORM_UNKNOWN);
         assert!(absent.resources_enforced, "the container fleet unchanged");
         assert!(absent.leases.is_empty());
+        assert!(
+            absent.envs.is_empty(),
+            "a node that named no environment serves none (design #322 §3)"
+        );
         assert!(absent.serves(RuntimeMode::Container));
         assert!(!absent.serves(RuntimeMode::Host), "fails closed");
 
@@ -1345,6 +1359,13 @@ mod tests {
             serde_json::from_str::<NodeCapabilities>("{}").unwrap(),
             absent,
             "each absent field within a present record takes the same default"
+        );
+        assert!(
+            serde_json::from_str::<NodeCapabilities>(r#"{"modes":["host"]}"#)
+                .unwrap()
+                .envs
+                .is_empty(),
+            "a daemon predating the field advertises no environment"
         );
         assert!(
             serde_json::from_str::<NodeCapabilities>(r#"{"modes":["host"]}"#)

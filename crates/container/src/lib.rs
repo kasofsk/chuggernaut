@@ -607,9 +607,10 @@ pub const WIRE_CHUGGERNAUT: &str = "/chuggernaut";
 /// site and the script consuming it cannot drift.
 pub const WORKSPACE_VAR: &str = "CHUG_WORKSPACE";
 
-/// Container-side variable naming the realised environment's store path, set by
-/// the worker daemon after it realises a launch's `runtime.env` (design #373
-/// P2). One name, so the injection site and the script consuming it cannot drift.
+/// Task-side variable naming the environment root the node resolved for a
+/// launch's `runtime.env`: the realised store path for `nix:` (design #373 P2),
+/// the selected `Developer/usr` for `xcode:` (design #322 §3). One name, so the
+/// injection site and the script consuming it cannot drift.
 pub const RUNTIME_ENV_PATH_VAR: &str = "CHUG_ENV_PATH";
 
 /// The bootstrap's toolchain half: refuse the task when the declared
