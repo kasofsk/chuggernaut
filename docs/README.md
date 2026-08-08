@@ -43,6 +43,7 @@ from being the one everyone forgets (design
 | [`docs/reference/runbooks/macos-host-supervision-proof.md`](reference/runbooks/macos-host-supervision-proof.md) | Runbook: proving host-task supervision on macOS |
 | [`docs/reference/runbooks/worker-capacity.md`](reference/runbooks/worker-capacity.md) | Runbook: reading a worker node's capacity, changing it, and where each number comes from |
 | [`docs/reference/runbooks/worker-kvm.md`](reference/runbooks/worker-kvm.md) | Runbook: turning KVM on for a worker node |
+| [`docs/reference/runbooks/worker-native-daemon-nixos.md`](reference/runbooks/worker-native-daemon-nixos.md) | Runbook: converting a NixOS worker node from the containerized daemon to the native unit |
 | [`docs/design/000-rationale.md`](design/000-rationale.md) | The original v2 rationale: why the platform is shaped the way it is |
 | [`docs/design/169-handoff-continuity.md`](design/169-handoff-continuity.md) | Audit: what one task hands the next, and where continuity breaks |
 | [`docs/design/210-ts-rewrite-plan.md`](design/210-ts-rewrite-plan.md) | The dormant TypeScript dispatcher rewrite plan, kept for its analysis |

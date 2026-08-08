@@ -251,6 +251,12 @@ Verify: `systemctl cat chug-worker.service` (the text should be the module's),
 `systemctl show -p FragmentPath chug-worker.service` (under `/etc`), and
 `systemctl is-active chug-worker.service`.
 
+**Converting a node that is still running the container** is the operator's side
+of those three steps — the credentials that move, the `WORKER_GIT_KEY` override
+the conversion needs, the deploy ordering and the recovery when the unit does
+not come up:
+[`worker-native-daemon-nixos.md`](worker-native-daemon-nixos.md).
+
 **darwin declares no agent, and asserts that it does not.** Setting
 `chug.node.daemon.enable` on a mac fails `darwin-rebuild build` naming
 [`deploy/prod/install-worker-launchd.sh`](../../../deploy/prod/install-worker-launchd.sh),
@@ -621,7 +627,7 @@ unverified — including the `chug.node` block you just added.
 | `chug.node: docker did not answer for <user>` on every darwin switch | the activation probe runs as `chug.node.user` through a login shell, because a mac's runtime is user-scoped | the VM is down, `docker` is not on that user's `PATH`, or activation could not `sudo -n`. All three are operational states, which is why this warns rather than fails |
 | `chug.node: chug.node.daemon.enable is a NixOS option — it declares a systemd unit, and this is darwin` | the daemon knobs are Linux-only | install the macOS agent with `deploy/prod/install-worker-launchd.sh` (§4a) |
 | `chug-worker.service` loops on `Restart=always`, journal says it cannot load the environment file | the unit is declared and the deploy has not run yet, or the two halves name different files | run `build-worker.sh` against the node, or point `daemon.environmentFile` and `WORKER_ENV_FILE_<node>` at one path (§4a) |
-| `build-worker: … has no usable systemd unit directory at '/etc/systemd/system'` | NixOS: the deploy has nowhere to write its own copy of the unit | declare the unit (§4a) and set `WORKER_UNIT_DIR_<node>=/run/systemd/system` |
+| `build-worker: … has no usable systemd unit directory at '/etc/systemd/system'` | NixOS: the deploy has nowhere to write its own copy of the unit | declare the unit (§4a) and set `WORKER_UNIT_DIR_<node>=/run/systemd/system` — the whole conversion is [`worker-native-daemon-nixos.md`](worker-native-daemon-nixos.md) |
 | the switch "worked" but nothing changed (darwin) | the two profile pointers disagree | §8 |
 | running jobs died during a switch | that switch restarted dockerd without live-restore active — the adopting switch, or a reboot | drain next time ([`worker-capacity.md`](worker-capacity.md) §4.1) |
 
