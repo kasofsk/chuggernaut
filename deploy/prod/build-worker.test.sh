@@ -109,7 +109,12 @@ EOF
 #     by default: a node with no worker at all, and nothing that can drift;
 #   * the nix preconditions (`[ -d '/nix/store' ] …`) and the toolchain-shape
 #     probe (`readlink -f …`) succeed unless $FAIL_NIX_PRECHECK /
-#     $FAIL_SDK_PRECHECK is set.
+#     $FAIL_SDK_PRECHECK is set;
+#   * the DOCKER GRANT socket probe (`[ -S '/run/chug/docker.sock' ]`, design
+#     #517 S5) succeeds unless $FAIL_GRANT_SOCKET is set. It is answered on the
+#     grant cases' own path rather than on $FAIL_DOCKER_SOCKET's, because the
+#     endpoint check asks `[ -S …` of a different path for a different reason and
+#     a case must be able to fail one without the other.
 cat > "$BIN/ssh" <<EOF
 #!/bin/sh
 cat >/dev/null 2>&1 || true
@@ -172,6 +177,7 @@ case "\$*" in
   *Config.Env*)    [ -z "\${FAKE_LIVE_ENV:-}" ] || printf '%s\n' "\${FAKE_LIVE_ENV}" ;;
   *"[ -d '/nix/store' ]"*) [ -z "\${FAIL_NIX_PRECHECK:-}" ] || exit 1 ;;
   *"readlink -f"*) [ -z "\${FAIL_SDK_PRECHECK:-}" ] || exit 1 ;;
+  *"[ -S '/run/chug/docker.sock'"*) [ -z "\${FAIL_GRANT_SOCKET:-}" ] || exit 1 ;;
   *"[ -S '"*)      [ -z "\${FAIL_DOCKER_SOCKET:-}" ] || exit 1 ;;
 esac
 exit 0
@@ -906,6 +912,184 @@ if grep -qE -- "WORKER_KVM|--device" "$LOG"; then
   fail "a whitespace-only WORKER_KVM is unset to the daemon — it must add nothing"
 fi
 echo "ok: WORKER_KVM is trimmed the way the daemon trims it"
+
+# ── Case 2i1: the docker grant reaches the daemon, per node (design #517 S5) ───
+# #522 landed the mechanism and nothing forwarded either knob, so the only way to
+# declare one was to hand-edit the node's environment file — which the next
+# deploy rewrites. Both ride the derived <VAR>_<node> resolution, like every
+# other node property, and the allow-list is quoted so an operator's spaces keep
+# it ONE value on both readers of the file.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  WORKER_DOCKER_SOCKET=/var/run/docker.sock \
+  WORKER_DOCKER_SOCKET_air=/run/chug/docker.sock \
+  WORKER_DOCKER_GRANTS=acme/api:code \
+  WORKER_DOCKER_GRANTS_air="acme/beacon:build-image, acme/api:code" \
+  sh "$SUT"
+
+grep_log "WORKER_DOCKER_SOCKET='/run/chug/docker.sock'"
+grep_log "[ -S '/run/chug/docker.sock' ]"
+case "$(env_file)" in
+  *"WORKER_DOCKER_GRANTS='acme/beacon:build-image, acme/api:code'"*) ;;
+  *) fail "a spaced allow-list must reach the environment file as one quoted value" ;;
+esac
+if grep -qF "WORKER_DOCKER_SOCKET='/var/run/docker.sock'" "$LOG"; then
+  fail "a per-node WORKER_DOCKER_SOCKET_air must win over the bare WORKER_DOCKER_SOCKET"
+fi
+if grep -qF "WORKER_DOCKER_GRANTS='acme/api:code'" "$LOG"; then
+  fail "a per-node WORKER_DOCKER_GRANTS_air must win over the bare WORKER_DOCKER_GRANTS"
+fi
+echo "ok: WORKER_DOCKER_SOCKET/_GRANTS reach the env file, per node, as one quoted value"
+
+# ── Case 2i2: a node declaring neither is BYTE-IDENTICAL to before this ────────
+# The property #522 was careful to buy and this slice must not spend: no node in
+# the fleet declares either knob, so this slice lands INERT. Compared against
+# case 2a's golden rather than against a token, because a stray line is exactly
+# what a token assertion misses.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT"
+
+[ "$(env_file)" = "$EXPECTED_ENV" ] || fail "a node declaring no docker grant must produce the run spec it produced before #517 S5.
+  expected: $EXPECTED_ENV
+  got:      $(env_file)"
+if grep -qE "WORKER_DOCKER_SOCKET|WORKER_DOCKER_GRANTS" "$LOG"; then
+  fail "nothing about the docker grant may reach a node that declares neither knob"
+fi
+echo "ok: a node declaring neither docker knob is byte-identical to before this slice"
+
+# ── Case 2i3: a socket the daemon's parse rejects refuses BEFORE the restart ───
+# `parse_docker_socket` holds the path to `parse_stable_path`'s rule
+# (crates/worker/src/config.rs): a relative path is a bind source the engine
+# would resolve somewhere unintended, and a store hash goes silently wrong at the
+# next `nixos-rebuild`. Both are hard config errors there, so passing one through
+# would replace a working daemon with one the supervisor boot-loops.
+for bad_socket in docker.sock /nix/store/3zr1pgwpc00zrj8qc8d631bdfw1z9c5y-docker/docker.sock; do
+  : > "$LOG"
+  set +e
+  PATH="$BIN:$PATH" \
+    WORKER_SSH=worksalot@nuc \
+    WORKER_NATS_URL=nats://10.0.0.1:4222 \
+    CHUG_WORKER_NODE=nuc \
+    WORKER_DOCKER_SOCKET="$bad_socket" \
+    sh "$SUT" >"$WORK/docker-socket.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "WORKER_DOCKER_SOCKET='$bad_socket' must fail the deploy (got rc=0)"
+  grep -qF "WORKER_DOCKER_SOCKET='$bad_socket'" "$WORK/docker-socket.out" \
+    || fail "the refusal must name the value it read"
+  not_started "WORKER_DOCKER_SOCKET='$bad_socket' must not reach the daemon restart (live daemon untouched)"
+done
+echo "ok: a relative or store-hashed WORKER_DOCKER_SOCKET refuses before the daemon is replaced"
+
+# ── Case 2i4: every entry `DockerGrantEntry::parse` rejects refuses too ───────
+# crates/container/src/docker.rs is the one place `owner/project:job_type` is
+# spelled, and this asks exactly what it asks. A malformed entry is refused AT
+# THE DECLARATION rather than kept as a grant that silently never matches — the
+# failure mode that looks identical to a working deny.
+for bad_grant in acme/beacon acme:code acme/beacon: code acme/b/c:code acme/api:co:de ""; do
+  : > "$LOG"
+  set +e
+  PATH="$BIN:$PATH" \
+    WORKER_SSH=worksalot@nuc \
+    WORKER_NATS_URL=nats://10.0.0.1:4222 \
+    CHUG_WORKER_NODE=nuc \
+    WORKER_DOCKER_SOCKET=/run/chug/docker.sock \
+    WORKER_DOCKER_GRANTS="acme/api:code,$bad_grant" \
+    sh "$SUT" >"$WORK/docker-grants.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the grant entry '$bad_grant' must fail the deploy (got rc=0)"
+  grep -qF "is not an owner/project:job_type pair" "$WORK/docker-grants.out" \
+    || fail "the refusal must name the shape it wanted, for '$bad_grant'"
+  not_started "the grant entry '$bad_grant' must not reach the daemon restart (live daemon untouched)"
+done
+
+# A REPEATED entry is a hard config error at the daemon too, and the same
+# fail-closed reason applies: an allow-list the daemon refuses is one no launch
+# is ever matched against.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_DOCKER_SOCKET=/run/chug/docker.sock \
+  WORKER_DOCKER_GRANTS="acme/api:code, acme/api:code" \
+  sh "$SUT" >"$WORK/docker-grants.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a repeated grant entry must fail the deploy (got rc=0)"
+grep -qF "more than once" "$WORK/docker-grants.out" || fail "the refusal must name the repeat"
+not_started "a repeated grant entry must not reach the daemon restart (live daemon untouched)"
+echo "ok: every malformed or repeated WORKER_DOCKER_GRANTS entry refuses before the restart"
+
+# ── Case 2i5: a socket that is not a socket ON THE NODE refuses ───────────────
+# `docker_grant_refusal` (crates/worker/src/daemon.rs) refuses the BOOT when the
+# path is absent from the daemon's own view, and the supervisor loops that
+# refusal until the node leaves the fleet. The probe asks the node the same
+# question, and the refusal names the containerized-daemon precondition #517 S3
+# left to this slice.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  FAIL_GRANT_SOCKET=1 \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_DOCKER_SOCKET=/run/chug/docker.sock \
+  WORKER_DOCKER_GRANTS=acme/api:code \
+  sh "$SUT" >"$WORK/grant-socket.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a declared socket that is not on the node must fail the deploy (got rc=0)"
+grep -qF "docker_grant_refusal" "$WORK/grant-socket.out" \
+  || fail "the refusal must name the daemon function that would refuse the boot"
+grep -qF "mounted into chug-worker" "$WORK/grant-socket.out" \
+  || fail "the refusal must state the containerized-daemon precondition"
+not_started "a missing grant socket must not reach the daemon restart (live daemon untouched)"
+echo "ok: a WORKER_DOCKER_SOCKET that is not a socket on the node refuses before the restart"
+
+# ── Case 2i6: the two acts are separate, and each half alone only WARNS ───────
+# Enabling the node's socket and granting it to a (project, job type) are two
+# decisions, exactly as WORKER_KVM and WORKER_KVM_PROJECTS are: an empty
+# allow-list grants nobody and is a working configuration, not an error. The
+# converse — an allow-list with no socket — is what the daemon silently ignores
+# (`docker_grant` returns None), so the deploy says so rather than refusing a
+# shape the daemon accepts.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_DOCKER_SOCKET=/run/chug/docker.sock \
+  sh "$SUT" >"$WORK/grant-half.out" 2>&1
+
+grep -qF "WORKER_DOCKER_GRANTS is empty" "$WORK/grant-half.out" \
+  || fail "a socket with no allow-list must say it grants nobody"
+grep_log "WORKER_DOCKER_SOCKET='/run/chug/docker.sock'"
+if grep -qF "WORKER_DOCKER_GRANTS=" "$LOG"; then
+  fail "an undeclared allow-list must not reach the node"
+fi
+
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_DOCKER_GRANTS=acme/api:code \
+  sh "$SUT" >"$WORK/grant-half.out" 2>&1
+
+grep -qF "WORKER_DOCKER_SOCKET is unset" "$WORK/grant-half.out" \
+  || fail "an allow-list with no socket must say the daemon reads nothing through it"
+grep_log "WORKER_DOCKER_GRANTS='acme/api:code'"
+echo "ok: the socket and the allow-list are two separate acts, each half warning rather than refusing"
 
 # ── Case 2j: an unprovisionable cache dir refuses BEFORE the daemon restart ───
 # A native daemon creates the cache dir at boot in the node's own view, so a path

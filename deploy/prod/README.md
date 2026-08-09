@@ -1099,6 +1099,20 @@ Notes:
   does not. The self-refresh swap carries no device at all any more (#440 slice
   6): a node still running the container daemon refuses its own swap and is
   converted with `build-worker.sh` instead.
+- **The docker socket is a per-node opt-in too, and it grants node root** —
+  [`docs/reference/runbooks/worker-docker-grant.md`](../../docs/reference/runbooks/worker-docker-grant.md)
+  is the procedure, [design #517](../../docs/design/517-docker-access-for-jobs.md)
+  the decision. `WORKER_DOCKER_SOCKET` says the node has a socket to give and
+  `WORKER_DOCKER_GRANTS` (`owner/project:job_type` entries) says which launches
+  may hold it; both ride the same `<VAR>_<node>` resolution as `WORKER_SLOTS` and
+  are written into the node's environment file, and unset ⇒ no bind at all, which
+  is **every node in this fleet today**. A container holding the socket can
+  bind-mount the node and reach the daemon's credentials, so the allow-list is
+  fail-closed — an empty one grants nobody — and `build-worker.sh` refuses, live
+  daemon untouched, anything the daemon would refuse at parse or at boot: a
+  relative or store-hashed path, a malformed or repeated entry, and a path that
+  is not a socket on the node. It is *not* `WORKER_DOCKER_ENDPOINT`, which is the
+  engine the daemon itself dials.
 - **`WORKER_MODES` declares the runtimes a node offers** (design #309 P0, #322
   W1) — `container` (the default, and what the whole fleet runs) and/or `host`.
   It rides the same `<VAR>_<node>` resolution as `WORKER_SLOTS`, and it survives

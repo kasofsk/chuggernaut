@@ -1,6 +1,6 @@
 # Design #517 — Docker access for jobs, accepted (amending #309 §10 and #313 Decision 0)
 
-Status: IMPLEMENTED IN PART — S1 (job #518), S2 (job #521), S3 (job #522) and S4 (job #519) landed; S5 is open, S6 deferred. The grant mechanism exists and grants nothing: no node declares one, and host-mode access is already live.
+Status: IMPLEMENTED IN PART — S1 (job #518), S2 (job #521), S3 (job #522), S4 (job #519) and S5a (job #523) landed; S5b is open, S6 deferred. The grant mechanism exists, the deploy can now declare one, and nothing is granted: no node declares one, and host-mode access is already live.
 
 Written against the tree at `ff3258a`. Every claim about current behavior below
 was read out of the source and out of [`docs/spec.md`](../spec.md), not inferred
@@ -45,6 +45,14 @@ granted and it is not declared anywhere; it is a consequence of the task user
 owning the colima socket. That is the production posture this document accepts
 rather than closes.
 
+**S5a (job #523) makes a grant declarable without hand-editing a node.** The
+deploy composes the node's whole run spec, so until it forwarded these two knobs
+the only way to declare one was an edit the next deploy overwrote. It still
+grants nothing — no `chuggernaut.env` in this repo names a socket or an entry —
+and a node declaring neither produces a byte-identical run spec, asserted in
+`deploy/prod/build-worker.test.sh`. What is left of S5 is the operator's own
+config (S5b).
+
 **S4 (job #519) makes that posture visible.** Every daemon now probes at boot
 whether it reaches a docker endpoint and advertises the answer as
 `NodeCapabilities.docker_reachable`, for both modes, defaulting false. Nothing
@@ -73,7 +81,8 @@ not at some future adoption. See [the trigger](#the-revisit-trigger-stated-as-a-
 | **S2** | Put the job type's name on the launch: one dispatcher-composed env entry in `container_env` ([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)). No schema field, no epoch, no `WORKER_RPC_VERSION` bump | **Landed** (job #521): `JOB_TYPE`, composed with the base stamps and sealed by S1's prefix. None of the three costs was spent ([what S2 landed](#what-s2-landed-job-521)) |
 | **S3** | A `DockerGrant` beside `KvmGrant` ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)): a node-side socket path plus a `(project, job type)` allow-list, bound into matching launches only, empty granting nobody | **Landed** (job #522): `WORKER_DOCKER_SOCKET` + `WORKER_DOCKER_GRANTS`, fail-closed at parse, at boot and at every launch. `docs/spec.md` §3.1's owed amendment landed with it ([what S3 landed](#what-s3-landed-job-522)) |
 | **S4** | Advertise the access on `NodeCapabilities` ([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)) for **both** modes, defaulting false so a daemon predating the field promises nothing. D4's audit half | **Landed** (job #519): `docker_reachable`, additive with no `WORKER_RPC_VERSION` bump, probed by `worker::docker_access` at boot for both modes and never a boot refusal. See [what S4 landed](#what-s4-landed-job-519) |
-| **S5** | *Node config:* the allow-list and the pin on one builder node — [#313](313-workload-identity-image-builds.md) S8, minus the proxy | Proposed — gated on S3 |
+| **S5a** | *Deploy plumbing:* forward `WORKER_DOCKER_SOCKET` and `WORKER_DOCKER_GRANTS` through [`deploy/prod/build-worker.sh`](../../deploy/prod/build-worker.sh), with pre-flight refusals mirroring the daemon's, and the operator runbook | **Landed** (job #523): both per-node overridable, unset byte-identical, four refusals ahead of the restart. The containerized-daemon precondition S3 left open is answered ([what S5a landed](#what-s5as-deploy-plumbing-landed-job-523)) |
+| **S5b** | *Node config:* the allow-list entry itself and the pin on one builder node — [#313](313-workload-identity-image-builds.md) S8, minus the proxy | Proposed — operator config, and the pin waits on [#313](313-workload-identity-image-builds.md) S9's `build-image` |
 | **S6** | *Deferred:* per-task users ([#309](309-host-native-execution.md) P3 §8), the only mechanism that can withhold host-mode docker | Deferred — D4's enforcement half |
 
 [#313](313-workload-identity-image-builds.md) S6 (the operator's provider
@@ -826,3 +835,63 @@ declares nothing produces a byte-identical launch — asserted, not assumed.
 `chug-worker` mount a containerized daemon needs and the rename trap C3 names),
 and per-task users (S6). No proxy and no verb allow-list — B-IV stays
 [superseded](#the-ladder-this-preserves), rung 2 of the ladder.
+
+## What S5a's deploy plumbing landed (job #523)
+
+**The two knobs travel through the deploy, and nothing is granted by that.**
+S3's mechanism was reachable only by hand-editing a node's environment file,
+which `deploy/prod/build-worker.sh` rewrites on the next deploy — the shortfall
+job #511 fixed for `WORKER_SLOTS_MAX`, in the same place and the same shape.
+
+- **Forwarded as two separate acts**, beside the KVM pair they mirror:
+  `WORKER_DOCKER_SOCKET` says the node has a socket to give and
+  `WORKER_DOCKER_GRANTS` says which `(project, job type)` launches may hold it,
+  both per-node overridable through the derived `<VAR>_<node>` resolution with no
+  second code path, both trimmed and whitespace-only-reads-as-unset because that
+  is `crates/worker/src/config.rs`'s own reading.
+- **Unset stays unset, and it is asserted rather than assumed.** A node
+  declaring neither produces the byte-identical run spec case 2a's golden
+  already pinned, so this slice is inert on the live fleet — the property S3 was
+  careful to buy and this one must not spend.
+- **Four pre-flight refusals, each naming the daemon function that would refuse
+  it**: a relative or store-hashed socket (`parse_stable_path`), an entry
+  `DockerGrantEntry::parse` rejects, a repeated entry (`parse_docker_grants`),
+  and a declared socket that is not a socket on the node
+  (`docker_grant_refusal`). The daemon runs under `Restart=always`/`KeepAlive`,
+  so each of these passed through would replace a working daemon with one the
+  supervisor boot-loops out of the fleet.
+- **The entry shape is not respelled.** The scan asks exactly what
+  `DockerGrantEntry::parse` asks — an owner, a project name with no second
+  slash, a job type with no second colon — because that parser is the one place
+  the spelling lives and a second copy here would be the drift it was written to
+  prevent.
+- **The precondition S3 left to this slice, answered by conversion rather than
+  by a mount.** `docker_grant_refusal` asks `chug-worker`'s own view, so a
+  containerized daemon would need the socket mounted into itself — and this
+  script composes **no container run spec** any more (design #440 D1/D2): it
+  installs the native unit and removes any leftover `chug-worker` container in
+  the same run. So neither branch of "add the bind or refuse for it" is
+  representable; the node ends the run natively supervised, its own view *is* the
+  node's, and the `[ -S ]` probe over ssh asks the boot refusal's exact question
+  in advance. The container case is **unreachable from the deploy path, not
+  dead** — the Mini's dispatcher and api are native and the nuc and the air were
+  converted, so no live node is in it — and it is stated in the refusal message,
+  in the runbook §3 and in `deploy/prod/env.example` for a node an operator
+  recreates by hand.
+- **Two shapes warn rather than refuse**, because the daemon accepts both: a
+  socket with an empty allow-list (it grants nobody, which is the fail-closed
+  default said out loud) and an allow-list with no socket (`docker_grant`
+  returns `None`, so those launches receive nothing and fail at the docker
+  command). Refusing either would be a rule this slice invented.
+- **The runbook is `docs/reference/runbooks/worker-docker-grant.md`**, on
+  `docs/reference/runbooks/worker-kvm.md`'s model, and it declares nothing that
+  would work if pasted: which job types get the socket is the operator's act,
+  which is what the [Which job types](#which-job-types) section keeps outside the
+  repo.
+
+**Not done here, and it is the rest of S5:** no node declares a socket, no
+allow-list entry exists in this tree, and no `placement.node` pin — that half
+waits on [#313](313-workload-identity-image-builds.md) S9's `build-image`, which
+is the first consumer this document names. No `crates/worker` or
+`crates/container` change, no epoch bump, no `WORKER_RPC_VERSION` bump and no
+`.chug/jobs/*.yaml` edit.

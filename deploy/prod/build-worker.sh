@@ -891,6 +891,154 @@ fi
 if [ -n "${WORKER_JDK_DIR:-}" ]; then
   spec_line WORKER_JDK_DIR "$WORKER_JDK_DIR"
 fi
+# ── the node's docker socket, and who may hold it (design #517 D3, S5) ───────
+# TWO settings and TWO acts, exactly as WORKER_KVM and WORKER_KVM_PROJECTS are:
+# WORKER_DOCKER_SOCKET says this node HAS a socket to give, WORKER_DOCKER_GRANTS
+# says which `owner/project:job_type` launches may hold it, and an empty
+# allow-list grants NOBODY. Both empty when unset ⇒ the run spec is byte-identical
+# to what it was before this block existed, which is what keeps the live fleet
+# inert: no node in it declares either today.
+#
+# WHAT A GRANT IS, said where the operator declares one: the socket is bound
+# WRITABLE into the matched launch at /var/run/docker.sock, and a container that
+# holds it can bind-mount the node's filesystem — so it holds NODE ROOT, and
+# through the daemon's key directory it can reach the node's NATS credential and
+# therefore other jobs' minted credentials. Design #517 D1 ACCEPTS that cost
+# rather than mitigating it, on the condition that every job runs code the
+# operator wrote or vendored. Do not list a linked project whose origin takes
+# third-party merges.
+#
+# THE REFUSALS MIRROR THE DAEMON AND INVENT NOTHING. Each of them is a hard
+# config error or a boot refusal there (crates/worker/src/config.rs
+# `parse_docker_socket` / `parse_docker_grants`, whose entry shape is
+# crates/container/src/docker.rs `DockerGrantEntry::parse`, and
+# crates/worker/src/daemon.rs `docker_grant_refusal`), and the daemon runs under
+# `Restart=always`/`KeepAlive` — so a declaration this script passed through
+# would replace a working daemon with one the supervisor boot-loops out of the
+# fleet. Trimmed first, and whitespace-only reads as unset, because that is the
+# daemon's own reading of both values.
+#
+# THE PRECONDITION #517's S3 LEFT HERE, ANSWERED: `docker_grant_refusal` asks
+# chug-worker's OWN view, and on a node whose daemon is still a container that
+# view is the container's, so the socket would have to be mounted into
+# chug-worker itself. This script cannot add that mount and does not refuse for
+# it, because it composes NO container run spec any more (design #440 D1/D2): it
+# installs a natively supervised daemon and removes any leftover chug-worker
+# container in the same run, and a native daemon's own view IS the node's. So the
+# `[ -S ]` probe below asks the node exactly the question the daemon will ask
+# itself at boot. The container case is not dead, it is unreachable from here —
+# a node nobody has converted refuses its own swap and is deployed with THIS
+# script, which converts it; the mount is stated in
+# docs/reference/runbooks/worker-docker-grant.md for a node an operator recreates
+# by hand.
+build_worker_store_hash() {
+  _path="$1"
+  while [ -n "$_path" ]; do
+    case "$_path" in
+      */*) _component="${_path%%/*}"; _path="${_path#*/}" ;;
+      *)   _component="$_path"; _path="" ;;
+    esac
+    case "$_component" in
+      *-*) ;;
+      *) continue ;;
+    esac
+    _hash="${_component%%-*}"
+    [ "${#_hash}" -eq 32 ] || continue
+    [ -n "${_component#*-}" ] || continue
+    case "$_hash" in
+      *[!0123456789abcdfghijklmnpqrsvwxyz]*) continue ;;
+    esac
+    return 0
+  done
+  return 1
+}
+DOCKER_GRANT_SOCKET="${WORKER_DOCKER_SOCKET:-}"
+DOCKER_GRANT_SOCKET="${DOCKER_GRANT_SOCKET#"${DOCKER_GRANT_SOCKET%%[![:space:]]*}"}"
+DOCKER_GRANT_SOCKET="${DOCKER_GRANT_SOCKET%"${DOCKER_GRANT_SOCKET##*[![:space:]]}"}"
+if [ -n "$DOCKER_GRANT_SOCKET" ]; then
+  # The two value refusals are asked on EVERY node, host-only included, because
+  # `WorkerConfig::from_env` parses this setting whatever the node's modes are.
+  case "$DOCKER_GRANT_SOCKET" in
+    /*) ;;
+    *)
+      echo "build-worker: WORKER_DOCKER_SOCKET='$DOCKER_GRANT_SOCKET' is not an absolute host path — the daemon refuses it at parse (crates/worker/src/config.rs \`parse_stable_path\`) and the supervisor would loop that refusal; REFUSING (live daemon untouched)" >&2
+      exit 1
+      ;;
+  esac
+  if build_worker_store_hash "$DOCKER_GRANT_SOCKET"; then
+    echo "build-worker: WORKER_DOCKER_SOCKET='$DOCKER_GRANT_SOCKET' names a nix store path — chug config names a stable, activation-maintained path, never a content hash, and the daemon refuses it at parse (crates/worker/src/config.rs \`parse_stable_path\`); REFUSING (live daemon untouched)" >&2
+    exit 1
+  fi
+  # Skipped on a host-only node for the endpoint check's reason, not a weaker
+  # one: `local_backend` returns before it builds the docker backend, so the
+  # grant is never read there and there is nothing to bind it into.
+  if [ -n "$SERVES_CONTAINER" ]; then
+    if ! ssh "$WORKER_SSH" "[ -S '$DOCKER_GRANT_SOCKET' ]" < /dev/null; then
+      echo "build-worker: WORKER_DOCKER_SOCKET names '$DOCKER_GRANT_SOCKET' and that is not a socket on $WORKER_SSH — the daemon refuses to BOOT when the path is absent from its own view (crates/worker/src/daemon.rs \`docker_grant_refusal\`) and the supervisor loops that refusal until the node leaves the fleet, and a path that exists but is not a socket is worse: the node boots and every granted launch is handed a bind no docker client can dial; REFUSING (live daemon untouched). Read the node's real socket off it with 'ssh $WORKER_SSH docker context inspect --format \"{{.Endpoints.docker.Host}}\"' (on a mac colima answers ~/.colima/default/docker.sock) and declare WORKER_DOCKER_SOCKET_$NODE=<that path, no unix:// prefix> in deploy/prod/chuggernaut.env ON THE MINI, or drop it to grant nothing. This run leaves $NODE's daemon natively supervised, so the view checked here is the daemon's own (design #440 D2); a daemon still running as a container needs the socket mounted into chug-worker itself (docs/reference/runbooks/worker-docker-grant.md)." >&2
+      exit 1
+    fi
+  else
+    echo "build-worker: WARNING: WORKER_DOCKER_SOCKET is declared on $NODE, which names no container runtime — the grant is read only where a container launch is composed, so this node binds the socket into nothing (design #517 D3). Host tasks reach docker by the uid they run as, which no chug setting grants or withholds (#517 D4)" >&2
+  fi
+  spec_line WORKER_DOCKER_SOCKET "$DOCKER_GRANT_SOCKET"
+fi
+DOCKER_GRANTS="${WORKER_DOCKER_GRANTS:-}"
+DOCKER_GRANTS="${DOCKER_GRANTS#"${DOCKER_GRANTS%%[![:space:]]*}"}"
+DOCKER_GRANTS="${DOCKER_GRANTS%"${DOCKER_GRANTS##*[![:space:]]}"}"
+if [ -n "$DOCKER_GRANTS" ]; then
+  # `DockerGrantEntry::parse` is the one place the entry shape is spelled, so
+  # this asks exactly what it asks — an owner, a project name with no second
+  # slash, and a job type with no second colon — and refuses a repeat the way
+  # `parse_docker_grants` does. The scan runs over a comma-TERMINATED copy so the
+  # final entry is examined like every other one, and each entry is trimmed
+  # because the parser trims it.
+  GRANTS_SEEN=""
+  _rest="$DOCKER_GRANTS,"
+  while [ -n "$_rest" ]; do
+    _entry="${_rest%%,*}"
+    _rest="${_rest#*,}"
+    _entry="${_entry#"${_entry%%[![:space:]]*}"}"
+    _entry="${_entry%"${_entry##*[![:space:]]}"}"
+    _project=""
+    _job_type=""
+    case "$_entry" in
+      *:*) _project="${_entry%%:*}"; _job_type="${_entry#*:}" ;;
+    esac
+    _owner=""
+    _name=""
+    case "$_project" in
+      */*) _owner="${_project%%/*}"; _name="${_project#*/}" ;;
+    esac
+    _bad=""
+    [ -n "$_owner" ] && [ -n "$_name" ] && [ -n "$_job_type" ] || _bad=1
+    case "$_name" in
+      */*) _bad=1 ;;
+    esac
+    case "$_job_type" in
+      *:*) _bad=1 ;;
+    esac
+    if [ -n "$_bad" ]; then
+      echo "build-worker: WORKER_DOCKER_GRANTS entry '$_entry' is not an owner/project:job_type pair — the daemon refuses it at parse (crates/container/src/docker.rs \`DockerGrantEntry::parse\`, called from crates/worker/src/config.rs) rather than keeping a grant that could never match a launch, and the supervisor would loop that refusal; REFUSING (live daemon untouched). The job type is the \`name:\` its .chug/jobs/*.yaml declares, and the project is the JOB_PROJECT shape 'owner/project'." >&2
+      exit 1
+    fi
+    case "$GRANTS_SEEN," in
+      *",$_entry,"*)
+        echo "build-worker: WORKER_DOCKER_GRANTS lists '$_entry' more than once, which the daemon refuses as a hard config error (crates/worker/src/config.rs \`parse_docker_grants\`); REFUSING (live daemon untouched)" >&2
+        exit 1
+        ;;
+    esac
+    GRANTS_SEEN="$GRANTS_SEEN,$_entry"
+  done
+  if [ -z "$DOCKER_GRANT_SOCKET" ]; then
+    echo "build-worker: WARNING: WORKER_DOCKER_GRANTS='$DOCKER_GRANTS' grants the docker socket on $NODE, but WORKER_DOCKER_SOCKET is unset — the daemon reads the allow-list only through a declared socket (crates/worker/src/daemon.rs \`docker_grant\`), so these launches receive NOTHING and fail at the docker command instead. Declare WORKER_DOCKER_SOCKET_$NODE, or drop the allow-list" >&2
+  fi
+  spec_line WORKER_DOCKER_GRANTS "$DOCKER_GRANTS"
+  if [ -n "$DOCKER_GRANT_SOCKET" ]; then
+    echo "build-worker: WORKER_DOCKER_GRANTS='$DOCKER_GRANTS' — each of those (project, job type) launches on $NODE gets '$DOCKER_GRANT_SOCKET' bound writable at /var/run/docker.sock and therefore NODE ROOT for its duration, accepted rather than mitigated (design #517 D1). Renaming a job type silently REVOKES its grant; every other launch is unaffected"
+  fi
+elif [ -n "$DOCKER_GRANT_SOCKET" ]; then
+  echo "build-worker: WARNING: WORKER_DOCKER_SOCKET='$DOCKER_GRANT_SOCKET' is declared on $NODE and WORKER_DOCKER_GRANTS is empty — the socket is bound into NO launch (design #517 D3: empty grants nobody), which is the daemon's own warning at boot. Granting it to a workload is the second act" >&2
+fi
 # Per-task nix GC roots (design #373 P1, daemon side in crates/worker/src/nix.rs).
 # WORKER_NIX_GCROOTS_DIR is the switch: unset ⇒ nothing below happens and the run
 # spec is exactly what it was. Set ⇒ the daemon realises the node's declared
