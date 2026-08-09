@@ -27,6 +27,8 @@
 #   WORKER_GIT_KEY          ssh private key for the node credential
 #   WORKER_NODE, WORKER_SLOTS, WORKER_CACHE_DIR   reported, never re-applied
 #   WORKER_REFRESH_DISK_FREE_GB_MIN / _DISK_PATH   disk pre-flight (see below)
+#   WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS   how long the post-prune colima trim
+#     may run on a mac before it is abandoned (see below); Darwin only
 #   WORKER_DAEMON_BIN / WORKER_CHANNEL_BINARY / WORKER_HOST_CHANNEL_BINARY /
 #   WORKER_REFRESH_SCRIPT
 #     where the swap installs the artifacts it stages — three on a
@@ -214,6 +216,18 @@ DISK_PATH="${WORKER_REFRESH_DISK_PATH:-/}"
 # below what is live evicts the coldest entries — a slower next build, never a
 # wrong one.
 BUILDER_KEEP_STORAGE="8GB"
+# How long the VM trim below may run. `fstrim -av` over a 100GiB volume is not
+# instant, and it sits on the refresh's hot path on both the successful and the
+# failed leg — so it is bounded the way everything else here is, and the bound is
+# printed rather than implied. Overridable per node the way the disk knobs above
+# are, through the environment file build-worker.sh renders.
+DISK_TRIM_TIMEOUT_SECS="${WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS:-120}"
+# Held to a number here rather than where it is compared: a bound that is not one
+# makes `[ -lt ]` fail, and a failure inside the trim is a loop rather than a
+# refusal (see refresh_disk_trim_vm).
+case "$DISK_TRIM_TIMEOUT_SECS" in
+  '' | *[!0-9]*) DISK_TRIM_TIMEOUT_SECS=120 ;;
+esac
 
 # Free space on $DISK_PATH in 1K blocks; empty when df cannot report it.
 refresh_disk_free_kb() {
@@ -273,6 +287,106 @@ refresh_disk_report_build_cost() {
   echo "worker-refresh: disk: build consumed $(refresh_disk_gb "$_used_kb")GB on $DISK_PATH ($(refresh_disk_gb "$DISK_FREE_KB_BEFORE")GB -> $(refresh_disk_gb "$_after_kb")GB free, pre-prune; floor is ${DISK_FREE_GB_MIN}GB)"
 }
 
+# ── returning what the prune freed to the filesystem the guard measures ──────
+# ON A CONTAINER-CAPABLE MAC THE PRUNE PAIR AND THE PRE-FLIGHT ADDRESS TWO
+# DIFFERENT FILESYSTEMS, and without this they never meet. Since #440 made the
+# daemon native, `/` is the boot volume while docker lives in a colima VM: the
+# prune above frees blocks INSIDE that VM, and a lima disk image grows on write
+# and never shrinks on delete — so none of that space returns to the filesystem
+# the pre-flight reads, and #248's prune-on-failure half is a no-op for the
+# number that decides whether the next attempt is allowed to start. `fstrim`
+# marks the already-free blocks as discardable and the hypervisor punches them
+# out of the backing file; it deletes nothing — no image, no container, no cache.
+#
+# Measured on dev-air, 2026-08-08, after deploy #508 was refused at 3.2GB free on
+# `/`: the datadisk was 99G host-allocated against 18G used inside the VM, and
+# one `fstrim -av` trimmed 80.1 GiB, taking the file to 19G and `/` from 3.4G to
+# 84G free. Discard is plumbed end to end and that was verified rather than
+# assumed — the guest advertises it (`lsblk`: vdb DISC-GRAN 512B, DISC-MAX 100G)
+# AND macOS Virtualization.framework passes it through to the backing file, which
+# is what those 80.1 GiB prove. The guest's advertisement alone is not sufficient.
+#
+# THIS MAKES THE GUARD'S NUMBER HONEST; IT DOES NOT FIX THE MEASUREMENT. `/` is
+# still the wrong filesystem to size a docker build against, and job #487's item
+# beside $DISK_PATH above stays open with both its reasons intact. What changes
+# is that the number now moves: while the datadisk sat fully allocated, VM writes
+# largely reused blocks the host had already given it and `/` barely moved, so
+# the host reading tracked the build's real needs poorly in BOTH directions; once
+# the file is sparse again, VM growth does consume `/`. That is also the argument
+# against simply declaring WORKER_REFRESH_DISK_FREE_GB_MIN_<node>=0 — the
+# documented workaround, and what the air is NOT running.
+#
+# Best-effort and fail-open, like the guard it serves and like the nix reaper's
+# charter next door (crates/worker/src/nix.rs): a node with no colima, a colima
+# with no fstrim, a hypervisor that ignores discard, and a trim that outruns its
+# bound all report and continue. The trim is never the reason a refresh fails.
+# LINUX IS UNTOUCHED — there the prune and the pre-flight are the same
+# filesystem, so there is nothing to hand back and this makes no call at all.
+refresh_disk_trim_vm() {
+  [ "$(uname -s)" = Darwin ] || return 0
+  if ! command -v colima > /dev/null 2>&1; then
+    echo "worker-refresh: no 'colima' on this daemon's PATH ('${PATH}') — skipping the VM trim, so what the prune freed stays inside the VM and $DISK_PATH sees none of it (continuing: a refresh is never failed by the trim)"
+    return 0
+  fi
+  echo "worker-refresh: trimming the colima VM (bounded at ${DISK_TRIM_TIMEOUT_SECS}s): the prune freed blocks INSIDE the VM, and a lima disk image never shrinks on delete — until this runs, none of that reclaim reaches $DISK_PATH, which is what the pre-flight measures"
+  _trim_before_kb="$(refresh_disk_free_kb)"
+  # Guarded, unlike the two `mktemp -d`s the phases open with, because THIS one
+  # can run from the EXIT trap: a `set -e` abort inside a trap that re-enters the
+  # prune is a loop, not a failure, so nothing in here may exit non-zero.
+  _trim_out="$(mktemp 2> /dev/null || true)"
+  if [ -z "$_trim_out" ]; then
+    echo "worker-refresh: cannot stage the colima trim's output ('mktemp' failed) — skipping the VM trim (continuing: a refresh is never failed by the trim)"
+    return 0
+  fi
+  _trim_done="$_trim_out.done"
+  # The bound is a POLLED FLAG the trim raises for itself, and both halves of that
+  # are deliberate. Not `timeout`, which macOS does not ship — homebrew's
+  # coreutils installs it as `gtimeout`, so a bound built on it would silently
+  # never apply on the one platform this ever runs on. And not `kill -0`, which
+  # answers "still running" for a child nobody has reaped yet. The flag is
+  # renamed into place so it is never observed half-written.
+  {
+    if colima ssh -- sudo fstrim -av > "$_trim_out" 2>&1; then
+      _trim_child_rc=0
+    else
+      _trim_child_rc=$?
+    fi
+    printf '%s\n' "$_trim_child_rc" > "$_trim_done.part"
+    mv -f "$_trim_done.part" "$_trim_done"
+  } < /dev/null &
+  _trim_pid=$!
+  _trim_waited=0
+  while [ ! -f "$_trim_done" ] && [ "$_trim_waited" -lt "$DISK_TRIM_TIMEOUT_SECS" ]; do
+    sleep 1
+    _trim_waited=$(( _trim_waited + 1 ))
+  done
+  _trim_rc="$(cat "$_trim_done" 2> /dev/null || true)"
+  case "$_trim_rc" in
+    '' | *[!0-9]*) _trim_rc=0 ;;
+  esac
+  if [ ! -f "$_trim_done" ]; then
+    # KILL, not TERM: a background subshell can inherit this script's TERM
+    # handler, and running it here would print the build phase's cancellation
+    # notice over a refresh nobody cancelled. What is already running inside the
+    # VM is welcome to finish — the refresh just stops waiting for it.
+    kill -KILL "$_trim_pid" 2> /dev/null || true
+    echo "worker-refresh: the colima trim did not finish within ${DISK_TRIM_TIMEOUT_SECS}s and was abandoned — the VM keeps the blocks and $DISK_PATH sees no reclaim from it (continuing: a refresh is never failed by the trim; raise WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS if this node needs longer)"
+  elif [ "$_trim_rc" -ne 0 ]; then
+    echo "worker-refresh: the colima trim failed (exit $_trim_rc: $(tail -n 1 "$_trim_out" 2> /dev/null || true)) — what the prune freed stays inside the VM (continuing: a refresh is never failed by the trim)"
+  else
+    _trim_after_kb="$(refresh_disk_free_kb)"
+    if [ -z "$_trim_before_kb" ] || [ -z "$_trim_after_kb" ]; then
+      echo "worker-refresh: trimmed the colima VM: the blocks the prune freed are back on $DISK_PATH"
+    else
+      _trim_returned_kb=$(( _trim_after_kb - _trim_before_kb ))
+      [ "$_trim_returned_kb" -ge 0 ] || _trim_returned_kb=0
+      echo "worker-refresh: trimmed the colima VM: returned $(refresh_disk_gb "$_trim_returned_kb")GB to $DISK_PATH ($(refresh_disk_gb "$_trim_before_kb")GB -> $(refresh_disk_gb "$_trim_after_kb")GB free), which is the reclaim the pre-flight will actually read"
+    fi
+  fi
+  rm -f "$_trim_out" "$_trim_done" "$_trim_done.part"
+  return 0
+}
+
 # The sanctioned safe prune pair (#183) plus the reclaim it won, reported so an
 # operator reads the disk story off the deploy leg without ssh'ing the node.
 # NEVER `-a`: only DANGLING images (the generation a retag-swap orphaned, or the
@@ -289,11 +403,15 @@ refresh_disk_prune() {
   _after_kb="$(refresh_disk_free_kb)"
   if [ -z "$_before_kb" ] || [ -z "$_after_kb" ]; then
     echo "worker-refresh: pruned after $_why: dangling images + BuildKit cache above $BUILDER_KEEP_STORAGE"
-    return 0
+  else
+    _reclaimed_kb=$(( _after_kb - _before_kb ))
+    [ "$_reclaimed_kb" -ge 0 ] || _reclaimed_kb=0
+    echo "worker-refresh: pruned after $_why: reclaimed $(refresh_disk_gb "$_reclaimed_kb")GB ($(refresh_disk_gb "$_before_kb")GB -> $(refresh_disk_gb "$_after_kb")GB free on $DISK_PATH)"
   fi
-  _reclaimed_kb=$(( _after_kb - _before_kb ))
-  [ "$_reclaimed_kb" -ge 0 ] || _reclaimed_kb=0
-  echo "worker-refresh: pruned after $_why: reclaimed $(refresh_disk_gb "$_reclaimed_kb")GB ($(refresh_disk_gb "$_before_kb")GB -> $(refresh_disk_gb "$_after_kb")GB free on $DISK_PATH)"
+  # Both callers reach this — the successful refresh and the failed build — and
+  # the failed one is the point: it is where the next attempt's headroom is
+  # decided, and on a mac the prune above returned none of it.
+  refresh_disk_trim_vm
 }
 
 case "$PHASE" in

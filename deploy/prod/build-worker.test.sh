@@ -381,10 +381,15 @@ PATH="$BIN:$PATH" \
   CHUG_WORKER_NODE=nuc \
   WORKER_REFRESH_DISK_FREE_GB_MIN=45 \
   WORKER_REFRESH_DISK_PATH=/var/lib/docker \
+  WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS=240 \
   sh "$SUT"
 
 grep_log "WORKER_REFRESH_DISK_FREE_GB_MIN='45'"
 grep_log "WORKER_REFRESH_DISK_PATH='/var/lib/docker'"
+# The bound on the post-prune colima trim (job #511) is the third of these, and
+# the refresh names it by name when a trim outruns it — an instruction an
+# operator cannot follow if node creation drops the value.
+grep_log "WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS='240'"
 echo "ok: the env file carries the disk pre-flight knobs when set"
 
 # ── Case 2c: the node's capacity reaches the daemon (WORKER_SLOTS) ─────────────

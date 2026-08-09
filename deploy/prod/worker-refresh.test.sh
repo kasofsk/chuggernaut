@@ -247,25 +247,52 @@ NORUSTCBIN="$WORK/norustcbin"
 mkdir -p "$NORUSTCBIN"
 cp "$MACBIN/uname" "$MACBIN/cargo" "$MACBIN/tar" "$NORUSTCBIN/"
 
-# The guard asks a REAL `command -v rustc`, and this suite's own host may have a
-# toolchain (CI runs it in the agent-rust image) — so a case modelling a node
-# without one has to strip every PATH entry that holds a rustc, or it would find
-# the harness's and the case would assert nothing.
-strip_rustc_path() {
+# The script asks REAL `command -v` questions, and this suite's own host may
+# answer them: CI runs it in the agent-rust image, which has a toolchain. So a
+# case modelling a node WITHOUT some tool has to strip every PATH entry that
+# holds it, or it would find the harness's copy and assert nothing.
+strip_path_of() {
   _out=""
-  _rest="$1"
+  _rest="$2"
   while [ -n "$_rest" ]; do
     case "$_rest" in
       *:*) _d="${_rest%%:*}"; _rest="${_rest#*:}" ;;
       *)   _d="$_rest"; _rest="" ;;
     esac
     [ -n "$_d" ] || continue
-    [ ! -x "$_d/rustc" ] || continue
+    [ ! -x "$_d/$1" ] || continue
     _out="${_out:+$_out:}$_d"
   done
   printf '%s\n' "$_out"
 }
-NO_RUSTC_PATH="$(strip_rustc_path "$PATH")"
+NO_RUSTC_PATH="$(strip_path_of rustc "$PATH")"
+# The same question for colima, which a host running this suite on a mac really
+# does have — and the Linux cases below assert that the script never so much as
+# looks for it.
+NO_COLIMA_PATH="$(strip_path_of colima "$PATH")"
+
+# Fake colima, in a dir of its OWN so a case can put a mac with and without one
+# on the same footing as a Linux node with and without one. `colima ssh -- sudo
+# fstrim -av` is the whole surface: it logs the argv, and — like the fake docker's
+# prune arm — moves the fake df reading, because returning blocks to the HOST
+# filesystem is the entire point of the call.
+COLIMABIN="$WORK/colimabin"
+mkdir -p "$COLIMABIN"
+cat > "$COLIMABIN/colima" <<EOF
+#!/bin/sh
+echo "colima \$*" >> "$LOG"
+# A VM that outruns the bound. \`exec\` so the abandoned trim is one process and
+# not two, and it holds the temp file it was writing rather than anything of this
+# suite's — which is what lets the suite finish while it is still running.
+[ -z "\${FAKE_TRIM_HANG:-}" ] || exec sleep 30
+# A VM with no fstrim, or a hypervisor that ignores discard: the trim fails and
+# the refresh must not.
+[ -z "\${FAKE_TRIM_FAIL:-}" ] || { echo "sudo: fstrim: command not found" >&2; exit 127; }
+[ -z "\${FREE_KB_AFTER_TRIM:-}" ] || echo "\$FREE_KB_AFTER_TRIM" > "$FREE_FILE"
+echo "/: 80.1 GiB (86020000000 bytes) trimmed"
+exit 0
+EOF
+chmod +x "$COLIMABIN/colima"
 
 # Where a converted mac keeps the tree it compiles and the target dir it keeps
 # between refreshes (WORKER_BUILD_DIR, written into the run spec by
@@ -754,6 +781,141 @@ grep_out "reclaimed 8.5GB (33.3GB -> 41.9GB free on /)"
 grep_out "worker-refresh: phase build-image 3/3 agent-rust"
 unset FREE_KB_AFTER_PRUNE
 echo "ok: a failed build prunes what it stranded and reports the reclaim"
+
+# ── Case 2e: on a mac the prune frees nothing the guard can see until the trim ─
+# The two-filesystem problem (deploy #508, dev-air 2026-08-08): since #440 made
+# the daemon native, `/` is the boot volume while docker lives in a colima VM, so
+# `docker image prune` and `docker builder prune` free blocks INSIDE the VM and a
+# lima disk image never shrinks on delete. The fakes model exactly that — the
+# prune moves nothing on `/` and only the trim does — so the case fails against a
+# script that stops at the prune pair, which is what #248's fix does on a mac.
+: > "$LOG"
+mac_build_reset
+set_free_kb 35000000                 # ~33.3GB free: clears the 30GB floor
+export FREE_KB_AFTER_TRIM=88000000   # ~83.9GB, the 80.1 GiB the air got back
+PATH="$MACBIN:$COLIMABIN:$BIN:$PATH" \
+  WORKER_NODE=air \
+  WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+  WORKER_GIT_KEY="$KEY" \
+  WORKER_CARGO="$MACBIN/cargo" \
+  WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+  sh "$SUT" build abc123 prod > "$OUT" 2>&1 \
+  || fail "a mac with ample space must refresh"
+
+grep_log "colima ssh -- sudo fstrim -av"
+# AFTER the prune pair, both halves of it: trimming before the prune would hand
+# back only what was already free, which is the reclaim that did not happen yet.
+image_prune_line="$(line_of "docker image prune -f")"
+builder_prune_line="$(line_of "docker builder prune -f")"
+trim_line="$(line_of "colima ssh -- sudo fstrim")"
+[ -n "$image_prune_line" ] && [ -n "$builder_prune_line" ] && [ -n "$trim_line" ] \
+  || fail "expected the prune pair and the trim in the log"
+[ "$image_prune_line" -lt "$trim_line" ] && [ "$builder_prune_line" -lt "$trim_line" ] \
+  || fail "the trim must run AFTER the prune pair, not before it"
+# The prune's own reclaim is 0.0GB — that is the bug, stated in the deploy leg —
+# and the trim is where the space the pre-flight measures actually comes back.
+grep_out "pruned after a successful refresh: reclaimed 0.0GB (33.3GB -> 33.3GB free on /)"
+grep_out "trimmed the colima VM: returned 50.5GB to / (33.3GB -> 83.9GB free)"
+echo "ok: a mac trims the VM after the prune pair, and that is where the guard's space comes back"
+
+# ── Case 2f: and on the FAILED-build path too, which is where it matters most ──
+# #248 pruned on failure precisely because the failed attempt decides whether the
+# next one is allowed to start. On a mac that prune returns nothing to the
+# filesystem the pre-flight reads, so a node three failed rebuilds deep refuses
+# every further deploy (#486, #508) with the space sitting inside the VM.
+: > "$LOG"
+mac_build_reset
+set_free_kb 35000000
+if PATH="$MACBIN:$COLIMABIN:$BIN:$PATH" \
+     WORKER_NODE=air \
+     WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+     WORKER_GIT_KEY="$KEY" \
+     WORKER_CARGO="$MACBIN/cargo" \
+     WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+     FAIL_BUILD=agent-rust \
+     sh "$SUT" build abc123 prod > "$OUT" 2>&1; then
+  fail "build should fail when one image build fails"
+fi
+
+grep_out "pruned after a failed build"
+grep_log "colima ssh -- sudo fstrim -av"
+grep_out "trimmed the colima VM: returned 50.5GB to / (33.3GB -> 83.9GB free)"
+echo "ok: the failed-build path trims too — the attempt that decides the next attempt's headroom"
+unset FREE_KB_AFTER_TRIM
+
+# ── Case 2g: the trim is NEVER the reason a refresh fails ─────────────────────
+# The guard it serves is deliberately fail-open, and so is this: a node with no
+# colima, a VM with no fstrim or a hypervisor that ignores discard, and a trim
+# that outruns its bound must each report and continue. Every arm asserts the
+# refresh COMPLETED, not merely that it exited 0.
+#
+# Bounded from the outside as well, because a trim that is NOT fail-open does not
+# simply fail: the failure re-enters the EXIT trap, whose cleanup prunes, which
+# trims, which fails again — a loop, and a hang is the worst shape a red can
+# take. Where the harness has no `timeout` (macOS), the CI suite cap is the
+# backstop and this reads exactly as it did before.
+TRIM_BOUND=""
+! command -v timeout > /dev/null 2>&1 || TRIM_BOUND="timeout -k 5 30"
+for _trim_case in no-colima fails times-out; do
+  : > "$LOG"
+  mac_build_reset
+  set_free_kb 35000000
+  _trim_path="$MACBIN:$COLIMABIN:$BIN:$PATH"
+  _trim_env="FAKE_UNUSED=1"
+  case "$_trim_case" in
+    no-colima) _trim_path="$MACBIN:$BIN:$NO_COLIMA_PATH" ;;
+    fails)     _trim_env="FAKE_TRIM_FAIL=1" ;;
+    times-out) _trim_env="FAKE_TRIM_HANG=1" ;;
+  esac
+  # shellcheck disable=SC2086
+  $TRIM_BOUND env PATH="$_trim_path" \
+    WORKER_NODE=air \
+    WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+    WORKER_GIT_KEY="$KEY" \
+    WORKER_CARGO="$MACBIN/cargo" \
+    WORKER_BUILD_DIR="$MAC_BUILD_DIR" \
+    WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS=1 \
+    $_trim_env \
+    sh "$SUT" build abc123 prod > "$OUT" 2>&1 \
+    || fail "a trim that is '$_trim_case' must not fail the refresh"
+  grep_out "built chuggernaut/{worker,agent,agent-rust}:prod (abc123)"
+  grep_log "docker tag chuggernaut/worker:prod-refresh chuggernaut/worker:prod"
+  case "$_trim_case" in
+    no-colima) grep_out "no 'colima' on this daemon's PATH" ;;
+    fails)     grep_out "the colima trim failed (exit 127" ;;
+    times-out) grep_out "the colima trim did not finish within 1s and was abandoned" ;;
+  esac
+done
+echo "ok: a missing, failing or over-running trim reports and completes the refresh anyway"
+
+# ── Case 2h: a LINUX node is byte-identical, colima on its PATH or not ────────
+# There the prune and the pre-flight are the same filesystem, so there is nothing
+# to hand back and nothing to ask. The assertion is a DIFF rather than a list of
+# absences: two runs that differ only in whether a colima exists must produce the
+# same output and the same calls, which is the only way to catch a probe that
+# fires and then decides to do nothing.
+for _colima in absent present; do
+  : > "$LOG"
+  set_free_kb 35000000
+  _lx_path="$BIN:$NO_COLIMA_PATH"
+  [ "$_colima" = absent ] || _lx_path="$COLIMABIN:$BIN:$NO_COLIMA_PATH"
+  PATH="$_lx_path" \
+    WORKER_NODE=nuc \
+    WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
+    WORKER_GIT_KEY="$KEY" \
+    sh "$SUT" build abc123 prod > "$WORK/linux-trim-$_colima.out" 2>&1 \
+    || fail "a Linux node must refresh with colima $_colima"
+  cp "$LOG" "$WORK/linux-trim-$_colima.log"
+done
+diff "$WORK/linux-trim-absent.out" "$WORK/linux-trim-present.out" \
+  || fail "a colima on a LINUX node's PATH changed the refresh output"
+diff "$WORK/linux-trim-absent.log" "$WORK/linux-trim-present.log" \
+  || fail "a colima on a LINUX node's PATH changed the calls the refresh makes"
+if grep -qiE "colima|fstrim|trim" "$WORK/linux-trim-present.log" "$WORK/linux-trim-present.out"; then
+  fail "a Linux refresh must neither call colima nor mention a trim"
+fi
+echo "ok: a Linux refresh is byte-identical with and without a colima on its PATH"
+set_free_kb 60000000
 
 # ── Case 3: the swap installs the new binary and asks the supervisor to restart ─
 # Design #440 D6, and the whole of slice 6: a daemon that is a binary under a

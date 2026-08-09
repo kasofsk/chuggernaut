@@ -629,6 +629,12 @@ fi
 if [ -n "${WORKER_REFRESH_DISK_PATH:-}" ]; then
   spec_line WORKER_REFRESH_DISK_PATH "$WORKER_REFRESH_DISK_PATH"
 fi
+# And the bound on the post-prune colima trim (job #511, Darwin only), which is
+# the knob the refresh names when a trim outruns it. A knob the daemon never
+# receives is an inert knob, and this one is only reachable from here.
+if [ -n "${WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS:-}" ]; then
+  spec_line WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS "$WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS"
+fi
 # The node's FIRST-BOOT capacity (`WORKER_SLOTS`, spec §3.1 dynamic registration):
 # the number it starts at before any operator intent exists, and the last resort
 # when the dispatcher is down. It is NOT how a node's concurrency is changed —

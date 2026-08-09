@@ -840,18 +840,35 @@ supervision probe. Converting a node is an operator step — declare
 `WORKER_MODES_<node>=host` in `chuggernaut.env` and re-run the deploy; nothing
 in this repo converts one for you.
 
-**Still open: the refresh disk pre-flight on a *container-capable* mac.**
-`worker-refresh.sh`'s floor is measured on `WORKER_REFRESH_DISK_PATH`, default
-`/` — which was the docker filesystem while the daemon was a container, and is
-the boot volume now that it is native. dev-air measured **7.2GB free on `/`
-against 76.3GB free inside colima**, so the guard refused a refresh
+**The refresh trims the colima VM after it prunes, on a mac only.** The prune
+pair (`docker image prune`, `docker builder prune`) frees blocks *inside* the
+VM, and a lima disk image grows on write and never shrinks on delete — so on a
+mac none of that reclaim reaches `/`, which is the filesystem the pre-flight
+below measures. A `colima ssh -- sudo fstrim -av` after each prune is what hands
+it back: on dev-air, 2026-08-08, one trim returned **80.1 GiB** (datadisk 99G →
+19G allocated, `/` from 3.4G to 84G free) with nothing deleted. It runs on the
+successful **and** the failed-build path, since the failed one is where the next
+attempt's headroom is decided, and it is best-effort throughout — no colima, no
+`fstrim`, or a trim past its bound (`WORKER_REFRESH_DISK_TRIM_TIMEOUT_SECS`,
+default 120s, declarable per node here) reports and continues. **A Linux node
+makes no such call**: there the prune and the pre-flight are one filesystem.
+
+**Still open: the refresh disk pre-flight on a *container-capable* mac.** The
+trim above makes that guard's number honest; it does not fix what the number
+measures. `worker-refresh.sh`'s floor is measured on `WORKER_REFRESH_DISK_PATH`,
+default `/` — which was the docker filesystem while the daemon was a container,
+and is the boot volume now that it is native. dev-air measured **7.2GB free on
+`/` against 76.3GB free inside colima**, so the guard refused a refresh
 (deploy #486) over space the build would never have touched, and the knob's documented
 remedy does not apply because that filesystem is not reachable from the mac at
 all. A host-only mac sidesteps this — it runs no build to protect, so the
 pre-flight is skipped outright — but a dual-mode or container mac still meets
 it. Workaround: declare `WORKER_REFRESH_DISK_FREE_GB_MIN_<node>=0`, which turns
-the guard off for that node alone. The argument for leaving it is in
-`worker-refresh.sh` beside `DISK_PATH`.
+the guard off for that node alone — weigh it against the trim, which is what
+makes `/` track a build's real needs at all: while the datadisk sat fully
+allocated the host number barely moved, and once it is sparse again VM growth
+does consume `/`. The argument for leaving it is in `worker-refresh.sh` beside
+`DISK_PATH`.
 
 **And a conversion is one-way.** #440 slice 6 deleted the `docker run` path, so
 there is no scripted way back to a container daemon: a conversion that fails
