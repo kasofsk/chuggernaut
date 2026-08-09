@@ -1,6 +1,6 @@
 # Design #308 — Porting beacon's GitHub Actions onto Chuggernaut
 
-Status: PROPOSED, amended 2026-07-30 (job #320), corrected 2026-08-09 (job #520).
+Status: PROPOSED, amended 2026-07-30 (job #320), corrected 2026-08-09 (jobs #520, #530).
 
 A survey whose job was to spawn children; all four were written and **all four**
 have shipped code. The port itself has not begun. See
@@ -17,6 +17,11 @@ code — **plus one added phase**: see
 should look first. A **fifth** correction was appended on 2026-08-09 and is the
 one that moves the ordering:
 [A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts).
+A **sixth**, also 2026-08-09, retires [gap 8](#gaps-ranked): nobody merges in
+chuggernaut, so "auto-merge vs human-merge" names no choice this platform offers
+— the question with a referent is whether a human gates a job, and that is an
+evaluation criterion, already shipped in two spellings
+([A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here)).
 
 Every claim about *Chuggernaut's* current behavior, at all three
 dates, was read out of `docs/spec.md` and the source in this repo, not inferred from
@@ -260,6 +265,11 @@ brief assumes and four make it *more expensive* or re-sequence it.
    before the squash lands. The divergence is a *default*, not a capability gap.
    That reframes decision [D2](#open-decisions) from "build something" to
    "choose a default", which is a much smaller thing to be blocked on.
+   **Amended 2026-08-09:** the mechanism half stands, and has since gained a
+   second, one-click spelling (`require_approval`, `docs/spec.md` §1.1). The
+   "choose a default" half does not: there is no default to choose, because
+   nobody merges here — see
+   [A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here).
 3. **"No keyed cache at all; the only mitigation is baking toolchains into the
    image."** A node-local build cache already ships (`docs/spec.md` §3.1 "Node-local
    build caching"): a worker sets `WORKER_CACHE_DIR`, its daemon bind-mounts one
@@ -327,6 +337,11 @@ requirement and re-derives the ordering table's `Depends on` column. It belongs
 to this list, but it is written as a top-level section at the **end** of the doc
 — the body is append-only, and a correction that arrived after the sections
 below cannot be spliced in among them.
+
+A **sixth**, [A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here),
+was appended on the same day and sits after A6 for the same reason: gap 8 and
+decision D2 ask a question that has no referent here, so the answer is not a
+default this doc failed to choose — it is a mechanism that shipped.
 
 Corrections are recorded here rather than by rewriting the sections they touch,
 so a reader who cited a section can see what moved; each affected section carries
@@ -1056,7 +1071,9 @@ Consequences:
 Re-ranked in the 2026-07-30 amendment. **Row order is the ranking; the `#`
 column is a stable identifier and is never reassigned** (siblings cite these
 numbers — see [What #308 got wrong](#what-308-got-wrong)). Two rows are new (10,
-11); one is retired (1) and one is mostly absorbed (4).
+11); one is retired (1) and one is mostly absorbed (4). **Gap 8 joined the
+retired end on 2026-08-09**, keeping its number and losing its rank
+([A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here)).
 
 | # | Gap | Why it ranks here |
 | --- | --- | --- |
@@ -1068,8 +1085,8 @@ numbers — see [What #308 got wrong](#what-308-got-wrong)). Two rows are new (1
 | 5 | **Artifacts** | `crates/store/src/artifacts.rs` holds transcripts, stdout and attachments; there is no inter-job binary handoff (Appendix: Deferred, "Binary artifact store") |
 | 7 | **Outbound webhooks** | `crates/webhooks/src/lib.rs` is a stub; blocks `sentry-resolve` |
 | 9 | **Node-level exclusive resources** | Only bites once host nodes run device-bound work (H.5); specced as #309 §5b / P4, where `placement.leases` is shown to force the epoch bump on its own |
-| 8 | **Auto-merge vs human-merge default** | A policy choice, not a mechanism gap (correction 2) — ~~and narrower again for a linked-origin project, whose release PR is already a human checkpoint ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project))~~ **that narrowing lapsed**: beacon is imported platform-owned and has no release PR ([A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts)) |
 | 4 | **Keyed caching** | **Mostly folded into gap 3.** Exactly one beacon workflow keys a cache (`creator/node_modules`); gradle/pub/buildx warmth is implicit host state, not a configured cache ([A2](#a2-the-keyed-caching-gap-was-overstated)). The remnant is one namespaced persistent directory in the worker — #309 §9, no platform change |
+| 8 | **Auto-merge vs human-merge default** | **Retired — a category error, and the thing it asked for is built** ([A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here)): nobody merges here, so there is no default to choose. Gating a job on a person is an evaluation criterion — a `Human` evaluator on the job type, or per-job `require_approval` (`docs/spec.md` §1.1, §3.3) — and the floor rule keeps either from weakening a merge gate. ~~A policy choice, not a mechanism gap (correction 2)~~ ~~— and narrower again for a linked-origin project, whose release PR is already a human checkpoint ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project))~~ **that narrowing lapsed**: beacon is imported platform-owned and has no release PR ([A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts)) — but what replaces the release PR is a criterion, not a human merge (A7). Kept at its number because siblings cite these numbers |
 | 1 | **Job inputs / parameterization** | **Retired — landed and deployed** ([A4](#a4-job-inputs-shipped-so-gap-1-is-retired)): epoch 2, `.chug/jobs/rollback.yaml` is the first consumer, the UI renders declared inputs. Kept at its number because siblings cite "Gap 1 of #308"; matrix / fan-out stays excluded by decision (#311 Decision 7) |
 
 **Gap 1 deserved its rank — and it is now closed, so this reads as history.**
@@ -1130,7 +1147,11 @@ validation happens on the way *in*, not after the fact.
 
 ### Open decisions
 
-Both are presented without a recommendation, deliberately.
+~~Both are presented without a recommendation, deliberately.~~ **Neither is open
+any more**: D1 is closed by
+[A1](#a1-image-builds-do-not-dissolve-into-host-mode) and D2 is retired by
+[A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here). The
+original text of each stands below, with its amendments.
 
 **D1 — image builds: scoped socket vs rootless builder.** ~~The tiebreaker is
 phase 2: if host-native nodes land, the question dissolves.~~ **CLOSED, and on
@@ -1141,7 +1162,15 @@ mistake — the question does not dissolve — and
 options in favour of a node-provided build service. Nothing here is waiting on
 the phase-2 prototype.
 
-**D2 — auto-merge vs human-merge default.** Still open. Chuggernaut
+**D2 — auto-merge vs human-merge default.** ~~Still open.~~ **RETIRED
+2026-08-09, as a question with no referent** — not decided, dissolved. Nobody
+merges in chuggernaut, so there is no default to choose between; whether a human
+gates a job is an evaluation criterion and it is already mechanized twice
+([A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here)). The
+original text, and the two amendments that narrowed and re-widened it, stand
+below.
+
+Chuggernaut
 auto-squash-merges on eval pass; beacon requires a human to merge. Per correction
 2 this is a default, not a capability: a `human` evaluator at the highest stage
 expresses beacon's policy today. The real question is which default a *project*
@@ -1393,7 +1422,12 @@ import runbook rather than invented here.
   publishes it on the next tick. So beacon's D2 is back at its original width:
   whether a human gates each job, answerable only by a `human` evaluator at the
   highest stage (correction 2). The [gap 8](#gaps-ranked) row's "narrower again for
-  a linked-origin project" lapses with it.
+  a linked-origin project" lapses with it. **Amended by
+  [A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here):** the
+  lapse is real and the hole it leaves is not, because what replaces the release
+  PR is a criterion the platform already synthesizes on request, not a merge
+  anyone performs. "Back at its original width" describes what beacon must
+  *decide*, never something it must build.
 - **A commit becomes a publication.** `CLAUDE.md` records that for this repo,
   whose mirror is public and force-pushed every five minutes. Whether beacon's
   GitHub repo is public is a beacon fact this tree cannot check — but the shape is
@@ -1403,3 +1437,149 @@ import runbook rather than invented here.
   0b; 7 depends on 2; 9 is landed; 10 is unscheduled by decision, and
   [#361](361-per-run-placement.md) already answered "is this needed before the
   beacon import?" with no — an answer that does not turn on the project kind.
+
+## A7. Gap 8 is retired: merging is not an act a person performs here
+
+*Correction — 2026-08-09, job #530. Retires [gap 8](#gaps-ranked) and dissolves
+[D2](#open-decisions), on the grounds that both ask a question with no referent
+in this platform. The decision is the operator's; the Chuggernaut half is
+verified against `docs/spec.md` and the source in this tree at this date. The
+superseded analysis stands where it was written — this is a correction, not a
+deletion.*
+
+### The decision
+
+Taken by the operator on 2026-08-09:
+
+> In chuggernaut it's not a question of manual vs auto merge. It's a question of
+> evaluation criteria. If the user wants to manually gate the job, they set an
+> evaluation criterion for it. But they never merge directly.
+
+Gap 8 keeps its number and loses its rank, exactly as gap 1 did
+([A4](#a4-job-inputs-shipped-so-gap-1-is-retired)): the table's own note fixes
+the `#` column as a stable identifier that is never reassigned, because siblings
+cite these numbers.
+
+### Why this is a category error and not a policy left open
+
+"Auto-merge vs human-merge" is a GitHub sentence, and it carries a GitHub
+premise: that merging is something a person *does* — a button, and therefore a
+policy about who may press it and when it is pressed for them. That premise is
+false here. The squash-merge is a state transition the dispatcher makes: the
+dispatcher is the sole writer of all job and task state (`docs/spec.md` §3.1),
+and the merge happens in WrapUp once the eval reduce has passed and the merge
+gate holds against the exact tree that lands (§3.3).
+
+The API is the plain evidence, and the negative is the whole of it: **nothing in
+§6.2 merges a job branch**. The operator surface over a job is create and edit
+while Draft, finalize, release, revoke, compose a batch's members, set the
+sign-off gate, label, claim a work attempt, dispatch triage, resolve a task,
+message the run, and read — roughly two dozen routes, and not one of them lands
+a branch. There is no button, so there is no default to choose between, and a
+doc that spent a decision slot choosing one was choosing between two spellings
+of the same non-thing.
+
+### The question that does have a referent, and its two answers
+
+*Should a human gate this job before it lands* is a real question, and this
+platform answers it twice. Both spellings are evaluation criteria, both are read
+out of `docs/spec.md` rather than restated here, and neither is a merge:
+
+- **A `Human` evaluator declared in the job type's `eval:` list** (§1.1, §3.3).
+  Repo-versioned config, per type, applying to every job of that type — the
+  answer when the gate is a property of the *kind* of change.
+- **`require_approval`, per job** (§1.1, §3.3; `PUT .../jobs/{seq}/approval`,
+  §6.2). The answer when the gate is a property of *this* change: the flag adds
+  one required Human evaluator on top of whatever the type declares, staged after
+  everything else, without touching the repo.
+
+Two properties of the second are worth naming because they are exactly what a
+"let a human merge instead" default could never have had. Its stage is computed
+at resolution time rather than fixed, so an operator is never asked to sign off
+on work a later stage is about to reject. And a batch unions the flag as an
+**OR** (§2.1), because one merge completes every member, so the strictest
+member's gate governs the whole batch — a rule that only means anything in a
+world where the merge is the platform's act.
+
+### Why the mechanism is better than the gap's own request
+
+Because of the floor rule, which
+[docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) argues
+under "eval criteria are a floor, additive per job": a job may *add* criteria and
+can never drop or override the type's, since one that could would let a job
+creator silently discard the merge-gate protections the type declares. Both
+spellings above are additive — the per-job flag adds a required evaluator, never
+replaces one, and the name `approval` is reserved so nothing overwrites it in
+either direction.
+
+That is the property gap 8's framing would have destroyed. "This project's
+default is that a human merges" is, by construction, a per-project switch that
+*weakens* what the type's criteria guarantee: the branch lands because a person
+decided it should, not because the declared gates passed against the tree that
+lands. The shipped mechanism is strictly stronger — a human checkpoint is one
+more gate on top of every other one, and it cannot be the reason a gate is
+skipped.
+
+So the finding is not "we decided not to build it." It is **built, and it is
+better than what the gap asked for.**
+
+### What this falsifies, and where it is marked
+
+- **The [gap 8](#gaps-ranked) row**, which read "A policy choice, not a mechanism
+  gap." It is not a policy choice either — there is nothing to choose. The row is
+  rewritten as retired and moved to the retired end of the table.
+- **[D2](#open-decisions)**, which read "Still open" and asked which default a
+  *project* gets. Marked retired in place, with its original text and both
+  amendments left standing.
+- **[Correction 2](#what-the-brief-got-wrong)'s second half**, which reframed D2
+  as "choose a default". Its first half — that the mechanism exists — was right,
+  and has since gained the one-click spelling. Marked at the correction.
+- **[A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts)'s
+  D2 bullet.** The lapse it records is real: a platform-owned beacon has no
+  release PR, so the free operator checkpoint a linked-origin project would have
+  had is genuinely gone. What is wrong is the hole that seems to leave. The
+  replacement for that checkpoint is `require_approval` or a `Human` evaluator on
+  the job type — a criterion, not a human merge — so beacon's remaining question
+  is which job types deserve one, not whether the platform can express it.
+
+Nothing outside this document asserted gap 8 was open: no sibling design,
+`docs/README.md` or `docs/reference/design-lifecycle.md` cites it (measured
+2026-08-09 across every tracked `*.md`).
+
+### Two checks this correction ran against the tree
+
+Both were asked for by the brief, and both are reported rather than acted on —
+this is a `docs` job, and job types are project-owned config.
+
+**No job type in this repo declares a `Human` evaluator, and one uses human work
+instead.** Every `eval:` entry across `.chug/jobs/*.yaml` is an `agent` reviewer
+or a `command`, plus the `ci` command `.chug/jobs/_defaults.yaml` appends to all
+of them. The single `type: human` in the directory is `.chug/jobs/manual.yaml`'s
+**work** phase — the operator pushes the commits by hand and resolves the work
+task — which is the opposite arrangement: a human doing the work, with the
+machinery judging it.
+
+**Whether one ought to, stated as a finding.** The candidates by blast radius are
+`.chug/jobs/deploy.yaml` and `.chug/jobs/rollback.yaml`: their effect is external
+and revoking the job does not undo it, and both carry `wrap_up: type: none`, so
+nothing merges and the only thing a gate could protect is the deploy itself.
+Against adding one: releasing a Frozen job is already an explicit operator act,
+the stage-0 `health` evaluator is the check that actually knows whether the
+release is good, and `require_approval` covers the one-off "gate this particular
+deploy" case with no config change at all. That is the argument for leaving the
+types as they are, and it is the operator's call, not this doc's.
+
+### The spec agrees with itself and with the code
+
+Checked because the brief asked. `docs/spec.md` §1.1's `require_approval` field
+comment, §3.3's approval-gate paragraph, §6.2's `POST .../jobs` field and
+`PUT .../jobs/{seq}/approval` endpoint, and §2.1's batch union make one
+consistent account — additive, one required Human evaluator, reserved name,
+stage computed as one past every other resolved evaluator, editable only in the
+pre-Work states, unioned as an OR across a batch — and the tree implements that
+account: `crates/domain/src/release.rs` (the reserved name, the synthesized
+evaluator, the release-time error when anything else claims the name),
+`crates/dispatcher/src/core.rs` (the pre-Work state check and the batch's
+`|=`), and `crates/api/src/lib.rs` (the route). `GET .../jobs/{seq}/criteria`
+returns the gate alongside the type's and the job's evaluators, so the resolved
+criteria are visible before the job runs. There is no discrepancy to record.
