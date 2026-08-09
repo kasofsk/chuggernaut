@@ -65,6 +65,14 @@ population to count.
   disturbed; two observations of "did not disturb" are not "cannot disturb", and
   the second run archived a baseline for a third to diff.
   [D4](#d4--one-host-task-per-node-stays) is unchanged.
+- **The `simctl spawn` failure recorded beside those two runs was
+  misattributed**, and the attribution is withdrawn ([the job #527
+  correction](#correction--2026-08-09-job-527-the-simctl-spawn-finding-was-misattributed-the-argument-not-the-session)).
+  It is not a property of the daemon's session — both error codes reproduce over
+  an ordinary SSH session, and they separate by **argument**: `spawn` runs the
+  named program inside the simulator's own filesystem, and iOS ships `launchctl`
+  but no `uname`. `.chug/prompts/work/mac-proof.md` §2 had asked for a command
+  that cannot pass anywhere, and now asks for one that does.
 
 Everything else about the machinery holds. The platform gap job #502 found is
 closed: a container level of a host job type is handed no `runtime.env`, so the
@@ -1624,3 +1632,80 @@ task's MCP transport, and after it lands that trail has to be caught on the node
 while the task is running. Accepted — the log is not harvested, so it was never
 readable from the UI in the first place, and a debugging convenience is not a
 reason to leave an unbounded accretion on a machine.
+
+## Correction — 2026-08-09, job #527 (the `simctl spawn` finding was misattributed: the argument, not the session)
+
+Appended by the `code` job that fixes the prompt which produced it. Nothing above
+is edited except one clause in the head; [the finding
+itself](#a-finding-neither-m-row-asked-for-simctl-spawn-fails-under-the-daemons-session)
+stands as jobs #506 and #509 honestly recorded it, because what was wrong is its
+attribution and not its observation. The measurements below were taken by an
+operator on `gumbo-air-0` on 2026-08-09 and are quoted here; a work container has
+no Mac, so nothing in this section was re-run while writing it. The two tree
+facts are checkable and were checked: the prompt's §2 text, and the finding above.
+
+### What was measured, and where
+
+Over an **SSH session** — `launchctl managername` reporting **Background**, so
+not the daemon's GUI session at all — against a freshly created and booted
+iPhone 17, deleted afterwards:
+
+| command | result |
+| --- | --- |
+| `xcrun simctl spawn <udid> launchctl list` | **works** — prints the simulator's own launchd jobs (`com.apple.progressd`, `com.apple.CoreAuthentication.daemon`, …) |
+| `xcrun simctl spawn <udid> uname -a` | `NSPOSIXErrorDomain` code 2, *No such file or directory* |
+| `xcrun simctl spawn <udid> /bin/ls /` | `LaunchdSimError` 111, underlying `SimXPCErrorDomain` 111, *Invalid or missing Program/ProgramArguments* |
+| `xcrun simctl spawn <udid> /usr/bin/uname -a` | the same `LaunchdSimError` 111 |
+
+### Why the session is ruled out, which is the load-bearing part
+
+Both of the finding's error codes reproduce **outside** the daemon's session.
+That alone falsifies "a property of the session the daemon's launchd agent gives
+a host task": a property of that session cannot be exhibited by a session that is
+not it. What replaces it is visible in the same table — the four commands
+separate cleanly by **argument**, not by session. A program that exists inside
+the iOS runtime spawns; one that does not, fails, with the error distinguishing
+*name not found* from *program not runnable*. Reproducing on both #506 and #509
+was read as ruling out a flake and it does; it does not rule in the session,
+because both runs passed the same argument.
+
+### The real constraint, and it is ordinary
+
+`simctl spawn` executes the named program **inside the simulator's own
+filesystem**, so the program has to be there. iOS ships `launchctl`; it does not
+ship `uname`, and a host absolute path such as `/bin/ls` does not resolve inside
+the simulator at all. So the finding's second claim — that a job type meaning to
+run a process inside a simulator from a host task "has a constraint nobody had
+measured" — is withdrawn too. The constraint is the one every iOS engineer
+already works under, it is not specific to host tasks or to this platform, and a
+ported workflow shelling out to `simctl spawn` hits it exactly when it names a
+binary the runtime does not carry.
+
+### The cause was in the prompt, and the prompt is fixed here
+
+`.chug/prompts/work/mac-proof.md` §2 asked for `xcrun simctl spawn <udid> uname
+-a` as its proof of a running simulator — a command that cannot succeed on any
+simulator in any session. Two proof runs ran it, failed, and reported the failure
+as a finding about the daemon. §2 now asks for `spawn <udid> launchctl list`,
+which is measured working, and states why the obvious command does not, so the
+next run does not re-derive the same false attribution.
+
+The finding above suggested "a third run should prove it with `launch`". That
+suggestion was made on the wrong diagnosis and is **not** what this job applied:
+`launch` needs an installed bundle and hands back a pid rather than output, where
+the rung wants something quotable from inside the running simulator. `spawn` with
+an argument the runtime carries is both the shorter proof and the one that
+demonstrates the corrected fact. `launch` stays named in the prompt as the answer
+for a rung that needs what the runtime does not ship.
+
+### What this does not touch
+
+[D4](#d4--one-host-task-per-node-stays) and
+[M7](#m7--two-samples-and-deliberately-no-verdict) are unchanged, and so is
+[#322](322-macos-native-runtime.md) §5's deferred per-task device set. The
+tenancy question is a different one, recorded by its own job, and the confound in
+that measurement does not reach here: this correction rests on the errors
+separating by argument, which it would do in any session. Two documents citing
+the finding are corrected in the same commit —
+[#308](308-gha-port.md)'s open-findings list and
+[#322](322-macos-native-runtime.md)'s pointer at slice 6.

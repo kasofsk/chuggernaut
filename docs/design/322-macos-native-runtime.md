@@ -112,8 +112,13 @@ its trait listing, the Appendix entry). **macOS host tasks have now run** —
 declaring `mode: host`, and releasing it is still an operator step; what slice 6
 measured is [that document's job #510
 correction](490-agent-work-on-a-mac.md#correction--2026-08-09-job-510-slice-6-ran-what-two-host-tasks-on-the-air-measured),
-including a `simctl spawn` failure under the daemon's session that no phase here
-had anticipated and W3's `simctl` work should read first. W1 is exactly what
+including a `simctl spawn` failure that correction reads as a property of the
+daemon's session and [the job #527
+correction](490-agent-work-on-a-mac.md#correction--2026-08-09-job-527-the-simctl-spawn-finding-was-misattributed-the-argument-not-the-session)
+withdraws — the same errors reproduce over an ordinary SSH session and separate
+by argument, leaving the ordinary constraint that `spawn` runs the named program
+inside the simulator's own filesystem, which is what W3's `simctl` work should
+read. W1 is exactly what
 [#309](309-host-native-execution.md) P0's first slice landed (job #434), N2's
 schema is what job #401 landed for [#373](373-project-toolchains.md), and W5 is
 what [#440](440-native-worker-daemon.md) slice 3 landed (job #460) — so this

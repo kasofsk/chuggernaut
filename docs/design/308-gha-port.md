@@ -136,18 +136,22 @@ beacon workflow — fastlane, `flutter-integration-tests`, or any other — has 
 here. The Android leg of this phase is untouched by that work and stands where
 [#367](367-android-emulator-execution.md) A1/A2 left it.
 
-**Two findings from the proof are open and bear on the port:**
+**Two findings from the proof bear on the port — one open, one withdrawn:**
 
 - **M7 has two samples and no verdict.** Simulator state one task leaves for
   the next made the second run *cheaper*, not disturbed; two observations of
   "did not disturb" are not "cannot disturb", so
   [#490](490-agent-work-on-a-mac.md) D4's one host task per node stays and
   [#322](322-macos-native-runtime.md) §5's per-task device set stays deferred.
-- **`xcrun simctl spawn <udid>` fails under the daemon's session** —
-  `LaunchdSimError` 111, `NSPOSIXErrorDomain` 2 — while `xcrun simctl launch`
-  against the same booted device works. Reproduced on both runs, so it is a
-  property of the session a host task gets and not a flake: a ported workflow
-  that shells out to `simctl spawn` will hit it.
+- **`xcrun simctl spawn <udid>` is not broken, and the session was the wrong
+  culprit.** The proof runs' `LaunchdSimError` 111 and `NSPOSIXErrorDomain` 2
+  were recorded here as a property of the session a host task gets; both
+  reproduce over an ordinary SSH session and separate by **argument**, so that
+  attribution is withdrawn ([#490](490-agent-work-on-a-mac.md)'s job #527
+  correction). What is left is the ordinary iOS constraint: `spawn` runs the
+  named program inside the simulator's own filesystem, so a ported workflow
+  shelling out to it hits nothing host-task-specific unless it names a binary
+  the runtime does not carry.
 
 ## Provenance
 

@@ -87,8 +87,21 @@ honest demonstration and a `sw_vers` is not.
 - Boot it, bounded, and prove it actually booted rather than trusting the
   command's exit code — `xcrun simctl list devices` should show it `Booted`.
 - Then do something *inside* it, so the proof is of a running simulator and not
-  of a plist: `xcrun simctl spawn <udid> uname -a` prints the simulator's own
-  Darwin. Quote the output.
+  of a plist: `xcrun simctl spawn <udid> launchctl list` prints the simulator's
+  own launchd jobs — `com.apple.progressd`,
+  `com.apple.CoreAuthentication.daemon` and the rest. Quote the output.
+- **`spawn` runs the program you name inside the simulator's own filesystem, so
+  name one the iOS runtime actually ships.** This rung is deliberately not
+  `uname -a`, which is the obvious command and cannot pass on any simulator in
+  any session: iOS carries no `uname`, so `simctl` answers `NSPOSIXErrorDomain`
+  code 2, and a host absolute path such as `/bin/ls` answers `LaunchdSimError`
+  111 — measured on `gumbo-air-0` on 2026-08-09 over an ordinary SSH session.
+  Two earlier runs of this prompt ran the old command, failed, and reported
+  those codes as a property of the daemon's session; they are not, and
+  [#490](../../../docs/design/490-agent-work-on-a-mac.md)'s job #527 correction
+  is where that is withdrawn. If a rung of your own needs something the runtime
+  does not ship, `xcrun simctl launch <udid> <bundle-id>` against an app the
+  device already carries is the other honest proof.
 - Shut down **only the device you booted**, by UDID. Never `shutdown all`,
   never `erase`, never `delete` — see the next section for why.
 
