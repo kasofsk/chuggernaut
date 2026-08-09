@@ -1,6 +1,6 @@
 # Design — the natively-supervised worker daemon
 
-Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away, on 2026-08-08 for the one artifact that correction over-reached onto, and again for the docker steps both corrections asked of every node rather than of a container-capable one** (job #487), and no node runs a native daemon from this tree: nothing was applied, and no node advertises `host` (#309 P1 made `runtime.mode: host` a legal declaration in job #478; placing by it is P2).
+Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away, on 2026-08-08 for the one artifact that correction over-reached onto, and again for the docker steps both corrections asked of every node rather than of a container-capable one** (job #487), and no node runs a native daemon from this tree: nothing was applied. Host execution itself has moved on without it — `gumbo-air-0`, whose native daemon an operator built by hand, advertises `host` and has run host tasks ([#490](./490-agent-work-on-a-mac.md) slice 6), and #309 P1's legal `runtime.mode: host` (job #478) became routable with P2 (jobs #483, #484).
 
 **The first conversion of a real node, on 2026-08-06, found two things this
 design got wrong for macOS** — [D6](#decisions)'s extracted binary is an ELF file
@@ -31,14 +31,21 @@ is written down, which is [D7](#decisions) working as intended.
 
 `IMPLEMENTED` is a claim about the slices and nothing more
 ([`docs/reference/docs.md`](../reference/docs.md)), and it is worth saying what it does
-not claim. Every slice is in the tree; the daemon is buildable and supervisable
-natively on both platforms; and the fleet is exactly where it was — two nodes
-still running the containerized daemon, no `WORKER_MODES` naming `host`, and no
-job type declaring `runtime.mode: host` (which #309 P1 has since made legal to
-declare, in job #478, without making it routable). The last slice's own half is the sharpest
-case of this: `nix/chug-node/` declares the unit, **nothing in this repo's CI
-evaluates that module** (#372 §2.3), and no node has ever been given it. The
-slices landed as — 3 as
+not claim. Every slice is in the tree and the daemon is buildable and
+supervisable natively on both platforms, but **no node has been converted by
+this tree's scripts**: `gumbo-air-0`'s native daemon was built by hand and
+`gumbo-nuc-0` still runs the containerized one, so slices 4–7 have been applied
+to nothing. The host half of the fleet did move, elsewhere and by other jobs:
+`WORKER_MODES` on the air names `host`, `.chug/jobs/mac-proof.yaml` declares
+`runtime.mode: host` (job #502), and #309 P2 (jobs #483, #484) places by it, so
+host work is routable and two `mac-proof` runs have performed it
+([#490](./490-agent-work-on-a-mac.md) slice 6). What none of that exercises is
+**this** design's guarantees: nothing has yet restarted a daemon under a live
+host task, so the drain refusal (slice 3) and the survives-a-restart contract
+(slice 2, spec §3.1) remain proven by tests and not by the fleet. The last
+slice's own half is the sharpest case of the same gap: `nix/chug-node/` declares
+the unit, **nothing in this repo's CI evaluates that module** (#372 §2.3), and
+no node has ever been given it. The slices landed as — 3 as
 [the refusal at both checks](#correction-2026-08-06--slice-3-as-landed-job-460),
 8 as
 [the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470),
@@ -156,7 +163,8 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 **The ordering between 2–3 and 4–6 is load-bearing**, not a preference: flipping
 a node to a native daemon before the drain mechanism lands means the first deploy
 after the flip kills that node's in-flight host work. It binds only on a node
-that declares `host`, which today is none.
+that declares `host` — today exactly one, `gumbo-air-0`, whose native daemon an
+operator built by hand rather than with slice 4's script.
 
 Test placement per [`docs/reference/testing.md`](../reference/testing.md): `env_clear` and the
 refresh-precondition predicate are pure and belong beside the existing

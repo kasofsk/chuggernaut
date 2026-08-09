@@ -83,3 +83,7 @@ Doc-reread: docs/design/322-macos-native-runtime.md
 Doc-reread: docs/design/309-host-native-execution.md
 Doc-reread: docs/spec.md
 Doc-reread: deploy/prod/README.md
+
+Doc-reread: docs/design/308-gha-port.md
+Doc-reread: docs/design/309-host-native-execution.md
+Doc-reread: docs/design/440-native-worker-daemon.md

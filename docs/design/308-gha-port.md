@@ -1,6 +1,7 @@
 # Design #308 — Porting beacon's GitHub Actions onto Chuggernaut
 
-Status: PROPOSED, amended 2026-07-30 (job #320) — a survey whose job was to
+Status: PROPOSED, amended 2026-07-30 (job #320), head rewritten 2026-08-09
+(job #513) — a survey whose job was to
 spawn children; all four were written and **all four** have shipped code. The
 port itself has not begun. See [Current state](#current-state).
 
@@ -45,12 +46,14 @@ written and all four have shipped code — [#309](309-host-native-execution.md) 
 (job #434), [#310](310-scheduled-jobs.md) (jobs #359/#360),
 [#311](311-job-inputs.md) slice A (job #314) and
 [#313](313-workload-identity-image-builds.md) half A (job #413). Shipped is not
-the same as in use: #309 P0 is off on every node and #313 half A's deploy and
-provider registration are still open, both as the rows below say. The port
-itself — beacon's
-workflows actually running here — has not begun, and **cannot be judged from
-this tree**: `~/beacon` is not checked out, so every phase whose work lives in
-that repo is reported below as unknown rather than guessed.
+the same as in use, and the two halves of that sentence have moved apart: #309
+P0 is now **on for one node** — `gumbo-air-0` advertises `host` and has run
+agent host tasks ([#490](490-agent-work-on-a-mac.md) slice 6) — while #313 half
+A's deploy and provider registration are still open, both as the rows below
+say. The port itself — beacon's workflows actually running here — has not
+begun, and **cannot be judged from this tree**: `~/beacon` is not checked out,
+so every phase whose work lives in that repo is reported below as unknown
+rather than guessed.
 
 The rows below are the states of [Ordering](#ordering)'s table, which is a
 dependency reading rather than a commitment, and which keeps each phase's
@@ -61,15 +64,59 @@ argument. **Phase numbers are never reassigned** — the children cite them.
 | **0** | Land this doc | **Landed** (job #308), amended by job #320 |
 | **0b** | Onboard beacon as a linked-origin project | Unknown here — the work is in the operator's and beacon's repos |
 | **1** | CI as evaluators (category B) | Unknown here — same reason |
-| **2** | Host-exec backend prototype on one node | **Landed** (job #434) as [#309](309-host-native-execution.md) P0, off on every node |
+| **2** | Host-exec backend prototype on one node | **Landed** (job #434) as [#309](309-host-native-execution.md) P0, and now **on for one node**: `gumbo-air-0` advertises `host` and host tasks have run on it |
 | **3** | Cron (category E) | **Landed** (job #359), with (job #360) for the dispatcher half — [#310](310-scheduled-jobs.md)'s minimum useful version |
 | **4** | OIDC issuer + JWKS + WIF provider | **Landed** (job #413) in part — [#313](313-workload-identity-image-builds.md) half A's code; the deploy and the provider registration are open |
 | **5** | Deploys, forward-only (category C) | Not started |
 | **6** | Image build and push (category D) | Not started — #313 half B is still a design |
 | **7** | Node-level exclusive resources | Not started — #309 P4 |
-| **8** | Mobile and simulator jobs on host nodes (category F) | Started on both legs — [#367](367-android-emulator-execution.md) A1/A2 landed (jobs #374, #395); the macOS leg ([#322](322-macos-native-runtime.md)) has its W2 `/workspace` rebase landed (job #485), **Linux-proven only**, with no macOS node in the fleet |
+| **8** | Mobile and simulator jobs on host nodes (category F) | Started on both legs, and the macOS leg is **proven on the air by `mac-proof`** — `gumbo-air-0` is host-capable, `.chug/jobs/mac-proof.yaml` is the one job type declaring `mode: host`, and two of its runs (jobs #506 and #509) drove the node's Xcode and a booted iOS simulator ([#490](490-agent-work-on-a-mac.md), IMPLEMENTED). A proof merges nothing and no beacon workflow has run; see below. The Android leg is where [#367](367-android-emulator-execution.md) A1/A2 left it (jobs #374, #395), still pinned to the one node with `/dev/kvm` |
 | **9** | Job inputs → unblocks rollback | **Landed** (job #314) — [#311](311-job-inputs.md) slice A, with jobs #315–#317 and #319 |
 | **10** | Per-run placement | Answered, not scheduled — [#361](361-per-run-placement.md) found gap 10 needs no new field |
+
+### Phase 8's macOS leg, precisely
+
+Row 8 said "**Linux-proven only**, with no macOS node in the fleet" until
+2026-08-09. Both halves are now false, and the replacement is narrower than
+"category F is done" — so what the two `mac-proof` runs on `gumbo-air-0` do and
+do not license is worth stating in full. The record is
+[#490](490-agent-work-on-a-mac.md)'s job #510 correction, and the machinery is
+`.chug/jobs/mac-proof.yaml` (`runtime: {mode: host, env: "xcode:26.5"}`,
+`placement: {node: air}`).
+
+**What the runs demonstrated:**
+
+- an **authenticated** agent CLI running as a native macOS process rather than
+  in a container, with its `session.jsonl` harvested end to end at 462,085
+  bytes (job #506);
+- the Mach-O `chuggernaut-channel` the node installs carrying `update_status`
+  and `submit_result` on the first call, on both runs;
+- a real **iOS simulator** exercised against the runtime the node's
+  `xcode:26.5` toolchain carries — `simctl boot`, then
+  `launch com.apple.Preferences` inside the booted device;
+- **host work and container CI in one job** (job #509), which is
+  [#309](309-host-native-execution.md) §1's worked case running for the first
+  time.
+
+**What it does not license.** The claim is "proven on the air by `mac-proof`",
+not "category F ports". It is one node, one job type, and a *proof*: `mac-proof`
+declares `wrap_up: type: none`, so it merges nothing and gates nothing, and no
+beacon workflow — fastlane, `flutter-integration-tests`, or any other — has run
+here. The Android leg of this phase is untouched by that work and stands where
+[#367](367-android-emulator-execution.md) A1/A2 left it.
+
+**Two findings from the proof are open and bear on the port:**
+
+- **M7 has two samples and no verdict.** Simulator state one task leaves for
+  the next made the second run *cheaper*, not disturbed; two observations of
+  "did not disturb" are not "cannot disturb", so
+  [#490](490-agent-work-on-a-mac.md) D4's one host task per node stays and
+  [#322](322-macos-native-runtime.md) §5's per-task device set stays deferred.
+- **`xcrun simctl spawn <udid>` fails under the daemon's session** —
+  `LaunchdSimError` 111, `NSPOSIXErrorDomain` 2 — while `xcrun simctl launch`
+  against the same booted device works. Reproduced on both runs, so it is a
+  property of the session a host task gets and not a flake: a ported workflow
+  that shells out to `simctl spawn` will hit it.
 
 ## Provenance
 

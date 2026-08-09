@@ -1,8 +1,9 @@
 # Design — Host-native execution (node kind, selector, capabilities, exclusive resources)
 
 Status: PROPOSED; **P0 landed 2026-08-05 (job #434)** — `HostBackend`,
-`WORKER_MODES` routing and the `slots: 1` enforcement, off on every node — and
-**P1 landed 2026-08-07 (jobs #401, #478, #479)**: `runtime.mode: host` became a
+`WORKER_MODES` routing and the `slots: 1` enforcement, on for `gumbo-air-0`
+since [#490](490-agent-work-on-a-mac.md) slice 6 and off on every other node —
+and **P1 landed 2026-08-07 (jobs #401, #478, #479)**: `runtime.mode: host` became a
 legal declaration that nothing placed by
 ([P1 as landed](#p1-as-landed-2026-08-07--the-host-rows-field-rules-job-478)),
 and a dual-mode node now routes each launch by its declared mode
