@@ -834,11 +834,15 @@ Two consequences worth knowing before you convert one:
   "needs no docker at all" is a **Darwin** property; a host-only Linux node
   still needs a docker to build and extract from.
 
-The host guard set is unchanged: `WORKER_SLOTS=1` and `WORKER_SLOTS_MAX=1` node
--wide (#309 §2 option (iii)), a creatable `WORKER_HOST_ROOT`, and the
-supervision probe. Converting a node is an operator step — declare
-`WORKER_MODES_<node>=host` in `chuggernaut.env` and re-run the deploy; nothing
-in this repo converts one for you.
+The host guard set gained one in job #525: `WORKER_SLOTS=1` and
+`WORKER_SLOTS_MAX=1` node-wide (#309 §2 option (iii)), a creatable
+`WORKER_HOST_ROOT`, the supervision probe, and a non-empty
+`WORKER_HOST_PROJECTS` (the knob list below). Converting a node is an operator
+step and now declares **two** things — `WORKER_MODES_<node>=host` **and**
+`WORKER_HOST_PROJECTS_<node>=<owner>/<project>` in `chuggernaut.env` — because
+the deploy refuses the conversion without the second
+([`docs/reference/runbooks/worker-host-projects.md`](../../docs/reference/runbooks/worker-host-projects.md)
+is the procedure). Nothing in this repo converts one for you.
 
 **The refresh trims the colima VM after it prunes, on a mac only.** The prune
 pair (`docker image prune`, `docker builder prune`) frees blocks *inside* the
@@ -1136,6 +1140,23 @@ Notes:
   the deploy — live daemon untouched — when either is anything else, naming the
   one that is wrong. An unset ceiling is refused with them: the daemon defaults
   it to the node's CPU count.
+- **A host node also declares whose work it runs, in `WORKER_HOST_PROJECTS`**
+  (design [#309](../../docs/design/309-host-native-execution.md) §10, job #525;
+  the procedure is
+  [`docs/reference/runbooks/worker-host-projects.md`](../../docs/reference/runbooks/worker-host-projects.md)).
+  A host task gets the machine, so a host node is single-tenant by policy and the
+  daemon enforces it: a comma-separated `owner/project` allow-list matched
+  against the launch's `JOB_PROJECT`, **fail-closed** like `WORKER_KVM_PROJECTS`
+  — unset or empty runs host work for nobody, and an unlisted project's host
+  launch is a hard launch failure naming the project and the node rather than a
+  queued `NoCapacity`. It binds **host** launches only: a mixed-mode node keeps
+  serving container launches for every project, and declaring it on a node with
+  no host runtime warns and decides nothing. `build-worker.sh` forwards it per
+  node, refuses a malformed or repeated entry the daemon would refuse at parse,
+  and **refuses the deploy when a node names `host` with no list beside it** —
+  the daemon in that state boots, advertises its slot and then refuses every host
+  launch, which is worse than a stopped deploy. `gumbo-air-0` serves host work
+  and declares none today, so its next deploy is a real cutover.
 - **A host node's task root is `WORKER_HOST_ROOT`, and a mac has to declare
   one** (design [#322](../../docs/design/322-macos-native-runtime.md) W2). The
   daemon defaults it to `/var/lib/chuggernaut/host-tasks` and creates it while

@@ -675,6 +675,33 @@ fi
 if [ -n "${WORKER_HOST_ROOT:-}" ]; then
   spec_line WORKER_HOST_ROOT "$WORKER_HOST_ROOT"
 fi
+# WHOSE host work this node runs (`WORKER_HOST_PROJECTS`, design #309 §10). Same
+# shape again: forwarded, per-node overridable, unset stays UNSET — a node that
+# names no host mode is byte-identical to what it was, because the daemon reads
+# the list only where a host launch is admitted (crates/container/src/host.rs
+# `HostTenancy`) and a container-only node constructs no host backend at all.
+#
+# It is FAIL-CLOSED at the daemon: an empty list runs host work for NOBODY, so
+# forwarding it is not a convenience — it is the only way a host node can be
+# declared at all after this slice, and the guard that catches the omission
+# lives with the WORKER_MODES block below, where `host` is known. Quoted like
+# every other spec line, so an operator's `acme/beacon, acme/api` stays ONE value
+# on both readers of the environment file.
+#
+# Trimmed here and forwarded trimmed, because `parse_projects` trims before it
+# reads: a whitespace-only value is UNSET to the daemon, so writing it as a line
+# would declare a tenancy the daemon does not see. The trimmed value is what the
+# WORKER_MODES guard below is then asked about, so the deploy and the daemon
+# cannot disagree about whether this node declared one.
+HOST_PROJECTS="${WORKER_HOST_PROJECTS:-}"
+HOST_PROJECTS="${HOST_PROJECTS#"${HOST_PROJECTS%%[![:space:]]*}"}"
+HOST_PROJECTS="${HOST_PROJECTS%"${HOST_PROJECTS##*[![:space:]]}"}"
+if [ -n "$HOST_PROJECTS" ]; then
+  if [ -z "$SERVES_HOST" ]; then
+    echo "build-worker: WARNING: WORKER_HOST_PROJECTS is declared on $NODE, which names no host runtime — the tenancy is read only where a HOST launch is admitted, so it decides nothing here (design #309 §10). Container launches are never matched against it" >&2
+  fi
+  spec_line WORKER_HOST_PROJECTS "$HOST_PROJECTS"
+fi
 # ── the docker engine the daemon dials: only the LINE is composed here ──────
 # The value was resolved and both its refusals answered far above, beside the
 # toolchain one (nothing this script builds is needed to answer either). Only
@@ -786,6 +813,53 @@ if [ -n "$MODES" ]; then
       echo "build-worker: WORKER_MODES='$MODES' names host, which the daemon serves only at WORKER_SLOTS=1 AND WORKER_SLOTS_MAX=1 (one host task per node — design #309 §2 option (iii), crates/worker/src/daemon.rs \`enforce_host_capacity\`), but $CAP_BAD on $NODE; REFUSING daemon restart (live daemon untouched). Declare WORKER_SLOTS_$NODE=1 and WORKER_SLOTS_MAX_$NODE=1 in deploy/prod/chuggernaut.env — this script forwards both into $ENV_FILE, so neither is added to the node by hand." >&2
       exit 1
     fi
+    # WHOSE host work this node runs (design #309 §10, `HostTenancy` in
+    # crates/container/src/host.rs). The daemon is FAIL-CLOSED: an empty
+    # WORKER_HOST_PROJECTS refuses every host launch with a hard
+    # BackendError::Launch, so a host node deployed without one boots fine,
+    # advertises its slot, and then fails every host job it is ever handed.
+    #
+    # That is not a boot loop, which is why the daemon warns rather than
+    # refusing — a mixed-mode node must keep serving its container launches. It
+    # IS a node that silently does nothing, so the refusal belongs here, where
+    # the operator is standing: gumbo-air-0 serves host work today and declares
+    # no list, so this deploy is where that cutover is noticed rather than in a
+    # job that queued behind it.
+    #
+    # Each entry is held to the `owner/project` shape `parse_projects`
+    # (crates/worker/src/config.rs) parses, and a repeat to the same refusal,
+    # because both are hard config errors THERE — a daemon that will not start is
+    # a supervisor loop and a node that leaves the fleet, which is the failure
+    # every guard in this script exists to precede.
+    if [ -z "$HOST_PROJECTS" ]; then
+      echo "build-worker: WORKER_MODES='$MODES' names host, but WORKER_HOST_PROJECTS is empty on $NODE — a host node is single-tenant BY POLICY and the daemon enforces it (design #309 §10, crates/container/src/host.rs \`HostTenancy\`): an undeclared tenancy admits NOBODY, so this node would boot, advertise its slot and refuse every host launch it is handed; REFUSING daemon restart (live daemon untouched). Declare WORKER_HOST_PROJECTS_$NODE='owner/project[, owner/project]' in deploy/prod/chuggernaut.env ON THE MINI — this script forwards it into $ENV_FILE, so it is never added to the node by hand (docs/reference/runbooks/worker-host-projects.md). Container launches on this node are unaffected either way." >&2
+      exit 1
+    fi
+    HOST_PROJECTS_SEEN=""
+    _rest="$HOST_PROJECTS,"
+    while [ -n "$_rest" ]; do
+      _slug="${_rest%%,*}"
+      _rest="${_rest#*,}"
+      _slug="${_slug#"${_slug%%[![:space:]]*}"}"
+      _slug="${_slug%"${_slug##*[![:space:]]}"}"
+      _bad=1
+      case "$_slug" in
+        */*/* | /* | */) ;;
+        */*) _bad="" ;;
+      esac
+      if [ -n "$_bad" ]; then
+        echo "build-worker: WORKER_HOST_PROJECTS entry '$_slug' is not an owner/project pair — the daemon refuses it at parse (crates/worker/src/config.rs \`parse_projects\`) rather than keeping a tenancy that could never match a launch's JOB_PROJECT, and the supervisor would loop that refusal; REFUSING (live daemon untouched)" >&2
+        exit 1
+      fi
+      case "$HOST_PROJECTS_SEEN," in
+        *",$_slug,"*)
+          echo "build-worker: WORKER_HOST_PROJECTS lists '$_slug' more than once, which the daemon refuses as a hard config error (crates/worker/src/config.rs \`parse_projects\`); REFUSING (live daemon untouched)" >&2
+          exit 1
+          ;;
+      esac
+      HOST_PROJECTS_SEEN="$HOST_PROJECTS_SEEN,$_slug"
+    done
+    echo "build-worker: WORKER_HOST_PROJECTS='$HOST_PROJECTS' — $NODE runs HOST work for those projects and refuses every other one at launch (design #309 §10). A project's own code persists across its own tasks here, which is the feature single-tenancy buys"
     # The host root, asked of the NODE rather than assumed. `HostBackend::new`
     # creates it at construction and `local_backend` constructs it at daemon
     # boot, so a root the daemon's user cannot create is not a degraded node —

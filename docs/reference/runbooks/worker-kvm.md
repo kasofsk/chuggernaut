@@ -9,8 +9,10 @@ It is *not* the design argument (that is
 [design #367](../../design/367-android-emulator-execution.md), including why a
 device passthrough beats a host runtime) and not the normative text
 ([`docs/spec.md`](../../spec.md) §3.1). For capacity, see
-[`worker-capacity.md`](worker-capacity.md); for the standing deploy story,
-[`deploy/prod/README.md`](../../../deploy/prod/README.md) §6.
+[`worker-capacity.md`](worker-capacity.md); for a host node's tenancy — the
+other fail-closed per-project allow-list, and a required one —
+[`worker-host-projects.md`](worker-host-projects.md); for the standing deploy
+story, [`deploy/prod/README.md`](../../../deploy/prod/README.md) §6.
 
 ---
 

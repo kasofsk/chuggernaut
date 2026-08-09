@@ -37,6 +37,14 @@
 //! saying so is the only answer that cannot run a container task against the
 //! machine's own toolchain.
 //!
+//! A host node is **single-tenant by policy, and the policy is enforced here**
+//! ([`HostTenancy`], design #309 §10): a launch whose `JOB_PROJECT` the node's
+//! `WORKER_HOST_PROJECTS` does not name is a hard [`BackendError::Launch`],
+//! never `NoCapacity`, because it can never clear without a config change on
+//! the node. The tenancy is told to the backend as [`AgentCapability`] is, an
+//! undeclared one admits nobody, and it binds host launches only — the same
+//! node's container launches never reach this backend at all.
+//!
 //! Each task is launched into its own **supervision unit** ([`Supervision`],
 //! design #440 D3) rather than the daemon's, so the restart that swaps the
 //! daemon leaves in-flight work running (spec §3.1). Which systemd manager that
@@ -536,6 +544,61 @@ pub struct TaskMeta {
     pub scope: Option<ScopeManager>,
 }
 
+/// Which projects a node runs **host** work for (design #309 §10): host nodes
+/// are single-tenant by policy, and this is where that policy is enforced.
+///
+/// Told to the backend as [`AgentCapability`] is, and empty admits **nobody** —
+/// serving `host` at all and declaring whose work it is for are two separate
+/// acts, so a node that declares no tenancy runs host work for no project.
+#[derive(Debug, Clone, Default)]
+pub struct HostTenancy {
+    projects: Vec<String>,
+}
+
+impl HostTenancy {
+    /// The node's `owner/project` allow-list, as `WORKER_HOST_PROJECTS` names
+    /// it.
+    pub fn new(projects: Vec<String>) -> Self {
+        Self { projects }
+    }
+
+    /// Whether the node runs host work for anybody at all, which is what makes
+    /// the daemon's boot warning sayable without reaching into the list.
+    pub fn is_empty(&self) -> bool {
+        self.projects.is_empty()
+    }
+
+    /// Whether a launch carrying this env is admitted, matched on `JOB_PROJECT`
+    /// — the identity spec §4.1's reserved `JOB_` prefix seals against a job
+    /// type's own `vars:`. A launch carrying no stamp is admitted by nothing.
+    pub fn admits(&self, env: &HashMap<String, String>) -> bool {
+        env.get("JOB_PROJECT")
+            .is_some_and(|project| self.projects.iter().any(|allowed| allowed == project))
+    }
+
+    /// Why this launch may not run host work here, naming the project and the
+    /// node, or `None` when the tenancy admits it.
+    pub fn refusal(&self, node: &str, env: &HashMap<String, String>) -> Option<String> {
+        (!self.admits(env)).then(|| {
+            format!(
+                "host node {node} runs host work only for the projects WORKER_HOST_PROJECTS names \
+                 ({}), and this launch is {}'s — refused rather than queued, because it can never \
+                 clear without a config change on {node} and NoCapacity would be a 30-minute \
+                 silence with a known answer (design #309 §10: single-tenant by policy, enforced \
+                 at the node). Container launches on {node} are unaffected; \
+                 docs/reference/runbooks/worker-host-projects.md is the procedure",
+                if self.projects.is_empty() {
+                    "none — the node declares no tenancy".to_string()
+                } else {
+                    self.projects.join(", ")
+                },
+                env.get("JOB_PROJECT")
+                    .map_or("<no JOB_PROJECT>", String::as_str),
+            )
+        })
+    }
+}
+
 /// Host-process execution on one node (design #309 P0). Serves the launches
 /// that carry no image and refuses the rest, so a node offering both runtimes
 /// routes to it per launch ([`names_host_task`]).
@@ -549,6 +612,9 @@ pub struct HostBackend {
     /// What this node can serve an agent launch with (design #490 D5),
     /// assembled by the daemon from the machine itself.
     agent: AgentCapability,
+    /// Whose host work this node runs (design #309 §10), assembled by the
+    /// daemon from `WORKER_HOST_PROJECTS`.
+    tenancy: HostTenancy,
     /// Serializes the whole of [`ContainerBackend::launch`], so the
     /// one-task-per-node check and the task directory it publishes cannot race
     /// a second concurrent launch on the daemon's op semaphore.
@@ -569,6 +635,7 @@ impl HostBackend {
         root: impl Into<PathBuf>,
         supervision: Supervision,
         agent: AgentCapability,
+        tenancy: HostTenancy,
     ) -> Result<Self, BackendError> {
         let root = root.into();
         std::fs::create_dir_all(&root)
@@ -579,6 +646,7 @@ impl HostBackend {
             root,
             supervision,
             agent,
+            tenancy,
             launching: tokio::sync::Mutex::new(()),
             live: Arc::new(Mutex::new(HashSet::new())),
             counter: AtomicU64::new(0),
@@ -651,6 +719,9 @@ impl HostBackend {
                  image's presence), refused rather than run against the machine's own toolchain",
                 self.node
             )));
+        }
+        if let Some(reason) = self.tenancy.refusal(&self.node, &config.env) {
+            return Err(BackendError::Launch(reason));
         }
         if agent_shaped(config)
             && let Some(reason) = self.agent.refusal(&self.node)
@@ -3003,6 +3074,7 @@ mod tests {
             &root,
             Supervision::ProcessGroup,
             AgentCapability::new(None, crate::CHANNEL_PATH_HOST),
+            HostTenancy::default(),
         )
         .unwrap();
         assert!(!leftover.exists(), "a detached tree is reclaimed at boot");
@@ -3024,6 +3096,7 @@ mod tests {
             &root,
             Supervision::ProcessGroup,
             AgentCapability::new(None, crate::CHANNEL_PATH_HOST),
+            HostTenancy::default(),
         )
         .unwrap();
         assert_eq!(

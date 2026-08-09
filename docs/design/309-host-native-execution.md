@@ -23,10 +23,17 @@ and its addendum on `remove` racing its own reaper.
 (job #517).** Host tasks on `gumbo-air-0` reach a working docker daemon by file
 ownership, and the operator has accepted that rather than closed it; the rule's
 *mechanism* clause — a node-side allow-list entry, never a job-type field the
-platform honors on request — survives unweakened, and §10's `WORKER_HOST_PROJECTS`
-enforcement claim is unbuilt. See
+platform honors on request — survives unweakened. See
 [the 2026-08-09 amendment](#amendment--2026-08-09-job-517-the-docker-socket-rule-inverts)
 and [#517](517-docker-access-for-jobs.md), which owns the decision.
+
+**§10's tenancy list is built as of 2026-08-09 (job #525).** The same amendment
+recorded `WORKER_HOST_PROJECTS` as a variable five designs named and no source
+file held; it now exists, fail-closed, enforced in `container::host::HostTenancy`
+at every host launch and refused at the deploy when a `host` node declares none.
+The finding stands as history; see
+[the 2026-08-09 note](#note-2026-08-09--10s-tenancy-list-is-built-job-525) and
+[`docs/reference/runbooks/worker-host-projects.md`](../reference/runbooks/worker-host-projects.md).
 
 Written against the tree at `b801b76`. Every claim about current behavior was
 read out of the source and out of [docs/spec.md](../spec.md), not inferred from
@@ -1712,3 +1719,48 @@ host-projects list. Host single-tenancy today is `placement.node` plus the fact
 that one node serves `host` at all. The policy stands as designed; the sentence
 claiming enforcement was ahead of the tree, and #517's acceptance should be read
 against what the tree enforces rather than what this section asserted.
+
+## Note, 2026-08-09 — §10's tenancy list is built (job #525)
+
+**`WORKER_HOST_PROJECTS` exists, and
+[§10's](#are-host-nodes-single-tenant) "enforced at the node" is now true.**
+The [2026-08-09 amendment](#amendment--2026-08-09-job-517-the-docker-socket-rule-inverts)
+above recorded that it was not — that five designs reasoned from a variable no
+source file, deploy script or nix module held. That record **stands**: it was
+accurate when written, and this note closes it rather than deleting it. What
+changed is the tree, not the finding.
+
+What landed, exactly:
+
+- **`container::host::HostTenancy`** is the single decision site. A host launch
+  whose `JOB_PROJECT` the node's list does not name is a `BackendError::Launch`
+  naming the project and the node — **never** `NoCapacity`, for the reason §10
+  gives and the message carries. It matches on the stamp
+  [#517 S1](517-docker-access-for-jobs.md) sealed, so project config cannot move
+  the key the tenancy is read against.
+- **Host launches only.** The list is read in `HostBackend::admit` and nowhere
+  else, so a mixed-mode node's **container** launches are byte-identical — which
+  is the distinction [#313](313-workload-identity-image-builds.md) drew and this
+  slice keeps.
+- **Unset runs host work for nobody**, matching `WORKER_KVM_PROJECTS` and §8's
+  rule that a node does not advertise `host` unless provisioned for it. The
+  alternative — unset ⇒ unrestricted — would have made the control opt-in, which
+  is the shape §10 was complaining about in the first place.
+- **The daemon warns; the deploy refuses.** An empty list is a working
+  configuration to the daemon: it logs the warning and refuses each host launch,
+  rather than refusing to boot and taking a mixed-mode node's container work down
+  with it. `deploy/prod/build-worker.sh` therefore refuses a deploy declaring
+  `host` with no tenancy beside it, in the shape it already refuses
+  `WORKER_MODES=host` without `WORKER_SLOTS=1 && WORKER_SLOTS_MAX=1`.
+
+**This is a real cutover, and it is the operator's.** `gumbo-air-0` serves host
+work today and declares no list, so its next deploy refuses until one is
+declared. Nothing in this repo declares it — no node config was edited here, by
+design — and [`docs/reference/runbooks/worker-host-projects.md`](../reference/runbooks/worker-host-projects.md)
+is the procedure.
+
+**Out of scope and unchanged:** §8's per-task users (structurally blocked on
+macOS by the daemon's GUI-domain requirement, [#490](490-agent-work-on-a-mac.md)),
+§6's transient scopes, and the docker grant — [#517 D3](517-docker-access-for-jobs.md)
+landed that, and [#517 D1](517-docker-access-for-jobs.md) accepted the escalation
+this list is the containment for.

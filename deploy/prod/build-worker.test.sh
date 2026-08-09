@@ -473,6 +473,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=nuc \
   WORKER_MODES="container, host" \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   sh "$SUT"
@@ -494,6 +495,7 @@ PATH="$BIN:$PATH" \
   CHUG_WORKER_NODE=air \
   WORKER_MODES=container \
   WORKER_MODES_air=container,host \
+  WORKER_HOST_PROJECTS_air=acme/chug \
   WORKER_SLOTS_air=1 \
   WORKER_SLOTS_MAX_air=1 \
   sh "$SUT"
@@ -519,6 +521,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=air \
   WORKER_MODES=container,host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=2 \
   sh "$SUT" >"$WORK/modes-slots.out" 2>&1
 rc=$?
@@ -549,6 +552,7 @@ for _max in 4 ""; do
     WORKER_NATS_URL=nats://10.0.0.1:4222 \
     CHUG_WORKER_NODE=air \
     WORKER_MODES=container,host \
+    WORKER_HOST_PROJECTS=acme/chug \
     WORKER_SLOTS=1 \
     WORKER_SLOTS_MAX="$_max" \
     sh "$SUT" >"$WORK/modes-max.out" 2>&1
@@ -588,6 +592,7 @@ for _shell in sh bash; do
     WORKER_NATS_URL=nats://10.0.0.1:4222 \
     CHUG_WORKER_NODE=nuc \
     WORKER_MODES=container,host \
+    WORKER_HOST_PROJECTS=acme/chug \
     WORKER_SLOTS=1 \
     WORKER_SLOTS_MAX=1 \
     "$_shell" "$SUT" > "$WORK/modes-ok-$_shell.out" 2>&1
@@ -614,6 +619,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=air \
   WORKER_MODES=container,host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   WORKER_HOST_ROOT=/var/lib/chuggernaut/host-tasks \
@@ -634,6 +640,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=nuc \
   WORKER_MODES=container,host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   sh "$SUT"
@@ -654,6 +661,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=air \
   WORKER_MODES=container,host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   FAKE_NODE_OS=Darwin \
@@ -680,6 +688,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=nuc \
   WORKER_MODES=container,host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   sh "$SUT" >"$WORK/host-root-linux.out" 2>&1
@@ -700,6 +709,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=nuc \
   WORKER_MODES=container,host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   sh "$SUT" >"$WORK/host-root-nosudo.out" 2>&1
@@ -2557,6 +2567,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=air \
   WORKER_MODES=container,host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   WORKER_REFRESH_GIT_URL="ssh://git@front:2222/acme/chug.git" \
@@ -2583,6 +2594,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=air \
   WORKER_MODES="container, host" \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   FAKE_LIVE_ENV_FILE="WORKER_NODE='air'
@@ -2617,6 +2629,7 @@ PATH="$BIN:$PATH" \
   FAKE_NODE_OS=Darwin \
   FAKE_NODE_HOME=/Users/op \
   WORKER_MODES=host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   WORKER_HOST_ROOT=/Users/op/chuggernaut-worker/host-tasks \
@@ -2694,6 +2707,7 @@ PATH="$BIN:$PATH" \
   FAKE_NODE_OS=Darwin \
   FAKE_NODE_HOME=/Users/op \
   WORKER_MODES=host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=2 \
   WORKER_SLOTS_MAX=2 \
   sh "$SUT" > "$WORK/hostonly-slots.out" 2>&1
@@ -2702,6 +2716,170 @@ set -e
 [ "$rc" -ne 0 ] || fail "a host-only node without WORKER_SLOTS=1 must still fail the deploy"
 not_started "a host-only node with the wrong capacity must not reach the daemon restart"
 echo "ok: a host-only node is still held to the one-host-task-per-node capacity rule"
+
+# ── Case 8a1: a host node with NO tenancy REFUSES, before the restart ─────────
+# The guard this slice exists for. The daemon is fail-closed (design #309 §10,
+# `HostTenancy` in crates/container/src/host.rs): an undeclared list admits
+# nobody, so a host node deployed without one boots, advertises its slot and
+# refuses every host launch it is handed — a silent do-nothing rather than a boot
+# loop, which is exactly why the deploy has to be the thing that notices.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  sh "$SUT" > "$WORK/host-tenancy.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a host node with no WORKER_HOST_PROJECTS must fail the deploy (got rc=0)"
+grep -qF "WORKER_HOST_PROJECTS is empty" "$WORK/host-tenancy.out" \
+  || fail "the refusal must name the variable that is missing"
+grep -qF "WORKER_HOST_PROJECTS_air=" "$WORK/host-tenancy.out" \
+  || fail "the refusal must name the fix, per node"
+grep -qF "REFUSING daemon restart (live daemon untouched)" "$WORK/host-tenancy.out" \
+  || fail "the refusal must use this script's established shape"
+not_started "a host node with no tenancy must not reach the daemon restart (live daemon untouched)"
+echo "ok: a host node declaring no WORKER_HOST_PROJECTS refuses before the daemon is replaced"
+
+# ── Case 8a2: the tenancy reaches the env file, per node, as one value ────────
+# Same forwarding shape as every other node property, and quoted so an
+# operator's `acme/beacon, acme/api` stays ONE value on both readers of the file
+# (systemd's EnvironmentFile parser and the macOS agent's `. <file>`).
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS=acme/api \
+  WORKER_HOST_PROJECTS_air="acme/beacon, acme/api" \
+  WORKER_HOST_ROOT=/Users/op/chuggernaut-worker/host-tasks \
+  sh "$SUT" > "$WORK/host-tenancy-fwd.out" 2>&1
+
+case "$(env_file)" in
+  *"WORKER_HOST_PROJECTS='acme/beacon, acme/api'"*) ;;
+  *) fail "a spaced tenancy must reach the environment file as one quoted value" ;;
+esac
+if grep -qF "WORKER_HOST_PROJECTS='acme/api'" "$LOG"; then
+  fail "a per-node WORKER_HOST_PROJECTS_air must win over the bare WORKER_HOST_PROJECTS"
+fi
+grep -qF "runs HOST work for those projects" "$WORK/host-tenancy-fwd.out" \
+  || fail "the operator must be told what the declared tenancy decides"
+started || fail "a host node WITH a tenancy must proceed to the daemon restart"
+
+# Whitespace-only is what the daemon reads as unset (`parse_projects` trims), so
+# it must refuse as an empty one rather than being written as a line the daemon
+# then ignores.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS="  " \
+  sh "$SUT" > "$WORK/host-tenancy-blank.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a whitespace-only WORKER_HOST_PROJECTS is unset to the daemon and must refuse"
+if grep -qF "WORKER_HOST_PROJECTS='" "$LOG"; then
+  fail "a whitespace-only tenancy must not be written into the environment file"
+fi
+echo "ok: WORKER_HOST_PROJECTS reaches the env file per node, and a blank one is unset"
+
+# ── Case 8a3: an entry the daemon's parse rejects refuses too ─────────────────
+# `parse_projects` (crates/worker/src/config.rs) refuses a malformed or repeated
+# entry as a hard config error, so passing one through would replace a working
+# daemon with one the supervisor boot-loops out of the fleet — and a tenancy the
+# daemon refuses is one no launch is ever matched against.
+for bad_slug in beacon acme/ /beacon acme/b/c "acme/api,"; do
+  : > "$LOG"
+  set +e
+  PATH="$BIN:$PATH" \
+    WORKER_SSH=op@air \
+    WORKER_NATS_URL=nats://10.0.0.1:4222 \
+    CHUG_WORKER_NODE=air \
+    FAKE_NODE_OS=Darwin \
+    FAKE_NODE_HOME=/Users/op \
+    WORKER_MODES=host \
+    WORKER_SLOTS=1 \
+    WORKER_SLOTS_MAX=1 \
+    WORKER_HOST_PROJECTS="acme/chug,$bad_slug" \
+    sh "$SUT" > "$WORK/host-tenancy-bad.out" 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "the tenancy entry '$bad_slug' must fail the deploy (got rc=0)"
+  grep -qF "is not an owner/project pair" "$WORK/host-tenancy-bad.out" \
+    || fail "the refusal must name the shape it wanted, for '$bad_slug'"
+  not_started "the tenancy entry '$bad_slug' must not reach the daemon restart (live daemon untouched)"
+done
+
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS="acme/chug, acme/chug" \
+  sh "$SUT" > "$WORK/host-tenancy-dup.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a repeated tenancy entry must fail the deploy (got rc=0)"
+grep -qF "more than once" "$WORK/host-tenancy-dup.out" || fail "the refusal must name the repeat"
+not_started "a repeated tenancy entry must not reach the daemon restart (live daemon untouched)"
+echo "ok: every malformed or repeated WORKER_HOST_PROJECTS entry refuses before the restart"
+
+# ── Case 8a4: a node that names NO host mode is BYTE-IDENTICAL ────────────────
+# The property this slice must not spend: every node in the live fleet but one
+# serves containers only, and none of them declares a tenancy. Compared against
+# case 2a's golden rather than against a token, because a stray line is exactly
+# what a token assertion misses.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT"
+
+[ "$(env_file)" = "$EXPECTED_ENV" ] || fail "a node naming no host mode must produce the run spec it produced before #309 §10.
+  expected: $EXPECTED_ENV
+  got:      $(env_file)"
+if grep -qF "WORKER_HOST_PROJECTS" "$LOG"; then
+  fail "nothing about the host tenancy may reach a node that declares neither knob"
+fi
+
+# And a container-only node that declares one anyway is told it decides nothing
+# here, rather than being refused a shape the daemon accepts.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  WORKER_HOST_PROJECTS=acme/chug \
+  sh "$SUT" > "$WORK/host-tenancy-container.out" 2>&1
+grep -qF "names no host runtime" "$WORK/host-tenancy-container.out" \
+  || fail "a tenancy on a container-only node must warn that it decides nothing"
+started || fail "a tenancy on a container-only node must not refuse the deploy"
+echo "ok: a node naming no host mode is byte-identical, and a stray tenancy only warns"
 
 # ── Case 8b: a host-only LINUX node still builds the worker image ─────────────
 # #440 D6 holds on Linux: that image is the only place the node's daemon binary
@@ -2714,6 +2892,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=nuc \
   WORKER_MODES=host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   sh "$SUT" > "$WORK/hostonly-linux.out" 2>&1
@@ -2758,6 +2937,7 @@ PATH="$BIN:$PATH" \
   FAKE_NODE_OS=Darwin \
   FAKE_NODE_HOME=/Users/op \
   WORKER_MODES=container,host \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   sh "$SUT" > "$WORK/dualmac.out" 2>&1
@@ -2845,6 +3025,7 @@ PATH="$BIN:$PATH" \
   WORKER_NATS_URL=nats://10.0.0.1:4222 \
   CHUG_WORKER_NODE=nuc \
   WORKER_MODES="container, host" \
+  WORKER_HOST_PROJECTS=acme/chug \
   WORKER_SLOTS=1 \
   WORKER_SLOTS_MAX=1 \
   sh "$SUT" > /dev/null 2>&1

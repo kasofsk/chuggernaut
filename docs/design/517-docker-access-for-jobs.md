@@ -53,6 +53,16 @@ and a node declaring neither produces a byte-identical run spec, asserted in
 `deploy/prod/build-worker.test.sh`. What is left of S5 is the operator's own
 config (S5b).
 
+**[Correction 1](#corrections-verified-against-the-tree) is closed (job #525,
+2026-08-09).** `WORKER_HOST_PROJECTS` exists: fail-closed, enforced at every
+host launch in `container::host::HostTenancy`, and refused at the deploy when a
+node declares `host` with no list. The correction stands as written — it was
+accurate against the tree it measured — and the containment story D1's
+acceptance leans on is now the one the docs assert. It grants nothing here
+either: no node declares a tenancy in this repo, and `gumbo-air-0`'s is the
+operator's to declare
+([`docs/reference/runbooks/worker-host-projects.md`](../reference/runbooks/worker-host-projects.md)).
+
 **S4 (job #519) makes that posture visible.** Every daemon now probes at boot
 whether it reaches a docker endpoint and advertises the answer as
 `NodeCapabilities.docker_reachable`, for both modes, defaulting false. Nothing

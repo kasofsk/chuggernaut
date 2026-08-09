@@ -445,11 +445,16 @@ Two things to know before converting one:
   the container are the same platform and the same bytes answer both questions.
 
 Nothing here weakens a host node: `WORKER_SLOTS=1` and `WORKER_SLOTS_MAX=1`
-node-wide (#309 §2 option (iii)), a creatable `WORKER_HOST_ROOT` and the
-supervision probe all still refuse before the live daemon is touched.
-**Converting is an operator step** — declare `WORKER_MODES_<node>=host` in
-`deploy/prod/chuggernaut.env` on the Mini and re-run the deploy. <!-- runtime --> No node in the
-fleet declares it today.
+node-wide (#309 §2 option (iii)), a creatable `WORKER_HOST_ROOT`, the
+supervision probe, and — since job #525 — a non-empty `WORKER_HOST_PROJECTS`
+(design #309 §10, the node's host tenancy) all still refuse before the live
+daemon is touched. **Converting is an operator step, and it declares two
+variables** — `WORKER_MODES_<node>=host` **and**
+`WORKER_HOST_PROJECTS_<node>=<owner>/<project>` in
+`deploy/prod/chuggernaut.env` on the Mini, then re-run the deploy, which <!-- runtime -->
+refuses the conversion without the second
+([`worker-host-projects.md`](worker-host-projects.md) is the procedure). No
+node in the fleet declares either today.
 
 ---
 

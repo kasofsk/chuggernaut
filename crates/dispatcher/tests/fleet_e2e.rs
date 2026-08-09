@@ -82,6 +82,7 @@ async fn worker_fleet(
         channel_binary: artifact,
         cache_dir: None,
         host_root: std::env::temp_dir().join("chug-host-root-test"),
+        host_projects: Vec::new(),
         kvm_device: None,
         kvm_projects: vec![],
         docker_socket: None,

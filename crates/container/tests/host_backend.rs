@@ -45,7 +45,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use container::host::{
-    AGENT_CONFIG_VAR, AgentCapability, HOST_ROOT_DEFAULT, HostBackend, ScopeManager, Supervision,
+    AGENT_CONFIG_VAR, AgentCapability, HOST_ROOT_DEFAULT, HostBackend, HostTenancy, ScopeManager,
+    Supervision,
 };
 use container::{ContainerBackend, ContainerLaunchConfig, ContainerStatus, InjectedFile};
 use std::collections::HashMap;
@@ -70,8 +71,16 @@ fn backend(root: &std::path::Path) -> HostBackend {
         root.join("tasks"),
         Supervision::ProcessGroup,
         capability(root),
+        tenancy(),
     )
     .unwrap()
+}
+
+/// A node whose `WORKER_HOST_PROJECTS` names the project every [`cfg`] launch
+/// is stamped with (design #309 §10), so a test about anything else is a test
+/// of an admitted launch.
+fn tenancy() -> HostTenancy {
+    HostTenancy::new(vec!["acme/chug".to_string()])
 }
 
 /// A node holding both halves an agent host launch needs (design #490 D5): a
@@ -395,6 +404,7 @@ async fn an_agent_shaped_launch_is_refused_by_missing_capability() {
             Some("node w1 discovered no claude on the daemon's own PATH".into()),
             runnable(&root, "chuggernaut-channel-host"),
         ),
+        tenancy(),
     )
     .unwrap();
     let err = no_cli.launch(agent_env(cfg("true"))).await.unwrap_err();
@@ -409,6 +419,7 @@ async fn an_agent_shaped_launch_is_refused_by_missing_capability() {
         root.join("tasks"),
         Supervision::ProcessGroup,
         AgentCapability::new(None, root.join("absent-channel")),
+        tenancy(),
     )
     .unwrap();
     let err = no_channel.launch(agent_env(cfg("true"))).await.unwrap_err();
@@ -424,6 +435,82 @@ async fn an_agent_shaped_launch_is_refused_by_missing_capability() {
         0,
         "a command host launch needs neither capability"
     );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// #309 §10's tenancy rule, which five design docs asserted and no source file
+/// held (#517 correction 1): a host node runs the projects
+/// `WORKER_HOST_PROJECTS` names and refuses every other one **hard**, because a
+/// refusal that can only clear by a config change on the node must never queue.
+#[tokio::test]
+async fn host_work_runs_only_for_the_projects_the_node_declares() {
+    let root = temp_root("tenancy");
+    let backend = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        Supervision::ProcessGroup,
+        capability(&root),
+        HostTenancy::new(vec!["acme/chug".into(), "acme/api".into()]),
+    )
+    .unwrap();
+
+    let id = backend.launch(cfg("true")).await.unwrap();
+    assert_eq!(settle(&backend, &id).await, 0, "a listed project runs");
+
+    let mut unlisted = cfg("true");
+    unlisted
+        .env
+        .insert("JOB_PROJECT".to_string(), "acme/beacon".into());
+    let err = backend.launch(unlisted).await.unwrap_err();
+    assert!(
+        matches!(err, container::BackendError::Launch(_)),
+        "an unlisted project is refused, NEVER queued as capacity: {err}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("acme/beacon") && text.contains("w1"),
+        "the refusal names the project and the node: {text}"
+    );
+    assert!(
+        text.contains("WORKER_HOST_PROJECTS"),
+        "the refusal names the setting that clears it: {text}"
+    );
+
+    let mut unstamped = cfg("true");
+    unstamped.env.remove("JOB_PROJECT");
+    assert!(
+        backend.launch(unstamped).await.is_err(),
+        "a launch carrying no JOB_PROJECT is admitted by nothing"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// The unset semantics this slice takes, pinned: a node that declares no
+/// tenancy runs host work for NOBODY (design #309 §10), which is
+/// `WORKER_KVM_PROJECTS`'s posture and the only one that cannot degrade to a
+/// pass.
+#[tokio::test]
+async fn an_undeclared_tenancy_admits_nobody() {
+    let root = temp_root("tenancy-unset");
+    let backend = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        Supervision::ProcessGroup,
+        capability(&root),
+        HostTenancy::default(),
+    )
+    .unwrap();
+
+    let err = backend.launch(cfg("true")).await.unwrap_err();
+    assert!(
+        matches!(err, container::BackendError::Launch(_)),
+        "an undeclared tenancy refuses hard: {err}"
+    );
+    assert!(
+        err.to_string().contains("declares no tenancy"),
+        "the refusal says the node declared none, not that the project is missing: {err}"
+    );
+    assert!(HostTenancy::default().is_empty());
     std::fs::remove_dir_all(&root).unwrap();
 }
 
@@ -1105,8 +1192,14 @@ async fn a_host_task_runs_in_its_own_supervision_unit() {
         return;
     };
     let root = temp_root("scope");
-    let backend =
-        HostBackend::new("w1", root.join("tasks"), supervision, capability(&root)).unwrap();
+    let backend = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        supervision,
+        capability(&root),
+        tenancy(),
+    )
+    .unwrap();
 
     let gate = root.join("release-scope");
     let id = backend
@@ -1162,8 +1255,14 @@ async fn a_scoped_task_is_handed_the_dollars_its_command_was_written_with() {
         return;
     };
     let root = temp_root("verbatim");
-    let backend =
-        HostBackend::new("w1", root.join("tasks"), supervision, capability(&root)).unwrap();
+    let backend = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        supervision,
+        capability(&root),
+        tenancy(),
+    )
+    .unwrap();
 
     let seen = root.join("shell.pid");
     let id = backend
@@ -1239,8 +1338,14 @@ async fn a_setsid_escapee_is_staged_under_a_scope_as_well() {
         return;
     };
     let root = temp_root("staging-scope");
-    let backend =
-        HostBackend::new("w1", root.join("tasks"), supervision, capability(&root)).unwrap();
+    let backend = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        supervision,
+        capability(&root),
+        tenancy(),
+    )
+    .unwrap();
     let pidfile = root.join("escapee.pid");
 
     let id = backend
@@ -1352,8 +1457,14 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
         return;
     };
     let root = temp_root("escapee");
-    let backend =
-        HostBackend::new("w1", root.join("tasks"), supervision, capability(&root)).unwrap();
+    let backend = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        supervision,
+        capability(&root),
+        tenancy(),
+    )
+    .unwrap();
 
     let pidfile = root.join("escapee.pid");
     let id = backend

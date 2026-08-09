@@ -48,6 +48,11 @@ pub struct WorkerConfig {
     /// when [`Self::modes`] names [`WorkerMode::Host`]; a container-only node
     /// never touches it.
     pub host_root: PathBuf,
+    /// Projects this node runs **host** work for (`WORKER_HOST_PROJECTS`,
+    /// `owner/project` entries, design #309 §10). Empty ⇒ nobody, so serving
+    /// `host` at all and declaring whose work it is for are two separate acts;
+    /// a container launch on the same node is untouched by it.
+    pub host_projects: Vec<String>,
     /// The KVM device this node passes through (`WORKER_KVM`); `None` (unset) ⇒
     /// no passthrough at all. A node property provisioned exactly as
     /// [`Self::cache_dir`] is — worker-side, never on the wire or the launch
@@ -217,6 +222,10 @@ impl WorkerConfig {
                 }),
             cache_dir: parse_cache_dir(std::env::var("WORKER_CACHE_DIR").ok()),
             host_root: parse_host_root(std::env::var("WORKER_HOST_ROOT").ok())?,
+            host_projects: parse_projects(
+                "WORKER_HOST_PROJECTS",
+                std::env::var("WORKER_HOST_PROJECTS").ok(),
+            )?,
             kvm_device: parse_kvm_device(std::env::var("WORKER_KVM").ok())?,
             kvm_projects: parse_projects(
                 "WORKER_KVM_PROJECTS",
@@ -349,8 +358,9 @@ fn parse_kvm_device(raw: Option<String>) -> Result<Option<PathBuf>, ConfigError>
 }
 
 /// Parse one node-side project allow-list — the device and its toolchain mounts
-/// (`WORKER_KVM_PROJECTS`, design #367 §2.3), or project-declared toolchains
-/// (`WORKER_NIX_PROJECTS`, design #373 Decision 2 rule 3). Absent or empty ⇒
+/// (`WORKER_KVM_PROJECTS`, design #367 §2.3), project-declared toolchains
+/// (`WORKER_NIX_PROJECTS`, design #373 Decision 2 rule 3), or the node's host
+/// tenancy (`WORKER_HOST_PROJECTS`, design #309 §10). Absent or empty ⇒
 /// **nobody**, and a malformed or repeated `owner/project` entry is a hard
 /// config error rather than a grant that silently never matches a `JOB_PROJECT`.
 fn parse_projects(var: &str, raw: Option<String>) -> Result<Vec<String>, ConfigError> {
@@ -1139,6 +1149,40 @@ mod tests {
         let err = parse_host_root(Some(store.into())).unwrap_err().to_string();
         assert!(err.contains("WORKER_HOST_ROOT"), "{err}");
         assert!(parse_host_root(Some("host-tasks".into())).is_err());
+    }
+
+    /// `WORKER_HOST_PROJECTS` (design #309 §10): unset runs host work for
+    /// NOBODY, the fail-closed answer §10 asserts and the tree did not have —
+    /// and a malformed or repeated entry is refused rather than kept as a
+    /// tenancy that can never match a `JOB_PROJECT`.
+    #[test]
+    fn host_projects_are_fail_closed_when_unset() {
+        for empty in [None, Some(String::new()), Some("  ".into())] {
+            assert_eq!(
+                parse_projects("WORKER_HOST_PROJECTS", empty).unwrap(),
+                Vec::<String>::new(),
+                "an undeclared host node serves no project"
+            );
+        }
+        assert_eq!(
+            parse_projects(
+                "WORKER_HOST_PROJECTS",
+                Some(" acme/beacon , acme/api ".into())
+            )
+            .unwrap(),
+            vec!["acme/beacon".to_string(), "acme/api".to_string()]
+        );
+
+        for bad in ["beacon", "acme/", "/beacon", "acme/b/c", "acme/beacon,", ""] {
+            let err = parse_projects("WORKER_HOST_PROJECTS", Some(format!("acme/api,{bad}")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("WORKER_HOST_PROJECTS"), "{bad:?}: {err}");
+        }
+        let err = parse_projects("WORKER_HOST_PROJECTS", Some("acme/api,acme/api".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than once"), "{err}");
     }
 
     /// `WORKER_MODES` (design #322 W1): unset is container-only — today's

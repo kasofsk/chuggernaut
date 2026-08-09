@@ -168,6 +168,51 @@ mod tests {
         assert_eq!(container.launches().len(), 1);
     }
 
+    /// #309 §10 binds the node's HOST work and nothing else: on a mixed-mode
+    /// node whose tenancy names nobody, a container launch for any project runs
+    /// exactly as it did — it is routed by its image and never reaches the host
+    /// backend that holds the list.
+    #[tokio::test]
+    async fn the_host_tenancy_leaves_container_launches_alone() {
+        let root = std::env::temp_dir().join(format!(
+            "chug-route-tenancy-{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        let container = Arc::new(FakeBackend::new());
+        let host = Arc::new(
+            container::host::HostBackend::new(
+                "w1",
+                root.join("tasks"),
+                container::host::Supervision::ProcessGroup,
+                container::host::AgentCapability::new(None, root.join("channel")),
+                container::host::HostTenancy::default(),
+            )
+            .unwrap(),
+        );
+        let routed = RoutedBackend::new(container.clone(), host);
+
+        let mut with_image = launch_of(Some("img:latest"));
+        with_image
+            .env
+            .insert("JOB_PROJECT".into(), "acme/beacon".into());
+        routed.launch(with_image).await.unwrap();
+        assert_eq!(container.launches().len(), 1);
+
+        let mut host_launch = launch_of(None);
+        host_launch
+            .env
+            .insert("JOB_PROJECT".into(), "acme/beacon".into());
+        let err = routed.launch(host_launch).await.unwrap_err();
+        assert!(
+            matches!(err, BackendError::Launch(_)),
+            "the same project's HOST launch is refused hard: {err}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Every later op addresses the backend that minted the id, so a host
     /// task's `kill` never reaches docker and vice versa.
     #[tokio::test]

@@ -11,7 +11,9 @@ node-root escalation is **accepted** rather than mitigated) and not the
 normative text ([`docs/spec.md`](../../spec.md) §3.1). Its direct sibling is
 [`worker-kvm.md`](worker-kvm.md) — a node-side capability plus a fail-closed
 per-project allow-list — and the two are declared the same way, in the same
-file, by the same script. For capacity see [`worker-capacity.md`](worker-capacity.md);
+file, by the same script; [`worker-host-projects.md`](worker-host-projects.md) is
+the third, and the containment this grant's acceptance leans on. For capacity see
+[`worker-capacity.md`](worker-capacity.md);
 for the standing deploy story, [`deploy/prod/README.md`](../../../deploy/prod/README.md) §6.
 
 **This repo grants nothing.** No node in the fleet declares a socket, no

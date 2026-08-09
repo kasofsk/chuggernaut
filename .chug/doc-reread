@@ -102,3 +102,16 @@ Doc-reread: docs/implementation-notes.md
 Doc-reread: docs/design/517-docker-access-for-jobs.md
 Doc-reread: deploy/prod/README.md
 Doc-reread: docs/README.md
+
+Doc-reread: docs/spec.md
+Doc-reread: docs/README.md
+Doc-reread: docs/design/309-host-native-execution.md
+Doc-reread: docs/design/517-docker-access-for-jobs.md
+Doc-reread: docs/reference/runbooks/worker-host-projects.md
+Doc-reread: docs/reference/runbooks/worker-kvm.md
+Doc-reread: docs/reference/runbooks/worker-docker-grant.md
+Doc-reread: docs/reference/runbooks/worker-capacity.md
+Doc-reread: docs/reference/runbooks/chug-node-adoption.md
+Doc-reread: deploy/prod/README.md
+Doc-reread: docs/reference/crates.md
+Doc-reread: docs/implementation-notes.md

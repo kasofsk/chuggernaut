@@ -731,6 +731,15 @@ async fn host_backend(
 ) -> Result<Arc<dyn ContainerBackend>, WorkerRunError> {
     enforce_host_capacity(config.slots, config.slots_max)?;
     let supervision = enforce_host_supervision(&config.node).await?;
+    let tenancy = container::host::HostTenancy::new(config.host_projects.clone());
+    if tenancy.is_empty() {
+        tracing::warn!(
+            node = %config.node,
+            "WORKER_MODES names host and WORKER_HOST_PROJECTS is empty — this node refuses EVERY \
+             host launch (design #309 §10: single-tenant by policy, and an undeclared tenancy \
+             admits nobody). Container launches here are unaffected"
+        );
+    }
     tracing::info!(
         node = %config.node,
         host_root = %config.host_root.display(),
@@ -739,13 +748,16 @@ async fn host_backend(
         modes = ?config.modes,
         host_channel = %container::CHANNEL_PATH_HOST,
         agent_cli = ?agent_cli.path(),
-        "host execution enabled — launches carrying no image run as host processes here"
+        host_projects = ?config.host_projects,
+        "host execution enabled — launches carrying no image run as host processes here, for the \
+         projects WORKER_HOST_PROJECTS names and no other (design #309 §10)"
     );
     Ok(Arc::new(container::host::HostBackend::new(
         config.node.clone(),
         config.host_root.clone(),
         supervision,
         agent_capability(&config.node, agent_cli, container::CHANNEL_PATH_HOST),
+        tenancy,
     )?))
 }
 

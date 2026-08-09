@@ -9,7 +9,10 @@ It is *not* the design argument (that is
 way) and not the normative text ([`docs/spec.md`](../../spec.md) §3.1, "Dynamic worker
 registration"). For the standing-instance runbook — deploys, worker refresh,
 backups — see [`deploy/prod/README.md`](../../../deploy/prod/README.md); for
-mid-incident by-hand deploys, [the ad-hoc deploy runbook](adhoc-deploy.md).
+mid-incident by-hand deploys, [the ad-hoc deploy runbook](adhoc-deploy.md). A
+node serving `host` pays its capacity in slots **and** in tenancy — one task at a
+time, and only for the projects it declares
+([`worker-host-projects.md`](worker-host-projects.md)).
 
 ---
 
