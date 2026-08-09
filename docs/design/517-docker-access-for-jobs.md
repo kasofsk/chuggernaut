@@ -1,0 +1,581 @@
+# Design #517 — Docker access for jobs, accepted (amending #309 §10 and #313 Decision 0)
+
+Status: PROPOSED — the decision is the operator's and taken; nothing is built, and host-mode access is already live.
+
+Written against the tree at `ff3258a`. Every claim about current behavior below
+was read out of the source and out of [`docs/spec.md`](../spec.md), not inferred
+from the sibling designs; where a sibling design and the tree disagree, the tree
+wins and the disagreement is recorded in
+[Corrections](#corrections-verified-against-the-tree). The measurement that
+prompted the decision is job #516's read-only probe on `gumbo-air-0`, quoted
+in full below and not re-run here.
+
+This document does three things: it **records a decision the operator has
+taken**, in the shape [#313](313-workload-identity-image-builds.md)'s D1–D4 were
+recorded in job #409; it **amends two rules that decision contradicts**, by
+appending to the docs that hold them rather than rewording them; and it
+**decides the one question the measurement left open** — whether container jobs
+get the socket too.
+
+## Current state
+
+*The mutable head ([#415](415-knowledge-architecture.md) D2): rewritten to
+current truth whenever anything below it changes. Everything after this section
+is append-only.*
+
+**Nothing is built. One thing is already live.** As of **2026-08-09**, agent
+host tasks on `gumbo-air-0` reach a working docker daemon, and every
+[`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) run since
+[#490](490-agent-work-on-a-mac.md) slice 6 has had that access. It was never
+granted and it is not declared anywhere; it is a consequence of the task user
+owning the colima socket. That is the production posture this document accepts
+rather than closes.
+
+| # | Decision | Argued in |
+| --- | --- | --- |
+| **D1** | **Jobs may use docker, and this is wanted rather than tolerated.** The escalation to node root is **accepted, not mitigated**, under a stated condition | [The decision](#the-decision-and-the-argument-that-carries-it), [The cost](#the-cost-stated-precisely), [The trigger](#the-revisit-trigger-stated-as-a-condition) |
+| **D2** | **The mechanism stays node-side.** [#309 §10](309-host-native-execution.md#10-trust-and-tenancy)'s *shape* clause survives intact — a node-side allow-list entry, never a job-type field the platform honors on request. Only the default and the justification invert | [What survives of §10](#what-survives-of-the-309-rule) |
+| **D3** | **Container jobs get the socket, allow-listed node-side per (project, job type),** failing closed. This is [#313](313-workload-identity-image-builds.md) **B-I**, whose rejection is hereby reversed — not a fifth option | [The container question](#the-question-this-job-decides-container-jobs), [Naming the shape](#naming-the-adopted-shape-honestly-this-is-b-i) |
+| **D4** | **Host-mode docker becomes advertised, not enforced.** The node reports the access as a capability so it is auditable; withholding it needs per-task users and waits on [#309](309-host-native-execution.md) P3 | [The host question](#the-host-question-ambient-access-and-what-can-actually-be-done-about-it) |
+
+**The revisit trigger, and it is nearer than it looks.** D1 holds *while every
+job runs code the operator wrote or vendored*. It stops holding the moment a job
+runs untrusted code. `docs/spec.md` §5.3's linked-origin sync already
+fast-forwards `integration` onto an origin main that took external commits, and
+`integration` is the base every job branch is cut from — so for a linked project
+whose origin accepts third-party merges, the condition is **satisfied today**,
+not at some future adoption. See [the trigger](#the-revisit-trigger-stated-as-a-condition).
+
+| Slice | Content | State |
+| --- | --- | --- |
+| **S1** | Make the node's allow-list key unshadowable: reserve the dispatcher-composed `JOB_*` stamps the way `docs/spec.md` §5.3 reserves `CHUG_`, or move the matched name under that prefix. **Prerequisite for S3, and a fix to the shipped KVM grant** ([correction 3](#corrections-verified-against-the-tree)) | Proposed |
+| **S2** | Put the job type's name on the launch: one dispatcher-composed env entry in `container_env` ([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)). No schema field, no epoch, no `WORKER_RPC_VERSION` bump | Proposed — gated on S1 |
+| **S3** | A `DockerGrant` beside `KvmGrant` ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)): a node-side socket path plus a `(project, job type)` allow-list, bound into matching launches only, empty granting nobody | Proposed — gated on S1, S2 |
+| **S4** | Advertise the access on `NodeCapabilities` ([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)) for **both** modes, defaulting false so a daemon predating the field promises nothing. D4's audit half | Proposed |
+| **S5** | *Node config:* the allow-list and the pin on one builder node — [#313](313-workload-identity-image-builds.md) S8, minus the proxy | Proposed — gated on S3 |
+| **S6** | *Deferred:* per-task users ([#309](309-host-native-execution.md) P3 §8), the only mechanism that can withhold host-mode docker | Deferred — D4's enforcement half |
+
+[#313](313-workload-identity-image-builds.md) S6 (the operator's provider
+registration), S7 (a registry confirmed), S9 (`build-image`) and S10
+(`promote`/`rollback`) are **unaffected** and keep their own numbering; only its
+S8 changes content.
+
+---
+
+## What was measured, 2026-08-09 (job #516)
+
+A read-only probe, run as a host task on `gumbo-air-0`:
+
+```
+docker info  → exit 0   colima, Server 29.5.2, 1 container, 8 images
+docker ps    → exit 0
+DOCKER_HOST  → unset
+active context: colima → ~/.colima/default/docker.sock
+socket: exists, mode 0600, owned by worksalot:staff — the user host tasks run as
+/var/run/docker.sock: absent; no `docker` group exists on the node
+```
+
+**Nothing granted this, and the control that was supposed to prevent it works.**
+[`crates/container/src/host.rs`](../../crates/container/src/host.rs) composes a
+host task's environment rather than inheriting it: `task_env` starts from a
+two-name floor, adds the rebased launch env, the workspace and the exit paths,
+and `spawn_task` clears the daemon's environment first. Its test
+`a_host_task_inherits_nothing_the_dispatcher_did_not_declare` asserts the exact
+key set and asserts `DOCKER_HOST` is not in it. That test genuinely holds. The
+probe agrees with it — `DOCKER_HOST` was unset.
+
+The access arrives by a different route, and the route is the point:
+
+1. The floor `task_env` carries from the daemon is `PATH` and `HOME` (the
+   `INHERITED` array in the same file), and `HOME` is the daemon's.
+2. On this node the daemon runs as the login user, so `HOME` is that user's.
+3. The docker CLI needs no `DOCKER_HOST`. Absent one it resolves the **active
+   context** from `~/.docker/config.json` under `HOME`, and that context names
+   `~/.colima/default/docker.sock`.
+4. The socket is mode `0600` owned by that same user, because colima runs under
+   the same login. Access is by **file ownership** — not group membership, and
+   not environment.
+
+> **An environment-composition guarantee bounds what a task is *told*. It says
+> nothing about what the task's uid may *open*.** The two are different
+> questions and only the first was ever answered.
+
+That is a [`docs/reference/style.md`](../reference/style.md) Tier 2 rule 7 error
+one layer down. The rule says to re-derive every host fact inside the namespace
+that will use it, and it names existence, identity and provenance as three
+separate questions. There is a fourth this instance adds: **reachability by
+uid**, which is invisible to all three. The host task's namespace *has* the
+socket; nobody asked it, because the environment answer looked like the whole
+answer.
+
+## What this falsifies
+
+**[#309 §10](309-host-native-execution.md#10-trust-and-tenancy)** says: *"host
+tasks do not get the docker socket … A job type that needs one is a node-side
+allow-list entry, never a job-type field the platform honors on request."* The
+first clause is **false on this node as configured**, and has been since #490
+slice 6 put agent host work on the air. The rule was written as a prohibition
+and read as a statement of fact; it was neither — it was an unenforced
+intention, and the node's uid quietly settled the matter the other way.
+
+**[#313 Decision 0](313-workload-identity-image-builds.md#decision-0-the-308-vs-309-contradiction-resolved)**
+resolved the #308-vs-#309 contradiction by ruling that *"#308's premise is
+wrong"*. [#308 §D](308-gha-port.md#d-image-build-and-push-5-workflows--open)'s
+premise — *"a host node has a real docker daemon … and the question stops being
+interesting"* — was **right about the capability** and wrong about the
+consequence. Decision 0 was **right that the capability must not be
+accidental**, and its three counts against "dissolves" all survive: the gumbo
+analogy still does not transfer to a mixed-mode node, a daemon still answers
+*may I build* and not *may I push*, and there is still nothing to push to. What
+Decision 0 got wrong is narrower than its own framing: it treated the socket's
+absence as a fact it could reason from, and the socket was present.
+
+The measurement is what separates the two claims. Neither doc was in a position
+to know: nothing in the tree observes a node's docker reachability from inside a
+task, which is exactly what S4 exists to fix.
+
+## The decision, and the argument that carries it
+
+> **Jobs may use docker. This is wanted, not merely tolerated.**
+
+The operator's reasoning, recorded as the argument rather than paraphrased into
+a conclusion:
+
+1. **Real workloads need it.** beacon runs OpenAPI client generation in docker,
+   and there are many such uses. An agent job being able to run a docker command
+   is a capability a forge should have, not a hole to plug. A forge that cannot
+   run the build its consumer already runs is not a smaller attack surface; it
+   is a forge the consumer does not move onto.
+2. **It is parity, not a regression.** beacon's builds already ran on this same
+   machine as this same user, under a self-hosted GitHub Actions runner — a
+   self-hosted runner *is* this property, and extends exactly this trust. Moving
+   beacon onto chuggernaut adds no exposure class it did not already have.
+3. **Chuggernaut v2 is a per-consumer forge** — single-tenant, running the
+   operator's own projects. `CLAUDE.md` states this as a design premise, and
+   [#309 §10](309-host-native-execution.md#10-trust-and-tenancy) already leans on
+   it for host tenancy. Accepting the socket is that premise applied
+   consistently, not an exception carved out of it.
+
+Argument 2 is the load-bearing one and it is **secondhand**, marked the way
+[#313 correction 2](313-workload-identity-image-builds.md#corrections-verified-against-the-tree)
+marks its beacon claims. `~/beacon` is not in this workspace and the runner
+directory is gone; what remains is residue of `~/actions-runner/_work/beacon/beacon`
+in the node's `claude-cli-nodejs` cache, dated June 2026. That is evidence the
+runner ran there, not a reading of its configuration. Nothing here re-derives
+what the runner was permitted.
+
+## The cost, stated precisely
+
+**You cannot have docker without node root.** A container can bind-mount the
+host filesystem, so any job holding the socket can:
+
+1. `docker inspect chug-worker` and learn the host path of the daemon's key
+   mount — `deploy/prod/build-worker.sh` runs the daemon with
+   `-v $HOME/chuggernaut-worker/keys:/data/keys:ro`;
+2. bind that path into a container of its own, yielding `worker.creds` (the
+   node's NATS credential) and `worker_git`;
+3. subscribe `req.worker.{node}.>` with that credential — and `docs/spec.md`
+   §3.1 states a launch request carries "prompt, per-job credentials, harness
+   config" **inline**.
+
+So the socket does not merely grant node root. It grants the ability to
+**receive other jobs' minted credentials**. This is
+[#313 correction 5](313-workload-identity-image-builds.md#corrections-verified-against-the-tree)
+verbatim, and it is the escalation that correction used to reject B-I.
+
+**It is not mitigated. It is accepted.** Three things follow that a reader
+should not have to infer:
+
+- **The blast radius is the platform's own execution substrate**, not one
+  project's containers. A job holding the socket on a node can read every other
+  container on it, and through the node credential can reach jobs placed
+  elsewhere.
+- **Accepting it does not shrink it.** Nothing below narrows the capability; D3
+  narrows only *which launches receive it*, and D4 makes it *visible*. A job on
+  the allow-list has precisely the escalation described above.
+- **The escalation is unauditable after the fact today.** No record says which
+  containers held a socket. S4 is what turns that from unknown into reported,
+  and it is worth doing for that reason alone even if no container is ever
+  granted one.
+
+### The revisit trigger, stated as a condition
+
+> **This holds while every job runs code the operator wrote or vendored. It
+> stops holding the moment a job runs untrusted code — a contributor's pull
+> request, an imported third-party repo, any project the operator does not
+> control.**
+
+Written as a condition so it can be checked rather than felt. Two things must be
+said about it, because the condition is closer to satisfied than the sentence
+suggests:
+
+- **Linked-origin sync already admits external commits.** `docs/spec.md` §5.3:
+  with no open release, `integration` fast-forwards onto origin main "when it has
+  nothing unreleased (external commits flow in)". `integration` is the default
+  branch every job branch is cut from. So for a linked project whose origin main
+  takes third-party merges, third-party code is *already* what a job runs. The
+  trigger does not fire on adopting some future feature; it fires on a project
+  configuration that exists. **Do not put a linked project with external
+  contributors on the allow-list.**
+- **Untrusted *input* is a near neighbour the trigger does not cover.**
+  `docs/spec.md` §13.2's ingest delivers external event payloads into a triage
+  agent's context, and §1.1's `cover_html` carries operator-supplied HTML. The
+  trigger is about code an agent *runs*; an agent that runs trusted code under
+  the steering of untrusted text is a different route to the same place. Named
+  as a residual, not folded into the operator's trigger — widening someone
+  else's decision is not this document's to do.
+
+## What survives of the #309 rule
+
+The rule inverts; its **mechanism clause does not**, and keeping the two apart
+is what makes this an amendment rather than a repeal.
+
+| Clause | Status |
+| --- | --- |
+| "host tasks do not get the docker socket" | **Inverted.** False as measured, and the default is now the other way |
+| "a node-side allow-list entry" | **Kept**, and made the mechanism for containers too (D2, D3) |
+| "never a job-type field the platform honors on request" | **Kept, unweakened.** See [C4 below](#the-question-this-job-decides-container-jobs) |
+| The blast-radius table's docker row | **Kept as analysis**, with its verdict reversed rather than its facts |
+| "Are host nodes single-tenant? Yes, by policy, and enforced at the node" | **Half wrong** — see [correction 1](#corrections-verified-against-the-tree). The policy is stated; nothing enforces it |
+
+The distinction that keeps the mechanism clause meaningful under D3: **a
+node-side allow-list that names a job type is the node consenting to a name the
+project chose. A job-type field is the project granting itself node root.** The
+first requires an operator edit on the node for every grant; the second requires
+a merge. [#367 §2.1](367-android-emulator-execution.md)'s table row — "Should
+[the docker socket] ever be a job-type field? **No, permanently.** #309 §10 is
+right and it is not a phasing statement" — **stands**, and this document does
+not reopen it. Only the premise that the socket is absent changes; #367's
+`/dev/kvm`-versus-socket comparison, including its "What it grants" row, is
+untouched.
+
+## Naming the adopted shape honestly: this is B-I
+
+[#313 B1](313-workload-identity-image-builds.md#b1-the-build-mechanism) weighed
+four shapes and wrote of the first:
+
+> **B-I — raw docker socket bound into a pinned job type's containers (#308
+> D1).** … *Against:* correction 5 — the socket yields `docker inspect
+> chug-worker`, the host path of its `:ro` key mount, and from there the node's
+> NATS credential and git key … **Rejected.**
+
+**That rejection is reversed.** The shape adopted here is B-I: the real socket,
+bound node-side into the containers of allow-listed launches, with the
+escalation consciously accepted. It is not a fifth option and presenting it as
+one would be a way of not saying that a rejection was overturned.
+
+**No fact in B-I's "against" is now false.** What changed is the acceptance, and
+the change has a date and an owner. The two clauses of that rejection deserve
+separate treatment:
+
+- The credential escalation is **accepted** (above).
+- "It also breaks §10.1's *No host volume mounts* and narrows §3.1's single
+  documented bind exception, which is justified there by carrying *no job
+  state*" — this is **still true and still a real cost**. `docs/spec.md` §3.1's
+  exception is a "small closed class of worker-provisioned node properties",
+  each justified by a property the socket does not have. Adding the socket to
+  that class widens it from *accelerators and read-only toolchains* to *a
+  capability*. A spec amendment is owed and is a `docs` job, not this one's; the
+  honest reading in the interim is that the class has a third member whose
+  justification is a decision rather than a property.
+
+### The ladder this preserves
+
+Superseding B-IV **without deleting its argument** is what keeps the fallback
+cheap. If [the trigger](#the-revisit-trigger-stated-as-a-condition) fires, the
+pre-argued escalation path is already written and priced:
+
+1. **B-I** — the real socket, node-side allow-list. *Adopted.*
+2. **B-IV** — the daemon's socket behind a deny-by-default filtering proxy;
+   `POST /build`, `POST /session`, push, tag, image-inspect permitted,
+   `/containers` denied. Its cost analysis (a filter is only as good as its rule
+   list; cross-project cache poisoning; invisible to config so a mis-placed job
+   fails at the build command) stands unedited.
+3. **B-III** — a build op on the worker daemon, the `refresh` precedent
+   generalized. Best isolation; a second execution lifecycle inside the daemon.
+4. **B-II** — rootless buildkit in an ordinary container. Needs launch-path
+   security options and turns the local cache into a registry cache.
+
+Read that as a ladder with the platform's current rung marked, not as a history
+of discarded ideas. #313 B1's own advice — "if the proxy's allow-list proves too
+coarse, escalate to B-III, not to B-I" — inverts in direction and keeps its
+ordering.
+
+## What half B reduces to
+
+With B-I adopted, most of [#313](313-workload-identity-image-builds.md) half B
+collapses:
+
+| Piece | Fate |
+| --- | --- |
+| **B-IV's proxy, its verb allow-list, its pinned proxy image** | **Superseded.** No proxy is built. The reasoning stays standing as rung 2 of the ladder |
+| **B-IV's `NodeCapabilities` dependency on #309 for the *diagnostic*** | **Kept, and generalized** — S4 advertises the access itself, which serves the same "fails at the build command" complaint |
+| **S8** | **Reduced** from "proxy + allow-list + `placement.node` pin" to "allow-list + pin". Becomes this document's S5, gated on S3 |
+| **B2 — registry auth falls out of half A** | **Unchanged, and now the whole of the build mechanism.** Its sketch is the shape: authenticate with half A's credential, `docker build`, `docker push`. Its two non-obvious properties survive verbatim — registry auth rides the request (`X-Registry-Auth`) so the node holds no standing push credential, and the IAM binding stays per (project, job type, container) |
+| **B3 — build cache** | **Unchanged in conclusion, simpler in argument.** The cache was never the job container's; it is BuildKit's, on the daemon, already exercised on every deploy and already pruned. B3's obligations (per-project cache `id`s; the existing `--keep-storage` prune must cover the new volume) survive intact — the shared cache is still not a boundary |
+| **B4 — tagging discipline** | **Unchanged, and good regardless of how docker is reached.** Push `{repo}:{sha}` first, record `{repo}@sha256:{digest}` as the task's `structured` result, move `:latest`/`:prod` only afterward and only as a separate job keyed on a digest input. This is what fixes the two beacon workflows #308 found pushing `:latest` with no rollback handle |
+| **S6, S7** | **Unaffected.** The provider registration and the registry confirmation are operator work that no mechanism change touches |
+| **S9, S10** | **Unaffected in content**, and their S8 dependency gets cheaper |
+
+**Half B's shape after this document:** a command job type that authenticates
+with half A's injected credential, runs `docker build` against the node's own
+daemon through a bound socket, pushes by SHA, and records the digest. That is
+B2's sketch plus a node-side bind, and it is most of what #308 §D asked for
+three documents ago.
+
+## The question this job decides: container jobs
+
+Tonight's measurement is about **host** tasks. Most agent jobs are **container**
+tasks and have no socket at all. The operator's intent — agents should be able
+to run docker commands — reaches further than host mode, so this document must
+decide it rather than inherit it.
+
+### What the node can observe today
+
+This is the constraint that shapes the options, and it is not what the sibling
+designs assume.
+
+- **The job type's name is not on the launch, anywhere.**
+  `ContainerLaunchConfig` ([`crates/container/src/lib.rs`](../../crates/container/src/lib.rs))
+  is `{ image, cmd, env, files, cpu_limit, memory_limit, node, runtime_env }`.
+  The dispatcher-composed env (`container_env` in
+  [`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs))
+  carries `JOB_ID`, `JOB_PROJECT`, `JOB_BRANCH`, `BASE_BRANCH`, `REPO_URL`,
+  `NATS_URL`, the channel-role stamps and the task-origin stamps — and no type
+  name.
+- **So `JOB_PROJECT` and `image` are the whole observable set**, which is what
+  `KvmGrant::admits` ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs))
+  matches on and what [#367](367-android-emulator-execution.md) correction 5
+  recorded. Every node-side allow-list in the tree —
+  `WORKER_KVM_PROJECTS`, `WORKER_NIX_PROJECTS` — keys on the project alone.
+- **Keying on the job type is therefore a change, and a cheap one.** One entry
+  added in `container_env` (S2). The env is already a `HashMap` on the launch,
+  so this costs no schema field, no `CONFIG_SCHEMA_EPOCH` bump and no
+  `WORKER_RPC_VERSION` bump. It is small, but it is not nothing, and it is the
+  first time a node keys policy on something other than a project.
+
+### Options
+
+**C1 — nothing. Host mode only, containers unchanged.**
+*For:* zero work, and the measured posture is already this. *Against:* it makes
+docker access a property of which execution mode a job type happened to choose,
+which is an accident rather than a policy — and mode is chosen for Xcode and
+emulators, not for docker. Most agent jobs are containers, so C1 delivers
+approximately none of the intent. **Rejected.**
+
+**C2 — every container on a docker-enabled node.**
+*For:* zero config, the `WORKER_CACHE_DIR` shape exactly, and the cheapest thing
+that could work. *Against:* every `code` job, every agent evaluator and every
+other project's containers on that node get node root. This is where the cost
+changes character rather than degree: D1 accepts an escalation for **workloads
+that need docker**, and C2 extends it to every workload that happens to be
+co-placed. [#367](367-android-emulator-execution.md)'s D1 was rejected for the
+same reason at a much lower stake. **Rejected.**
+
+**C3 (recommended) — node-side allow-list, keyed per (project, job type).**
+The `KvmGrant` shape: a node-side socket path plus a list of
+`owner/project:job_type` entries; the bind is added only for launches that
+match; an empty list grants nobody, so enabling the socket on a node is one act
+and granting it to a workload is another.
+*For:* it is D2's mechanism verbatim, so it complies with #309 §10's surviving
+clause rather than carving it out. It costs the dispatcher one env entry and the
+schema nothing. It fails closed at every layer — no socket configured, no
+allow-list, no match. And blast radius stays scoped to the job types the
+operator actually chose, which is what makes D1's acceptance a per-workload
+decision instead of a fleet-wide one.
+*Against, honestly:*
+- **It is invisible to the project's config.** A job type needing docker on a
+  node without the entry fails at the docker command with `Cannot connect to the
+  Docker daemon` — loud, late, and diagnosable only from the container log. This
+  is B-IV's own complaint and it transfers unchanged; S4 is the mitigation, and
+  `placement.node` is the interim answer.
+- **It puts a project-chosen string in operator config.** Renaming a job type
+  silently revokes its grant. That is the failure mode to prefer (revocation,
+  not escalation), but it is a real operational trap and belongs in the node's
+  runbook.
+- **The matched name is shadowable today** — see below, and S1.
+
+**C4 — a job-type field, e.g. `runtime.docker: true`.**
+*For:* the honest end state on paper. The requirement would live in the project
+repo where `CLAUDE.md`'s per-consumer-forge principle wants config to live; it
+would be reviewed through the merge gate like any other job-type change; and it
+would degrade into a placement predicate when a second docker node appears.
+*Against, and decisive:* it is exactly the shape #309 §10's surviving clause
+forbids, and the clause is right for a reason that D1 does not touch. A field
+the platform honors on request means a **merge** grants node root — and the
+merge gate is agent-driven, on a repo whose main branch a job's own evaluators
+approve. That is a self-granting loop; the node-side entry is not, because it
+requires an act outside the system being granted access to. It would also cost a
+`CONFIG_SCHEMA_EPOCH` bump on its own (`deny_unknown_fields` on the nested
+blocks — [`crates/types/src/job_type.rs`](../../crates/types/src/job_type.rs)),
+which is a real price for the wrong shape. **Rejected, and #367 §2.1's
+"permanently" is not weakened.**
+
+### Which job types
+
+**This document decides the mechanism and names no job types.** Job types are
+project-owned, repo-versioned config; picking them is the operator's act, and
+the allow-list exists so that act stays outside the repo. Two rules to carry
+into it:
+
+- **The first consumer should be a build type** — [#313](313-workload-identity-image-builds.md)
+  S9's `build-image` — because it is the workload the whole of half B was
+  argued for, and because a command job type has no agent steering it.
+- **A general `code` or `web` type on the list is inside D1's acceptance but at
+  its widest.** The operator's intent explicitly reaches agent jobs running
+  docker commands, so this is permitted, not discouraged by sleight of hand.
+  State the consequence plainly: an agent job type with the socket means *the
+  agent* holds node root for the duration, and the [trigger](#the-revisit-trigger-stated-as-a-condition)
+  is the only thing standing between that and an untrusted-code job.
+
+### The prerequisite: the matched key is shadowable
+
+**A node-side allow-list keyed on the launch env is only as trustworthy as the
+env, and the env is not currently sealed.** In `container_env`
+([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)) the
+base stamps are inserted first and the job type's declared `vars` are resolved
+from KV and inserted **after** them. Only the `CHUG_` prefix is reserved —
+`docs/spec.md` §5.3 and the release-validation check that enforces it — and
+`JOB_PROJECT` matches the `[A-Za-z0-9_]+` charset vars are validated against at
+write time. So a job type declaring `vars: [JOB_PROJECT]`, over a KV record at
+`{owner}.{project}.JOB_PROJECT`, **overwrites the value the node matches on**.
+
+Be precise about who could do this, because overstating it is its own error:
+writing that KV record takes project-scoped API access, which in a single-tenant
+forge is the operator's, and the declaration takes a merge. It is not an
+anonymous escalation. What it is, is a **grant key that project-side config can
+move** — so the allow-list stops being a statement the node alone controls,
+which is the entire property D2 kept #309 §10's mechanism clause for. It is also
+true of the **shipped** KVM grant today, not only of this proposal, and has been
+latent because `/dev/kvm` is — per #367's own analysis — not in the socket's
+class. A root-equivalent grant is a different matter:
+
+> **Do not ship a node-side socket grant keyed on a name project config can
+> shadow.** S1 is a prerequisite, not a follow-up.
+
+Two fixes, either sufficient: extend the reserved-prefix rule to the
+dispatcher-composed `JOB_*` stamps (the smaller change, and it matches the
+reasoning `docs/spec.md` §5.3 already gives for the task-origin stamps — "neither
+may be shadowed by project config"), or move the matched identity under the
+`CHUG_` prefix that is already sealed. The second is cleaner and costs a
+migration of the KVM grant's matcher; the first is one line of validation and
+leaves every existing name alone. **Prefer the first**, and note that it seals
+`JOB_ID` and `JOB_BRANCH` as a side effect, which is a gain rather than a cost.
+`BASE_BRANCH`, `REPO_URL` and `NATS_URL` are dispatcher-composed too and carry
+no shared prefix — whether they join the rule is a question for S1, not one this
+document settles.
+
+## The host question: ambient access, and what can actually be done about it
+
+On a host node the access is **ambient** rather than granted: a job type that
+declares nothing has docker, because the task's uid owns the socket. An
+undeclared capability cannot be audited from the job type, which is a hygiene
+cost even where the capability is wanted.
+
+**The asymmetry between the two modes is the whole finding here:**
+
+| | Container mode | Host mode |
+| --- | --- | --- |
+| How the capability arrives | **added** by a bind the node composes | **inherited** from the uid the task runs as |
+| Default | denied, for free | granted, for free |
+| To grant | add an allow-list entry | nothing to do |
+| To deny | omit the entry | change the task's uid, its `HOME`, or the socket's ownership |
+
+So "make it an explicit declaration" is cheap for containers and expensive for
+host tasks, and pretending otherwise would produce a declaration that grants
+what is already granted and denies nothing.
+
+**Options for the host half:**
+
+- **H1 — leave it ambient and undocumented.** Rejected: it is the current state,
+  and the current state is what a probe had to discover.
+- **H2 — a node-side declaration that gates host launches the way C3 gates
+  container launches.** *Against:* there is no bind to withhold. A gate that
+  refuses to *launch* an undeclared host job type on a docker-capable node is
+  enforceable but absurd — it would refuse `mac-proof`, whose access is
+  incidental and harmless, while granting nothing to anyone. A gate that claims
+  to withhold the socket while the uid still owns it is worse: a control that
+  reports success and does nothing is how the first clause of #309 §10 came to
+  be believed.
+- **H3 (recommended) — advertise it, do not pretend to enforce it.** The node
+  probes whether the daemon's own view reaches a docker daemon and reports it on
+  `NodeCapabilities` ([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)),
+  defaulting false so a daemon predating the field promises nothing — the shape
+  `agent_cli` already uses for #490 D3. The fleet view then answers "which nodes
+  can a job reach docker from", for both modes, and the answer is a measurement
+  rather than a config file's intention.
+- **H4 — per-task users.** [#309](309-host-native-execution.md) P3 §8's
+  per-task user boundary is the **only** mechanism that can actually withhold
+  host-mode docker, because it is the only one that changes the uid. Real, and
+  not this document's to schedule.
+
+> **D4: an advertised capability is an audit record, not a grant.** S4 makes the
+> access visible and dated; S6 (per-task users) is where withholding it becomes
+> possible, and it is **deferred**, named, with its dependency stated.
+
+The hygiene cost is therefore **reduced, not eliminated**, and this document says
+so rather than closing the item. What a reader gets after S4 is: every node's
+docker reachability is reported, so no future design reasons from an assumed
+absence again.
+
+## Corrections (verified against the tree)
+
+Three claims that shaped this decision or a sibling doc do not survive contact
+with the source.
+
+1. **`WORKER_HOST_PROJECTS` does not exist.** Five design docs name it —
+   [#309 §10](309-host-native-execution.md#10-trust-and-tenancy) as "enforced at
+   the node", plus [#313](313-workload-identity-image-builds.md),
+   [#355](355-project-task-images.md), [#367](367-android-emulator-execution.md)
+   and [#322](322-macos-native-runtime.md) citing it as precedent — and it
+   appears in no source file, no deploy script and no nix module.
+   [`crates/worker/src/config.rs`](../../crates/worker/src/config.rs) parses
+   `WORKER_MODES`, `WORKER_HOST_ROOT`, `WORKER_KVM_PROJECTS` and
+   `WORKER_NIX_PROJECTS`; there is no host-projects list. Host single-tenancy
+   today is `placement.node` plus the fact that one node serves `host` at all.
+   **This matters here:** the containment story D1's acceptance leans on is
+   weaker than the docs assert, and the acceptance should be read against the
+   tree's enforcement rather than the doc's.
+2. **The job type's name is not on the launch wire.** Recorded above; it is the
+   reason S2 exists and the reason every existing node-side allow-list keys on a
+   project instead.
+3. **`JOB_PROJECT` is shadowable by a declared var.** Recorded above; it is a
+   live weakness in the shipped KVM grant, not only a hazard for the proposed
+   one, and S1 is its fix.
+
+## What this makes wrong elsewhere
+
+- **[#309 §10](309-host-native-execution.md#10-trust-and-tenancy)** — amended by
+  an appended, dated section in that document rather than a reworded rule; its
+  head links the amendment.
+- **[#313](313-workload-identity-image-builds.md)** — Decision 0 amended, B-IV
+  and S8 superseded, by the same append-plus-head-pointer treatment.
+- **[#308 §D](308-gha-port.md#d-image-build-and-push-5-workflows--open)** — its
+  retraction note says #313 Decision 0 "supersedes both D1 and D2 above with a
+  third shape". D1 is now the adopted shape, so that clause is false; a one-line
+  dated pointer is added under it. Nothing else in #308 changes, and its
+  "**Do not port two of these as-is**" paragraph is reinforced by B4 surviving.
+- **`docs/spec.md` §3.1's bind-mount exception class, and §10.1's "No host
+  volume mounts"** — a socket bind is a third member of a class whose two
+  members are justified by properties it lacks. A spec amendment is owed and is
+  a `docs` job; S3 should not land without it.
+- **[#367 §2.1](367-android-emulator-execution.md)** — **not** made wrong. Its
+  docker-socket column described a capability the fleet did not have and now
+  knows it does; its verdict rows (root-equivalence, never a job-type field) are
+  unchanged, and correction 3 above strengthens rather than contradicts its D2.
+- **[#490](490-agent-work-on-a-mac.md), [#440](440-native-worker-daemon.md),
+  [#322](322-macos-native-runtime.md)** — deliberately untouched. #490's slice 6
+  is where the measured access began, and recording that here is a citation, not
+  an amendment.
+
+## What this document does not decide
+
+- **Which job types go on the allow-list.** Operator config, per the section
+  above.
+- **Whether the socket bind belongs in `docs/spec.md` §3.1's exception class or
+  in a new class of its own.** A `docs` job's, owed before S3.
+- **When per-task users land.** [#309](309-host-native-execution.md) P3's
+  ordering is its own.
+- **Anything about the registry, the provider registration, or the tagging
+  discipline.** [#313](313-workload-identity-image-builds.md) S6, S7 and B4 are
+  unaffected and keep their owners.

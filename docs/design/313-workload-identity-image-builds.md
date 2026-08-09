@@ -7,6 +7,16 @@ and #414 (S4), and prod was observed on 2026-08-09 running a dispatcher at
 epoch 5 (S3d), at the commit job #508's deploy carried. The operator's provider
 registration (S6) is the one link still open.
 
+**Amended 2026-08-09 (job #517): Decision 0 is amended and half B collapses to
+B-I.** The operator has accepted docker access for jobs, so the recommended
+shape is no longer B-IV's filtering proxy but the **real socket**, bound
+node-side into allow-listed launches, with the credential escalation
+consciously accepted. B-IV's reasoning stays standing as the first rung of an
+escalation ladder. B2, B3, B4, S6 and S7 are unaffected; only S8 changes
+content. See [the 2026-08-09 amendment](#amendment--2026-08-09-job-517-decision-0-amended-half-b-collapses-to-b-i)
+and [#517](./517-docker-access-for-jobs.md), which owns the decision, its cost
+and its revisit trigger.
+
 **Amended 2026-08-04 (job #409), against the tree at `f1e3b41`.** The operator
 has taken half A's four open decisions. They are recorded in
 [Decisions taken](#decisions-taken-2026-08-04) and marked in the sections that
@@ -167,7 +177,7 @@ of work.
 | **S5** | Discovery + JWKS routes on the api, unexposed — [`crates/api/src/oidc.rs`](../../crates/api/src/oidc.rs) | **Landed** (job #412) |
 | **S6** | *Operator:* register the provider with the uploaded JWK set; attribute condition; one IAM binding; prove it in a work container | Pending — the terraform and the six-rung proof are authored ([`infra/gcp-proof/`](../../infra/gcp-proof), [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml)); the `apply` is the operator's |
 | **S7** | *Operator:* a registry confirmed | Pending — runs in parallel with S1–S6 |
-| **S8** | *Node config:* proxy + allow-list + `placement.node` pin on one builder node | Proposed |
+| **S8** | *Node config:* allow-list + `placement.node` pin on one builder node | Proposed, **reduced 2026-08-09 (job #517)** — the proxy is superseded, so this is the socket bound node-side into allow-listed launches. Carried as [#517](./517-docker-access-for-jobs.md)'s S5, and gated on its S1 (the matched launch env is shadowable today) |
 | **S9** | A real `build-image` job type: SHA tag, digest recorded, digest-resolves evaluator | Proposed — gated on S6, S7, S8 |
 
 ## Problem
@@ -1617,3 +1627,81 @@ reopen [A4](#a4-the-public-reachability-problem-the-crux) entirely.
   0](#decision-0-the-308-vs-309-contradiction-resolved) removes half B's
   dependency on it; it does not amend
   [#309](./309-host-native-execution.md) in any other way.
+
+---
+
+## Amendment — 2026-08-09, job #517 (Decision 0 amended; half B collapses to B-I)
+
+**The operator has accepted docker access for jobs.** The full record — the
+measurement, the argument, the accepted cost and the revisit trigger — is
+[#517](./517-docker-access-for-jobs.md); this section says what changes *here*,
+and every rejected option below keeps its reasoning, which is the property that
+made half A's amendment defensible.
+
+### Decision 0, amended rather than deleted
+
+Decision 0 resolved the #308-vs-#309 contradiction by ruling that "#308's
+premise is wrong". The measurement splits that ruling in two, and both halves
+deserve to stand:
+
+- **#308 §D was right about the capability.** "A host node has a real docker
+  daemon the way gumbo does" is true of `gumbo-air-0` as configured, and has
+  been since [#309](./309-host-native-execution.md) P0 put host work on it — job
+  #516's probe found `docker info` and `docker ps` exiting 0 from inside a host
+  task, reached by file ownership rather than by anything this platform granted.
+- **Decision 0 was right that it must not be accidental.** It was accidental,
+  for months, and nothing in the tree could have reported it. That is the part
+  of the ruling #517 keeps and builds on.
+
+**What is retracted is narrower than the ruling's own framing.** Decision 0
+treated the socket's *absence* as a fact it could reason from, and the socket was
+present. Its three counts against "the question stops being interesting" all
+survive intact: the gumbo analogy still does not transfer to a node whose
+container fleet runs everything placed on it,
+[correction 5](#corrections-verified-against-the-tree)'s escalation is unchanged
+and is now **accepted rather than avoided**, "a real docker daemon" still answers
+*may I build* and not *may I push*, and there is still nothing to push to
+([S7](#sequencing-and-what-ships-first)).
+
+The resolution's final sentence — "image builds are neither a host-mode
+capability nor a socket in a job container" — is **reversed on its second
+clause**. Image builds are a socket in an allow-listed job container.
+
+### Half B: B-IV is superseded, and the adopted shape is B-I
+
+**Name it honestly: [B-I](#b1-the-build-mechanism)'s rejection is reversed.** The
+real socket, bound node-side into the containers of allow-listed launches, with
+the credential escalation consciously accepted. It is not a fifth option.
+
+**No fact in B-I's "against" became false.** Its `docker inspect chug-worker` →
+key mount → `worker.creds` chain is exactly as written, and `docs/spec.md` §3.1
+still puts other jobs' per-job credentials inline on the subjects that
+credential subscribes. What changed is the acceptance, and it has a date and an
+owner. B-I's *second* clause — that a socket bind narrows §3.1's single
+documented bind exception, justified there by carrying no job state — is **still
+a real cost**, and #517 records that a `docs/spec.md` amendment is owed before
+the bind ships.
+
+| Piece | Fate |
+| --- | --- |
+| **B-IV's proxy, verb allow-list and pinned proxy image** | **Superseded.** No proxy is built; the analysis stays standing as the first rung of the escalation ladder below |
+| **B-IV's node-side allow-list mechanism** | **Kept**, and extended — it is #309 §10's surviving shape and #517 D2 keeps it |
+| **[S8](#sequencing-and-what-ships-first)** | **Reduced** to allow-list + `placement.node` pin, minus the proxy. It becomes #517's S5 and gains a prerequisite: #517's S1, because the launch env the node matches on is shadowable by a declared `vars:` entry today |
+| **[B2](#b2-registry-auth-falls-out-of-half-a)** | **Unchanged, and now the whole of the build mechanism.** Its sketch is the shape; both of its non-obvious properties (registry auth rides the request, so the node holds no standing push credential; the IAM binding stays per project/job-type/container) survive verbatim |
+| **[B3](#b3-build-cache)** | **Unchanged in conclusion, simpler in argument.** The cache was never the job container's — it is BuildKit's, on the daemon, already exercised and already pruned. Its two obligations (per-project cache `id`s; the prune must cover the new volume) stand |
+| **[B4](#b4-tagging-discipline-and-the-rollback-handle)** | **Unchanged, and good regardless of how docker is reached.** SHA tag first, digest recorded as the task's `structured` result, the alias move as its own digest-keyed job |
+| **[S6](#sequencing-and-what-ships-first), [S7](#sequencing-and-what-ships-first)** | **Unaffected.** Operator work no mechanism change touches |
+| **[S9](#sequencing-and-what-ships-first), [S10](#sequencing-and-what-ships-first)** | **Unaffected in content**; their S8 dependency gets cheaper |
+| **[S11](#sequencing-and-what-ships-first)** | **Generalized** — #517's S4 advertises docker reachability itself, for both execution modes, which serves the same "fails at the build command" complaint B-IV raised |
+
+**The ladder, preserved rather than discarded.** If #517's revisit trigger fires
+— the moment a job runs code the operator did not write or vendor — the
+escalation path is already argued and priced: **B-I** (adopted) → **B-IV** (the
+filtering proxy) → **B-III** (a build op on the daemon) → **B-II** (rootless
+buildkit). B1's advice inverts in direction and keeps its ordering: escalate
+toward narrowness, never sideways.
+
+**What half B is now:** a command job type that authenticates with half A's
+injected credential, runs `docker build` against the node's own daemon through a
+bound socket, pushes by SHA, and records the digest. That is B2's sketch plus a
+node-side bind.

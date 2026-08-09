@@ -67,6 +67,7 @@ from being the one everyone forgets (design
 | [`docs/design/415-knowledge-architecture.md`](design/415-knowledge-architecture.md) | Knowledge architecture: one definition per concept, and prose that cannot go quietly stale |
 | [`docs/design/440-native-worker-daemon.md`](design/440-native-worker-daemon.md) | The natively-supervised worker daemon |
 | [`docs/design/490-agent-work-on-a-mac.md`](design/490-agent-work-on-a-mac.md) | Agent work on a Mac: finding a transcript without predicting its path, and what one host task per node buys |
+| [`docs/design/517-docker-access-for-jobs.md`](design/517-docker-access-for-jobs.md) | Docker access for jobs, accepted: what it costs, when that stops holding, and which launches get a socket |
 
 ## The target factoring
 

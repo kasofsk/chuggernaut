@@ -19,6 +19,15 @@ a pin
 [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed)
 and its addendum on `remove` racing its own reaper.
 
+**[§10](#10-trust-and-tenancy)'s docker-socket rule is inverted as of 2026-08-09
+(job #517).** Host tasks on `gumbo-air-0` reach a working docker daemon by file
+ownership, and the operator has accepted that rather than closed it; the rule's
+*mechanism* clause — a node-side allow-list entry, never a job-type field the
+platform honors on request — survives unweakened, and §10's `WORKER_HOST_PROJECTS`
+enforcement claim is unbuilt. See
+[the 2026-08-09 amendment](#amendment--2026-08-09-job-517-the-docker-socket-rule-inverts)
+and [#517](517-docker-access-for-jobs.md), which owns the decision.
+
 Written against the tree at `b801b76`. Every claim about current behavior was
 read out of the source and out of [docs/spec.md](../spec.md), not inferred from
 the docs; where the job brief and the tree disagree, the tree wins and the
@@ -1659,3 +1668,47 @@ mode and nothing otherwise, which is the boundary condition stated as code. The
 normative form is `docs/spec.md` §1.1's `mode: host` row, which was already
 scoped to that mode and needed no correction; this section exists because the
 prose above it was not.
+
+## Amendment — 2026-08-09, job #517 (the docker-socket rule inverts)
+
+**[§10](#10-trust-and-tenancy)'s first clause is false, and the operator has
+inverted the rule rather than fixed the node.** The full record — the
+measurement, the argument, the cost and the revisit trigger — is
+[#517](517-docker-access-for-jobs.md); this section says what changed here and
+why, and does not restate it.
+
+**What was measured.** Job #516 ran a read-only probe as a host task on
+`gumbo-air-0`: `docker info` and `docker ps` both exited 0 against a colima
+daemon, `DOCKER_HOST` was unset, and the active docker context named a socket
+mode `0600` owned by the login user — the user host tasks run as. There is no
+`/var/run/docker.sock` on that node and no `docker` group.
+
+**Nothing granted it, and this section's own control works.**
+`crates/container/src/host.rs` composes a launch environment rather than
+inheriting one, and its test
+`a_host_task_inherits_nothing_the_dispatcher_did_not_declare` genuinely holds —
+`DOCKER_HOST` never reaches the task. The CLI does not need it: the floor
+carried from the daemon includes `HOME`, the docker context resolves from
+`~/.docker/config.json` under it, and the socket is reachable by **file
+ownership** rather than group membership. An environment guarantee bounds what a
+task is told; it says nothing about what the task's uid may open, and §10 was
+written as though the first answered the second.
+
+**What changes in this section, precisely:**
+
+| Clause | After #517 |
+| --- | --- |
+| "host tasks do not get the docker socket" | **Inverted.** Jobs may use docker; #517 D1 records the reasoning, the accepted cost and the condition under which it stops holding |
+| "a node-side allow-list entry" | **Kept**, and extended to container launches (#517 D3) |
+| "never a job-type field the platform honors on request" | **Kept, unweakened.** A node-side entry is the node consenting to a name the project chose; a job-type field would let a merge grant node root |
+| The blast-radius table's docker row | **Kept as analysis.** Its facts are unchanged and the escalation it describes is accepted, not mitigated |
+
+**And one claim in [§10's tenancy subsection](#are-host-nodes-single-tenant) is
+unbuilt.** `WORKER_HOST_PROJECTS` — "enforced at the node" — appears in this
+document, in #313, #322, #355 and #367, and in no source file, deploy script or
+nix module; `crates/worker/src/config.rs` parses `WORKER_MODES`,
+`WORKER_HOST_ROOT`, `WORKER_KVM_PROJECTS` and `WORKER_NIX_PROJECTS` and no
+host-projects list. Host single-tenancy today is `placement.node` plus the fact
+that one node serves `host` at all. The policy stands as designed; the sentence
+claiming enforcement was ahead of the tree, and #517's acceptance should be read
+against what the tree enforces rather than what this section asserted.

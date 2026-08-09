@@ -689,6 +689,18 @@ of whether #309 lands. Read the options above as history, and #313 for the
 decision. The retraction also re-sequences phase 6 in the
 [ordering](#ordering): it depends on phase 4 plus a registry, not on phase 2.
 
+**Amended 2026-08-09 (job #517): D1 is the adopted shape after all.** A host
+task on `gumbo-air-0` was measured reaching a working docker daemon by file
+ownership, and the operator has accepted docker access for jobs; #313 B-IV's
+proxy is superseded and the real socket — allow-listed node-side, escalation
+accepted — is what half B now builds. So the paragraph above is false of D1
+where it says #313 supersedes "both D1 and D2 … with a third shape". The
+struck-through sentence at the head of this note was right about the
+**capability** and wrong about the consequence, and #313 Decision 0 was right
+that the capability must be deliberate. D1's stated cost ("effectively root on
+that node") is unchanged and is now accepted rather than avoided. See
+[#517](./517-docker-access-for-jobs.md), which owns the decision.
+
 ### E. Cron (1 live, 2 dormant)
 
 `flutter-integration-tests` runs nightly; the `sentry-sync` and `quilbert-slots`
