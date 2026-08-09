@@ -1092,8 +1092,10 @@ Notes:
   advertising `host`, with no pin needed. `.chug/jobs/mac-proof.yaml` (design
   [#490](../../docs/design/490-agent-work-on-a-mac.md) slice 6) is the one job
   type declaring `runtime.mode: host`, and `gumbo-air-0` has advertised `host`
-  since 2026-08-08, so what still gates real host work is an operator releasing
-  that job — an operator step, not code. It **is** additive
+  since 2026-08-08. That job has been released and has run there twice, which is
+  every host task this fleet has performed; releasing it stays an operator step,
+  because it is an authenticated agent on a mac's login user with no container
+  around it. It **is** additive
   since #309 P1 (job #479): a node naming both constructs both backends and
   routes each launch by whether it carries an image, and one naming only `host`
   needs no Docker and refuses any launch that carries one. What every node naming

@@ -51,8 +51,9 @@ this section is append-only — the original argument and its dated corrections,
 never edited into the prose above them.*
 
 Two phases have landed, one of them early and out of order. P0 is in the tree
-(`crates/container/src/host.rs`, `WORKER_MODES`) and is **off on every node** —
-no node advertises `host`. P1 is complete: its schema half arrived ahead of P0
+(`crates/container/src/host.rs`, `WORKER_MODES`) and is **on for one node** —
+`gumbo-air-0` advertises `host`, and [#490](490-agent-work-on-a-mac.md) slice 6
+ran the first host tasks on it. P1 is complete: its schema half arrived ahead of P0
 in job #401, driven by [#373](373-project-toolchains.md), job #478 landed
 the host row's own field rules (`crates/types/src/job_type.rs` — top-level
 `image` disallowed, `runtime.env` required, the evaluator-image requirement
@@ -83,7 +84,9 @@ so a level whose own `image` resolves it **out of the job type's mode** — a ho
 job type's container evaluator — inherits no `runtime.env`, while under
 `mode: container` an `image` and an `env` still layer
 ([#373](373-project-toolchains.md) Decision 2). That is what makes "host work,
-container CI, one job" actually run; the carve-out is
+container CI, one job" actually run, and it has: [#490](490-agent-work-on-a-mac.md)
+slice 6's second run is the first job to have taken a host work task and a
+container `ci` evaluator to Done together. The carve-out is
 [the 2026-08-08 correction](#correction-2026-08-08--the-precedence-rule-fires-only-across-a-mode-boundary-job-507).
 Everything from P3 on is unstarted.
 [#440](440-native-worker-daemon.md) is the design for the native-supervision

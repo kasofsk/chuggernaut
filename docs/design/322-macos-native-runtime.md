@@ -98,17 +98,22 @@ produce `xcodebuild -version` and `xcrun simctl runtime list` into the captured
 stdout. The discovered set is advertised as `NodeCapabilities.envs`
 (`crates/types/src/worker.rs`), additively — `WORKER_RPC_VERSION` stays at 2 —
 and **placement still filters on `modes` only**: capability-filtered placement on
-`envs` is deliberately later. Nothing here has run on a Mac.
+`envs` is deliberately later. This ran on a Mac for the first time in
+[#490](490-agent-work-on-a-mac.md) slice 6, whose two host tasks launched under
+`xcode:26.5` on `gumbo-air-0` and drove the resolved Xcode's `xcrun simctl`.
 
 What is still missing on the macOS side: W3's
 symlink containment (the rebase refuses a `..` component but resolves no
 symlink), the `simctl`-scoped teardown, the retention sweep,
 N3's runbook and N1's remaining spec edits (§3.1's host node kind and
-its trait listing, the Appendix entry). **No macOS host task has run yet**, and
-`.chug/jobs/mac-proof.yaml` — the machinery
-[#490](490-agent-work-on-a-mac.md) slice 6 needs, which that document's job #502
-correction records — is the one job type declaring `mode: host`; releasing it is
-an operator step. W1 is exactly what
+its trait listing, the Appendix entry). **macOS host tasks have now run** —
+`.chug/jobs/mac-proof.yaml`, the machinery
+[#490](490-agent-work-on-a-mac.md) slice 6 needed, is still the one job type
+declaring `mode: host`, and releasing it is still an operator step; what slice 6
+measured is [that document's job #510
+correction](490-agent-work-on-a-mac.md#correction--2026-08-09-job-510-slice-6-ran-what-two-host-tasks-on-the-air-measured),
+including a `simctl spawn` failure under the daemon's session that no phase here
+had anticipated and W3's `simctl` work should read first. W1 is exactly what
 [#309](309-host-native-execution.md) P0's first slice landed (job #434), N2's
 schema is what job #401 landed for [#373](373-project-toolchains.md), and W5 is
 what [#440](440-native-worker-daemon.md) slice 3 landed (job #460) — so this
@@ -142,11 +147,11 @@ argument and its dependency.
 | Phase | What | State |
 | --- | --- | --- |
 | **W1** | Backend polymorphism: the provided `managed_running_total`, `Arc<dyn ContainerBackend>`, `WORKER_MODES` parsing | **Landed** (job #434), as #309 P0's slice 1 rather than as macOS work |
-| **W2** | The host backend **including the rebase**, on one Mac at `slots: 1` | **Landed** (job #434) for the backend, the task dir under `WORKER_HOST_ROOT` and the exit-status wrapper, and **Landed** (job #485) for the rest: the `CHUG_WORKSPACE` indirection, the total `/workspace` + `/chuggernaut` mapping over all four surfaces, the credential-tree teardown, the agent-shaped-launch refusal, and `WORKER_HOST_ROOT` forwarded per node with a boot-time refusal. That refusal is **gone** since [#490](490-agent-work-on-a-mac.md) slice 5 — the launch is admitted and a node lacking the agent CLI or its own channel binary refuses by naming the missing half — and the teardown now spares the CLI's config directory so the harvest can read the transcript out of it (#490 D6 amendment). The env-value surface refused every launch carrying this repository's `REPO_URL` until job #505 gave the prefix match a left-hand boundary — see [the 2026-08-08 correction](#correction--2026-08-08-job-505-the-env-value-assertion-had-no-left-hand-boundary). Still **Linux-proven only** — nothing here has run on a Mac |
+| **W2** | The host backend **including the rebase**, on one Mac at `slots: 1` | **Landed** (job #434) for the backend, the task dir under `WORKER_HOST_ROOT` and the exit-status wrapper, and **Landed** (job #485) for the rest: the `CHUG_WORKSPACE` indirection, the total `/workspace` + `/chuggernaut` mapping over all four surfaces, the credential-tree teardown, the agent-shaped-launch refusal, and `WORKER_HOST_ROOT` forwarded per node with a boot-time refusal. That refusal is **gone** since [#490](490-agent-work-on-a-mac.md) slice 5 — the launch is admitted and a node lacking the agent CLI or its own channel binary refuses by naming the missing half — and the teardown now spares the CLI's config directory so the harvest can read the transcript out of it (#490 D6 amendment). The env-value surface refused every launch carrying this repository's `REPO_URL` until job #505 gave the prefix match a left-hand boundary — see [the 2026-08-08 correction](#correction--2026-08-08-job-505-the-env-value-assertion-had-no-left-hand-boundary). **Proven on a Mac** since [#490](490-agent-work-on-a-mac.md) slice 6: two agent host tasks ran on `gumbo-air-0`, the second green end to end, so the rebase, the D6-amended teardown and the transcript harvest are exercised on real hardware — a 462,085-byte transcript read out of the spared config directory after the process exited |
 | **W3** | macOS hardening: symlink containment, `simctl`-scoped teardown, the retention sweep | Proposed — nothing macOS-specific is in the tree. The rebase refuses a `..` component lexically (job #485), so containment after **symlink** resolution is the piece left, in `rebase_path` (`crates/container/src/host.rs`) |
 | **N1** | `docs/spec.md`: the host column, the host node kind, `/workspace` as a logical path | **Partly landed** (job #485) — §4.1 says `/workspace` and `/chuggernaut` are virtual wire paths, §1.1's host row carries the field rules and, since [#490](490-agent-work-on-a-mac.md) slice 5, an unrestricted `work.type`, §3.1's mode-routing paragraph no longer claims the one-task rule is a `/workspace` collision, and `docs/reference/crates.md`'s container row follows. Open: §3.1's host **node kind** and its stale trait listing, and the Appendix's "macOS bare metal dispatchers" still reading as undesigned rather than pointing here |
 | **N2** | The `runtime: { mode, env }` schema, its field rules, the epoch bump and both validate rules | **Landed** — (job #401) for #373's container-mode need, (job #478) for the host row's own field rules as #309 P1, and (job #485) for N2's own `mode: host` requires `work.type: command` rule, which rode beside the node-side refusal W2 landed in the same job. Both are **deleted** since [#490](490-agent-work-on-a-mac.md) slice 5; the `image` and `runtime.env` rules under `mode: host` are what remain |
-| **W4** | Node-side env-ref resolution: Xcode discovery, `xcode:<version>` → `DEVELOPER_DIR` | **Landed** (job #489) — boot-time discovery in `crates/worker/src/xcode.rs`, the scheme fork in `crates/worker/src/daemon.rs`, and the discovered set advertised as `NodeCapabilities.envs`. Fixture-tested only: no Mac has run it |
+| **W4** | Node-side env-ref resolution: Xcode discovery, `xcode:<version>` → `DEVELOPER_DIR` | **Landed** (job #489) — boot-time discovery in `crates/worker/src/xcode.rs`, the scheme fork in `crates/worker/src/daemon.rs`, and the discovered set advertised as `NodeCapabilities.envs`. Run on a Mac since [#490](490-agent-work-on-a-mac.md) slice 6, whose two host tasks were launched under `xcode:26.5` on `gumbo-air-0` |
 | **W5** | Refresh precondition: decline a refresh while a host task runs | **Landed** (job #460) generically, as [#440](440-native-worker-daemon.md) slice 3 — §6's phase-1 mitigation, plus a swap-boundary re-check that phase never asked for |
 | **N3** | The macOS node runbook in `deploy/prod/README.md` | Proposed |
 | **P1** | `NodeCapabilities` on ping/announce + the `choose_placement` predicate | **Landed** (job #489) for this phase's `envs` field, additively; the rest arrived generically as #309 P2 — the record on `PingOk`/`WorkerAnnounce` ingested in `probe_worker` (job #483), carrying `modes`, `platform`, `resources_enforced` and `leases`, and the predicate filtering placement by `modes` (job #484). `envs` is advertised, **not** filtered on: capability-filtered placement is later, and the remainder is [#367](367-android-emulator-execution.md) A3's `features` field, still Proposed |

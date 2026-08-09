@@ -77,3 +77,9 @@ Doc-reread: docs/design/309-host-native-execution.md
 Doc-reread: docs/design/355-project-task-images.md
 Doc-reread: docs/design/490-agent-work-on-a-mac.md
 Doc-reread: docs/spec.md
+
+Doc-reread: docs/design/490-agent-work-on-a-mac.md
+Doc-reread: docs/design/322-macos-native-runtime.md
+Doc-reread: docs/design/309-host-native-execution.md
+Doc-reread: docs/spec.md
+Doc-reread: deploy/prod/README.md
