@@ -358,9 +358,12 @@ pub struct NodeCapabilities {
     /// its own.
     #[serde(default = "platform_unknown")]
     pub platform: String,
-    /// Whether the node enforces a task's `resources.cpu`/`memory` (design #309
-    /// §7). Absent ⇒ `true`, because every backend that can serve a container
-    /// launch enforces them through the runtime.
+    /// Whether the node enforces a task's `resources.cpu`/`memory` **through its
+    /// container runtime** (design #309 §7); a dual-mode node's host launches are
+    /// bounded by nothing, so a reader asks this per launch mode
+    /// (`container::PlacementCandidate::bounds`). Absent ⇒ `true`, because every
+    /// backend that can serve a container launch enforces them through the
+    /// runtime.
     #[serde(default = "resources_enforced_default")]
     pub resources_enforced: bool,
     /// Named exclusive resources this node holds (design #309 §5). Absent ⇒

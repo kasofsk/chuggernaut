@@ -557,8 +557,9 @@ fn serves_container(modes: &[WorkerMode]) -> bool {
 
 /// This node's capability advertisement (design #309 §4), resolved from its
 /// `WORKER_MODES` and its discovered environments. `resources_enforced` follows
-/// container capability: the Docker `HostConfig` is what enforces
-/// `resources.cpu`/`memory`, and a host-only node has none.
+/// container capability because the Docker `HostConfig` is what enforces
+/// `resources.cpu`/`memory` — so a dual-mode node advertises `true` and the
+/// **reader** narrows it to the launch's mode (#309 §7).
 fn node_capabilities(
     modes: &[WorkerMode],
     xcodes: &Xcodes,
@@ -2279,7 +2280,11 @@ mod tests {
             &no_docker,
         );
         assert_eq!(both.modes, vec![RuntimeMode::Container, RuntimeMode::Host]);
-        assert!(both.resources_enforced, "it still has a docker daemon");
+        assert!(
+            both.resources_enforced,
+            "it still has a docker daemon — and the claim is about that half alone, which is why \
+             the placement predicate asks per launch mode (design #309 §7)"
+        );
 
         let host_only = node_capabilities(&[WorkerMode::Host], &none, &no_cli, &no_docker);
         assert_eq!(host_only.modes, vec![RuntimeMode::Host]);

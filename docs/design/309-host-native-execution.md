@@ -115,9 +115,21 @@ container CI, one job" actually run, and it has: [#490](490-agent-work-on-a-mac.
 slice 6's second run is the first job to have taken a host work task and a
 container `ci` evaluator to Done together. The carve-out is
 [the 2026-08-08 correction](#correction-2026-08-08--the-precedence-rule-fires-only-across-a-mode-boundary-job-507).
-Everything from P3 on is unstarted.
-[#440](440-native-worker-daemon.md) is the design for the native-supervision
-prerequisite P0 named and left unowned.
+**P3 is partly landed.** Job #524 gave
+`NodeCapabilities.resources_enforced` its first reader: `choose_placement` now
+takes a `LaunchRequirements { mode, resource_limits }` and admits a launch
+declaring `resources.cpu`/`memory` only onto a node that enforces them **for
+that launch's resolved mode**, while `HostBackend::admit` refuses — hard, naming
+the field and the node — one that arrives anyway through a `placement.node` pin
+([the 2026-08-09 note](#note-2026-08-09--7s-predicate-and-backstop-landed-job-524)).
+Reading the advertisement per mode is what keeps a dual-mode node like
+`gumbo-air-0` from claiming a bound that is false for its host launches; nothing
+bounds a host task's cpu or memory on any platform, so a host job type must
+declare neither, and the platform now says so at placement instead of at nothing.
+The rest of P3 — per-task users ([§8](#8-secrets-on-a-shared-host)), transient
+scopes as a *limits* mechanism ([§7](#7-resource-limits)) — and everything from
+P4 on is unstarted. [#440](440-native-worker-daemon.md) is the design for the
+native-supervision prerequisite P0 named and left unowned.
 
 The rows below are the states of [Phasing](#phasing)'s table, which keeps each
 phase's full argument; the seven-row table in
@@ -129,7 +141,7 @@ is the same work sliced by contract, not a second plan.
 | **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed) |
 | **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch; **Landed** (job #479) for §1's per-launch routing and the `WORKER_RPC_VERSION` bump it needed; **Landed** (job #507) for the launch half of [Coexistence](#coexistence-on-a-mixed-fleet)'s precedence rule — `JobType::level_image` / `level_runtime_env` resolve a launch from the **level** it is for, so a host job type's container evaluator inherits no `runtime.env` |
 | **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | **Landed** (job #483) for slice 5 — the record on both transports, additive, ingested in `probe_worker` with ping authoritative and docker-endpoint nodes synthesized; **Landed** (job #484) for slice 6 — `choose_placement` takes the required mode, excludes the nodes that do not serve it, and answers "no node advertises it" differently from "every capable node is full". P2 is complete: host work is routable |
-| **P3** | Per-task users; `resources_enforced`; transient scopes | Proposed — gated on P2 |
+| **P3** | Per-task users; `resources_enforced`; transient scopes | **Partly landed** (job #524) — `resources_enforced` is consumed: `choose_placement` treats a launch declaring `resources.cpu`/`memory` as requiring enforcement **for its resolved mode**, and `HostBackend::admit` refuses one that reaches a node anyway ([the 2026-08-09 note](#note-2026-08-09--7s-predicate-and-backstop-landed-job-524)). Per-task users ([§8](#8-secrets-on-a-shared-host)) and transient scopes for *limits* ([§7](#7-resource-limits)) stay Proposed |
 | **P4** | Device leases | Proposed — only when a host node must run a second, non-device-bound task concurrently |
 | **P5** | Declared caches + GC roots + warm set | Proposed — gated on P1, independent of P2–P4 |
 
@@ -1828,3 +1840,85 @@ that one node serves `host` at all, and `enforce_host_capacity`
 (`crates/worker/src/daemon.rs`) refusing to boot a host-capable node at anything
 but one slot — and the declaration itself is the last bound this decision leans
 on, not a tidying step.
+
+## Note, 2026-08-09 — §7's predicate and backstop landed (job #524)
+
+Appended by the job that implemented [§7](#7-resource-limits) option 3's
+**consuming** half. `NodeCapabilities.resources_enforced` had shipped with P2's
+capability slice and had **no reader** anywhere: a job type declaring
+`resources.cpu`/`memory` was placed exactly as if the field did not exist. It
+now has two, and nothing above is edited beyond the P3 status row.
+
+**The predicate reuses [§5a](#5a-capability-aware-placement)'s filter rather
+than adding a second path.** `choose_placement` takes a `LaunchRequirements {
+mode, resource_limits }` in place of the bare `RuntimeMode`, derived in one
+place — `ContainerLaunchConfig::requirements()`, beside the `required_mode()`
+the same config already answered — so the placement filter and a backend's own
+refusal read one launch the same way. Unpinned, an unmeetable requirement is
+`NoCapacity` and therefore an ordinary §3.5 queue entry with its reason
+attached; pinned, it is `Launch`, for the reason the mode pin is: a pin never
+falls back, so no amount of waiting clears it.
+
+**The dual-mode question is answered by narrowing the *reading*, not the
+advertisement.** `resources_enforced: serves_container(modes)` means
+`gumbo-air-0` — `WORKER_MODES=container,host` — advertises `true` while every
+host task it runs is bounded by nothing, which is [option 1's silent
+lie](#7-resource-limits) arrived at from the other side. The two available
+fixes were to make the requirement mode-aware or to make a dual-mode node
+advertise `false`; **this slice takes the first**, and the second is rejected on
+measurement rather than taste: `gumbo-air-0` serves container work today, and
+**ten** of the repo's twelve job types declare `cpu`/`memory`, so an
+advertisement narrowed to container-only nodes would strike a live node out of
+the candidate set for ten job types — a fleet change wearing a bug fix's
+clothes. Enforceability is a property of **the launch's resolved mode**, the
+same shape [#507](#correction-2026-08-08--the-precedence-rule-fires-only-across-a-mode-boundary-job-507)
+found for `runtime.env` and [#517](517-docker-access-for-jobs.md) D4 for docker
+access, and it lives in `PlacementCandidate::bounds`: the advertisement answers
+for the container runtime that would enforce it, and never for the host half.
+
+**The backstop replaced a warning that was already the rejected option.**
+`HostBackend::admit` logged a `tracing::warn!` naming the declared limits and
+ran the task anyway — precisely the "advisory elsewhere" §7 rejected. It is now
+`BackendError::Launch`, sharing one message builder with the pinned placement
+refusal so the two cannot drift, naming the field and the node, and refusing
+before any task directory is created.
+
+**`task_timeout` is untouched, and now says so in the spec.** It never reaches a
+`ContainerLaunchConfig` at all — the §3.5 scan enforces it dispatcher-side — so
+it is mode-independent and constrains placement not at all. `docs/spec.md`'s
+`resources:` block now carries that distinction, since it is the difference
+between a bound a host job type may declare and two it may not.
+
+**What the tree measured, against §7's own claim.** §7 says the predicate is "a
+no-op for the container fleet and for every job type in `.chug/jobs/` today".
+True, and by a wider margin than the phrasing suggests, but the count in the
+brief that commissioned this slice (five job types) is wrong: **ten** declare
+`cpu`/`memory` — `android-proof`, `code`, `coverage`, `deploy`, `design`,
+`docs`, `gcp-proof`, `rollback`, `web`, `web-publish` — and every one is
+container work on nodes that all read `resources_enforced: true`.
+`mac-proof.yaml`, the one host job type, declares `task_timeout` **only**, which
+is exactly what §7's corollary asks of it. `crates/test-utils/tests/placement_guard.rs`
+is that measurement as a test: every level of every job type in the tree is
+placed twice — once carrying the limits it declares, once carrying none — and
+the answers must match.
+
+**One thing this slice found and did not fix.** `resources.cpu`/`memory` reach
+only **command** launches: `ClaudeProvider::run` (`crates/agent/src/claude.rs`)
+builds its `ContainerLaunchConfig` with `cpu_limit: None, memory_limit: None`,
+so an agent work task has never been bounded by either field on any node,
+whatever its job type declares. That is a pre-existing gap in the *enforcement*
+of §7's fields rather than in this slice's predicate — the predicate is correct
+either way, and simply never fires for an agent launch — but it means a
+`code.yaml` work container has been running unbounded on the container fleet
+since those fields were written. Not touched here: closing it changes what real
+jobs are allowed to consume, which is a fleet-capacity decision and wants its
+own ticket.
+
+**Not in scope, and still Proposed:** [§6](#6-drain)'s transient scopes (landed
+separately as [#440](440-native-worker-daemon.md) D3 for supervision, not for
+limits) and [§8](#8-secrets-on-a-shared-host)'s per-task users, which is
+structurally blocked on macOS by the daemon's GUI-domain requirement
+([#490](490-agent-work-on-a-mac.md)). P3 is therefore *partly* landed: its
+`resources_enforced` third is in, and nothing bounds a host task's cpu or memory
+on any platform — a host job type must still declare neither, which the platform
+now says out loud instead of implying.

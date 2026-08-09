@@ -58,7 +58,7 @@
 
 use crate::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
-    InjectedFile, LogTail, MAX_LOG_TAIL, RunningContainer,
+    InjectedFile, LogTail, MAX_LOG_TAIL, RunningContainer, unenforceable_limits,
 };
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use types::job_type::RuntimeMode;
 
 /// Where each wire prefix lands inside a task directory (design #322 §2): the
 /// clone under `workspace/`, the injected credential tree under
@@ -706,11 +707,12 @@ impl HostBackend {
         Some(status_after_restart(meta.as_ref(), observed.as_deref()))
     }
 
-    /// Whether this node may take the launch: it must be a host launch, this
-    /// node must hold what an agent-shaped one needs, and it must be the only
-    /// one. The exclusion is #309 §2 option (iii) **enforced**: `NoCapacity` is
-    /// transient, so the dispatcher queues and retries (§3.5) rather than
-    /// spending the retry budget.
+    /// Whether this node may take the launch: it must be a host launch
+    /// declaring no `resources.cpu`/`memory` bound no cgroup here can apply
+    /// (#309 §7's launch backstop), this node must hold what an agent-shaped one
+    /// needs, and it must be the only one. The exclusion is #309 §2 option (iii)
+    /// **enforced**: `NoCapacity` is transient, so the dispatcher queues and
+    /// retries (§3.5) rather than spending the retry budget.
     async fn admit(&self, config: &ContainerLaunchConfig) -> Result<(), BackendError> {
         if let Some(image) = config.image.as_deref() {
             return Err(BackendError::Launch(format!(
@@ -722,6 +724,12 @@ impl HostBackend {
         }
         if let Some(reason) = self.tenancy.refusal(&self.node, &config.env) {
             return Err(BackendError::Launch(reason));
+        }
+        if config.cpu_limit.is_some() || config.memory_limit.is_some() {
+            return Err(BackendError::Launch(unenforceable_limits(
+                &self.node,
+                RuntimeMode::Host,
+            )));
         }
         if agent_shaped(config)
             && let Some(reason) = self.agent.refusal(&self.node)
@@ -737,15 +745,6 @@ impl HostBackend {
                 crate::WIRE_WORKSPACE,
                 held.id
             )));
-        }
-        if config.cpu_limit.is_some() || config.memory_limit.is_some() {
-            tracing::warn!(
-                node = %self.node,
-                cpu = ?config.cpu_limit,
-                memory = ?config.memory_limit,
-                "host node cannot enforce resources.cpu/memory (#309 §7) — task_timeout still \
-                 bounds this task in time"
-            );
         }
         Ok(())
     }

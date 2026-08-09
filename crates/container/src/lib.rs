@@ -100,6 +100,10 @@ pub struct PlacementCandidate<'a> {
     /// same probe that produced `load`. A node advertising nothing reads as
     /// [`CONTAINER_ONLY_MODES`].
     pub modes: &'a [RuntimeMode],
+    /// `NodeCapabilities.resources_enforced` as of the same probe: whether the
+    /// node's container runtime bounds a task's `resources.cpu`/`memory`
+    /// (design #309 §7). A node advertising nothing reads as `true`.
+    pub resources_enforced: bool,
 }
 
 impl PlacementCandidate<'_> {
@@ -107,6 +111,39 @@ impl PlacementCandidate<'_> {
     /// predicate placement filters candidates on.
     pub fn serves(&self, mode: RuntimeMode) -> bool {
         self.modes.contains(&mode)
+    }
+
+    /// Whether this node can bound whatever `required` declares (design #309
+    /// §7). Enforcement is the container runtime's `HostConfig`, so a dual-mode
+    /// node's advertisement covers its container launches and never the host
+    /// ones it also takes.
+    pub fn bounds(&self, required: LaunchRequirements) -> bool {
+        !required.resource_limits
+            || (self.resources_enforced && required.mode == RuntimeMode::Container)
+    }
+}
+
+/// What a launch needs of the node that takes it (design #309 §5a, §7): the
+/// mode its `image` selects, and whether it declares limits that node must be
+/// able to enforce. Derived in one place ([`ContainerLaunchConfig::requirements`]),
+/// so placement and the backend it places onto cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchRequirements {
+    /// The execution mode, from [`ContainerLaunchConfig::required_mode`].
+    pub mode: RuntimeMode,
+    /// Whether this launch carries `resources.cpu` or `resources.memory`, which
+    /// only a node enforcing them **for [`Self::mode`]** may take.
+    pub resource_limits: bool,
+}
+
+impl From<RuntimeMode> for LaunchRequirements {
+    /// A launch that declares no limits, which is every job type's agent task
+    /// and the whole fleet's reading before design #309 §7.
+    fn from(mode: RuntimeMode) -> Self {
+        Self {
+            mode,
+            resource_limits: false,
+        }
     }
 }
 
@@ -118,6 +155,22 @@ fn mode_list(modes: &[RuntimeMode]) -> String {
         .join(", ")
 }
 
+/// The refusal a launch declaring `resources.cpu`/`memory` gets from a node
+/// that cannot bound them for its mode (design #309 §7) — the §5a filter's
+/// pinned case and [`host::HostBackend`]'s launch backstop, one message so the
+/// two cannot drift. It names the field and the node, because a silent
+/// unbounded run is what option 1 was rejected for.
+pub(crate) fn unenforceable_limits(node: &str, mode: RuntimeMode) -> String {
+    format!(
+        "node {node} does not enforce resources.cpu/memory for {} mode \
+         (NodeCapabilities.resources_enforced) and this launch declares them — refused rather \
+         than run unbounded (design #309 §7). A placement.node pin bypasses the capability \
+         filter, which is how a launch reaches here; drop the two fields to run unbounded, \
+         resources.task_timeout still bounds the task in time",
+        mode.as_str()
+    )
+}
+
 fn fleet_modes(candidates: &[PlacementCandidate<'_>]) -> String {
     candidates
         .iter()
@@ -126,52 +179,94 @@ fn fleet_modes(candidates: &[PlacementCandidate<'_>]) -> String {
         .join("; ")
 }
 
+/// The pinned half of [`choose_placement`]: the named node or an error, never a
+/// fallback. The two capability verdicts sit between the out-of-service check
+/// and the free-slot one, an ordering `docs/implementation-notes.md` explains.
+fn choose_placement_pinned(
+    candidates: &[PlacementCandidate<'_>],
+    name: &str,
+    required: LaunchRequirements,
+) -> Result<usize, BackendError> {
+    let Some(c) = candidates.iter().find(|c| c.name == name) else {
+        let known: Vec<&str> = candidates.iter().map(|c| c.name).collect();
+        return Err(BackendError::Launch(format!(
+            "placement pinned to unknown node {name:?}; known nodes: {}",
+            known.join(", ")
+        )));
+    };
+    match c.load {
+        Some(_) if !c.serves(required.mode) => Err(BackendError::Launch(format!(
+            "placement pinned to node {name}, which serves {} and not {} mode; a pin never falls \
+             back, so this needs a config change on the node or the job type",
+            mode_list(c.modes),
+            required.mode.as_str()
+        ))),
+        Some(_) if !c.bounds(required) => Err(BackendError::Launch(unenforceable_limits(
+            name,
+            required.mode,
+        ))),
+        Some(load) if load.free > 0 => Ok(c.index),
+        _ => Err(BackendError::NoCapacity(format!(
+            "no free slots on node {name}"
+        ))),
+    }
+}
+
+/// The unpinned fleet-wide half: a requirement not one candidate could meet
+/// even with a free slot, as the transient answer spec §3.5 queues (design #309
+/// §5a, §7). `None` on an empty fleet, which is the zero-seed boot rather than a
+/// fleet refusing anything.
+fn choose_placement_unmet(
+    candidates: &[PlacementCandidate<'_>],
+    required: LaunchRequirements,
+) -> Option<BackendError> {
+    let mode = required.mode;
+    if candidates.is_empty() {
+        return None;
+    }
+    if !candidates.iter().any(|c| c.serves(mode)) {
+        return Some(BackendError::NoCapacity(format!(
+            "no node advertises {} mode: no fleet node serves it, so this launch cannot be placed \
+             until one declares it in WORKER_MODES ({})",
+            mode.as_str(),
+            fleet_modes(candidates)
+        )));
+    }
+    if !candidates
+        .iter()
+        .any(|c| c.serves(mode) && c.bounds(required))
+    {
+        return Some(BackendError::NoCapacity(format!(
+            "this job type declares resources.cpu/memory and no node serving {} mode enforces \
+             them (NodeCapabilities.resources_enforced, design #309 §7): the bound would be a \
+             lie, so the launch queues instead. Drop the two fields to run unbounded — \
+             resources.task_timeout still bounds it in time ({})",
+            mode.as_str(),
+            fleet_modes(candidates)
+        )));
+    }
+    None
+}
+
 /// The spec §3.1 placement decision — pure, so both policies and the design
-/// #309 §5a capability predicate are unit-tested without a daemon. Its
+/// #309 §5a/§7 capability predicates are unit-tested without a daemon. Its
 /// postcondition is `docs/implementation-notes.md`'s `fn choose_placement`
 /// entries; the returned `usize` is the chosen candidate's `index`.
-#[allow(
-    clippy::expect_used,
-    reason = "TODO(style): pre-existing violation (refactor-plan A4) — fix when this function is next touched."
-)]
 pub fn choose_placement(
     policy: PlacementPolicy,
     candidates: &[PlacementCandidate<'_>],
     pin: Option<&str>,
-    required: RuntimeMode,
+    required: LaunchRequirements,
 ) -> Result<usize, BackendError> {
     if let Some(name) = pin {
-        let Some(c) = candidates.iter().find(|c| c.name == name) else {
-            let known: Vec<&str> = candidates.iter().map(|c| c.name).collect();
-            return Err(BackendError::Launch(format!(
-                "placement pinned to unknown node {name:?}; known nodes: {}",
-                known.join(", ")
-            )));
-        };
-        return match c.load {
-            Some(_) if !c.serves(required) => Err(BackendError::Launch(format!(
-                "placement pinned to node {name}, which serves {} and not {} mode; a pin never \
-                 falls back, so this needs a config change on the node or the job type",
-                mode_list(c.modes),
-                required.as_str()
-            ))),
-            Some(load) if load.free > 0 => Ok(c.index),
-            _ => Err(BackendError::NoCapacity(format!(
-                "no free slots on node {name}"
-            ))),
-        };
+        return choose_placement_pinned(candidates, name, required);
     }
-    if !candidates.is_empty() && !candidates.iter().any(|c| c.serves(required)) {
-        return Err(BackendError::NoCapacity(format!(
-            "no node advertises {} mode: no fleet node serves it, so this launch cannot be placed \
-             until one declares it in WORKER_MODES ({})",
-            required.as_str(),
-            fleet_modes(candidates)
-        )));
+    if let Some(unmet) = choose_placement_unmet(candidates, required) {
+        return Err(unmet);
     }
-    let mut best: Option<&PlacementCandidate> = None;
+    let mut best: Option<(&PlacementCandidate, NodeLoad)> = None;
     for c in candidates {
-        if !c.serves(required) {
+        if !c.serves(required.mode) || !c.bounds(required) {
             continue;
         }
         let Some(load) = c.load else { continue };
@@ -180,28 +275,23 @@ pub fn choose_placement(
         }
         let better = match best {
             None => true,
-            Some(b) => {
-                let bl = b.load.expect("best always has load");
-                match policy {
-                    PlacementPolicy::Headroom => {
-                        load.free > bl.free || (load.free == bl.free && c.name < b.name)
-                    }
-                    PlacementPolicy::Busyness => {
-                        load.running < bl.running
-                            || (load.running == bl.running && load.free > bl.free)
-                            || (load.running == bl.running
-                                && load.free == bl.free
-                                && c.name < b.name)
-                    }
+            Some((b, bl)) => match policy {
+                PlacementPolicy::Headroom => {
+                    load.free > bl.free || (load.free == bl.free && c.name < b.name)
                 }
-            }
+                PlacementPolicy::Busyness => {
+                    load.running < bl.running
+                        || (load.running == bl.running && load.free > bl.free)
+                        || (load.running == bl.running && load.free == bl.free && c.name < b.name)
+                }
+            },
         };
         if better {
-            best = Some(c);
+            best = Some((c, load));
         }
     }
     match best {
-        Some(c) => Ok(c.index),
+        Some((c, _)) => Ok(c.index),
         None => Err(BackendError::NoCapacity("no free slots on any node".into())),
     }
 }
@@ -538,6 +628,17 @@ impl ContainerLaunchConfig {
             None => RuntimeMode::Host,
         }
     }
+
+    /// What this launch needs of the node that takes it (design #309 §5a, §7):
+    /// its mode, and whether it carries limits that node must be able to
+    /// enforce. The one derivation, so the placement filter and the backend's
+    /// own backstop read the same launch the same way.
+    pub fn requirements(&self) -> LaunchRequirements {
+        LaunchRequirements {
+            mode: self.required_mode(),
+            resource_limits: self.cpu_limit.is_some() || self.memory_limit.is_some(),
+        }
+    }
 }
 
 /// Injected via the backend's file API (Docker put-archive / k8s equivalent)
@@ -692,6 +793,7 @@ mod tests {
             name,
             load: Some(NodeLoad { running, free }),
             modes: CONTAINER_ONLY_MODES,
+            resources_enforced: true,
         }
     }
 
@@ -709,6 +811,121 @@ mod tests {
         }
     }
 
+    /// A launch that declares `resources.cpu`/`memory`, which only a node
+    /// enforcing them for its mode may take (design #309 §7).
+    fn limited(mode: RuntimeMode) -> LaunchRequirements {
+        LaunchRequirements {
+            mode,
+            resource_limits: true,
+        }
+    }
+
+    /// The design #309 §7 predicate: a launch declaring `resources.cpu`/`memory`
+    /// requires `resources_enforced` the way a mode requirement is required, and
+    /// a launch declaring neither is placed by load alone.
+    #[test]
+    fn only_a_node_that_bounds_the_limits_takes_a_launch_declaring_them() {
+        let by = PlacementPolicy::Busyness;
+        let nodes = [
+            PlacementCandidate {
+                resources_enforced: false,
+                ..cand("air", 0, 4, 0)
+            },
+            cand("nuc", 3, 1, 1),
+        ];
+        assert_eq!(
+            choose_placement(by, &nodes, None, limited(RuntimeMode::Container)).unwrap(),
+            1,
+            "the busiest node wins because it is the only one that can bound the launch"
+        );
+        assert_eq!(
+            choose_placement(by, &nodes, None, RuntimeMode::Container.into()).unwrap(),
+            0,
+            "and a launch declaring neither field is placed by load, as it always was"
+        );
+
+        let alone = [PlacementCandidate {
+            resources_enforced: false,
+            ..cand("air", 0, 4, 0)
+        }];
+        let err = choose_placement(by, &alone, None, limited(RuntimeMode::Container)).unwrap_err();
+        assert!(
+            matches!(err, BackendError::NoCapacity(_)),
+            "unpinned, an unmet requirement is the ordinary queued decision §7 asks for: {err}"
+        );
+        let err = err.to_string();
+        assert!(
+            err.contains("resources.cpu/memory")
+                && err.contains("NodeCapabilities.resources_enforced")
+                && err.contains("resources.task_timeout"),
+            "{err}"
+        );
+    }
+
+    /// `task_timeout` alone requires nothing of a node (design #309 §7): it is
+    /// enforced dispatcher-side by the §3.5 scan, so it never reaches a launch
+    /// config at all and only `cpu`/`memory` move the predicate.
+    #[test]
+    fn requirements_follow_cpu_and_memory_alone() {
+        let mut config = ContainerLaunchConfig {
+            image: Some("img".into()),
+            cmd: vec!["run".into()],
+            env: HashMap::new(),
+            files: vec![],
+            cpu_limit: None,
+            memory_limit: None,
+            node: None,
+            runtime_env: None,
+        };
+        assert_eq!(config.requirements(), RuntimeMode::Container.into());
+        config.cpu_limit = Some(3.0);
+        assert_eq!(config.requirements(), limited(RuntimeMode::Container));
+        config.cpu_limit = None;
+        config.memory_limit = Some("4Gi".into());
+        assert_eq!(config.requirements(), limited(RuntimeMode::Container));
+        config.image = None;
+        assert_eq!(config.requirements(), limited(RuntimeMode::Host));
+    }
+
+    /// The dual-mode answer this slice takes: enforceability is a property of
+    /// the launch's resolved mode, not of the node. `gumbo-air-0` advertises
+    /// `resources_enforced: true` because it has a docker daemon, and that
+    /// covers its container launches and never the host ones it also takes.
+    #[test]
+    fn a_dual_mode_node_bounds_its_container_half_only() {
+        let by = PlacementPolicy::Busyness;
+        let nodes = [host_cand("air", 0, 1, 0)];
+        assert_eq!(
+            choose_placement(by, &nodes, None, limited(RuntimeMode::Container)).unwrap(),
+            0,
+            "its container half enforces, so container work with limits places as before"
+        );
+        let err = choose_placement(by, &nodes, None, limited(RuntimeMode::Host)).unwrap_err();
+        assert!(
+            matches!(err, BackendError::NoCapacity(_)),
+            "but its host half bounds nothing: {err}"
+        );
+
+        let err =
+            choose_placement(by, &nodes, Some("air"), limited(RuntimeMode::Host)).unwrap_err();
+        assert!(
+            matches!(err, BackendError::Launch(_)),
+            "a pin bypasses the filter, so the pinned case is hard: {err}"
+        );
+        let err = err.to_string();
+        assert!(
+            err.contains("node air")
+                && err.contains("resources.cpu/memory")
+                && err.contains("host mode"),
+            "and it names the field and the node: {err}"
+        );
+        assert_eq!(
+            choose_placement(by, &nodes, Some("air"), limited(RuntimeMode::Container)).unwrap(),
+            0,
+            "while the same pin under container mode is untouched"
+        );
+    }
+
     /// A host launch takes the one node advertising the mode, even where the
     /// policy would otherwise prefer an incapable node (design #309 §5a) — and
     /// the same fleet places container work by load alone.
@@ -717,12 +934,12 @@ mod tests {
         for policy in [PlacementPolicy::Busyness, PlacementPolicy::Headroom] {
             let nodes = [cand("air", 0, 4, 0), host_cand("nuc", 1, 1, 1)];
             assert_eq!(
-                choose_placement(policy, &nodes, None, RuntimeMode::Host).unwrap(),
+                choose_placement(policy, &nodes, None, RuntimeMode::Host.into()).unwrap(),
                 1,
                 "{policy:?}"
             );
             assert_eq!(
-                choose_placement(policy, &nodes, None, RuntimeMode::Container).unwrap(),
+                choose_placement(policy, &nodes, None, RuntimeMode::Container.into()).unwrap(),
                 0,
                 "{policy:?}"
             );
@@ -735,9 +952,14 @@ mod tests {
     #[test]
     fn full_capable_fleet_and_no_capable_node_read_differently() {
         let full = [cand("air", 4, 0, 0), host_cand("nuc", 1, 0, 1)];
-        let err = choose_placement(PlacementPolicy::Busyness, &full, None, RuntimeMode::Host)
-            .unwrap_err()
-            .to_string();
+        let err = choose_placement(
+            PlacementPolicy::Busyness,
+            &full,
+            None,
+            RuntimeMode::Host.into(),
+        )
+        .unwrap_err()
+        .to_string();
         assert_eq!(err, "no free slots on any node");
 
         let incapable = [cand("air", 0, 4, 0), cand("mini", 0, 2, 1)];
@@ -745,7 +967,7 @@ mod tests {
             PlacementPolicy::Busyness,
             &incapable,
             None,
-            RuntimeMode::Host,
+            RuntimeMode::Host.into(),
         )
         .unwrap_err()
         .to_string();
@@ -762,9 +984,14 @@ mod tests {
     /// (spec §3.1 zero-seed boot), not one that refuses the mode.
     #[test]
     fn empty_fleet_is_not_a_capability_error() {
-        let err = choose_placement(PlacementPolicy::Busyness, &[], None, RuntimeMode::Host)
-            .unwrap_err()
-            .to_string();
+        let err = choose_placement(
+            PlacementPolicy::Busyness,
+            &[],
+            None,
+            RuntimeMode::Host.into(),
+        )
+        .unwrap_err()
+        .to_string();
         assert_eq!(err, "no free slots on any node");
     }
 
@@ -775,7 +1002,7 @@ mod tests {
     fn pin_to_an_incapable_live_node_is_a_hard_error() {
         let by = PlacementPolicy::Busyness;
         let nodes = [cand("air", 0, 4, 0), host_cand("nuc", 0, 1, 1)];
-        let err = choose_placement(by, &nodes, Some("air"), RuntimeMode::Host)
+        let err = choose_placement(by, &nodes, Some("air"), RuntimeMode::Host.into())
             .unwrap_err()
             .to_string();
         assert!(
@@ -784,12 +1011,12 @@ mod tests {
             "{err}"
         );
         assert_eq!(
-            choose_placement(by, &nodes, Some("nuc"), RuntimeMode::Host).unwrap(),
+            choose_placement(by, &nodes, Some("nuc"), RuntimeMode::Host.into()).unwrap(),
             1
         );
 
         let full = [cand("air", 4, 0, 0)];
-        let err = choose_placement(by, &full, Some("air"), RuntimeMode::Host)
+        let err = choose_placement(by, &full, Some("air"), RuntimeMode::Host.into())
             .unwrap_err()
             .to_string();
         assert!(
@@ -798,7 +1025,7 @@ mod tests {
             "{err}"
         );
         assert_eq!(
-            choose_placement(by, &full, Some("air"), RuntimeMode::Container)
+            choose_placement(by, &full, Some("air"), RuntimeMode::Container.into())
                 .unwrap_err()
                 .to_string(),
             "no free slots on node air"
@@ -809,8 +1036,9 @@ mod tests {
             name: "air",
             load: None,
             modes: CONTAINER_ONLY_MODES,
+            resources_enforced: true,
         }];
-        let err = choose_placement(by, &down, Some("air"), RuntimeMode::Host)
+        let err = choose_placement(by, &down, Some("air"), RuntimeMode::Host.into())
             .unwrap_err()
             .to_string();
         assert_eq!(err, "no free slots on node air");
@@ -874,7 +1102,7 @@ mod tests {
         let by = PlacementPolicy::Busyness;
         let nodes = [cand("air", 1, 3, 0), cand("nuc", 0, 2, 1)];
         assert_eq!(
-            choose_placement(by, &nodes, None, RuntimeMode::Container).unwrap(),
+            choose_placement(by, &nodes, None, RuntimeMode::Container.into()).unwrap(),
             1
         );
         assert_eq!(
@@ -882,7 +1110,7 @@ mod tests {
                 PlacementPolicy::Headroom,
                 &nodes,
                 None,
-                RuntimeMode::Container
+                RuntimeMode::Container.into()
             )
             .unwrap(),
             0
@@ -895,12 +1123,12 @@ mod tests {
         let by = PlacementPolicy::Busyness;
         let nodes = [cand("air", 2, 2, 0), cand("nuc", 2, 4, 1)];
         assert_eq!(
-            choose_placement(by, &nodes, None, RuntimeMode::Container).unwrap(),
+            choose_placement(by, &nodes, None, RuntimeMode::Container.into()).unwrap(),
             1
         );
         let nodes = [cand("nuc", 2, 3, 0), cand("air", 2, 3, 1)];
         assert_eq!(
-            choose_placement(by, &nodes, None, RuntimeMode::Container).unwrap(),
+            choose_placement(by, &nodes, None, RuntimeMode::Container.into()).unwrap(),
             1
         );
     }
@@ -913,7 +1141,7 @@ mod tests {
         for policy in [PlacementPolicy::Busyness, PlacementPolicy::Headroom] {
             let nodes = [cand("zero", 0, 0, 0), cand("nuc", 3, 1, 1)];
             assert_eq!(
-                choose_placement(policy, &nodes, None, RuntimeMode::Container).unwrap(),
+                choose_placement(policy, &nodes, None, RuntimeMode::Container.into()).unwrap(),
                 1,
                 "{policy:?}"
             );
@@ -924,17 +1152,18 @@ mod tests {
                     name: "down",
                     load: None,
                     modes: CONTAINER_ONLY_MODES,
+                    resources_enforced: true,
                 },
                 cand("nuc", 1, 1, 1),
             ];
             assert_eq!(
-                choose_placement(policy, &nodes, None, RuntimeMode::Container).unwrap(),
+                choose_placement(policy, &nodes, None, RuntimeMode::Container.into()).unwrap(),
                 1,
                 "{policy:?}"
             );
 
             let nodes = [cand("full", 4, 0, 0)];
-            let err = choose_placement(policy, &nodes, None, RuntimeMode::Container)
+            let err = choose_placement(policy, &nodes, None, RuntimeMode::Container.into())
                 .unwrap_err()
                 .to_string();
             assert!(

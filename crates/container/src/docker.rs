@@ -8,8 +8,8 @@
 
 use crate::{
     BackendError, CONTAINER_ONLY_MODES, ContainerBackend, ContainerId, ContainerLaunchConfig,
-    ContainerStatus, InjectedFile, LogTail, ModeWarnings, NodeLoad, NodeStatus, PlacementCandidate,
-    PlacementPolicy, RunningContainer, choose_placement,
+    ContainerStatus, InjectedFile, LaunchRequirements, LogTail, ModeWarnings, NodeLoad, NodeStatus,
+    PlacementCandidate, PlacementPolicy, RunningContainer, choose_placement,
 };
 use async_trait::async_trait;
 use bollard::Docker;
@@ -23,7 +23,6 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use types::job_type::RuntimeMode;
 
 /// Label stamped on every container we launch; placement counts by it and the
 /// §3.6 startup sweeps reap by it. It means exactly *"a job container the
@@ -552,8 +551,14 @@ impl DockerBackend {
     /// §3.1 placement: every node is (re-)probed here (so one that recovered
     /// rejoins without a dispatcher restart) and [`choose_placement`] decides.
     /// Every docker-endpoint node serves [`CONTAINER_ONLY_MODES`] and nothing
-    /// else, so a host launch finds no candidate here (design #309 §5a).
-    async fn place(&self, pin: Option<&str>, required: RuntimeMode) -> Result<&Node, BackendError> {
+    /// else, so a host launch finds no candidate here (design #309 §5a), and
+    /// every one of them enforces `resources.cpu`/`memory` — the limits reach
+    /// the `HostConfig` this very backend builds (§7).
+    async fn place(
+        &self,
+        pin: Option<&str>,
+        required: LaunchRequirements,
+    ) -> Result<&Node, BackendError> {
         let mut candidates = Vec::with_capacity(self.nodes.len());
         for (i, node) in self.nodes.iter().enumerate() {
             let load = self.probe_load(node).await;
@@ -562,9 +567,10 @@ impl DockerBackend {
                 name: &node.name,
                 load,
                 modes: CONTAINER_ONLY_MODES,
+                resources_enforced: true,
             });
         }
-        self.mode_warnings.observe(&candidates, required);
+        self.mode_warnings.observe(&candidates, required.mode);
         let index = choose_placement(self.policy, &candidates, pin, required)?;
         Ok(&self.nodes[index])
     }
@@ -597,7 +603,7 @@ impl DockerBackend {
 impl ContainerBackend for DockerBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
         let node = self
-            .place(config.node.as_deref(), config.required_mode())
+            .place(config.node.as_deref(), config.requirements())
             .await?;
         let image = image_or_refusal(&node.name, &config)?;
         let body = ContainerCreateBody {
@@ -1150,6 +1156,7 @@ fn parse_memory(s: &str) -> Result<i64, String> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use types::job_type::RuntimeMode;
 
     #[test]
     fn memory_parsing() {
@@ -1183,6 +1190,7 @@ mod tests {
             name,
             load: free.map(|free| NodeLoad { running: 0, free }),
             modes: CONTAINER_ONLY_MODES,
+            resources_enforced: true,
         }
     }
 
@@ -1197,18 +1205,18 @@ mod tests {
             cand("aaa", Some(4), 2),
         ];
         assert_eq!(
-            choose_placement(hr, &nodes, None, RuntimeMode::Container).unwrap(),
+            choose_placement(hr, &nodes, None, RuntimeMode::Container.into()).unwrap(),
             2
         );
 
         let nodes = [cand("local", Some(2), 0), cand("nuc", None, 1)];
         assert_eq!(
-            choose_placement(hr, &nodes, None, RuntimeMode::Container).unwrap(),
+            choose_placement(hr, &nodes, None, RuntimeMode::Container.into()).unwrap(),
             0
         );
 
         let nodes = [cand("local", Some(0), 0), cand("nuc", None, 1)];
-        let err = choose_placement(hr, &nodes, None, RuntimeMode::Container)
+        let err = choose_placement(hr, &nodes, None, RuntimeMode::Container.into())
             .unwrap_err()
             .to_string();
         assert!(err.contains("no free slots on any node"), "{err}");
@@ -1221,24 +1229,24 @@ mod tests {
         let hr = PlacementPolicy::Headroom;
         let nodes = [cand("local", Some(1), 0), cand("nuc", Some(4), 1)];
         assert_eq!(
-            choose_placement(hr, &nodes, Some("local"), RuntimeMode::Container).unwrap(),
+            choose_placement(hr, &nodes, Some("local"), RuntimeMode::Container.into()).unwrap(),
             0
         );
 
         let nodes = [cand("local", Some(0), 0), cand("nuc", Some(4), 1)];
-        let err = choose_placement(hr, &nodes, Some("local"), RuntimeMode::Container)
+        let err = choose_placement(hr, &nodes, Some("local"), RuntimeMode::Container.into())
             .unwrap_err()
             .to_string();
         assert!(err.contains("no free slots on node local"), "{err}");
 
         let nodes = [cand("local", None, 0), cand("nuc", Some(4), 1)];
-        let err = choose_placement(hr, &nodes, Some("local"), RuntimeMode::Container)
+        let err = choose_placement(hr, &nodes, Some("local"), RuntimeMode::Container.into())
             .unwrap_err()
             .to_string();
         assert!(err.contains("no free slots on node local"), "{err}");
 
         let nodes = [cand("local", Some(1), 0), cand("nuc", Some(4), 1)];
-        let err = choose_placement(hr, &nodes, Some("mini"), RuntimeMode::Container)
+        let err = choose_placement(hr, &nodes, Some("mini"), RuntimeMode::Container.into())
             .unwrap_err()
             .to_string();
         assert!(

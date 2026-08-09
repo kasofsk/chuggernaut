@@ -60,6 +60,18 @@ population to count.
   subtree for that task — listed out of the cache root by the task directory's
   own name, never computed, and best-effort on the nix reaper's charter
   (`sweep_agent_cache` and `reclaim_agent_cache`, `crates/container/src/host.rs`).
+- **[D7](#d7--a-host-tasks-resources-are-unbounded-and-the-node-flag-does-not-say-so)'s
+  revisit trigger has fired, and the fix was not the one it priced.** D7
+  accepted the misdescription on the ground that *"nothing consumes it"*, and
+  named the trigger: **the first reader that decides something from this flag**.
+  Job #524 is that reader ([#309](./309-host-native-execution.md) §7's placement
+  predicate), and it needed no shape change to `NodeCapabilities` — the reader
+  narrows the node's one bool to the launch's resolved mode, so a dual-mode air
+  still advertises `true` and still never has that `true` applied to a host
+  launch. The per-launch warning D7 called "the signal that is actually true" is
+  now a refusal: a host launch declaring `cpu`/`memory` is `BackendError::Launch`
+  naming the field and the node. See [the 2026-08-09
+  amendment](#amendment--2026-08-09-job-524-d7s-trigger-fired-and-the-warning-became-a-refusal).
 - **[M7](#what-must-be-measured-on-the-air-first) has two samples and no
   verdict.** Simulator state the first task left made the second **cheaper**, not
   disturbed; two observations of "did not disturb" are not "cannot disturb", and
@@ -1709,3 +1721,35 @@ separating by argument, which it would do in any session. Two documents citing
 the finding are corrected in the same commit —
 [#308](308-gha-port.md)'s open-findings list and
 [#322](322-macos-native-runtime.md)'s pointer at slice 6.
+
+## Amendment — 2026-08-09, job #524 (D7's trigger fired, and the warning became a refusal)
+
+[D7](#d7--a-host-tasks-resources-are-unbounded-and-the-node-flag-does-not-say-so)
+is accepted on two grounds and names its own trigger. Both have moved.
+
+**"Nothing consumes it" is no longer true.** [#309](./309-host-native-execution.md)
+§7's placement predicate landed in job #524, so `resources_enforced` decides
+something: a launch declaring `resources.cpu`/`memory` is placed only on a node
+that enforces them. D7 priced that trigger as *"a shape change to
+`NodeCapabilities` that every consumer of the advertisement would have to be
+re-read against"* — and the actual cost was smaller, because the truthfulness
+D7 wanted lives in the **reader** rather than in the wire. `PlacementCandidate::bounds`
+narrows the node's one bool to the launch's resolved mode, so the air's `true`
+is applied to the container launches its Docker `HostConfig` bounds and to
+nothing else. The field's contract is unchanged, the wire is unchanged, and
+`WORKER_RPC_VERSION` did not move. D7's own framing — *"one bit answering two
+questions, and it answers the container one"* — turns out to be the whole fix:
+ask it only the question it answers.
+
+**The per-launch warning is now a refusal.** D7 names `HostBackend::admit`'s
+`tracing::warn!` as "the granularity the flag lacks". §7 is explicit that an
+unenforceable bound is *"never a silent ignore"*, and a warned-then-run task is
+exactly the option 1 §7 rejected, so job #524 made it `BackendError::Launch`
+naming the field and the node. Read D7's paragraph accordingly: the signal is
+still per launch, but it stops the launch rather than annotating it.
+
+**What D7 decided is otherwise unchanged.** A host task's cpu and memory are
+still bounded by nothing on this node or any other; `resources.task_timeout`
+still bounds it in time; and [D4](#d4--one-host-task-per-node-stays)'s one task
+per node is still what makes that tolerable. The only difference is that a job
+type asking for a bound on a Mac is now *refused* rather than told.

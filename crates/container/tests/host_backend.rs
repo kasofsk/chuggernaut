@@ -485,6 +485,61 @@ async fn host_work_runs_only_for_the_projects_the_node_declares() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// Design #309 §7's launch backstop: a host launch declaring `resources.cpu` or
+/// `resources.memory` — which reaches a node only through a `placement.node`
+/// pin, since the §5a filter excludes it otherwise — is refused by name rather
+/// than run unbounded, because macOS has no cgroups and §7 rejected the silent
+/// ignore explicitly.
+#[tokio::test]
+async fn a_host_launch_declaring_limits_this_node_cannot_bound_is_refused() {
+    let root = temp_root("resources-enforced");
+    let backend = backend(&root);
+
+    for limited in [
+        ContainerLaunchConfig {
+            cpu_limit: Some(3.0),
+            ..cfg("true")
+        },
+        ContainerLaunchConfig {
+            memory_limit: Some("4Gi".into()),
+            ..cfg("true")
+        },
+    ] {
+        let err = backend.launch(limited).await.unwrap_err();
+        assert!(
+            matches!(err, container::BackendError::Launch(_)),
+            "a bound this node cannot apply is a hard refusal, never queued capacity: {err}"
+        );
+        let text = err.to_string();
+        assert!(
+            text.contains("node w1")
+                && text.contains("resources.cpu/memory")
+                && text.contains("host mode"),
+            "the refusal names the field and the node: {text}"
+        );
+    }
+    assert!(
+        backend.list_managed_running().await.unwrap().is_empty()
+            && backend.list_managed_exited().await.unwrap().is_empty(),
+        "and it refuses before spawning anything"
+    );
+
+    let id = backend
+        .launch(ContainerLaunchConfig {
+            cpu_limit: None,
+            memory_limit: None,
+            ..cfg("true")
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        settle(&backend, &id).await,
+        0,
+        "a host launch declaring neither field runs exactly as before"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// The unset semantics this slice takes, pinned: a node that declares no
 /// tenancy runs host work for NOBODY (design #309 §10), which is
 /// `WORKER_KVM_PROJECTS`'s posture and the only one that cannot degrade to a

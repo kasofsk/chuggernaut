@@ -28,8 +28,11 @@
 //! no ordering key, the `ping` reply is authoritative, and an announce applies
 //! only while no ping has answered for the node. A docker-endpoint node can
 //! answer neither, so [`FleetBackend::node_capabilities`] synthesizes its
-//! capabilities from the node kind. Placement reads their `modes`: a launch is
-//! placed only on a node serving the mode its `image` selects (#309 §5a).
+//! capabilities from the node kind. Placement reads two of their fields: a
+//! launch is placed only on a node serving the mode its `image` selects (#309
+//! §5a), and one declaring `resources.cpu`/`memory` only on a node that enforces
+//! them **for that mode** (#309 §7) — `resources_enforced` answers for the
+//! node's container runtime, so it never covers a dual-mode node's host half.
 
 use async_trait::async_trait;
 use container::docker::{DockerBackend, DockerNodeConfig};
@@ -41,7 +44,6 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use store::NatsStore;
 use store::worker::{MAX_COPY_FILE_BYTES, WorkerRpc, WorkerRpcError};
-use types::job_type::RuntimeMode;
 use types::worker::{
     FileSource, RefreshOutcome, WireFile, WireStatus, WorkerError, WorkerLaunchRequest, b64_decode,
     b64_encode,
@@ -545,7 +547,7 @@ impl FleetBackend {
     async fn place(
         &self,
         pin: Option<&str>,
-        required: RuntimeMode,
+        required: container::LaunchRequirements,
     ) -> Result<(Arc<FleetNode>, Reservation), BackendError> {
         let _guard = self.place_lock.lock().await;
         let nodes = self.snapshot();
@@ -562,9 +564,10 @@ impl FleetBackend {
                 name: nodes[i].name.as_str(),
                 load: *load,
                 modes: &capabilities.modes,
+                resources_enforced: capabilities.resources_enforced,
             })
             .collect();
-        self.mode_warnings.observe(&candidates, required);
+        self.mode_warnings.observe(&candidates, required.mode);
         let index = choose_placement(self.policy, &candidates, pin, required)?;
         let node = nodes[index].clone();
         node.reserved.fetch_add(1, Ordering::SeqCst);
@@ -779,7 +782,7 @@ fn to_wire(config: &ContainerLaunchConfig) -> WorkerLaunchRequest {
 impl ContainerBackend for FleetBackend {
     async fn launch(&self, config: ContainerLaunchConfig) -> Result<ContainerId, BackendError> {
         let (node, _reservation) = self
-            .place(config.node.as_deref(), config.required_mode())
+            .place(config.node.as_deref(), config.requirements())
             .await?;
         match &node.handle {
             NodeHandle::Docker { backend } => backend.launch(config).await,

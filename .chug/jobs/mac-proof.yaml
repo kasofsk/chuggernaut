@@ -81,10 +81,12 @@ wrap_up:
 placement:
   node: air
 resources:
-  # NEITHER cpu NOR memory, deliberately. A host task is not cgroup-bounded
-  # (#490 D7, #309 §7) and HostBackend::admit logs a per-launch warning naming
-  # whichever of the two a host launch declares — declaring one here would buy
-  # that warning on every run in exchange for a bound the node will not apply.
+  # NEITHER cpu NOR memory, deliberately, and since job #524 the platform
+  # enforces that rather than warning about it. A host task is not cgroup-bounded
+  # (#490 D7, #309 §7), so declaring either field makes this job type unplaceable:
+  # choose_placement admits a launch declaring them only on a node that enforces
+  # them for its mode, and the pin here would carry it to HostBackend::admit,
+  # which refuses it by name. task_timeout is unaffected and is the bound below.
   #
   # 45m, and short on purpose rather than generous. D4 gives a host-capable node
   # ONE task slot node-wide, and #440 slice 3 has a running host task decline the

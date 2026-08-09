@@ -745,7 +745,9 @@ async fn docker_endpoint_capabilities_are_synthesized() {
 
 /// A host launch (no `image`, design #309 §5a) reaches the one node advertising
 /// the mode, past a container-only node the busyness policy would otherwise
-/// prefer — and a container launch on the same fleet still places by load.
+/// prefer — and a container launch on the same fleet still places by load. Both
+/// launches drop the shared fixture's `memory_limit` so this stays a test of the
+/// mode predicate alone; the §7 one is the test below.
 #[tokio::test]
 async fn a_host_launch_is_placed_on_the_node_that_advertises_host() {
     let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
@@ -774,15 +776,63 @@ async fn a_host_launch_is_placed_on_the_node_that_advertises_host() {
 
     let mut host = suite::cfg("true");
     host.image = None;
+    host.memory_limit = None;
     assert_eq!(
         fleet.launch(host).await.unwrap(),
         "mac/placed",
         "only mac advertises host mode"
     );
+    let mut container = suite::cfg("true");
+    container.memory_limit = None;
     assert_eq!(
-        fleet.launch(suite::cfg("true")).await.unwrap(),
+        fleet.launch(container).await.unwrap(),
         "mac/placed",
         "a container launch is placed by load alone, and mac ties first by name"
+    );
+    mac.abort();
+    nuc.abort();
+}
+
+/// Design #309 §7 over the wire: a node whose ping said it enforces nothing is
+/// skipped for a launch declaring `resources.memory` and taken for one declaring
+/// none, so the advertisement the probe carried is what the predicate reads.
+#[tokio::test]
+async fn a_node_that_enforces_nothing_is_skipped_only_by_a_launch_declaring_limits() {
+    let Some(server) = test_utils::nats::NatsTestServer::spawn().await else {
+        return;
+    };
+    let store = store::NatsStore::connect(server.url()).await.unwrap();
+    let mac = capable_worker(&store, "mac", host_capable()).await;
+    let nuc = capable_worker(&store, "nuc", types::worker::NodeCapabilities::absent()).await;
+    let fleet = FleetBackend::new(
+        vec![
+            DockerNodeConfig {
+                name: "mac".into(),
+                endpoint: "worker".into(),
+                slots: 1,
+            },
+            DockerNodeConfig {
+                name: "nuc".into(),
+                endpoint: "worker".into(),
+                slots: 1,
+            },
+        ],
+        store,
+        PlacementPolicy::default(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        fleet.launch(suite::cfg("true")).await.unwrap(),
+        "nuc/placed",
+        "the fixture declares memory 128Mi, so the node advertising no enforcement is skipped"
+    );
+    let mut unbounded = suite::cfg("true");
+    unbounded.memory_limit = None;
+    assert_eq!(
+        fleet.launch(unbounded).await.unwrap(),
+        "mac/placed",
+        "and it takes the same launch declaring neither field, tying first by name"
     );
     mac.abort();
     nuc.abort();
