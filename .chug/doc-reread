@@ -115,3 +115,6 @@ Doc-reread: docs/reference/runbooks/chug-node-adoption.md
 Doc-reread: deploy/prod/README.md
 Doc-reread: docs/reference/crates.md
 Doc-reread: docs/implementation-notes.md
+
+Doc-reread: docs/design/322-macos-native-runtime.md
+Doc-reread: docs/design/309-host-native-execution.md

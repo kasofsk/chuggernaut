@@ -35,6 +35,16 @@ The finding stands as history; see
 [the 2026-08-09 note](#note-2026-08-09--10s-tenancy-list-is-built-job-525) and
 [`docs/reference/runbooks/worker-host-projects.md`](../reference/runbooks/worker-host-projects.md).
 
+**[§8](#8-secrets-on-a-shared-host)'s per-task user pool is unavailable on macOS,
+and the operator has accepted the absent boundary (2026-08-09, job #526).** Host
+tasks on `gumbo-air-0` run as the node's existing login user; option (b) is kept
+unweakened for a Linux host node, of which there are none. With §8 unavailable,
+§10's tenancy list is the only remaining bound on cross-task exposure — built by
+job #525 just above, and awaiting the deploy that declares one for `gumbo-air-0`.
+See
+[the 2026-08-09 amendment on tenancy](#amendment--2026-08-09-job-526-8s-recommendation-is-unavailable-on-macos-and-10s-tenancy-list-is-now-the-only-bound)
+and [#322](322-macos-native-runtime.md), which owns the decision.
+
 Written against the tree at `b801b76`. Every claim about current behavior was
 read out of the source and out of [docs/spec.md](../spec.md), not inferred from
 the docs; where the job brief and the tree disagree, the tree wins and the
@@ -1764,3 +1774,57 @@ macOS by the daemon's GUI-domain requirement, [#490](490-agent-work-on-a-mac.md)
 §6's transient scopes, and the docker grant — [#517 D3](517-docker-access-for-jobs.md)
 landed that, and [#517 D1](517-docker-access-for-jobs.md) accepted the escalation
 this list is the containment for.
+
+## Amendment — 2026-08-09, job #526 (§8's recommendation is unavailable on macOS, and §10's tenancy list is now the only bound)
+
+**The operator has decided host-node tenancy on the one host node that exists,
+and it is not what [§8](#8-secrets-on-a-shared-host) recommends.** The full
+record — the decision, the accepted cost, each bound read out of the tree, and
+the partial measurement taken against the revisit condition — is
+[#322's 2026-08-09 correction](322-macos-native-runtime.md#correction--2026-08-09-job-526-host-tasks-run-as-the-login-user-the-secret-boundary-is-absent-and-what-bounds-it-is-thinner-than-5-says).
+This section says what changes here and does not restate it.
+
+**What was decided.** Host tasks on macOS run as the node's **existing login
+user** (`worksalot` on `gumbo-air-0`). Per-task users are **deferred, not
+rejected**.
+
+**§8 is not reworded, and its recommendation is not superseded — it is
+unavailable.** Option (b)'s mechanism is `systemd-run --uid=` against a
+pre-created pool, and [#322 §5](322-macos-native-runtime.md#5-ios-specifics)
+already records the three macOS collisions that leave no equivalent:
+CoreSimulator is a per-user-session service, an unlocked signing keychain is a
+session property, and `launchctl asuser` and a per-user launchd domain both need
+a session a provisioned user does not have. [#490](490-agent-work-on-a-mac.md)'s
+M5 fork adds the one that settles it on the tree: the macOS worker daemon is a
+launchd agent in the **login user's GUI domain**
+([#440](440-native-worker-daemon.md) D2), which is how the native conversion
+works at all. So macOS runs §8's option **(a)** — accept and document — which §8
+rejected as a default, and #322's correction is where the documenting happens.
+
+| Clause | After job #526 |
+| --- | --- |
+| "(b) per-task unix user (recommended)" | **Kept for a Linux host node, unweakened.** Unavailable on macOS, where the node runs option (a) |
+| "the daemon does not advertise `host` unless the user pool is provisioned" | **Not in force.** `gumbo-air-0` advertises `host` with no pool, because on macOS there is no pool to provision. The rule is Linux's and has never had a node to bind |
+| "(a) accept and document … rejected as the default" | **Is** the macOS default now, by decision rather than by drift |
+| §8's residual-risk paragraph | **Kept and widened.** `remove` scrubbing the task dir is real (`crates/container/src/host.rs`) and bounds only what is *in* the task dir |
+
+**There is no Linux host node.** [`.chug/jobs/android-proof.yaml`](../../.chug/jobs/android-proof.yaml)
+declares `image: chuggernaut/agent:prod` and runs in a **container** with
+`/dev/kvm`, and [`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml)
+is the only job type declaring `mode: host`. The one category that forced host
+mode is the Mac, so P3's per-task-user work has, so far, no platform to land on.
+
+**And [§10's tenancy subsection](#are-host-nodes-single-tenant) carries more
+weight than it did.** §8's per-task user boundary was the thing that would have
+handled *accidental* cross-reading, with §10's policy layered on top for the
+hostile case. With §8 unavailable, **§10's list is the whole of it** — which is
+what makes the [note above](#note-2026-08-09--10s-tenancy-list-is-built-job-525)
+matter here: job #525 merged the same day this was written, so
+`WORKER_HOST_PROJECTS` is now real, enforced in `container::host::HostTenancy` at
+`HostBackend::admit` and fail-closed when unset. **One step of it is still the
+operator's**: `gumbo-air-0` declares no list at the time of writing, so what
+enforces its single-tenancy until the next deploy is `placement.node`, the fact
+that one node serves `host` at all, and `enforce_host_capacity`
+(`crates/worker/src/daemon.rs`) refusing to boot a host-capable node at anything
+but one slot — and the declaration itself is the last bound this decision leans
+on, not a tidying step.

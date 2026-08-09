@@ -1,6 +1,6 @@
 # Design — a native (macOS) execution runtime for iOS/Xcode jobs
 
-Status: PARTLY IMPLEMENTED — W2's rebase landed (job #485); the
+Status: PARTLY IMPLEMENTED — host-node tenancy decided 2026-08-09 (job #526); W2's rebase landed (job #485); the
 `work.type: command` rule it carried has since been **lifted** by
 [#490](490-agent-work-on-a-mac.md) slice 5, which replaced it with a
 capability test at the node. W4's Xcode discovery and `xcode:<version>` resolution
@@ -58,6 +58,22 @@ since #309 was written); [docs/reference/style.md](../reference/style.md);
 *The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
 rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
+
+**Host tasks run as the node's existing login user, and the operator has ratified
+that (2026-08-09, job #526).** §[5](#5-ios-specifics)'s "one dedicated task user
+with a login session, and the node declared single-tenant" is taken in **half**:
+the single-tenancy half, with the account already logged in at the console
+(`worksalot` on `gumbo-air-0`) rather than one provisioned for the purpose. So
+the cross-task secret boundary is **absent**, deliberately, and of the three
+things §5 offers as bounds one is built and undeclared on the node
+(`WORKER_HOST_PROJECTS`, job #525, the same day), one covers only the task
+directory, and one holds for the two credentials the platform mints and for none
+of the three it forwards. Per-task users are deferred, not
+rejected; [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s
+user pool is untouched for a Linux host node, of which there are none. The
+record, with each bound read out of the tree and the partial non-Aqua
+measurement that does **not** yet answer the revisit condition, is
+[the 2026-08-09 correction](#correction--2026-08-09-job-526-host-tasks-run-as-the-login-user-the-secret-boundary-is-absent-and-what-bounds-it-is-thinner-than-5-says).
 
 **The `/workspace` rebase has landed (job #485), and three and a half of the
 other phases were satisfied generically by somebody else.** W2's remaining half
@@ -1264,3 +1280,192 @@ loud. The accept set is therefore widened only for a delimiter some real value
 uses, never for a character a file name may contain — the note under
 `crates/container/src/host.rs` in [docs/implementation-notes.md](../implementation-notes.md)
 is where that reasoning is kept in step with the code.
+
+## Correction — 2026-08-09, job #526 (host tasks run as the login user; the secret boundary is absent, and what bounds it is thinner than §5 says)
+
+Appended by the job recording an **operator decision on host-node tenancy**,
+read against the tree at `3eaff1e`. Nothing above is edited: §[5](#5-ios-specifics)'s
+recommendation stands as the argument that produced the decision, and the half
+of it the operator did not take is marked here rather than reworded there.
+
+**The decision.** Host tasks on macOS run as the node's **existing login user**
+— `worksalot` on `gumbo-air-0` — for now. Per-task users are **deferred, not
+rejected**; the revisit condition is at the end of this section.
+
+### What it ratifies, and the half it does not
+
+§5 recommends "one dedicated task user with a login session, and the node
+declared single-tenant". The operator takes the **single-tenancy** half and
+declines the **dedicated user**: the account host tasks run as is the one
+already logged in at the console, provisioned by nobody for this purpose. §5
+reads as though a dedicated user were the plan. It is not, and
+[#490](490-agent-work-on-a-mac.md)'s M5 fork is the reason on the tree rather
+than on taste — the macOS worker daemon is a launchd agent in the **login user's
+GUI domain** ([#440](440-native-worker-daemon.md) D2), bootstrapped into
+`gui/$(id -u)` literally by `deploy/prod/install-worker-launchd.sh`, and that
+domain is how the native conversion works at all. A user provisioned for the
+purpose has no such session to be bootstrapped into, and §5's own three
+collisions are why giving it one is not a config line: CoreSimulator is a
+per-user-session service, signing identities live in a specific user's keychain
+and an unlocked keychain is a session property, and macOS has no
+`systemd-run --uid=` — `launchctl asuser` and a per-user launchd domain both
+require the session that does not exist.
+
+### What it falsifies in #309, and what it leaves standing
+
+[#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host) recommends
+option **(b)**, a fixed pool of per-task unix users launched with
+`systemd-run --uid=`, under the hard rule that "the daemon does not advertise
+`host` in its `modes` unless the user pool is provisioned". On macOS that
+recommendation is **not available**, so what the node actually does is §8's
+option **(a)** — accept and document — which §8 rejected as a default. This
+correction is where the documenting happens.
+
+**§8's option (b) stands unweakened for a Linux host node** and is not reworded
+there; it is macOS where it does not apply. Worth naming while here: **no Linux
+host node exists.** [`.chug/jobs/android-proof.yaml`](../../.chug/jobs/android-proof.yaml)
+declares `image: chuggernaut/agent:prod` and runs in a **container** with
+`/dev/kvm`, so the one category that forced host mode is the Mac, and
+[`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) is still the only
+job type declaring `mode: host`. §8's user pool has never had a node to be
+provisioned on.
+
+### The accepted cost, unsoftened
+
+**The cross-task secret boundary is absent on a Mac.** #309 §8 enumerates what
+`Core::container_env` (`crates/dispatcher/src/exec.rs`) puts into a launch
+environment: every declared `work.secrets` and evaluator `secrets` value, the
+reserved `global/agents` platform agent credentials for agent launches, project
+`vars`, and a minted per-task NATS creds file body. On a shared host every one
+of those is readable out of the running process's environment by any process of
+the same uid — `/proc/<pid>/environ` on Linux, the `ps`-equivalent on macOS,
+which permits it for the same uid and for root.
+
+On `gumbo-air-0` that uid also owns the login keychain and the colima docker
+socket. **This acceptance and [#517](517-docker-access-for-jobs.md) D1's lean on
+each other**, and neither is a bound on the other: #517 accepts that a host task
+reaches docker because the login user owns the socket, and this decision accepts
+that the task *is* the login user. Taking either makes the other cheaper to
+take, which is exactly why they should be read together rather than as two
+independent concessions.
+
+### What bounds exposure instead — each read out of the tree, not asserted
+
+§5 names three bounds — single-tenancy, exit-time secret deletion, and short
+credential TTLs. The previous statement of enforcement was ahead of the tree, so
+each was read out of the source at `3eaff1e` and is reported with what it
+actually covers.
+
+**1. Single-tenancy — built the same day, undeclared on the node, and now
+load-bearing.** `WORKER_HOST_PROJECTS` was a variable seven design documents
+named and no source file held when this correction was drafted — the finding
+[#517 correction 1](517-docker-access-for-jobs.md#corrections-verified-against-the-tree)
+recorded. **Job #525 merged before it landed**, so the tree now holds it:
+`HostTenancy` (`crates/container/src/host.rs`) is read in `HostBackend::admit`
+and nowhere else, and a host launch whose `JOB_PROJECT` the node's list does not
+name is a hard `BackendError::Launch` naming the project and the node, never a
+`NoCapacity` that would queue for thirty minutes on an answer that cannot
+change. It is **fail-closed**: `crates/worker/src/config.rs` parses the list
+beside `WORKER_KVM_PROJECTS` and `WORKER_NIX_PROJECTS`, and unset or empty runs
+host work for nobody. A mixed-mode node's **container** launches are matched
+against nothing, which is the distinction the whole design keeps. The daemon
+warns at boot rather than refusing to start, so `deploy/prod/build-worker.sh`
+carries the refusal instead: a deploy declaring `host` with no tenancy beside it
+exits non-zero with the live daemon untouched. The
+[#309 note](309-host-native-execution.md#note-2026-08-09--10s-tenancy-list-is-built-job-525)
+is the record and
+[`docs/reference/runbooks/worker-host-projects.md`](../reference/runbooks/worker-host-projects.md)
+is the procedure.
+
+**What is still open is the declaration.** `gumbo-air-0` serves host work today
+and declares no list; nothing in this repo declares one for it, by design — the
+value lives in the operator's `chuggernaut.env` on the Mini, and
+`deploy/prod/env.example` carries a commented example and no live setting. Until
+that deploy runs, what enforces single-tenancy on the node is what enforced it
+before: `placement.node`, the fact that one node serves `host` at all, and
+`enforce_host_capacity` (`crates/worker/src/daemon.rs`), which refuses to boot a
+host-capable node whose `WORKER_SLOTS` and `WORKER_SLOTS_MAX` are not both 1 —
+so the node runs one host task at a time and the *concurrent*-reader case cannot
+arise on it.
+
+**And single-tenancy is a narrower bound than §5's sentence suggests, however
+well it is enforced.** It bounds which *projects* share the uid; it does not
+bound tasks of the same project sharing it, and those run sequentially rather
+than concurrently, which the leftovers of bound 2 outlive. **What changed with
+this decision is the weight**: §5 offered single-tenancy as one of three bounds
+and it is now the primary one, so both the missing declaration and the gap
+between "one project" and "one task" cost more than they did when #517 recorded
+the variable as absent.
+
+**2. Exit-time deletion — real, and bounded by the task directory.**
+`supervised_cmd` (`crates/container/src/host.rs`) wraps the launch so the task's
+own shell empties the mapped `chuggernaut/` credential tree one level down the
+moment the command returns, sparing `AGENT_STATE_DIR` for the transcript harvest
+that runs after the process exits ([#490](490-agent-work-on-a-mac.md) D6
+amendment). `HostBackend::remove` in the same file then removes each path
+recorded in the task's `meta.json` `files`, sweeps the agent CLI's MCP-log cache
+under the daemon's home, and renames the task directory aside before deleting
+it; any failure is logged as disk that leaked and nothing else reclaims, and
+returned as a `BackendError`, rather than swallowed.
+
+**What it does not cover is everything outside the task directory.** `floor_env`
+carries exactly `PATH` and `HOME` from the daemon into a host task, and that
+`HOME` is the login user's — so `~/Library/Developer/CoreSimulator`, the shared
+`DerivedData` tree, `~/.docker/config.json`, the login keychain and any other
+path that uid may write are reachable by the task and reclaimed by nothing when
+it ends. The MCP-log sweep is the single exception, and it exists because
+[#490](490-agent-work-on-a-mac.md) D6 measured one such subtree; a warning and a
+leak is what it does when that cache is unreadable. Exit-time deletion is a
+bound on **injected** credentials in **one directory**, not on what a task chose
+to leave elsewhere in a home directory it shares with the daemon.
+
+**3. Short credential TTLs — half true, and the other half is an open item.**
+What the platform **mints** per task is TTL-bounded, and the TTL is the task's
+resolved timeout in both cases: `Core::container_env` passes `creds_ttl` into
+`mint_creds` (`crates/auth/src/nats.rs`), which sets the NATS user JWT's
+expiry, and `ssh_credential_files` issues a fresh key and a certificate with the
+same TTL (both in `crates/dispatcher/src/exec.rs`). A leaked file from either is
+a bounded-lifetime credential, as §[2](#2-workspace-as-a-virtual-wire-path)
+claims.
+
+What the platform **forwards** carries no TTL at all. Declared `work.secrets`
+and evaluator `secrets` values, project `vars`, and the reserved `global/agents`
+platform agent credentials that `inject_platform_agent_secrets` puts into every
+agent launch are stored values injected verbatim; their lifetime is rotation
+discipline — which is exactly what
+[option B above](#b--an-ordinary-container-that-sshes-into-a-mac) calls a
+strictly worse credential than a task-bounded one, when it is a key to a Mac
+rather than a project secret. Three of the four classes #309 §8 enumerates are
+therefore unbounded, and on an agent host task they sit in the environment of a
+process every other process of the login user may read. **Record this as an open
+item, not a bound**: nothing in the tree shortens the lifetime of a forwarded
+secret, and no slice here or in #309 proposes one.
+
+### The revisit condition, and the measurement taken against it
+
+§[Risks and open questions](#risks-and-open-questions) says per-task users on
+macOS "should be answered by measuring whether CoreSimulator works in a non-Aqua
+session at all". That measurement was **partly** taken on `gumbo-air-0` on
+2026-08-09, over an SSH session with `launchctl managername` reporting
+**Background** (uid 501, macOS 26.5.1):
+
+| Rung | Result |
+| --- | --- |
+| `xcrun simctl list devices` | CoreSimulatorService started, full device list, rc 0 |
+| `simctl create` an iPhone 17 | ok |
+| `simctl boot` + `simctl bootstatus -b` | reached Booted in 45s |
+| `simctl launch com.apple.Preferences` | ok, pid 50215 |
+| `security find-identity -v -p codesigning` | **0 valid identities on the node in any session** — the keychain axis is untested, not cleared |
+| `xcodebuild test` | **not run** — no iOS project on the node |
+
+Both test devices were deleted afterwards and confirmed absent.
+
+**The confound is what keeps this from being an answer.** `worksalot` was logged
+in at the console throughout — `launchctl print gui/501` succeeded from that
+Background session — so `CoreSimulatorService` for uid 501 may already have been
+alive in the **GUI** domain, and the Background session may simply have talked
+to it. That explanation fits every rung equally well. What was measured is
+therefore *"a Background session can drive simulators belonging to a uid that
+has an Aqua session"*, which is **not** the question §5 asks. A user that has
+never logged in at the console is untested, and answering the revisit condition
+needs one provisioned.
