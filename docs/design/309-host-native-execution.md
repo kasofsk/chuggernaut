@@ -16,7 +16,7 @@ host work is **routable** — a host job type placed by capability rather than b
 a pin
 ([the 2026-08-07 note on slice 6](#note-2026-08-07--slice-6-landed-host-work-is-routable-job-484)).
 §1's recommendation had already shipped before P0 started; see
-[the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed)
+[the 2026-08-05 correction](#correction-2026-08-05--1-already-shipped-p0-landed)
 and its addendum on `remove` racing its own reaper.
 
 **[§10](#10-trust-and-tenancy)'s docker-socket rule is inverted as of 2026-08-09
@@ -138,7 +138,7 @@ is the same work sliced by contract, not a second plan.
 
 | Phase | What | State |
 | --- | --- | --- |
-| **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--§1-already-shipped-p0-landed) |
+| **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--1-already-shipped-p0-landed) |
 | **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch; **Landed** (job #479) for §1's per-launch routing and the `WORKER_RPC_VERSION` bump it needed; **Landed** (job #507) for the launch half of [Coexistence](#coexistence-on-a-mixed-fleet)'s precedence rule — `JobType::level_image` / `level_runtime_env` resolve a launch from the **level** it is for, so a host job type's container evaluator inherits no `runtime.env` |
 | **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | **Landed** (job #483) for slice 5 — the record on both transports, additive, ingested in `probe_worker` with ping authoritative and docker-endpoint nodes synthesized; **Landed** (job #484) for slice 6 — `choose_placement` takes the required mode, excludes the nodes that do not serve it, and answers "no node advertises it" differently from "every capable node is full". P2 is complete: host work is routable |
 | **P3** | Per-task users; `resources_enforced`; transient scopes | **Partly landed** (job #524) — `resources_enforced` is consumed: `choose_placement` treats a launch declaring `resources.cpu`/`memory` as requiring enforcement **for its resolved mode**, and `HostBackend::admit` refuses one that reaches a node anyway ([the 2026-08-09 note](#note-2026-08-09--7s-predicate-and-backstop-landed-job-524)). Per-task users ([§8](#8-secrets-on-a-shared-host)) and transient scopes for *limits* ([§7](#7-resource-limits)) stay Proposed |
@@ -197,7 +197,7 @@ adjusting against the tree, and each moves work.
 One brief claim is *stronger* than stated and deserves promotion: the trait's
 container assumptions are not the only cost. `/workspace` is hardcoded in
 **shared** code that container mode also uses, and that is the sharpest single
-finding in this document — see [2](#2-the-traits-container-assumptions).
+finding in this document — see [2](#2-the-traits-container-assumptions-method-by-method).
 
 ---
 
@@ -818,7 +818,7 @@ its own crash story, and its own reconciliation — three mechanisms to avoid on
 **Is H.5's cheap interim worth shipping first? Yes.** Pinning a device-bound job
 type to a 1-slot node needs *zero* new mechanism — `placement.node` and a slot
 count both ship today — and it is the same 1-slot pin that
-[2](#2-the-traits-container-assumptions) wants to dodge the `/workspace`
+[2](#2-the-traits-container-assumptions-method-by-method) wants to dodge the `/workspace`
 collision during the prototype. One configuration change buys both. It stops
 being adequate at a precise, nameable moment: **when the host node must run a
 second, non-device-bound task concurrently.** Until then, building the lease
@@ -860,7 +860,7 @@ is specific to host mode and is not currently covered anywhere:**
 > tasks.
 
 That is the same transient scope [7](#7-resource-limits) needs for limits and
-[2](#2-the-traits-container-assumptions) needs for kill-the-whole-group. It is
+[2](#2-the-traits-container-assumptions-method-by-method) needs for kill-the-whole-group. It is
 the single most load-bearing implementation detail in this document on Linux,
 and it has no macOS equivalent — on macOS, a daemon restart under running host
 tasks is a known hazard to be handled by draining first.
@@ -999,7 +999,7 @@ and the clone therefore runs outside the declared environment (it needs only
 `nix-collect-garbage` deletes a running task's toolchain — a failure that would
 look like a random mid-build explosion. `remove` drops the root along with the
 task dir, and §3.6 step 6's existing sweep is the crash backstop
-([2](#2-the-traits-container-assumptions)), so **no new sweep is needed**.
+([2](#2-the-traits-container-assumptions-method-by-method)), so **no new sweep is needed**.
 
 ### The cold-realise cost
 
@@ -1111,7 +1111,7 @@ What can be prototyped on one node with nothing migrated:
 
 | Phase | Work | Needs | Notes |
 | --- | --- | --- | --- |
-| **P0** | Backend polymorphism ([1](#1-backend-polymorphism)) + a `HostBackend` ([2](#2-the-traits-container-assumptions)), on one node with `WORKER_MODES=container,host`, routed by `placement.node`, `slots: 1` | nothing else | **No schema change, no epoch bump, no capability wire, no placement change.** The job type still declares `image:` and that node simply ignores it. This is deliberately a lie and must never leave the prototype node — but it answers the only question that matters: *which of the ten methods is actually hard* |
+| **P0** | Backend polymorphism ([1](#1-backend-polymorphism)) + a `HostBackend` ([2](#2-the-traits-container-assumptions-method-by-method)), on one node with `WORKER_MODES=container,host`, routed by `placement.node`, `slots: 1` | nothing else | **No schema change, no epoch bump, no capability wire, no placement change.** The job type still declares `image:` and that node simply ignores it. This is deliberately a lie and must never leave the prototype node — but it answers the only question that matters: *which of the ten methods is actually hard* |
 | **P1** | The `runtime:` selector, the `CONFIG_SCHEMA_EPOCH` bump, the `min_dispatcher` requirement, the validate rule ([3](#3-the-host-mode-selector)) | P0 | Still pinned; `image` stops lying. **Half-landed ahead of P0** — see the note below |
 | **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` ([4](#4-capability-advertisement), [5a](#5a-capability-aware-placement)) | P1, **and #293 job 3** | Unpins host work — **Landed** (jobs #483, #484) |
 | **P3** | Per-task users ([8](#8-secrets-on-a-shared-host)); `resources_enforced` ([7](#7-resource-limits)); transient scopes ([6](#6-drain)) | P2 | The isolation and bounding story; the scope work is Linux-only |
@@ -1187,7 +1187,7 @@ tests.
   analogues is knowable; their difficulty is not. That asymmetry is why P0 is a
   prototype and why this document declines to pre-commit the ordering past P2.
 - **macOS gets a materially weaker product**: no cgroup limits ([7](#7-resource-limits)),
-  no mount namespaces ([2](#2-the-traits-container-assumptions)), no transient
+  no mount namespaces ([2](#2-the-traits-container-assumptions-method-by-method)), no transient
   scopes ([6](#6-drain)), a harder per-task-user story ([8](#8-secrets-on-a-shared-host)).
   Every one of those is stated as a refusal or a capability rather than a silent
   downgrade, which is the most this design can honestly do.

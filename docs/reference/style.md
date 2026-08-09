@@ -266,10 +266,10 @@ verify it in seconds and must name it when rejecting.
    D10](../design/415-knowledge-architecture.md#d10-the-implementing-job-owns-the-update)
    has it write the row in the same commit its merge creates.
 
-   The **owned definition** is the fourth, and it is the only one of the four
-   that is about other docs rather than about the tree. `docs/concepts.md` routes
-   each registered concept to the doc that defines it; a *definitional shape* for
-   a registered term anywhere else is an error
+   The **owned definition** is the fourth, and it is the only one of the first
+   four that is about other docs rather than about the tree. `docs/concepts.md`
+   routes each registered concept to the doc that defines it; a *definitional
+   shape* for a registered term anywhere else is an error
    ([#415](../design/415-knowledge-architecture.md) D3/D4, S4). Two shapes are
    read — `**Term.**` opening a list item, and `**Term** is|are|means|refers to`
    where the term opens a sentence — and only for a term the registry names, so
@@ -282,6 +282,18 @@ verify it in seconds and must name it when rejecting.
    the file exemption would have covered the worst instance the tree ever
    carried. Registering a term is a commitment, so the registry stays about a
    dozen rows and states its own criterion.
+
+   The **heading anchor** is the fifth. A link carrying a `#fragment` at a `.md`
+   target claims a heading exists there, and the anchor is the GitHub slug of the
+   heading text: lowercased, everything but letters, digits, spaces, `_` and `-`
+   dropped, spaces to hyphens. So a `§`, an em dash and a dropped trailing clause
+   all change it, while underscores survive — an identifier heading stays
+   linkable. A repeated heading takes GitHub's `-1`/`-2` suffix in document
+   order. The markers do not reach this one either: an anchor claims a heading
+   rather than a path, so the only honest fix for a link the document
+   contradicts is the link. A fragment on a source file is a line anchor, an
+   external URL is someone else's document, and an untracked target is
+   `doc-lint.sh`'s broken-link finding — all three skipped in silence.
 
    **A claim that is true and unread is a case of its own, and nothing above
    catches it.** `.chug/tasks/doc-staleness.sh` is the git-derived ledger

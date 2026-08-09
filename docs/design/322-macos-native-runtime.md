@@ -223,7 +223,7 @@ things have moved or need adjusting, and each one moves work.
 
 5. **`bootstrap_cmd` cannot simply "gain a workspace parameter", because its
    callers are above the backend.** The brief and
-   [#309 §2](./309-host-native-execution.md#2-the-traits-container-assumptions)
+   [#309 §2](./309-host-native-execution.md#2-the-traits-container-assumptions-method-by-method)
    both describe the rebase as a parameter on `bootstrap_cmd`
    (`crates/container/src/lib.rs`). But it is called from
    `crates/dispatcher/src/launch_queue.rs` and `crates/agent/src/claude.rs` —
@@ -610,7 +610,7 @@ it to `{task_dir}/workspace`. Three additions this document makes:
   enablement, and it is the only part of the rebase the phasing defers.
 
 The alternatives are recorded in
-[#309 §2](./309-host-native-execution.md#2-the-traits-container-assumptions)
+[#309 §2](./309-host-native-execution.md#2-the-traits-container-assumptions-method-by-method)
 and the conclusion is unchanged on macOS, with one becoming *worse*: option (ii)
 (per-task mount namespaces) is **impossible on macOS** — no per-process bind
 mounts — and macOS is the entire reason this category exists. Option (iii)

@@ -1,7 +1,7 @@
 #!/bin/sh
-# Doc-fact gate — design #415 D6 checks 1-4 and D15 check 5. Five mechanical
-# claims the docs make about THIS tree, all resolved against git and never the
-# filesystem, so the verdict cannot depend on whether the caller ran
+# Doc-fact gate — design #415 D6 checks 1-4, D15 check 5, and check 6. Six
+# mechanical claims the docs make about THIS tree, all resolved against git and
+# never the filesystem, so the verdict cannot depend on whether the caller ran
 # `cargo build` (the reason .chug/tasks/check-modules.sh's header gives for its
 # own shape):
 #
@@ -20,6 +20,10 @@
 #      while a passing mention is free anywhere, as often as an argument needs.
 #   5. The catalogue in `docs/README.md` and the tracked docs under `docs/`
 #      agree BOTH ways — no doc without a row, no row without a doc.
+#   6. A link's `#anchor` names a heading that exists — the GitHub slug of a
+#      heading in the `.md` the link targets, resolved the way a click resolves
+#      it. Nothing else in the tree checks a fragment: `doc-lint.sh` resolves the
+#      file and drops it, so renaming a heading broke every link to it silently.
 #
 # Both were rules 3 and 5 of .chug/tasks/doc-lint.sh and MOVED here whole (slice
 # S1b). What they DECIDE is unchanged — S1a fixed check 1's precision, S1c
@@ -204,7 +208,8 @@ const_index="$(mktemp)"
 job_index="$(mktemp)"
 term_index="$(mktemp)"
 catalogue_index="$(mktemp)"
-trap 'rm -f "$tracked_index" "$const_index" "$job_index" "$term_index" "$catalogue_index"' EXIT
+slug_index="$(mktemp)"
+trap 'rm -f "$tracked_index" "$const_index" "$job_index" "$term_index" "$catalogue_index" "$slug_index"' EXIT
 git ls-files >"$tracked_index" 2>/dev/null || : >"$tracked_index"
 [ -s "$tracked_index" ] || doc_facts_unrunnable \
 	"\`git ls-files\` listed nothing — check 1 has no index to resolve against."
@@ -294,12 +299,29 @@ job_merged() { # <seq>
 concepts_registry="docs/concepts.md"
 registry_findings=0
 
-# The GitHub heading slug, so a row's `#anchor` is resolved the way a reader's
-# click resolves it: lowercased, everything but `[a-z0-9 _-]` dropped (which is
-# what removes an em dash under LC_ALL=C), spaces to hyphens. A heading inside a
-# fence is a code sample and anchors nothing.
-doc_facts_anchor_resolves() { # <file> <anchor>
-	awk -v want="$2" '
+# --- The heading-slug index checks 4 and 6 resolve against --------------------
+# `<file><TAB><slug>` for every heading in every tracked doc, built once. The
+# GitHub slug, so an `#anchor` resolves the way a reader's click resolves it:
+# lowercased, everything but `[a-z0-9 _-]` dropped (which is what removes an em
+# dash — and a `§` — under LC_ALL=C), spaces to hyphens. A heading inside a fence
+# is a code sample and anchors nothing.
+#
+# Underscores are KEPT, and that is not incidental: a slugger that treats `_` as
+# markdown emphasis destroys every identifier heading in this tree
+# (`XDG_RUNTIME_DIR`, `copy_file`, `task_timeout`) and reports the links to them
+# as broken. GitHub keeps them.
+#
+# A repeated slug takes GitHub's `-1`, `-2` suffix in document order, so a doc
+# with two `### Verification` headings can be linked to twice. The counter is
+# keyed by file so no `delete` is needed — POSIX awk only specifies deleting one
+# element, and this runs under whatever awk the host has.
+#
+# ONE copy of the rule, for two readers. A second copy would be a duplication
+# finding (docs/reference/style.md Tier 1) and, worse, two answers to the same
+# click.
+doc_facts_slug_index() { # <file>...
+	awk '
+		FNR == 1 { fence = 0 }
 		/^[[:space:]]*(```|~~~)/ { fence = !fence; next }
 		fence { next }
 		/^#+[ \t]/ {
@@ -307,11 +329,50 @@ doc_facts_anchor_resolves() { # <file> <anchor>
 			sub(/^#+[ \t]+/, "", s)
 			gsub(/[^a-z0-9 _-]/, "", s)
 			gsub(/ /, "-", s)
-			if (s == want) { hit = 1; exit }
+			if (s == "") next
+			n = seen[FILENAME SUBSEP s]++
+			print FILENAME "\t" (n ? s "-" n : s)
 		}
-		END { exit(hit ? 0 : 1) }
-	' "$1"
+	' "$@"
 }
+
+doc_facts_anchor_resolves() { # <file> <anchor>
+	awk -F'\t' -v f="$1" -v want="$2" '
+		$1 == f && $2 == want { hit = 1; exit }
+		END { exit(hit ? 0 : 1) }
+	' "$slug_index"
+}
+
+# The same skip the scan loop makes with `[ -f "$f" ] || continue`, hoisted so
+# the two awk passes below can make it too: a tracked doc absent from the
+# worktree — what a plain `mv` of a doc leaves behind, and what an explicit
+# argument naming nothing is — has no content to read. awk aborts on a file it
+# cannot open, so an unfiltered list turns that documented skip into a bare
+# exit 2 with no LINTER ERROR line.
+doc_facts_present() { # <file>... -> the ones that exist, newline-separated
+	for _p in "$@"; do
+		[ -f "$_p" ] || continue
+		printf '%s\n' "$_p"
+	done
+}
+
+# Whole-tree even in `--staged` mode: a link in a staged doc points at a heading
+# in a doc this diff never touched, so a scoped index would report it broken.
+# The subshell is load-bearing — `set --` inside it must not reach the script's
+# own `$@`, which still carries `--staged` or an explicit file list.
+if [ "$emit_paths" -eq 0 ]; then
+	(
+		IFS='
+'
+		set -f
+		# shellcheck disable=SC2046 # deliberate split on git's newline-separated list
+		set -- $(awk '/\.md$/' "$tracked_index")
+		# shellcheck disable=SC2046 # same split, over the ones that exist
+		set -- $(doc_facts_present "$@")
+		set +f
+		[ "$#" -eq 0 ] || doc_facts_slug_index "$@"
+	) >"$slug_index"
+fi
 
 # One registry row: `<concept>` in the first cell, the owner as a relative
 # markdown link in the second. A row that resolves goes into the index; one that
@@ -507,6 +568,88 @@ if [ -z "$files" ]; then
 	[ "$emit_paths" -eq 1 ] || echo "check-doc-facts: no markdown to check ($mode) — nothing to do"
 	exit 0
 fi
+
+# --- Check 6: an `#anchor` names a heading that exists ------------------------
+# A markdown link carrying a `#fragment` is a claim about a heading, and it was
+# the one claim nothing checked: .chug/tasks/doc-lint.sh resolves the FILE and
+# drops the fragment, so a renamed heading broke every link to it in silence.
+# Design #415 S1b's argument decides the location — the claims are made by every
+# job type, and a `code` job renaming a heading is exactly the drift a
+# `docs`-scoped check misses.
+#
+# Only a `.md` target is judged. A fragment on a source file
+# (`crates/x.rs#L10`) is a line anchor rather than a heading, an external URL is
+# somebody else's document, and an untracked target is doc-lint's broken-link
+# finding and not this one's — each skipped in silence.
+doc_facts_anchor_scan() { # <file>...
+	awk -F'\t' '
+	function dirof(f,   d) { d = f; if (sub(/\/[^\/]*$/, "", d)) return d; return "" }
+	# Repo-relative with `.` and `..` collapsed, so the key matches `git ls-files`.
+	function norm(dir, p,   full, n, parts, i, j, out, s) {
+		full = (dir == "" ? p : dir "/" p)
+		n = split(full, parts, "/")
+		j = 0
+		for (i = 1; i <= n; i++) {
+			if (parts[i] == "" || parts[i] == ".") continue
+			if (parts[i] == "..") { if (j > 0) j--; continue }
+			out[++j] = parts[i]
+		}
+		s = ""
+		for (i = 1; i <= j; i++) s = (i == 1 ? out[i] : s "/" out[i])
+		return s
+	}
+	NR == FNR { slug[$1 SUBSEP $2] = 1; next }
+	FNR == 1 { fence = 0 }
+	/^[[:space:]]*(```|~~~)/ { fence = !fence; next }
+	fence { next }
+	{
+		line = $0
+		while (match(line, /\]\([^)]*\)/)) {
+			tgt = substr(line, RSTART + 2, RLENGTH - 3)
+			line = substr(line, RSTART + RLENGTH)
+			sub(/[ \t].*$/, "", tgt) # a `"title"` suffix; no URL carries a raw space
+			if (index(tgt, "#") == 0) continue
+			frag = tgt; sub(/^[^#]*#/, "", frag)
+			path = tgt; sub(/#.*$/, "", path)
+			if (frag == "") continue
+			if (path ~ /^[A-Za-z][A-Za-z0-9+.-]*:/ || path ~ /^\/\//) continue
+			target = (path == "" ? FILENAME : norm(dirof(FILENAME), path))
+			if (target !~ /\.md$/) continue
+			if (!((target SUBSEP tolower(frag)) in slug))
+				print FILENAME "\t" FNR "\t" target "\t" frag
+		}
+	}
+	' "$@"
+}
+
+anchor_findings=0
+
+doc_facts_anchor_gate() {
+	[ -s "$slug_index" ] || return 0
+	_out="$(
+		IFS='
+'
+		set -f
+		# shellcheck disable=SC2046 # deliberate split on the newline-separated list
+		set -- $files
+		# shellcheck disable=SC2046 # same split, over the ones that exist
+		set -- $(doc_facts_present "$@")
+		set +f
+		[ "$#" -eq 0 ] || doc_facts_anchor_scan "$slug_index" "$@"
+	)"
+	[ -n "$_out" ] || return 0
+	while IFS="$(printf '\t')" read -r _f _ln _target _frag; do
+		[ -n "$_f" ] || continue
+		# An untracked target is a broken *link*, which doc-lint owns.
+		grep -qxF "$_target" "$tracked_index" || continue
+		echo "!!! check-doc-facts: $_f:$_ln: names no heading in $_target -> #$_frag"
+		anchor_findings=$((anchor_findings + 1))
+	done <<-ANCHORS
+		$_out
+	ANCHORS
+}
+
+doc_facts_anchor_gate
 
 # --- Scan ---------------------------------------------------------------------
 # awk emits one record per candidate token so the shell can resolve it against
@@ -859,10 +1002,20 @@ if [ "$term_findings" -gt 0 ]; then
 	echo "!!!     A mention is free — only \`**Term.**\` opening a list item and \`**Term** is\`"
 	echo "!!!     opening a sentence are read as definitions, and only for a registered term."
 fi
+if [ "$anchor_findings" -gt 0 ]; then
+	echo "!!! check-doc-facts: $anchor_findings link(s) naming a heading that does not exist."
+	echo "!!!     The anchor is the GitHub slug of the heading text: lowercased, everything"
+	echo "!!!     but letters, digits, spaces, \`_\` and \`-\` dropped, spaces to hyphens — so a"
+	echo "!!!     \`§\`, an em dash and a trailing \`, method by method\` all change it. Fix the"
+	echo "!!!     link, or the heading, whichever moved. Repeated headings take GitHub's"
+	echo "!!!     \`-1\`/\`-2\` suffix in document order."
+	echo "!!!     Markers do not reach this: an anchor claims a heading, not a path, and the"
+	echo "!!!     only honest fix for a link the document contradicts is the link."
+fi
 [ "$registry_findings" -eq 0 ] || doc_facts_registry_summary
 [ "$catalogue_findings" -eq 0 ] || doc_facts_catalogue_summary
 
-_findings=$((path_findings + const_findings + slice_findings + term_findings + registry_findings + catalogue_findings))
+_findings=$((path_findings + const_findings + slice_findings + term_findings + registry_findings + catalogue_findings + anchor_findings))
 if [ "$_findings" -ne 0 ]; then
 	echo "!!!     Reproduce locally with: .chug/tasks/check-doc-facts.sh"
 	exit 1

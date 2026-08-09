@@ -37,7 +37,7 @@ argument), §5.3 (linked-origin projects), §6.6 (health), §12.1–12.4 (init,
 project creation, admin CLI, provider defaults);
 [deploy/prod/README.md](../../deploy/prod/README.md) (the manual runbook, which
 stays the fallback for every stage); [README.md](../../README.md) (whose
-disposition is decided in §[10](#10-surface-summary-and-the-disposition-of-installmd));
+disposition is decided in §[10](#10-surface-summary-and-the-disposition-of-readmemd));
 [docs/reference/crates.md](../reference/crates.md); [docs/reference/testing.md](../reference/testing.md);
 [docs/reference/style.md](../reference/style.md) (Tier 2 rule 3, "everything is bounded", which the
 runbook design leans on hard).
@@ -415,7 +415,7 @@ and the raw URL `…/main/BOOTSTRAP.md` is the shortest stable thing we can prin
 
 The name is also load-bearing in a small way: `BOOTSTRAP.md` says "this is how
 you begin", where `README.md` has come to mean "the runbook for someone who
-already has the tree". §[10](#10-surface-summary-and-the-disposition-of-installmd)
+already has the tree". §[10](#10-surface-summary-and-the-disposition-of-readmemd)
 resolves the overlap.
 
 ---

@@ -233,7 +233,7 @@ leisure.
 
 | Gate | Runs | Judges | Verdict |
 | --- | --- | --- | --- |
-| `.chug/tasks/check-doc-facts.sh` | pre-stage of **every** job, whole-tree; `--staged` in the pre-commit hook | paths, restated constants, landed-slice rows, owned definitions, the catalogue | **error** |
+| `.chug/tasks/check-doc-facts.sh` | pre-stage of **every** job, whole-tree; `--staged` in the pre-commit hook | paths, restated constants, landed-slice rows, owned definitions, the catalogue, heading anchors | **error** |
 | `.chug/tasks/check-comments.sh` | pre-stage of every job | non-doc comments, and the two-sentence cap on doc comments | **error** |
 | `.chug/tasks/doc-lint.sh` | stage 1 of `docs` and `design` jobs | markdown well-formedness, relative links, the `{seq}-{slug}.md` filename shape | **error** for those two job types |
 | `.chug/tasks/review-docs-updated.md` | evaluation of every `code` and `web` job | cross-doc state claims, behavioural claims about symbols the diff touched, a design slice landed without its head updated | **error** — an agent evaluator, so it reads and never runs |

@@ -125,3 +125,11 @@ Doc-reread: docs/spec.md
 Doc-reread: docs/implementation-notes.md
 
 Doc-reread: docs/design/308-gha-port.md
+
+Doc-reread: docs/reference/docs.md
+Doc-reread: docs/reference/style.md
+Doc-reread: docs/design/415-knowledge-architecture.md
+Doc-reread: docs/design/322-macos-native-runtime.md
+Doc-reread: docs/design/323-paste-a-prompt-onboarding.md
+Doc-reread: docs/spec.md
+Doc-reread: .chug/tasks/docs-update.md

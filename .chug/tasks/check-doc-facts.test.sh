@@ -577,7 +577,7 @@ check "a catalogue agreeing with the tree passes" 0 "$RC" "$OUT" "check-doc-fact
 catalogue_rows \
 	'| the runbooks | a prose row carrying no link |' \
 	'| [the root README](../README.md) | outside docs/ |' \
-	'| [a section](notes.md#prose) | an anchor, not a document |'
+	'| [a section](notes.md#notes) | an anchor, not a document |'
 run_catalogue
 check "a malformed catalogue row is skipped, not failed" 0 "$RC" "$OUT" \
 	"check-doc-facts: clean"
@@ -651,7 +651,128 @@ check "--emit-paths never reports a verdict" 0 "$RC" "$OUT" \
 check_absent "--emit-paths prints no finding line" 0 "$RC" "$OUT" \
 	"!!! check-doc-facts:"
 
+# --- Check 6: an `#anchor` names a heading that exists ------------------------
+# $ANCHOR owns the headings and the links to them. The slug index is whole-tree
+# even when the judged set is one file, so a cross-doc case needs both docs
+# tracked and only one of them passed.
+ANCHOR="$WORK/anchor"
+mkdir -p "$ANCHOR/docs/sub" "$ANCHOR/crates/pkg/src"
+git -C "$ANCHOR" -c init.defaultBranch=main init -q
+: > "$ANCHOR/crates/pkg/src/lib.rs"
+git -C "$ANCHOR" add crates/pkg/src/lib.rs >/dev/null 2>&1 || true
+write_anchor_doc() { # <path-under-docs> <line>...
+	name="$1"; shift
+	{ for l in "$@"; do printf '%s\n' "$l"; done; } > "$ANCHOR/docs/$name"
+	git -C "$ANCHOR" add "docs/$name" >/dev/null 2>&1 || true
+}
+run_anchor() { run_in "$ANCHOR" "$@"; }
+
+# The target doc: an identifier heading, a symbol heading, a duplicate pair, and
+# a heading inside a fence that must anchor nothing.
+write_anchor_doc a.md '# Target' '' \
+	'## 2. The trait'"'"'s container assumptions, method by method' '' 'Prose.' '' \
+	'### `XDG_RUNTIME_DIR`, answered' '' 'Prose.' '' \
+	'## Correction, 2026-08-05 — §1 already shipped' '' 'Prose.' '' \
+	'## Verification' '' 'Prose.' '' \
+	'## Verification' '' 'Prose.' '' \
+	'```' '## Not A Heading' '```'
+
+# 47. The slug drops a symbol and an em dash but KEEPS underscores, so an
+#     identifier heading is linkable. This is a regression guard with a scar: a
+#     slugger that treats `_` as emphasis reports every `XDG_RUNTIME_DIR`-style
+#     link in the tree as broken, which is a false positive in the pre-stage of
+#     every job.
+write_anchor_doc ok.md '# Links' '' \
+	'See [tail](a.md#2-the-traits-container-assumptions-method-by-method).' \
+	'See [ident](a.md#xdg_runtime_dir-answered).' \
+	'See [symbol](a.md#correction-2026-08-05--1-already-shipped).'
+run_anchor docs/ok.md
+check "resolving anchors pass, underscores kept and \`§\` dropped" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 48. A repeated heading takes GitHub's `-1` suffix in document order, so the
+#     second one is reachable and the first keeps the bare slug.
+write_anchor_doc dup.md '# Links' '' \
+	'First [one](a.md#verification), second [two](a.md#verification-1).'
+run_anchor docs/dup.md
+check "a repeated heading is linkable via the -1 suffix" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 49. The failure this check exists for: a hand-typed anchor that dropped the
+#     heading's tail. Nothing else in the tree catches it.
+write_anchor_doc truncated.md '# Links' '' \
+	'See [tail](a.md#2-the-traits-container-assumptions).'
+run_anchor docs/truncated.md
+check "a truncated anchor fails, naming the target doc" 1 "$RC" "$OUT" \
+	"names no heading in docs/a.md -> #2-the-traits-container-assumptions"
+
+# 50. Keeping a character the slug drops is the same finding, and it is how a
+#     `§` or an em dash typed into an anchor by hand goes wrong.
+write_anchor_doc symbol.md '# Links' '' \
+	'See [sym](a.md#correction-2026-08-05--§1-already-shipped).'
+run_anchor docs/symbol.md
+check "an anchor keeping a dropped symbol fails" 1 "$RC" "$OUT" \
+	"names no heading in docs/a.md"
+
+# 51. A same-file anchor resolves against its own headings.
+write_anchor_doc self.md '# Own' '' 'Jump to [there](#the-section).' '' '## The section'
+run_anchor docs/self.md
+check "a same-file anchor resolves against its own headings" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 52. A relative link out of a subdirectory is normalised before the lookup, so
+#     `../a.md` is judged as `docs/a.md` and not as a path nobody tracks.
+write_anchor_doc sub/deep.md '# Deep' '' \
+	'Up to [tail](../a.md#2-the-traits-container-assumptions-method-by-method).'
+run_anchor docs/sub/deep.md
+check "a ../ link is normalised before the lookup" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 53. A heading inside a fence is a code sample and anchors nothing.
+write_anchor_doc fenced.md '# Links' '' 'See [nope](a.md#not-a-heading).'
+run_anchor docs/fenced.md
+check "a heading inside a fence anchors nothing" 1 "$RC" "$OUT" \
+	"names no heading in docs/a.md -> #not-a-heading"
+
+# 54. THREE THINGS ARE SKIPPED IN SILENCE, because each belongs to someone else:
+#     a fragment on a source file is a line anchor, an external URL is another
+#     document, and an untracked target is doc-lint's broken-link finding.
+write_anchor_doc skipped.md '# Links' '' \
+	'Source [line](../crates/pkg/src/lib.rs#L10).' \
+	'External [page](https://example.com/x#frag).' \
+	'Untracked [doc](gone.md#anywhere).'
+run_anchor docs/skipped.md
+check "a line anchor, an external URL and an untracked target are all skipped" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 55. `--emit-paths` judges nothing, here as everywhere: doc-staleness.sh reads
+#     it for the path set and must never inherit an anchor verdict.
+run_anchor --emit-paths docs/truncated.md
+check_absent "--emit-paths does not judge an anchor" 0 "$RC" "$OUT" \
+	"names no heading"
+
+# --- A doc absent from the worktree is a skip, not a crash --------------------
+# The scan loop has always skipped one; checks 4 and 6 read the same files
+# through awk, which aborts on a file it cannot open, so they skip it too.
+
+# 56. An explicit argument naming nothing is judged as nothing — the verdict a
+#     `docs/gone.md` on the command line got before the anchor gate existed.
+run_anchor docs/gone.md
+check "an explicit path that is not there is a clean skip" 0 "$RC" "$OUT" \
+	"check-doc-facts: clean"
+
+# 57. Whole-tree with a TRACKED doc missing from the worktree — what a plain
+#     `mv` of a doc leaves behind — still judges every doc that is there.
+mv "$ANCHOR/docs/a.md" "$ANCHOR/a.md.away"
+run_anchor
+check "a tracked doc absent from the worktree does not abort the run" 1 "$RC" "$OUT" \
+	"check-doc-facts:"
+check_absent "the absent doc is skipped rather than opened" 1 "$RC" "$OUT" \
+	"cannot open"
+mv "$ANCHOR/a.md.away" "$ANCHOR/docs/a.md"
+
 # --- A prerequisite that is missing is loud, and is not a pass ----------------
+
 # 16. Outside a git checkout the check refuses to judge rather than falling back
 #     to the filesystem — exit 2, a LINTER ERROR, distinct from both verdicts.
 NONGIT="$WORK/nongit"
