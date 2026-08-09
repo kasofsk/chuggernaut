@@ -1,16 +1,24 @@
 # Design #308 — Porting beacon's GitHub Actions onto Chuggernaut
 
-Status: PROPOSED, amended 2026-07-30 (job #320), head rewritten 2026-08-09
-(job #513) — a survey whose job was to
-spawn children; all four were written and **all four** have shipped code. The
-port itself has not begun. See [Current state](#current-state).
+Status: PROPOSED, amended 2026-07-30 (job #320), corrected 2026-08-09 (job #520).
+
+A survey whose job was to spawn children; all four were written and **all four**
+have shipped code. The port itself has not begun. See
+[Current state](#current-state). The head was rewritten on 2026-08-09 by job #513,
+and again by job #520 for the operator decision that beacon is imported as a
+**platform-owned** project — which inverts phase 0b's role and is recorded as
+[A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts).
 
 The original was written against the tree at `0346a80`; the amendment against
 `00dd0dc`. **Four corrections to this doc's own claims** — one retraction, one
 overstatement, one finding it was missing entirely, one made stale by shipped
 code — **plus one added phase**: see
 [What #308 got wrong](#what-308-got-wrong), which is where a downstream reader
-should look first. Every claim about *Chuggernaut's* current behavior, at both
+should look first. A **fifth** correction was appended on 2026-08-09 and is the
+one that moves the ordering:
+[A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts).
+
+Every claim about *Chuggernaut's* current behavior, at all three
 dates, was read out of `docs/spec.md` and the source in this repo, not inferred from
 the docs; the corrections in
 [What the brief got wrong](#what-the-brief-got-wrong) are the ones the original
@@ -62,7 +70,7 @@ argument. **Phase numbers are never reassigned** — the children cite them.
 | Phase | Work | State |
 | --- | --- | --- |
 | **0** | Land this doc | **Landed** (job #308), amended by job #320 |
-| **0b** | Onboard beacon as a linked-origin project | Unknown here — the work is in the operator's and beacon's repos |
+| **0b** | **Import beacon as a platform-owned project** — a cutover, not a prerequisite ([A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts)) | Not started. The kind is decided (operator, 2026-08-09): platform-owned, with beacon's `.github/workflows/` disabled at import |
 | **1** | CI as evaluators (category B) | Unknown here — same reason |
 | **2** | Host-exec backend prototype on one node | **Landed** (job #434) as [#309](309-host-native-execution.md) P0, and now **on for one node**: `gumbo-air-0` advertises `host` and host tasks have run on it |
 | **3** | Cron (category E) | **Landed** (job #359), with (job #360) for the dispatcher half — [#310](310-scheduled-jobs.md)'s minimum useful version |
@@ -73,6 +81,29 @@ argument. **Phase numbers are never reassigned** — the children cite them.
 | **8** | Mobile and simulator jobs on host nodes (category F) | Started on both legs, and the macOS leg is **proven on the air by `mac-proof`** — `gumbo-air-0` is host-capable, `.chug/jobs/mac-proof.yaml` is the one job type declaring `mode: host`, and two of its runs (jobs #506 and #509) drove the node's Xcode and a booted iOS simulator ([#490](490-agent-work-on-a-mac.md), IMPLEMENTED). A proof merges nothing and no beacon workflow has run; see below. The Android leg is where [#367](367-android-emulator-execution.md) A1/A2 left it (jobs #374, #395), still pinned to the one node with `/dev/kvm` |
 | **9** | Job inputs → unblocks rollback | **Landed** (job #314) — [#311](311-job-inputs.md) slice A, with jobs #315–#317 and #319 |
 | **10** | Per-run placement | Answered, not scheduled — [#361](361-per-run-placement.md) found gap 10 needs no new field |
+
+### Phase 0b, after the platform-owned decision
+
+Row 0b said "Onboard beacon as a **linked-origin** project" until 2026-08-09, and
+[A5](#a5-the-missing-phase-onboarding-beacon-as-a-project) argued that kind was a
+requirement. The operator has decided otherwise: beacon is imported as a
+**platform-owned** project — the kind this repo is, where the bare repo owns
+`main` and GitHub is a force-pushed read-only mirror — with beacon's
+`.github/workflows/` **disabled** at import. A5's analysis of the linked-origin
+mode stays standing as the rejected option; what changed is which mode beacon
+gets.
+
+**The consequence is an inversion, and it is the part to read.** Linked-origin
+would have been additive and reversible, so 0b came *first* and phases 1, 5, 6
+and 8 hung off it. A platform-owned import is the **cutover**: after it the
+platform owns `main` and there is no incremental-porting window on the far side,
+so those phases are now work to be proven **before** 0b rather than work it
+unblocks. That is not a deadlock — proof job types against in-repo fixtures
+(`.chug/jobs/android-proof.yaml`, `.chug/jobs/mac-proof.yaml`,
+`.chug/jobs/gcp-proof.yaml`) already prove capability with no beacon anywhere.
+The full argument, the reason the workflows are disabled, and what it does to
+[D2](#open-decisions) are in
+[A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts).
 
 ### Phase 8's macOS leg, precisely
 
@@ -201,7 +232,7 @@ a configured cache ([A2](#a2-the-keyed-caching-gap-was-overstated)).
 | Job inputs (`CHUG_INPUT_*`) | `docs/spec.md` §1.1, §6.3, §14.2; `crates/types/src/inputs.rs`, `crates/domain/src/inputs.rs` | **Shipped and deployed** (amendment [A4](#a4-job-inputs-shipped-so-gap-1-is-retired)) — `CONFIG_SCHEMA_EPOCH` was 2 when A4 landed (`crates/types/src/version.rs` is the authority today); first consumer `.chug/jobs/rollback.yaml` |
 | Matrix / fan-out over inputs | — | Absent **by decision** ([#311](./311-job-inputs.md) Decision 7), not by omission |
 | Per-run placement (a runner chosen at launch) | — | Absent, and forbidden in the obvious shape — see [A3](#a3-beacon-already-parameterizes-placement-per-run) |
-| Linked-origin projects (external host owns `main`) | `docs/spec.md` §5.3; `crates/dispatcher/src/handlers/origin.rs`, `crates/dispatcher/tests/origin.rs` | Shipped — the mode beacon needs ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)) |
+| Linked-origin projects (external host owns `main`) | `docs/spec.md` §5.3; `crates/dispatcher/src/handlers/origin.rs`, `crates/dispatcher/tests/origin.rs` | Shipped — ~~the mode beacon needs~~ **not** the mode beacon gets: the operator chose a platform-owned import ([A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts)) |
 | OIDC issuance / JWKS endpoint | — | Absent (RS256 keypair exists, §12.1); designed as [#313](./313-workload-identity-image-builds.md) half A |
 
 ## What the brief got wrong
@@ -275,14 +306,23 @@ Three of these (1, 2, 3) delete or shrink work the brief scheduled. Four
 
 ## What #308 got wrong
 
-The same treatment, applied to this doc. **Four corrections**: one claim
-retracted outright ([A1](#a1-image-builds-do-not-dissolve-into-host-mode)), one
+The same treatment, applied to this doc. **Five corrections and one addition** —
+the fifth appended on 2026-08-09 and described at the end of this preamble. The
+original four: one claim retracted outright ([A1](#a1-image-builds-do-not-dissolve-into-host-mode)), one
 materially overstated ([A2](#a2-the-keyed-caching-gap-was-overstated)), one
 significant finding missing entirely
 ([A3](#a3-beacon-already-parameterizes-placement-per-run)), and one made stale by
 shipped code ([A4](#a4-job-inputs-shipped-so-gap-1-is-retired)). Plus **one
 addition** ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)): a phase
 the ordering never had, which every category-B and category-C port assumes.
+
+The fifth is
+[A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts): beacon
+is imported as a **platform-owned** project, which falsifies A5's central
+requirement and re-derives the ordering table's `Depends on` column. It belongs
+to this list, but it is written as a top-level section at the **end** of the doc
+— the body is append-only, and a correction that arrived after the sections
+below cannot be spliced in among them.
 
 Corrections are recorded here rather than by rewriting the sections they touch,
 so a reader who cited a section can see what moved; each affected section carries
@@ -456,6 +496,13 @@ forecast of twelve near-identical deploy job types is corrected in place — one
 doc that reads as "inputs are absent" is stale, not a live constraint.
 
 ### A5. The missing phase: onboarding beacon as a project
+
+> **Superseded in part, 2026-08-09** by
+> [A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts): the
+> phase is real and stays, but beacon is imported **platform-owned**, not
+> linked-origin. Everything below about the linked-origin mode is accurate and
+> is left standing as the rejected option; what is false is that beacon "must be
+> the other kind", and — per A6 — that 0b comes first.
 
 No phase in the [ordering](#ordering) covers the prerequisite every category-B
 and category-C port silently assumes: **beacon has to be a Chuggernaut project
@@ -1017,7 +1064,7 @@ numbers — see [What #308 got wrong](#what-308-got-wrong)). Two rows are new (1
 | 5 | **Artifacts** | `crates/store/src/artifacts.rs` holds transcripts, stdout and attachments; there is no inter-job binary handoff (Appendix: Deferred, "Binary artifact store") |
 | 7 | **Outbound webhooks** | `crates/webhooks/src/lib.rs` is a stub; blocks `sentry-resolve` |
 | 9 | **Node-level exclusive resources** | Only bites once host nodes run device-bound work (H.5); specced as #309 §5b / P4, where `placement.leases` is shown to force the epoch bump on its own |
-| 8 | **Auto-merge vs human-merge default** | A policy choice, not a mechanism gap (correction 2) — and narrower again for a linked-origin project, whose release PR is already a human checkpoint ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)) |
+| 8 | **Auto-merge vs human-merge default** | A policy choice, not a mechanism gap (correction 2) — ~~and narrower again for a linked-origin project, whose release PR is already a human checkpoint ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project))~~ **that narrowing lapsed**: beacon is imported platform-owned and has no release PR ([A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts)) |
 | 4 | **Keyed caching** | **Mostly folded into gap 3.** Exactly one beacon workflow keys a cache (`creator/node_modules`); gradle/pub/buildx warmth is implicit host state, not a configured cache ([A2](#a2-the-keyed-caching-gap-was-overstated)). The remnant is one namespaced persistent directory in the worker — #309 §9, no platform change |
 | 1 | **Job inputs / parameterization** | **Retired — landed and deployed** ([A4](#a4-job-inputs-shipped-so-gap-1-is-retired)): epoch 2, `.chug/jobs/rollback.yaml` is the first consumer, the UI renders declared inputs. Kept at its number because siblings cite "Gap 1 of #308"; matrix / fan-out stays excluded by decision (#311 Decision 7) |
 
@@ -1106,34 +1153,50 @@ gating each job onto `integration`, not about gating code into the repo of recor
 — a smaller decision than the original framing, and one that can be taken per job
 type after phase 0b rather than before it.
 
+**That narrowing lapsed on 2026-08-09.** It rested entirely on the release PR a
+linked-origin project gets, and a platform-owned beacon has none: a squash-merge
+lands on the platform's `main` and the mirror publishes it. D2 is back at its
+original width for beacon — see
+[A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts), which
+also applies to gap 8's row in [Gaps, ranked](#gaps-ranked).
+
 ## Ordering
 
 Not a commitment — a dependency reading. Amended 2026-07-30; **phase numbers are
 not reassigned** (children cite them), so the new project-onboarding phase is
-**0b** and the new open question is 10.
+**0b** and the new open question is 10. The `Depends on` column was re-derived on
+2026-08-09 for the platform-owned import decision — every edge into 0b reversed —
+per [A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts).
 
 | Phase | Work | Depends on |
 | --- | --- | --- |
 | 0 | Land this doc | — |
-| 0b | **Onboard beacon as a linked-origin project** (§5.3) — origin secrets, `admin project link`, seeded `.chug/` config ([A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)) | — |
-| 1 | CI as evaluators (category B) | 0b |
+| 0b | ~~Onboard beacon as a linked-origin project (§5.3)~~ → **Import beacon as a platform-owned project** — `chug-install.sh project-import`, a per-project mirror agent, `.github/workflows/` disabled ([A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts)) | ~~—~~ **1, 5, 6, 8 proven first**: it is a cutover, and nothing ports incrementally after it (A6) |
+| 1 | CI as evaluators (category B) | ~~0b~~ — nothing; it **precedes** 0b (A6) |
 | 2 | Host-exec backend prototype on one node (H; [#309](./309-host-native-execution.md) P0) | — |
 | 3 | Cron (category E; [#310](./310-scheduled-jobs.md)) | — |
 | 4 | OIDC issuer + JWKS + WIF provider ([#313](./313-workload-identity-image-builds.md) half A) | infra exposure |
-| 5 | Deploys, forward-only (category C) | 0b, 4 |
-| 6 | Image build and push (category D; #313 half B) | 0b, 4, **plus an operator-provisioned registry** — **not 2**, per [A1](#a1-image-builds-do-not-dissolve-into-host-mode) |
+| 5 | Deploys, forward-only (category C) | ~~0b,~~ 4 — and it **precedes** 0b (A6) |
+| 6 | Image build and push (category D; #313 half B) | ~~0b,~~ 4, **plus an operator-provisioned registry** — **not 2**, per [A1](#a1-image-builds-do-not-dissolve-into-host-mode); and it **precedes** 0b (A6) |
 | 7 | Node-level exclusive resources (H.5; #309 §5b / P4) | 2 |
-| 8 | Mobile and simulator jobs on host nodes (F) | 0b, 2, 3, 7 |
+| 8 | Mobile and simulator jobs on host nodes (F) | ~~0b,~~ 2, 3, 7 — and it **precedes** 0b (A6) |
 | 9 | Job inputs → unblocks rollback (**landed**, [#311](./311-job-inputs.md) slice A; jobs #314–#317, #319) | — |
 | 10 | Per-run placement — **design first**, an open question, not scheduled work ([A3](#a3-beacon-already-parameterizes-placement-per-run)) | — |
 
-Phases 0b, 2 and 3 are mutually independent, and 9 is done. Phase 1 and every
+~~Phases 0b, 2 and 3 are mutually independent, and 9 is done. Phase 1 and every
 category-B/C port now hang off 0b, which is the one thing in this table that
 cannot be prototyped around: without a project there is nowhere for beacon's
-`.chug/` config to live.
+`.chug/` config to live.~~
 
-**Phase 0b is the cheapest and the most blocking** — it invents nothing (§5.3
-ships) and unblocks the two largest categories.
+~~**Phase 0b is the cheapest and the most blocking** — it invents nothing (§5.3
+ships) and unblocks the two largest categories.~~
+
+**Both paragraphs are superseded**
+([A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts)). 2, 3
+and 9 are unaffected; 0b is neither independent nor first. It is the cutover, so
+it is the *last* of 1/5/6/8's chain rather than their precondition, and it is the
+most expensive phase in the table rather than the cheapest — the analysis above
+priced the linked-origin mode, which is not the mode beacon gets.
 
 **Phase 1 is the highest value for zero new capability** — it uses only
 mechanisms that already ship.
@@ -1169,8 +1232,170 @@ boring, cache-heavy build instead.
   deliberately stops there: it is a `Job`-record contract change and wants its own
   doc.
 - The concrete phase-0b sequence for beacon (which job types first, what beacon's
-  `.chug/tasks/ci.sh` legs are, what `origin/release` cadence the project wants).
-  [A5](#a5-the-missing-phase-onboarding-beacon-as-a-project) fixes only that the
-  project must be linked-origin and that the phase exists.
+  `.chug/tasks/ci.sh` legs are, ~~what `origin/release` cadence the project
+  wants~~ — the cadence question goes with the project kind, since a
+  platform-owned project has no `origin/release` at all).
+  [A5](#a5-the-missing-phase-onboarding-beacon-as-a-project) fixes only ~~that the
+  project must be linked-origin and~~ that the phase exists; the kind is
+  **platform-owned**, and 0b is the cutover rather than the prerequisite
+  ([A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts)).
 - Whether beacon's non-CI GHA usage (release notes, label automation, anything
   the survey classified into A) is worth reproducing at all, versus dropping.
+
+## A6. Beacon imports as a platform-owned project, and phase 0b inverts
+
+*Correction — 2026-08-09, job #520. Falsifies
+[A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)'s central requirement
+and reverses every dependency edge into phase 0b. The Chuggernaut half is
+verified against this tree at this date; the decision itself is the operator's,
+recorded here because it overturns a premise this doc states as a requirement.*
+
+### The decision
+
+Taken by the operator on 2026-08-09, in two parts:
+
+1. **beacon is imported as a platform-owned (chug-managed) project** — the same
+   kind as `kasofsk/chuggernaut`, where the platform's bare repo owns `main` and
+   GitHub is a read-only mirror force-pushed by a launchd agent
+   (`deploy/prod/README.md` §3). **Not** a linked-origin project.
+2. **beacon's GitHub Actions workflows are disabled at import** — disabled, not
+   deleted.
+
+### What it falsifies
+
+[A5](#a5-the-missing-phase-onboarding-beacon-as-a-project) states the opposite as
+a requirement — "beacon must be the other kind: a **linked-origin** project …
+GitHub keeps owning `main` and chuggernaut never pushes it" — and the
+[ordering](#ordering)'s phase 0b read "Onboard beacon as a linked-origin
+project", with phases 1, 5, 6 and 8 depending on it and the prose calling 0b "the
+cheapest and the most blocking".
+
+**The mechanism A5 describes is not what is wrong with it.** Linked-origin ships
+and A5's account of it is accurate: the `CHUG_ORIGIN_DEPLOY_KEY` /
+`CHUG_ORIGIN_PAT` secrets, `chuggernaut admin project link`, the chuggernaut-owned
+`integration` branch, the `chug/release-{n}` PR (`docs/spec.md` §5.3;
+`crates/dispatcher/src/handlers/origin.rs`). That analysis is left standing as the
+**rejected option**. What is false is that beacon *must* be that kind, and
+therefore everything the ordering derived from it.
+
+The prerequisites change with the kind. A platform-owned import needs none of
+A5's origin secrets — `deploy/prod/README.md` §3 already records them as dead for
+this project — and the push credential is an SSH **deploy key** installed out of
+band by the operator, not a project secret
+(`deploy/prod/chug-mirror-install.sh`: "no secret is stored here"). A5's last
+bullet is unaffected: fleet capacity for a second project is the same problem
+whichever kind beacon is.
+
+### The consequence: 0b's role inverts
+
+This is the substance of the correction, and it is a sequencing claim, not a
+vocabulary one.
+
+**Linked-origin would have been cheap, additive and reversible.** GitHub keeps
+owning `main`, beacon keeps building on Actions, and the platform holds an
+`integration` branch beside them. beacon's `.chug/` config could land there and
+workflows could be ported **one at a time against real code**, with the still-live
+Actions run as the control and an unported workflow costing nothing. Undoing it is
+deleting a project.
+
+**A platform-owned import is the cutover.** After it the platform owns `main`,
+GitHub is a mirror the platform force-pushes over, and — per the decision's second
+half — beacon's Actions are off. There is no dual-running window on the far side:
+the day of the import, everything beacon's CI/CD does either runs on Chuggernaut
+or does not run.
+
+So the dependency reading flips. Phases 1 (category B), 5 (category C), 6
+(category D) and 8 (category F) are no longer work that 0b unblocks; they are work
+that must be **proven before** 0b, because there is no incremental-porting window
+afterwards. 0b stops being the cheapest and most blocking phase and becomes the
+most expensive one — the point of no return, which the table now reads as "1, 5,
+6, 8 proven first".
+
+### Why that is not a deadlock
+
+A reader who sees only "0b inverted" will conclude the ports are blocked on a
+project that is blocked on the ports. They are not, and the reason is already
+routine in this repo: **a job type is proven against fixtures and proof job types
+here, with no beacon anywhere.**
+
+- `.chug/jobs/android-proof.yaml` boots the node's Android emulator under KVM and
+  runs a real `flutter build apk --debug` of `fixtures/mobile` — phase 8's Android
+  leg aimed at a stock in-repo fixture rather than at beacon
+  ([#367](367-android-emulator-execution.md) A1/A2, jobs #374 and #395; phase 8's
+  row in [Current state](#current-state) is where that leg stands).
+- `.chug/jobs/mac-proof.yaml` did the same for the macOS leg on `gumbo-air-0`,
+  driving the node's Xcode and a booted iOS simulator (jobs #506 and #509,
+  [#490](490-agent-work-on-a-mac.md)).
+- `.chug/jobs/gcp-proof.yaml` climbs [#313](313-workload-identity-image-builds.md)
+  half A's ladder against chuggernaut's own GCP project — phase 4's and phase 6's
+  auth half, with no consumer repo involved.
+
+All three declare `wrap_up: type: none`, so a proof merges nothing and gates
+nothing: the cost of being wrong is one report. That is the shape the pre-cutover
+work takes for categories B, C, D and F — prove the *capability* and the shape of
+the port here, then import.
+
+**What a proof cannot cover, stated plainly.** A fixture proves the platform can
+do the thing; it does not prove beacon's own `.chug/` config is right, because a
+job type in beacon's repo does nothing until beacon is a project. Under
+linked-origin that gap closed incrementally after 0b; under a platform-owned
+import the first exercise of beacon's config happens after `main` has moved. That
+residual risk is the price of the decision, and how to rehearse the cutover — a
+throwaway platform-owned import of a beacon copy is the obvious candidate — is an
+operator question this doc does not decide.
+
+### Why the workflows are disabled
+
+Not tidiness — a collision.
+
+**A force-push still fires `push`-triggered workflows.** The mirror is a launchd
+agent running `git push <remote> main:main --force-with-lease` on an interval
+(300s by default — `deploy/prod/chug-mirror-install.sh`; every five minutes for
+this repo, `deploy/prod/README.md` §3). GitHub delivers a `push` event for a
+forced update like any other, so every mirrored push would trigger whatever
+beacon's workflows trigger on. Left alone they would keep running against the
+mirror, duplicating or racing whatever Chuggernaut just did.
+
+**Deploys are the sharp case, and this doc already documented why.**
+[Category C](#c-deploys-16-workflows) records that beacon has **no concurrency
+guard on any deploy workflow**, so two dispatches can race the same VM image-tag
+metadata; the single-writer dispatcher (`docs/spec.md` §3.1) removes that race for
+free — *within* Chuggernaut. Two systems deploying is the same hazard with a
+second driver the dispatcher cannot see, and no amount of single-writer discipline
+on this side helps.
+
+**Disabled, not deleted.** The workflow files stay in beacon's tree. They are the
+specification each port is checked against — this doc's entire category map is a
+reading of them, and phases 1 and 5 are re-implementations that need something to
+be diffed against. Deleting them destroys the reference in the middle of the port,
+and re-enabling one is how a partial rollback would work.
+
+**How "disabled" is achieved is an open operator step.** Nothing in this tree does
+it. `deploy/prod/chug-install.sh project-import` creates the project, pushes the
+history in as `main` and installs the per-project mirror agent
+(`deploy/prod/chug-mirror-install.sh`), and neither script touches beacon's
+workflow directory; `.claude/skills/chug-install/SKILL.md` — the documented path
+for importing an existing GitHub repo as a platform-owned project, which is worth
+reading before 0b — covers the deploy-key step and says nothing about workflows
+either. So this is an out-of-band action on the GitHub side, to be named in the
+import runbook rather than invented here.
+
+### What else moves
+
+- **[D2](#open-decisions) re-widens.** A5 narrowed it on the strength of the
+  release PR: for a linked-origin project the merge reaching GitHub `main` is a PR
+  a human merges, so an operator checkpoint came for free. A platform-owned beacon
+  has no release PR — a squash-merge lands on the platform's `main` and the mirror
+  publishes it on the next tick. So beacon's D2 is back at its original width:
+  whether a human gates each job, answerable only by a `human` evaluator at the
+  highest stage (correction 2). The [gap 8](#gaps-ranked) row's "narrower again for
+  a linked-origin project" lapses with it.
+- **A commit becomes a publication.** `CLAUDE.md` records that for this repo,
+  whose mirror is public and force-pushed every five minutes. Whether beacon's
+  GitHub repo is public is a beacon fact this tree cannot check — but the shape is
+  the same, so beacon's ignore rules and secret hygiene become a disclosure
+  boundary at import, not afterwards.
+- **Nothing else in the ordering changes.** Phases 2, 3 and 4 never depended on
+  0b; 7 depends on 2; 9 is landed; 10 is unscheduled by decision, and
+  [#361](361-per-run-placement.md) already answered "is this needed before the
+  beacon import?" with no — an answer that does not turn on the project kind.
