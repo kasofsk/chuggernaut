@@ -1,6 +1,6 @@
 # Design — agent work on a Mac
 
-Status: IMPLEMENTED — slices 0–6 landed in jobs #491–#510, slice 6 run on the air; D6 re-opened by M5, M7 at two samples.
+Status: IMPLEMENTED — slices 0–6 landed in jobs #491–#510; D6 amended in job #512, its sweep slice open; M7 at two samples.
 
 Written against the tree at `d556a6c` (job #489's `code` merge, the last commit
 touching source before this branch): every claim below was read out of the
@@ -37,20 +37,26 @@ correction](#correction--2026-08-08-job-494-slice-2-landed-and-how-m6-gets-answe
 whose precondition — a deploy carrying slice 1 — is now met, so what it wants is a
 population to count.
 
-**Two decisions do not close with the slices.**
+**D6 is amended and closed. M7 is not.**
 
 - **[D6](#d6--credential-lifetime-is-unchanged-in-mechanism-longer-in-duration) is
-  false as stated and is an open decision.** It was already amended once, in
-  slice 5, because the teardown it said to keep would have deleted every host
-  transcript before the harvest could read it, so it now spares the CLI's own
-  config directory with the secrets half unchanged ([the job #497
-  correction](#correction--2026-08-08-job-497-d6-amended-the-teardown-spared-the-clis-own-tree)).
+  amended a second time and closed** ([the job #512
+  correction](#correction--2026-08-09-job-512-d6-amended-the-premise-is-false-the-guarantee-holds-and-the-teardown-grows-by-one-path)).
+  Its first amendment was slice 5's, because the teardown it said to keep would
+  have deleted every host transcript before the harvest could read it, so it
+  spares the CLI's own config directory with the secrets half unchanged ([the job
+  #497 correction](#correction--2026-08-08-job-497-d6-amended-the-teardown-spared-the-clis-own-tree)).
   Its remaining premise — that the CLI confines itself to `CLAUDE_CONFIG_DIR` —
   is what slice 6 measured under an authenticated CLI running as the daemon's
-  user, and there is exactly one attributable write outside it, identical on both
-  runs and accreting across tasks. The M5 row's own "Teardown grows, or the
-  daemon user does" is the choice, and slice 6 gives it a subject rather than
-  making it.
+  user, and it is **false**: one directory, the CLI's own MCP log tree under the
+  daemon user's cache, outlives the task and accretes across tasks. **The
+  guarantee that premise was holding up survives anyway** — nothing in that
+  residue is a credential, and the injected tree is still deleted the moment the
+  command returns — so D6 keeps its decision and grows its teardown by exactly
+  that one path. The M5 row's own "Teardown grows, or the daemon user does" is
+  resolved in favour of the first, with the second rejected on the tree rather
+  than left hanging; [slice 7](#slices) is the `code` job that lands the sweep and
+  is the only slice still open.
 - **[M7](#what-must-be-measured-on-the-air-first) has two samples and no
   verdict.** Simulator state the first task left made the second **cheaper**, not
   disturbed; two observations of "did not disturb" are not "cannot disturb", and
@@ -744,6 +750,7 @@ different decision on the other side of a "no".
 | **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent — **and put the CLI on that `PATH`**, which M3 says it is not | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump; `AGENT_PATH`/`WORKER_PATH` in `deploy/prod/install-worker-launchd.sh` | 0 (M3), 3 | **Landed** (job #496) |
 | **5** | `code` | D5: `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` test becomes a launch-time capability test; `validate_host_serves_commands_only` lifts | `HostBackend::admit`; spec §1.1's host row | 4 | **Landed** (job #497) |
 | **6** | `code` | The first agent host task actually run on `gumbo-air-0`, with the transcript resolved and harvested end to end; **M5's authenticated residual and M7 measured under the daemon** | The row's "none — this is the confirmation" was wrong twice over, and so was its promise that M5 and M7 would be *settled*: job #502 built the config half it said did not exist, and settling M7 needs two host tasks rather than one. What ran is two `mac-proof` jobs on the air, green end to end on the second, with two launch-blocking defects found and fixed between them; **M5's residual is measured and D6 is re-opened rather than settled, and M7 has two samples and no verdict** | 5 | **Landed** (job #510) — the runs are jobs #506 and #509, recorded in [the correction below](#correction--2026-08-09-job-510-slice-6-ran-what-two-host-tasks-on-the-air-measured); this row and the head are the deliverable a `mac-proof` job cannot carry, since its `wrap_up` is `type: none` and it merges nothing |
+| **7** | `code` | [D6's second amendment](#correction--2026-08-09-job-512-d6-amended-the-premise-is-false-the-guarantee-holds-and-the-teardown-grows-by-one-path): a host task's teardown reclaims the agent CLI's own MCP-log subtree for **that task**, located by **listing** the cache root and matching the task directory's own name — never by computing the CLI's slug | Held to `crates/worker/src/nix.rs`'s reaper charter — it leaks disk rather than ever failing a job — so an absent, unreadable or undeletable subtree is logged and skipped, and it never contributes to `remove`'s failure list. Only a subtree keyed under **this** task's directory; the node's unrelated ones (an actions-runner's, dated June) are untouched. Bounded in entries examined per pass | 6 | Open — this job amends the decision, the sweep is its own `code` job |
 
 Slice 6 was not ceremony, and neither was slice 0. Every decision above rested on
 reading the tree until slice 6 ran it, and the first attempt was refused before
@@ -1401,3 +1408,216 @@ five slices had ever launched a host task. Each had been in the tree for slices;
 each surfaced in the first second of an attempted launch. That is the argument
 [the slice table](#slices) makes for slice 6 existing, and it is now evidence
 rather than a claim.
+
+## Correction — 2026-08-09, job #512 (D6 amended: the premise is false, the guarantee holds, and the teardown grows by one path)
+
+Appended by the `design` job that closes
+[D6](#d6--credential-lifetime-is-unchanged-in-mechanism-longer-in-duration).
+Nothing above is edited except the head and one new row in [the slice
+table](#slices). The measurement is jobs #506's and #509's, recorded in
+[the job #510 correction](#correction--2026-08-09-job-510-slice-6-ran-what-two-host-tasks-on-the-air-measured)
+and re-inspected on `gumbo-air-0` on 2026-08-09 as counts and file names only,
+with no values read; every code citation below was read out of the tree at
+`fbe42e1` while writing this. No decision other than D6 is touched: D1–D5 and D7
+stand as written, and [M7](#m7--two-samples-and-deliberately-no-verdict) keeps
+its two samples and its absence of a verdict.
+
+### Both halves, and they have to be said together
+
+D6 names its own premise and marks it unmeasured:
+
+> It assumes the agent CLI confines itself to `CLAUDE_CONFIG_DIR`. In a container
+> that assumption is free — anything it wrote elsewhere died with the container.
+> On a host there is no such boundary.
+
+**The premise is false.** Two authenticated agent host tasks under the daemon's
+own user each made exactly one attributable write outside `CLAUDE_CONFIG_DIR`,
+identical on both runs: the CLI's own MCP log tree under the daemon user's
+`Library/Caches` <!-- runtime -->, one `.jsonl` per session under a directory
+named for this platform's channel server. It **accretes** — #509 found #506's
+subtree still sitting beside its own — and nothing on the node reclaims either.
+
+**The guarantee that premise was holding up is intact.** D6 bounds the lifetime
+of *credentials*, and no credential-shaped content is in the residue. The
+injected tree is still emptied by the task's own wrapper the moment the command
+returns and re-emptied by the daemon's reaper (`supervised_cmd` and
+`reclaim_credentials`, `crates/container/src/host.rs`); the login keychain was
+not written, across an mtime check and nine attribute-only service probes, which
+is what `Core::inject_platform_agent_secrets`
+(`crates/dispatcher/src/exec.rs`) predicts — a token delivered as an environment
+variable gives a keychain nothing to store.
+
+**Saying only the second half is how a design rots.** A decision whose stated
+premise turned out false but whose guarantee survives should say exactly that,
+out loud, rather than being quietly re-derived on the strength of the conclusion
+it happened to reach. The premise is what a later reader would have generalised
+from — "the CLI stays inside its config directory" is a sentence someone would
+lean on when adding the next host-mode surface — and it is the part that must be
+withdrawn by name.
+
+### What is in the residue, and why "it is only logs" is not the argument
+
+Inspected on the node, counts and names only:
+
+| | |
+| --- | --- |
+| whole cache | **68K**, four subtrees, two of them left by host tasks |
+| the subtree key | the task's own workspace path, so two tasks never share one |
+| `sk-ant`, `CLAUDE_CODE_OAUTH_TOKEN`, `Bearer `, `creds`, `PRIVATE KEY`, `nats://` | **zero** files each |
+
+The tempting close is "MCP logs carry no credentials, so nothing that matters
+outlives the task". **Refuse it**, on two grounds.
+
+- It is a claim about *content at one moment*, and the thing being decided is a
+  *property of the system*. An MCP log is a record of traffic, and the traffic on
+  this transport is the platform's own: `update_status` and `submit_result`
+  carried a work summary through it on both runs. Nothing stops a future tool
+  from carrying a diff, a file or a project's own text over the same channel, and
+  when one does, the sweep either already exists or is written under time
+  pressure after somebody notices.
+- "Harmless" is not a bound. The subtree grows once per task and nothing reclaims
+  it, which is the unbounded-and-quiet shape [`docs/reference/style.md`](../reference/style.md)
+  Tier 2 rule 3 refuses on its own terms, independently of what the bytes say.
+
+So the absence of credentials is what makes this an **amendment** rather than an
+incident. It is not what makes the sweep optional. The property D6 owns is *what
+outlives a task*, and one directory does.
+
+### The M5 fork, resolved: teardown grows, the daemon user does not
+
+M5's row wrote the choice as "Teardown grows, or the daemon user does". The
+second is rejected, and on the tree rather than on taste:
+
+1. **The daemon inhabits a domain a per-task user cannot.** The macOS worker
+   daemon is a launchd agent in the **login user's GUI domain**
+   ([#440](./440-native-worker-daemon.md) D2); `deploy/prod/install-worker-launchd.sh`
+   bootstraps the plist into `gui/$(id -u)` literally, and that domain is how the
+   native conversion works at all. A per-task user has no such session to be
+   bootstrapped into — and [#322](./322-macos-native-runtime.md)'s whole premise
+   is a task reaching the login user's Xcode, simulators and provisioning.
+   Isolating the user isolates the task from the machine it exists to drive.
+2. **There is no concurrency for a second user to isolate.** `enforce_host_capacity`
+   (`crates/worker/src/daemon.rs`) refuses to boot a host-capable node whose
+   slots and slot ceiling are not both 1 — [#309](./309-host-native-execution.md)
+   §2 option (iii), kept by [D4](#d4--one-host-task-per-node-stays). One host task
+   runs at a time, so the only task a second user could separate this one from is
+   its own **predecessor**, which is what a teardown does at a fraction of the
+   cost.
+
+A weaker version of the same move — leave the user alone and give the task its
+own `HOME` — is rejected for a third reason on top of both of those. `floor_env`
+(`crates/container/src/host.rs`) carries exactly `PATH` and `HOME` from the
+daemon into a host task, so this is nearly a one-line change, and that is
+precisely what makes it dangerous: it relocates **every** tool's per-user state
+rather than the one directory that was measured. CoreSimulator keeps its device
+set under the user's home, so a per-task `HOME` delivers
+[#322](./322-macos-native-runtime.md) §5's per-task device set as a side effect —
+the thing [D4](#d4--one-host-task-per-node-stays) defers deliberately — and takes
+the operator-provisioned simulators with it. It is also unmeasured: on macOS a
+process's home directory is not always the environment's `HOME`, so the change
+could relocate the toolchain and leave the cache exactly where it is.
+
+### Where the subtree is located, and why it is listed rather than computed
+
+The constraint that shapes the slice: it must remove **only** the subtree keyed
+by this task's own workspace path. The node's cache also holds subtrees belonging
+to other tools — one from a `beacon` actions-runner, dated June — and a sweep
+that took those would be deleting another tool's state.
+
+The key is the CLI's slugification of the **resolved realpath** of its cwd, which
+[the slice 0 correction](#a-fourth-measurement-row-the-slug-is-of-the-resolved-realpath)
+measured directly: a cwd under `/tmp` produced a key naming `/private/tmp`. So
+"compute the name" is [D1](#d1--the-transcript-is-resolved-by-session-id-not-by-a-computed-path)'s
+candidate 1 arriving in a second place, and it inherits every objection D1 made
+plus the realpath finding that turned that rejection from fragility into
+correctness. Three shapes were weighed.
+
+1. **The worker computes the slug.** Canonicalize `{task_dir}/workspace`, apply
+   the character rule, remove that one name. Feasible — `std::fs::canonicalize`
+   supplies the realpath half a shell slugifier lacks. Rejected twice over. It
+   re-adopts in a quieter place the dependency D1 spent a decision removing: a
+   wrong slug removes nothing, and "removed nothing" is indistinguishable from
+   "the CLI wrote nothing", so the failure is silent in exactly the way this
+   document exists to prevent. And it is **incomplete today**, not only
+   tomorrow — D1's candidate 3 was falsified by a second cwd inside one config
+   dir producing a second directory, and the cache is keyed the same way, so a
+   computed single name leaves behind every subtree but one.
+2. **The wrapper does it in shell**, beside the `find` that already empties the
+   credential tree. It is the tightest possible moment and it is where the
+   existing teardown lives. Rejected: the wrapper is one `sh -c` string, and the
+   construct this needs there is a glob-driven `rm -rf` — the
+   highest-consequence line in `crates/container/src/host.rs`, written in the one
+   language where the containment check is hardest to make and where
+   [`docs/reference/style.md`](../reference/style.md)'s own shell-quoting rule
+   exists because a line can mean two things in two shells. It also does nothing
+   when the wrapper is killed, which is the exact gap `reclaim_credentials` was
+   written to cover.
+3. **The worker lists the cache root and matches on the task directory's own
+   name.** Adopted.
+
+**Why 3 is right and not merely the survivor**, which is D1's argument reaching
+the same place by the same route. A host task directory is named from
+`TASK_PREFIX` and two hex fields (`HostBackend::launch`,
+`crates/container/src/host.rs`) — every character alphanumeric or `-`, so it
+survives *any* character-mapping slugifier unchanged and appears verbatim inside
+the key. The predicate is therefore "an immediate child of the cache root whose
+name contains this task's directory name", and it relies on nothing about the
+prefix, the realpath, the leading slash or how many dashes fall where. It matches
+on a token **the platform itself supplies**, which is the same distinction D1
+drew between depending on a tool's output and depending on its input, and it
+covers the multi-cwd case candidate 1 misses, since every cwd inside the task
+directory yields a key containing that name.
+
+Two costs, stated rather than discovered later:
+
+- It still assumes alphanumerics survive slugification. If the CLI moved to
+  hashing its key, the predicate matches nothing and the residue accretes as it
+  does today — a leak, logged, not a wrong deletion. That asymmetry is the reason
+  for the shape: a miss leaks disk, a false match deletes another tool's state,
+  and the predicate is chosen so failure lands on the first.
+- A cwd **outside** the task directory produces a key this predicate deliberately
+  does not match, because such a subtree is not keyed to the task and may be
+  shared with something else. That is residue this sweep does not bound, and it
+  is named here because M5's whole finding was a residue nobody had looked for.
+
+### Where it runs, and the charter it is held to
+
+Beside `reclaim_credentials` in `spawn_reaper` (`crates/container/src/host.rs`),
+which is the daemon's own repeat of the wrapper's teardown and fires when the
+wrapper exits — the same moment the credential tree is emptied, and a moment that
+arrives whether or not the dispatcher ever calls `remove`. And again from
+`remove`, so a daemon restarted between the two still reclaims the subtree when
+the task directory goes.
+
+Its charter is the nix stale-root reaper's, quoted because the sentence is
+already in the tree: it "leaks disk rather than ever failing a job"
+(`crates/worker/src/nix.rs`). A cache root that does not exist is a skip; an
+unreadable directory is a warning and zero removed; a removal that fails is a
+warning and the next task's is still attempted. **It never contributes to
+`remove`'s failure list** — that strictness exists for the 5–10 GB `target/`
+nothing else on the node reclaims ([#309](./309-host-native-execution.md) §2(c)),
+and borrowing it for a 68K log tree would trade a bounded leak for a failed task.
+The pass is bounded in entries examined, the way `crates/worker/src/nix.rs`'s is.
+
+### What this does not change, and the trigger it sharpens
+
+D6 is otherwise as written and as amended in
+[job #497](#correction--2026-08-08-job-497-d6-amended-the-teardown-spared-the-clis-own-tree):
+no rotation, the injected tree deleted at return, `AGENT_STATE_DIR` spared for
+the harvest that runs after the process is gone.
+
+D6's revisit trigger — *"Revisit if host tasks ever run unattended on a shared
+node, which D4 currently prevents"* — **stays**, and the payload point above is
+what sharpens it. The sweep bounds how long the residue sits on the node; the
+trigger is about who else can read it while it is there. An MCP log carrying
+request payloads on a node one operator uses is a different exposure from the
+same log on a node several projects share, and that is a decision about
+isolation rather than about lifetime. The sweep does not retire it and must not
+be read as having done so.
+
+One cost of the sweep, recorded because it is the instrument that produced this
+correction: it deletes the trail an operator would read when debugging a host
+task's MCP transport, and after it lands that trail has to be caught on the node
+while the task is running. Accepted — the log is not harvested, so it was never
+readable from the UI in the first place, and a debugging convenience is not a
+reason to leave an unbounded accretion on a machine.
