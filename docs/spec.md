@@ -1315,6 +1315,7 @@ Running agent/eval **containers are not stopped** — they keep running and are 
 ```
 JOB_ID          42
 JOB_PROJECT     acme/api
+JOB_TYPE        code              # the job type's name; the second half of the (project, job type) identity a node-side grant matches on
 JOB_BRANCH      job/42
 JOB_SHA         4b84d25...        # the job branch's commit at launch; absent until the branch exists (§3.1 project toolchains)
 BASE_BRANCH     main
@@ -1337,6 +1338,7 @@ CHUG_INPUT_SHA  4f9c1ab
 ```
 JOB_ID          42
 JOB_PROJECT     acme/api
+JOB_TYPE        code              # the job type's name (§3.1 node-side grants)
 JOB_BRANCH      job/42
 JOB_SHA         4b84d25...        # the job branch's commit at launch (§3.1 project toolchains)
 BASE_BRANCH     main
@@ -1354,7 +1356,7 @@ RUST_EDITION    2021
 CHUG_INPUT_SHA  4f9c1ab
 ```
 
-**The dispatcher-composed stamps (`JOB_*`) are reserved.** `JOB_ID`, `JOB_PROJECT`, `JOB_BRANCH`, `JOB_SHA` and `JOB_TASK_ID` are composed by the dispatcher and carry the launch's identity; the `JOB_` prefix is **reserved** for them exactly as `CHUG_` is (§5.3), so declaring a `JOB_`-prefixed **secret or var** in a job type is a release-validation error and injection skips it. Vars and secrets are injected *after* the stamps and would otherwise overwrite them, and `JOB_PROJECT` is the only project identity a node can observe: every node-side grant in the platform — `WORKER_KVM_PROJECTS` (§3.1), `WORKER_NIX_PROJECTS` (§3.1) — matches on it, so a name project config could move is a **grant key project config could move**, and a node-side allow-list would stop being a statement the node alone controls. The reservation is those two prefixes and nothing wider: `BASE_BRANCH`, `REPO_URL` and `NATS_URL` are dispatcher-composed too, but no node or platform decision reads them, so shadowing one only misconfigures the shadowing project's own container and they stay declarable.
+**The dispatcher-composed stamps (`JOB_*`) are reserved.** `JOB_ID`, `JOB_PROJECT`, `JOB_TYPE`, `JOB_BRANCH`, `JOB_SHA` and `JOB_TASK_ID` are composed by the dispatcher and carry the launch's identity; the `JOB_` prefix is **reserved** for them exactly as `CHUG_` is (§5.3), so declaring a `JOB_`-prefixed **secret or var** in a job type is a release-validation error and injection skips it. Vars and secrets are injected *after* the stamps and would otherwise overwrite them, and `JOB_PROJECT` and `JOB_TYPE` are the whole identity a node can observe about a launch: every node-side grant in the platform — `WORKER_KVM_PROJECTS` (§3.1), `WORKER_NIX_PROJECTS` (§3.1) — matches on the first, so a name project config could move is a **grant key project config could move**, and a node-side allow-list would stop being a statement the node alone controls. `JOB_TYPE` is the job type's own `name:` — the same string the workload-identity token's subject carries (§8.3) — and it is stamped so a node-side grant can key on `(project, job type)` rather than the project alone; nothing consumes it yet (design [#517](design/517-docker-access-for-jobs.md) S2). The reservation is those two prefixes and nothing wider: `BASE_BRANCH`, `REPO_URL` and `NATS_URL` are dispatcher-composed too, but no node or platform decision reads them, so shadowing one only misconfigures the shadowing project's own container and they stay declarable.
 
 **Job inputs (`CHUG_INPUT_*`).** An input declared as `sha` (§1.1) is delivered as `CHUG_INPUT_SHA` — `name.to_uppercase()` under one reserved namespace, which is injective because input names are lowercase-only. The namespace sits inside the `CHUG_` prefix §5.3 reserves for secrets *and* vars, so no project-declared name can collide with an input; inputs are therefore injected **last**, asserting at the insertion site that the namespace was empty. Delivery rules:
 

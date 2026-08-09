@@ -398,15 +398,17 @@ mod tests {
         }
     }
 
-    /// Design #517 S1: `JOB_PROJECT` is what a node's KVM (and, after S3,
-    /// docker) grant matches on, so a job type may no more declare it than it
-    /// may declare `CHUG_PHASE` — the grant key must not be movable by project
-    /// config.
+    /// Design #517 S1: `JOB_PROJECT` — and, since S2, `JOB_TYPE` — is what a
+    /// node's KVM (and, after S3, docker) grant matches on, so a job type may no
+    /// more declare one than it may declare `CHUG_PHASE`: the grant key must not
+    /// be movable by project config.
     #[test]
     fn the_dispatcher_composed_job_stamps_cannot_be_declared() {
         for (secrets, vars, field) in [
             (vec!["JOB_PROJECT"], vec![], "secrets"),
             (vec![], vec!["JOB_PROJECT"], "vars"),
+            (vec!["JOB_TYPE"], vec![], "secrets"),
+            (vec![], vec!["JOB_TYPE"], "vars"),
             (vec![], vec!["JOB_ID"], "vars"),
             (vec![], vec!["JOB_BRANCH"], "vars"),
             (vec![], vec!["JOB_SHA"], "vars"),

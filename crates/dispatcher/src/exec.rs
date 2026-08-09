@@ -48,9 +48,10 @@ pub(crate) use crate::decide::work::{INFRA_LOSS_REASON, INFRA_RELAUNCH_CAP, prov
 const WORK_FOLD_STEPS_MAX: usize = 4;
 
 /// Reserved prefix of the dispatcher-composed launch stamps — `JOB_ID`,
-/// `JOB_PROJECT`, `JOB_BRANCH`, `JOB_SHA`, `JOB_TASK_ID` (spec §4.1, §5.3).
+/// `JOB_PROJECT`, `JOB_TYPE`, `JOB_BRANCH`, `JOB_SHA`, `JOB_TASK_ID`
+/// (spec §4.1, §5.3).
 /// Sealed exactly as `CHUG_` is because a node's grant list matches on
-/// `JOB_PROJECT` (design #517 S1).
+/// `JOB_PROJECT` and `JOB_TYPE` (design #517 S1, S2).
 pub const RESERVED_STAMP_PREFIX: &str = "JOB_";
 
 /// Which reserved prefix a declared secret or var name falls under, with the
@@ -1573,6 +1574,13 @@ impl Core {
         Ok(prompt)
     }
 
+    /// Every environment variable a work, wrap-up or eval container is launched
+    /// with (spec §4.1): the dispatcher-composed stamps first, so the job type's
+    /// declared vars and secrets — sealed off the `JOB_` prefix by
+    /// [`reserved_env_prefix`] — cannot move one.
+    /// `JOB_TYPE` carries the job type's name because it is the second half of
+    /// the `(project, job type)` identity a node-side grant matches on,
+    /// `JOB_PROJECT` being the first (design #517 S2).
     #[allow(clippy::too_many_arguments)]
     #[allow(
         clippy::too_many_lines,
@@ -1592,6 +1600,7 @@ impl Core {
         let mut env = HashMap::from([
             ("JOB_ID".into(), seq.to_string()),
             ("JOB_PROJECT".into(), format!("{owner}/{project}")),
+            ("JOB_TYPE".into(), job_type.name.clone()),
             ("JOB_BRANCH".into(), branch.to_string()),
             (
                 "BASE_BRANCH".into(),
@@ -2237,6 +2246,7 @@ mod tests {
             "CHUG_PHASE",
             "CHUG_ORIGIN_PAT",
             "JOB_PROJECT",
+            "JOB_TYPE",
             "JOB_ID",
             "JOB_BRANCH",
             "JOB_SHA",

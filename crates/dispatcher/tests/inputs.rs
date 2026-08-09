@@ -606,12 +606,24 @@ async fn an_input_free_job_launches_a_byte_identical_eval_env() {
             "JOB_PROJECT",
             "JOB_SHA",
             "JOB_TASK_ID",
+            "JOB_TYPE",
             "NATS_URL",
             "REPO_URL",
         ],
         "an input-free job's eval env must not grow a key"
     );
+    assert_eq!(
+        eval.env.get("JOB_TYPE").map(String::as_str),
+        Some("plain-ci"),
+        "design #517 S2: the job type's name rides every launch, so a node-side \
+         grant can match on (project, job type) and not the project alone"
+    );
     let work = &provider.runs()[0];
+    assert_eq!(
+        work.env.get("JOB_TYPE").map(String::as_str),
+        Some("plain-ci"),
+        "the work container is composed by the same call and carries the same stamp"
+    );
     assert!(
         !work.prompt.contains("### Inputs") && !work.prompt.contains("<untrusted_input>"),
         "the same guarantee on the prompt side (#311 slice B): an input-free job's \

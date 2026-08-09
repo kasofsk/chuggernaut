@@ -1,6 +1,6 @@
 # Design #517 — Docker access for jobs, accepted (amending #309 §10 and #313 Decision 0)
 
-Status: IMPLEMENTED IN PART — S1 (job #518) and S4 (job #519) landed; S2, S3 and S5 are open, S6 deferred. No grant is built, and host-mode access is already live.
+Status: IMPLEMENTED IN PART — S1 (job #518), S2 (job #521) and S4 (job #519) landed; S3 and S5 are open, S6 deferred. No grant is built, and host-mode access is already live.
 
 Written against the tree at `ff3258a`. Every claim about current behavior below
 was read out of the source and out of [`docs/spec.md`](../spec.md), not inferred
@@ -23,14 +23,16 @@ get the socket too.
 current truth whenever anything below it changes. Everything after this section
 is append-only.*
 
-**Two slices are built; no grant is. One thing was already live.** As of
+**Three slices are built; no grant is. One thing was already live.** As of
 **2026-08-09**, S1 has landed: `JOB_` is a reserved secret/var prefix alongside
 `CHUG_` (`docs/spec.md` §4.1, §5.3), so the `JOB_PROJECT` every node-side
 allow-list matches on can no longer be moved by a job type's `vars:` — which
 also closes [correction 3](#corrections-verified-against-the-tree) against the
-**shipped** KVM grant. S4 has landed beside it, advertising the access. No grant
-is built: no socket is bound into any container, and S2's job-type stamp does
-not exist.
+**shipped** KVM grant. S2 has landed under that seal: every launch now carries
+`JOB_TYPE`, so the `(project, job type)` key S3's allow-list needs is observable
+at the node, and [correction 2](#corrections-verified-against-the-tree) is
+historical. S4 has landed beside them, advertising the access. No grant is
+built: no socket is bound into any container, and nothing reads `JOB_TYPE` yet.
 
 Agent host tasks on `gumbo-air-0` reach a working docker daemon, and every
 [`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) run since
@@ -42,7 +44,7 @@ rather than closes.
 **S4 (job #519) makes that posture visible.** Every daemon now probes at boot
 whether it reaches a docker endpoint and advertises the answer as
 `NodeCapabilities.docker_reachable`, for both modes, defaulting false. Nothing
-is granted, withheld or bound by it — the rest of the mechanism (S2, S3, S5) is
+is granted, withheld or bound by it — the rest of the mechanism (S3, S5) is
 still proposed, and withholding host-mode access is still S6.
 
 | # | Decision | Argued in |
@@ -63,7 +65,7 @@ not at some future adoption. See [the trigger](#the-revisit-trigger-stated-as-a-
 | Slice | Content | State |
 | --- | --- | --- |
 | **S1** | Make the node's allow-list key unshadowable: reserve the dispatcher-composed `JOB_*` stamps the way `docs/spec.md` §5.3 reserves `CHUG_`, or move the matched name under that prefix. **Prerequisite for S3, and a fix to the shipped KVM grant** ([correction 3](#corrections-verified-against-the-tree)) | **Landed** (job #518) — the first fix, as a prefix: `exec::reserved_env_prefix` is the one decision site release validation refuses on and injection skips on. `BASE_BRANCH`/`REPO_URL`/`NATS_URL` deliberately stay declarable ([why](#which-of-the-two-fixes-s1-took-job-518-2026-08-09)) |
-| **S2** | Put the job type's name on the launch: one dispatcher-composed env entry in `container_env` ([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)). No schema field, no epoch, no `WORKER_RPC_VERSION` bump | Proposed — gated on S1 |
+| **S2** | Put the job type's name on the launch: one dispatcher-composed env entry in `container_env` ([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)). No schema field, no epoch, no `WORKER_RPC_VERSION` bump | **Landed** (job #521): `JOB_TYPE`, composed with the base stamps and sealed by S1's prefix. None of the three costs was spent ([what S2 landed](#what-s2-landed-job-521)) |
 | **S3** | A `DockerGrant` beside `KvmGrant` ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)): a node-side socket path plus a `(project, job type)` allow-list, bound into matching launches only, empty granting nobody | Proposed — gated on S1, S2 |
 | **S4** | Advertise the access on `NodeCapabilities` ([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)) for **both** modes, defaulting false so a daemon predating the field promises nothing. D4's audit half | **Landed** (job #519): `docker_reachable`, additive with no `WORKER_RPC_VERSION` bump, probed by `worker::docker_access` at boot for both modes and never a boot refusal. See [what S4 landed](#what-s4-landed-job-519) |
 | **S5** | *Node config:* the allow-list and the pin on one builder node — [#313](313-workload-identity-image-builds.md) S8, minus the proxy | Proposed — gated on S3 |
@@ -696,3 +698,60 @@ task's command reads it, or against anything after the launch: the guarantee is
 that *the value the dispatcher put on the wire is the dispatcher's*, which is
 exactly what a node-side allow-list needs and no more. S3 still must not ship
 without `docs/spec.md` §3.1's amendment, which this job does not touch.
+
+## What S2 landed (job #521)
+
+**One env entry, and none of the three costs the slice was allowed to spend.**
+`container_env` ([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs))
+now composes `JOB_TYPE` alongside `JOB_ID`, `JOB_PROJECT` and `JOB_BRANCH`, in
+the same `HashMap::from` literal and therefore **before** the job type's declared
+`vars` and `secrets` are resolved from KV. Both halves of the shape S1 established
+hold: the stamp is composed first, and S1's `JOB_` prefix is what makes composing
+it first mean something — a job type declaring `JOB_TYPE` in `vars:` or `secrets:`
+is a release-validation error and injection skips it, with no edit to
+`reserved_env_prefix` needed, because a prefix seals a name the day it is written.
+
+**The value is `JobType.name`, and the alternative is worth naming.** The other
+candidate was the job record's `type` — the `jobs/{stem}.yaml` stem the dispatcher
+routed on, which is also what `GET /api/v1/…/job-types` answers with
+(`handlers::jobtypes::list_job_types` reports the stem and reads only
+`display_name`/`description` out of the file). The two differ only for a project
+whose file stem and declared `name:` disagree, which nothing validates. `name`
+wins because the platform **already** keys an outside-the-container grant on it:
+`auth::workload` mints the workload-identity subject as
+`project:{project}:type:{name}` ([#313](313-workload-identity-image-builds.md)
+D4), so a cloud IAM binding is written against that spelling today. Two grant
+mechanisms answering "which job type is this" differently would be a trap worth
+more than the stem's marginal familiarity. The divergence is a real operational
+edge and belongs in S5's node runbook beside C3's rename trap, not in a
+validation rule this slice invents.
+
+**What was not spent, checked rather than asserted:** no
+`CONFIG_SCHEMA_EPOCH` bump (no job-type field exists to declare), no
+`WORKER_RPC_VERSION` bump (`ContainerLaunchConfig.env` is already a
+`HashMap<String, String>` on the wire, so this is a value inside a field both
+sides have had all along), no `.chug/jobs/*.yaml` edit, and no change to any
+node. A worker that ignores the key behaves exactly as it did — the byte
+difference in a launch is one more env pair, which is the same class of change
+as a job type adding a `var`.
+
+**Nothing consumes it.** `KvmGrant::admits` still matches on `JOB_PROJECT`
+alone; no `DockerGrant` exists; no socket is bound. S3 is what reads this, and
+S3 still must not ship without `docs/spec.md` §3.1's amendment (a `docs` job,
+still owed).
+
+**The regression that matters is the one pinning S1 and S2 together.**
+`release::tests::the_dispatcher_composed_job_stamps_cannot_be_declared` now
+covers `JOB_TYPE` as a declared var *and* as a declared secret, and
+`exec::tests::injection_skips_exactly_the_names_release_validation_refuses`
+covers the injection side — the two ends of the single predicate. At tier 2,
+`tests/inputs.rs::an_input_free_job_launches_a_byte_identical_eval_env` pins the
+whole composed key set, so the stamp's arrival was a deliberate edit to a sorted
+list rather than a silent addition, and asserts the value on both the work and
+the eval container.
+
+**[Correction 2](#corrections-verified-against-the-tree) is now historical**, as
+is the first bullet of [what the node can observe
+today](#what-the-node-can-observe-today): the job type's name *is* on the launch.
+Both are left as written, per the append-only rule; this section is the current
+reading.
