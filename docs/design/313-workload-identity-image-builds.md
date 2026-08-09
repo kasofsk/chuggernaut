@@ -1,8 +1,11 @@
 # Design #313 — Workload identity (OIDC issuer) and image build/push
 
-Status: IMPLEMENTED IN PART — half A's slices S1 (job #410), S2 (job #411),
-S5 (job #412), S3 (job #413) and S4 (job #414) shipped; S3d (the deploy) and S6
-(the operator's provider registration) are open and half B is still a design.
+Status: IMPLEMENTED IN PART — half A shipped and is deployed at epoch 5; S6 is the operator's, half B is still a design.
+
+Half A's code landed across jobs #410 (S1), #411 (S2), #412 (S5), #413 (S3)
+and #414 (S4), and prod was observed on 2026-08-09 running a dispatcher at
+epoch 5 (S3d), at the commit job #508's deploy carried. The operator's provider
+registration (S6) is the one link still open.
 
 **Amended 2026-08-04 (job #409), against the tree at `f1e3b41`.** The operator
 has taken half A's four open decisions. They are recorded in
@@ -79,13 +82,62 @@ rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument and its dated amendments,
 never edited into the prose above them.*
 
-**Half A's code is done; its deployment and its provider registration are not,
-and half B is still a design.** A declared identity mints a real token inside
-its own container against an issuer no cloud provider has been told about, so
-nothing authenticates end to end yet: S3d (a dispatcher carrying epoch 5 reaches
-prod) and S6 (the operator registers the provider) are the two open links, and
-both are operator work rather than code. Half B — the image build and push —
-has no slice past S9 and no owner.
+**Half A's code is done and deployed; its provider registration is not, and half
+B is still a design.** S3d was observed satisfied on 2026-08-09, so **S6 (the operator registers
+the provider) is the single remaining link** in half A: a declared identity
+mints a real token inside its own container against an issuer no cloud provider
+has been told about, so nothing authenticates end to end yet. Half B — the image
+build and push — has no slice past S9 and no owner.
+
+**What satisfies it is an observation, not a commit.** `GET
+/api/v1/platform/config` against prod reported `dispatcher.schema_epoch: 5`
+beside `dispatcher_sha` `8da61424b9bf53a7322bf5aa5f39d92a35c2ebc2` — the commit
+job #508's deploy carried. That snapshot describes **the one dispatcher**, not
+the fleet:
+[`DispatcherConfigSnapshot`](../../crates/types/src/platform.rs) carries a single
+`schema_epoch` and a single `dispatcher_sha`, and the api serves it verbatim
+under `dispatcher`
+([`crates/api/src/routes.rs`](../../crates/api/src/routes.rs)). The `nodes[]`
+entries carry no epoch at all — `WorkerNode::version` is the *worker daemon's*
+build string, last reported by that node's ping — so the two nodes agreeing is
+evidence about the worker refresh, never about the dispatcher's epoch. The
+tree's `CONFIG_SCHEMA_EPOCH` is 5 as well, and that is *not* what satisfies the
+slice: §14.3's merge gate compares a config's `min_dispatcher` against the epoch
+the **running** binary reports, which is exactly what that snapshot measures
+(`schema_epoch` is set from the binary's own constant —
+[`crates/dispatcher/src/config.rs`](../../crates/dispatcher/src/config.rs)), so a
+constant in the tree proves nothing about what is deployed.
+
+**The consequence this job type feels is at release**, and the date is when
+someone looked rather than when it became true.
+[`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml) has declared
+`min_dispatcher: 5` since job #417 on 2026-08-04: what a pre-epoch-5 dispatcher
+does with that file is park the job `config_schema_skew` at release and launch
+nothing (§14.2), and an epoch-5 dispatcher runs it. S9's `build-image` will
+inherit the same gate. The merge side is gated too — §3.3 step 0 has the
+dispatcher refuse to *land* a branch declaring an epoch above its own, over
+every `.chug/jobs/*.yaml` on that branch and not only the ones it changed
+([`crates/dispatcher/src/release.rs`](../../crates/dispatcher/src/release.rs)) —
+but that scan is job #421's own code, landed hours *after* #417 merged, and a
+landed gate still needs its own deploy before any dispatcher runs it.
+
+**So no merge in this history dates the deploy**, #417's least of all. The only
+skew signal at that merge was `config_schema_gate()` in
+[`.chug/tasks/ci.sh`](../../.chug/tasks/ci.sh), whose no-`CHUG_API_URL` branch
+compares the config against **the checkout's own epoch** — evidence that CI
+compared the tree against itself, and nothing about any deployed dispatcher
+([CLAUDE.md](../../CLAUDE.md)). What #421's scan buys is a mechanism rather than
+a date: once a dispatcher carrying it is running, any successful landing implies
+epoch ≥ 5, because that file sits on every branch. But the tree dates #421's own
+deploy no better than it dates #508's, which is why the row below records an
+observation and not a closing date.
+
+S3d's row below deliberately breaks the table's `**Landed** (job #N)` shape. A
+`deploy` job carries no commits and merges nothing
+([`.chug/jobs/deploy.yaml`](../../.chug/jobs/deploy.yaml)), so no `job/508`
+commit exists — and `.chug/tasks/check-doc-facts.sh` check 3 resolves that shape
+against exactly such a commit. An operator slice is recorded by observation
+instead, which is also how S6 will have to be recorded when it lands.
 
 **Half A's four decisions**, lifted from [Decisions taken,
 2026-08-04](#decisions-taken-2026-08-04). The operator took all four on that
@@ -110,7 +162,7 @@ of work.
 | **S1** | Issuer keypair, mounts, `kid` from the public-key thumbprint | **Landed** (job #410) |
 | **S2** | Token minting + claim assembly as a pure function — [`crates/auth/src/workload.rs`](../../crates/auth/src/workload.rs) | **Landed** (job #411) |
 | **S3** | `workload_identities:` on `work`/`eval[]`/`wrap_up`, field rules, the epoch bump and the frozen feature epoch, the KV + admin CLI + release-validation check | **Landed** (job #413) |
-| **S3d** | *Deploy:* a dispatcher carrying epoch 5 reaches prod | Pending — **not optional**, and not a code slice |
+| **S3d** | *Deploy:* a dispatcher carrying epoch 5 reaches prod | **Observed satisfied 2026-08-09** — prod's `/api/v1/platform/config` reports `dispatcher.schema_epoch: 5` at `dispatcher_sha` `8da61424b9bf53a7322bf5aa5f39d92a35c2ebc2`, the commit job #508's deploy carried; both `nodes[]` entries report a matching worker build version, which is a separate fact. Not a code slice, so no merge commit bears it |
 | **S4** | Injection at launch: two injected files, `GOOGLE_APPLICATION_CREDENTIALS`, audit fields — [`crates/dispatcher/src/workload.rs`](../../crates/dispatcher/src/workload.rs) | **Landed** (job #414) |
 | **S5** | Discovery + JWKS routes on the api, unexposed — [`crates/api/src/oidc.rs`](../../crates/api/src/oidc.rs) | **Landed** (job #412) |
 | **S6** | *Operator:* register the provider with the uploaded JWK set; attribute condition; one IAM binding; prove it in a work container | Pending — the terraform and the six-rung proof are authored ([`infra/gcp-proof/`](../../infra/gcp-proof), [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml)); the `apply` is the operator's |

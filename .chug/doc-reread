@@ -89,3 +89,5 @@ Doc-reread: docs/design/309-host-native-execution.md
 Doc-reread: docs/design/440-native-worker-daemon.md
 
 Doc-reread: deploy/prod/README.md
+
+Doc-reread: docs/design/313-workload-identity-image-builds.md
