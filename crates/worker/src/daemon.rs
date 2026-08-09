@@ -16,7 +16,7 @@ use crate::config::{WorkerConfig, WorkerMode};
 use crate::docker_access::{DockerAccess, DockerEnv, PROBE_TIMEOUT};
 use crate::nix::{NIX_ENV_PREFIX, NixRoots, REAP_AGE_MIN, Realised, flake_installable};
 use crate::xcode::{DEVELOPER_DIR_VAR, XCODE_ENV_PREFIX, XcodeInstall, Xcodes};
-use container::docker::{DockerBackend, DockerNodeConfig, KvmGrant};
+use container::docker::{DockerBackend, DockerGrant, DockerNodeConfig, KvmGrant};
 use container::{
     BackendError, ContainerBackend, ContainerId, ContainerLaunchConfig, ContainerStatus,
     InjectedFile, RunningContainer,
@@ -802,6 +802,24 @@ async fn docker_backend(
         );
         backend = backend.with_kvm(grant);
     }
+    if let Some(grant) = docker_grant(config) {
+        if let Some(refusal) = docker_grant_refusal(&grant) {
+            return Err(WorkerRunError::Config(refusal));
+        }
+        if grant.allowed.is_empty() {
+            tracing::warn!(
+                "WORKER_DOCKER_SOCKET is set but WORKER_DOCKER_GRANTS is empty — no launch will \
+                 receive the socket (design #517 D3: empty grants nobody)"
+            );
+        }
+        tracing::info!(
+            socket = %grant.socket.display(),
+            allowed = ?grant.allowed,
+            "docker socket bound for the allow-listed (project, job type) pairs — each holds node \
+             root for the duration (design #517 D1)"
+        );
+        backend = backend.with_docker_grant(grant);
+    }
     if config.nix_gcroots_dir.is_some() {
         backend = backend.with_nix_store(config.nix_store_dir.clone());
     }
@@ -819,6 +837,34 @@ fn kvm_grant(config: &WorkerConfig) -> Option<KvmGrant> {
         flutter_dir: config.flutter_dir.clone(),
         jdk_dir: config.jdk_dir.clone(),
         projects: config.kvm_projects.clone(),
+    })
+}
+
+/// The node's docker grant (design #517 D3), or `None` when
+/// `WORKER_DOCKER_SOCKET` is unset. The one place the node's docker settings
+/// become one grant, so the socket and the allow-list it is read against can
+/// only ever travel together.
+fn docker_grant(config: &WorkerConfig) -> Option<DockerGrant> {
+    config.docker_socket.as_ref().map(|socket| DockerGrant {
+        socket: socket.clone(),
+        allowed: config.docker_grants.clone(),
+    })
+}
+
+/// Why this node must refuse to boot with the docker grant it declares, or
+/// `None`. Asked of the **daemon's own view** (docs/reference/style.md Tier 2
+/// rule 7): a socket the node has and `chug-worker` cannot reach is a
+/// capability the node cannot serve, and a grant that quietly does nothing is
+/// exactly the control #517 measured failing.
+fn docker_grant_refusal(grant: &DockerGrant) -> Option<String> {
+    (!grant.socket.exists()).then(|| {
+        format!(
+            "WORKER_DOCKER_SOCKET names {}, which this daemon's own view does not have — mount it \
+             into `chug-worker` on a node whose daemon is still a container, and never advertise \
+             a capability the node cannot serve (design #517 D3, docs/reference/style.md Tier 2 \
+             rule 7)",
+            grant.socket.display()
+        )
     })
 }
 
@@ -2263,6 +2309,33 @@ mod tests {
                 "{modes:?} advertises what the node's own probe reached"
             );
         }
+    }
+
+    /// A declared socket the daemon's own view does not have REFUSES the boot,
+    /// naming the variable and the path (design #517 D3): a grant that quietly
+    /// binds nothing is the control #517 measured failing, and the daemon's
+    /// view is the one that must answer (docs/reference/style.md Tier 2 rule 7).
+    #[test]
+    fn a_declared_docker_socket_the_daemon_cannot_see_refuses_the_boot() {
+        let dir = std::env::temp_dir().join(format!("chug-daemon-socket-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let present = dir.join("docker.sock");
+        std::fs::write(&present, b"").unwrap();
+
+        let grant = |socket: PathBuf| DockerGrant {
+            socket,
+            allowed: vec![],
+        };
+        assert_eq!(docker_grant_refusal(&grant(present)), None);
+
+        let absent = dir.join("nowhere.sock");
+        let refusal = docker_grant_refusal(&grant(absent.clone())).expect("an absent socket");
+        assert!(refusal.contains("WORKER_DOCKER_SOCKET"), "{refusal}");
+        assert!(
+            refusal.contains(&absent.display().to_string()),
+            "must name the path: {refusal}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A fixture `PATH` with the agent CLI on it, so every assertion about the

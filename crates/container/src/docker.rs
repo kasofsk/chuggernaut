@@ -124,6 +124,80 @@ impl KvmGrant {
     }
 }
 
+/// Container-side path of the node's docker socket — the conventional one,
+/// whatever the node calls it host-side, because that is where a docker client
+/// looks when nothing names an endpoint (design #517 D3).
+pub const DOCKER_SOCKET_MOUNT_PATH: &str = "/var/run/docker.sock";
+
+/// One `owner/project:job_type` allow-list entry, the `(project, job type)`
+/// identity a node consents to (design #517 D3). Parsed once at declaration so
+/// a malformed entry is a refusal rather than a grant that silently never
+/// matches.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockerGrantEntry {
+    /// `owner/project`, matched against the launch's `JOB_PROJECT`.
+    pub project: String,
+    /// The job type's `name:`, matched against the launch's `JOB_TYPE`.
+    pub job_type: String,
+}
+
+impl DockerGrantEntry {
+    /// Parse one `owner/project:job_type` entry, or say why it is not one. The
+    /// single decision site for the entry shape, so what an operator may write
+    /// and what [`DockerGrant::admits`] matches cannot drift apart.
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        let entry = raw.trim();
+        let (project, job_type) = entry.split_once(':').unwrap_or_default();
+        let (owner, name) = project.split_once('/').unwrap_or_default();
+        if owner.is_empty()
+            || name.is_empty()
+            || name.contains('/')
+            || job_type.is_empty()
+            || job_type.contains(':')
+        {
+            return Err(format!(
+                "entry {entry:?} is not an owner/project:job_type pair"
+            ));
+        }
+        Ok(Self {
+            project: project.to_string(),
+            job_type: job_type.to_string(),
+        })
+    }
+}
+
+/// One node's docker grant (design #517 D3): the socket it binds and the
+/// `(project, job type)` launches allowed it — node root, accepted rather than
+/// mitigated, which is why it is node config and never a job-type field.
+///
+/// [`admits`](Self::admits) is the single decision site, matched on the two
+/// dispatcher-composed stamps the `JOB_` prefix seals (spec §4.1).
+#[derive(Debug, Clone)]
+pub struct DockerGrant {
+    /// Host path of the socket, bound writable at
+    /// [`DOCKER_SOCKET_MOUNT_PATH`] — a client cannot connect through a
+    /// read-only bind.
+    pub socket: PathBuf,
+    /// `owner/project:job_type` allow-list; empty grants nobody, so binding a
+    /// socket on a node and granting it to a workload are two separate acts.
+    pub allowed: Vec<DockerGrantEntry>,
+}
+
+impl DockerGrant {
+    /// Whether a launch carrying this env is admitted, matched on
+    /// `(JOB_PROJECT, JOB_TYPE)` — the identity a node can observe, sealed
+    /// against project config by spec §4.1's reserved prefix. A launch missing
+    /// either stamp is admitted by nothing.
+    pub fn admits(&self, env: &HashMap<String, String>) -> bool {
+        let (Some(project), Some(job_type)) = (env.get("JOB_PROJECT"), env.get("JOB_TYPE")) else {
+            return false;
+        };
+        self.allowed
+            .iter()
+            .any(|entry| &entry.project == project && &entry.job_type == job_type)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DockerNodeConfig {
     pub name: String,
@@ -205,6 +279,13 @@ pub struct DockerBackend {
     /// [`with_kvm`](DockerBackend::with_kvm); like [`Self::cache_dir`] it is a
     /// node property, never carried on the wire or the launch config.
     kvm: Option<KvmGrant>,
+    /// The node's docker grant (design #517 D3): the socket an allow-listed
+    /// launch gets bound in, `None` (the dispatcher's construction) binding
+    /// none. Set worker-side via
+    /// [`with_docker_grant`](DockerBackend::with_docker_grant); like
+    /// [`Self::kvm`] it is a node property, never carried on the wire or the
+    /// launch config.
+    docker_grant: Option<DockerGrant>,
     /// The node's nix store, mounted read-only into a launch that declares a
     /// `runtime.env` (design #373 P2); `None` (the dispatcher's construction)
     /// mounts nothing. Set worker-side via
@@ -241,6 +322,7 @@ impl DockerBackend {
             nodes,
             cache_dir: None,
             kvm: None,
+            docker_grant: None,
             nix_store: None,
             policy: PlacementPolicy::default(),
             mode_warnings: ModeWarnings::default(),
@@ -260,6 +342,7 @@ impl DockerBackend {
             }],
             cache_dir: None,
             kvm: None,
+            docker_grant: None,
             nix_store: None,
             policy: PlacementPolicy::default(),
             mode_warnings: ModeWarnings::default(),
@@ -290,6 +373,16 @@ impl DockerBackend {
     /// mount-free.
     pub fn with_kvm(mut self, grant: KvmGrant) -> Self {
         self.kvm = Some(grant);
+        self
+    }
+
+    /// Bind the node's docker socket into the launches `grant` allow-lists
+    /// (design #517 D3): those launches reach the node's own daemon, every
+    /// other launch on the node is untouched, and an empty allow-list reaches
+    /// nobody. Worker-daemon-only — the dispatcher never calls this, so its
+    /// fleet stays bind-mount-free.
+    pub fn with_docker_grant(mut self, grant: DockerGrant) -> Self {
+        self.docker_grant = Some(grant);
         self
     }
 
@@ -516,6 +609,7 @@ impl ContainerBackend for DockerBackend {
                 &config,
                 self.cache_dir.as_deref(),
                 self.kvm.as_ref(),
+                self.docker_grant.as_ref(),
                 self.nix_store.as_deref(),
             )?),
             ..Default::default()
@@ -741,15 +835,18 @@ impl ContainerBackend for DockerBackend {
 /// `devices: None, binds: None, mounts: None` (spec §3.1); a worker's
 /// `cache_dir` adds one writable mount at [`CACHE_MOUNT_PATH`], its `kvm` adds
 /// the device and the read-only toolchain mounts or none of them per
-/// [`KvmGrant::admits`], and its `nix_store` adds the store read-only for a
+/// [`KvmGrant::admits`], its `docker_grant` adds the node's socket per
+/// [`DockerGrant::admits`], and its `nix_store` adds the store read-only for a
 /// launch declaring `runtime.env` — nothing here sets `binds`.
 fn build_host_config(
     config: &ContainerLaunchConfig,
     cache_dir: Option<&Path>,
     kvm: Option<&KvmGrant>,
+    docker_grant: Option<&DockerGrant>,
     nix_store: Option<&Path>,
 ) -> Result<HostConfig, BackendError> {
     let granted = kvm.filter(|g| g.admits(&config.env));
+    let socket = docker_grant.filter(|g| g.admits(&config.env));
     let env_store = nix_store.filter(|store| {
         config.runtime_env.is_some() && (granted.is_none() || *store != Path::new(STORE_MOUNT_PATH))
     });
@@ -772,6 +869,9 @@ fn build_host_config(
         if let Some(jdk_dir) = &g.jdk_dir {
             mounts.push(read_only_bind(jdk_dir, JDK_MOUNT_PATH));
         }
+    }
+    if let Some(g) = socket {
+        mounts.push(writable_bind(&g.socket, DOCKER_SOCKET_MOUNT_PATH));
     }
     let toolchain_mounts = mounts.iter().filter(|m| m.read_only == Some(true)).count();
     let toolchain_mounts_expected = granted.map_or(0, |g| {
@@ -806,11 +906,29 @@ fn build_host_config(
         "a launch carries the KVM device and the read-only toolchain mounts together or carries \
          neither"
     );
+    debug_assert_eq!(
+        mounts_target_count(&host_config, DOCKER_SOCKET_MOUNT_PATH),
+        usize::from(socket.is_some()),
+        "the socket rides exactly the launches the node's allow-list names, once (design #517 D3)"
+    );
     Ok(host_config)
 }
 
-/// The node's build cache, mounted writable — sccache writes through it, so
-/// unlike a toolchain mount it cannot be read-only. Derived from
+/// How many mounts a built host config lands at `target` — the negative-space
+/// assertions above read it, so "granted nobody" is checked on the config
+/// itself rather than on the decision that produced it.
+fn mounts_target_count(host_config: &HostConfig, target: &str) -> usize {
+    host_config
+        .mounts
+        .iter()
+        .flatten()
+        .filter(|m| m.target.as_deref() == Some(target))
+        .count()
+}
+
+/// The two mounts a node adds that cannot be read-only: its build cache, which
+/// sccache writes through, and its docker socket on an allow-listed launch,
+/// which a client cannot connect through when read-only. Derived from
 /// [`read_only_bind`] so both share its refuse-a-missing-source property.
 fn writable_bind(host_dir: &Path, container_path: &str) -> Mount {
     Mount {
@@ -1167,7 +1285,7 @@ mod tests {
     /// passthrough (design #367 A1).
     #[test]
     fn host_config_without_node_properties_is_bare() {
-        let hc = build_host_config(&launch_config(), None, None, None).unwrap();
+        let hc = build_host_config(&launch_config(), None, None, None, None).unwrap();
         assert!(hc.binds.is_none(), "dispatcher path must add no binds");
         assert!(hc.devices.is_none(), "dispatcher path must add no devices");
         assert!(hc.mounts.is_none(), "dispatcher path must add no mounts");
@@ -1183,7 +1301,8 @@ mod tests {
     #[test]
     fn host_config_with_cache_adds_one_writable_mount() {
         let dir = PathBuf::from("/var/cache/chuggernaut/sccache");
-        let hc = build_host_config(&launch_config(), Some(dir.as_path()), None, None).unwrap();
+        let hc =
+            build_host_config(&launch_config(), Some(dir.as_path()), None, None, None).unwrap();
         assert!(hc.binds.is_none(), "the cache is a mount, not a bind");
         assert!(hc.devices.is_none(), "a cache dir grants no device");
 
@@ -1211,7 +1330,7 @@ mod tests {
         let store = PathBuf::from("/nix/store");
         let mut config = launch_config();
         config.runtime_env = Some("nix:.#chug-mobile".into());
-        let hc = build_host_config(&config, None, None, Some(store.as_path())).unwrap();
+        let hc = build_host_config(&config, None, None, None, Some(store.as_path())).unwrap();
 
         assert!(hc.devices.is_none(), "an environment grants no device");
         let mounts = hc.mounts.expect("a declared env carries the store");
@@ -1224,13 +1343,14 @@ mod tests {
         );
         assert_eq!(mounts[0].read_only, Some(true));
 
-        let hc = build_host_config(&launch_config(), None, None, Some(store.as_path())).unwrap();
+        let hc =
+            build_host_config(&launch_config(), None, None, None, Some(store.as_path())).unwrap();
         assert!(
             hc.mounts.is_none(),
             "a launch declaring no env is exactly what it is today"
         );
 
-        let hc = build_host_config(&config, None, None, None).unwrap();
+        let hc = build_host_config(&config, None, None, None, None).unwrap();
         assert!(
             hc.mounts.is_none(),
             "a node that provisions no store mounts none, whatever a launch declares"
@@ -1260,6 +1380,7 @@ mod tests {
             &config,
             None,
             Some(&kvm_grant()),
+            None,
             Some(Path::new(STORE_MOUNT_PATH)),
         )
         .unwrap();
@@ -1270,7 +1391,8 @@ mod tests {
         );
 
         let elsewhere = Path::new("/data/nix/store");
-        let hc = build_host_config(&config, None, Some(&kvm_grant()), Some(elsewhere)).unwrap();
+        let hc =
+            build_host_config(&config, None, Some(&kvm_grant()), None, Some(elsewhere)).unwrap();
         assert_eq!(
             stores_in(&hc),
             vec!["/data/nix/store".to_string(), STORE_MOUNT_PATH.to_string()],
@@ -1312,8 +1434,14 @@ mod tests {
     /// every toolchain case shares — the device, and no legacy binds — checked
     /// in passing.
     fn admitted_mounts(grant: &KvmGrant, cache: Option<&Path>) -> Vec<Mount> {
-        let hc =
-            build_host_config(&launch_config_for("acme/beacon"), cache, Some(grant), None).unwrap();
+        let hc = build_host_config(
+            &launch_config_for("acme/beacon"),
+            cache,
+            Some(grant),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(hc.devices.as_ref().map(Vec::len), Some(1));
         assert!(hc.binds.is_none(), "a toolchain leaf adds no legacy binds");
         hc.mounts
@@ -1349,6 +1477,7 @@ mod tests {
             &launch_config_for("acme/beacon"),
             None,
             Some(&kvm_grant()),
+            None,
             None,
         )
         .unwrap();
@@ -1402,6 +1531,7 @@ mod tests {
             &launch_config_for("acme/beacon"),
             Some(dir.as_path()),
             Some(&kvm_grant()),
+            None,
             None,
         )
         .unwrap();
@@ -1555,7 +1685,7 @@ mod tests {
                 launch_config(),
                 launch_config_for(""),
             ] {
-                let hc = build_host_config(&config, None, Some(&grant), None).unwrap();
+                let hc = build_host_config(&config, None, Some(&grant), None, None).unwrap();
                 assert!(hc.devices.is_none(), "unlisted launch got the device");
                 assert!(hc.mounts.is_none(), "unlisted launch got the mounts");
             }
@@ -1565,10 +1695,177 @@ mod tests {
             projects: vec![],
             ..kvm_grant()
         };
-        let hc = build_host_config(&launch_config_for("acme/beacon"), None, Some(&nobody), None)
-            .unwrap();
+        let hc = build_host_config(
+            &launch_config_for("acme/beacon"),
+            None,
+            Some(&nobody),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(hc.devices.is_none(), "an empty allow-list grants nobody");
         assert!(hc.mounts.is_none(), "an empty allow-list grants nobody");
+    }
+
+    fn docker_grant() -> DockerGrant {
+        DockerGrant {
+            socket: PathBuf::from("/var/run/docker.sock"),
+            allowed: vec![DockerGrantEntry {
+                project: "acme/beacon".to_string(),
+                job_type: "build-image".to_string(),
+            }],
+        }
+    }
+
+    fn launch_config_for_pair(project: &str, job_type: &str) -> ContainerLaunchConfig {
+        let mut config = launch_config_for(project);
+        config.env.insert("JOB_TYPE".into(), job_type.to_string());
+        config
+    }
+
+    /// An entry is `owner/project:job_type` and nothing else: every malformed
+    /// spelling is refused and named rather than accepted as a grant that
+    /// silently never matches a launch (design #517 D3, fail closed).
+    #[test]
+    fn docker_grant_entries_parse_or_are_refused_by_shape() {
+        assert_eq!(
+            DockerGrantEntry::parse(" acme/beacon:build-image ").unwrap(),
+            DockerGrantEntry {
+                project: "acme/beacon".into(),
+                job_type: "build-image".into(),
+            }
+        );
+
+        for malformed in [
+            "",
+            "acme/beacon",
+            "acme:build-image",
+            "acme/beacon:",
+            ":build-image",
+            "/beacon:build-image",
+            "acme/:build-image",
+            "acme/beacon/extra:build-image",
+            "acme/beacon:build:image",
+        ] {
+            let err = DockerGrantEntry::parse(malformed).unwrap_err();
+            assert!(
+                err.contains("owner/project:job_type"),
+                "{malformed:?}: {err}"
+            );
+        }
+    }
+
+    /// An allow-listed `(project, job type)` on a docker node gets the node's
+    /// socket at the conventional container path, writable — a client cannot
+    /// connect through a read-only bind — and gets no device and no toolchain
+    /// mount with it (design #517 D3).
+    #[test]
+    fn host_config_with_a_docker_grant_binds_the_socket_for_an_allow_listed_pair() {
+        let hc = build_host_config(
+            &launch_config_for_pair("acme/beacon", "build-image"),
+            None,
+            None,
+            Some(&docker_grant()),
+            None,
+        )
+        .unwrap();
+
+        assert!(hc.devices.is_none(), "a socket grant carries no device");
+        assert!(hc.binds.is_none(), "the socket is a mount, not a bind");
+        let mounts = hc
+            .mounts
+            .expect("an allow-listed launch carries the socket");
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].typ, Some(MountTypeEnum::BIND));
+        assert_eq!(mounts[0].source.as_deref(), Some("/var/run/docker.sock"));
+        assert_eq!(mounts[0].target.as_deref(), Some(DOCKER_SOCKET_MOUNT_PATH));
+        assert_eq!(
+            mounts[0].read_only,
+            Some(false),
+            "a client connecting through the socket must be able to write to it"
+        );
+    }
+
+    /// The negative space: every launch the allow-list does not name gets
+    /// NOTHING on the same node that grants the socket to the named pair — a
+    /// different project, a different job type of the same project, and a
+    /// launch missing either stamp. An empty allow-list grants nobody, and a
+    /// node declaring no grant at all is byte-identical to today.
+    #[test]
+    fn host_config_without_a_docker_allow_list_entry_binds_nothing() {
+        let grant = docker_grant();
+        for config in [
+            launch_config_for_pair("acme/other", "build-image"),
+            launch_config_for_pair("acme/beacon", "code"),
+            launch_config_for_pair("", ""),
+            launch_config_for("acme/beacon"),
+            launch_config(),
+        ] {
+            let hc = build_host_config(&config, None, None, Some(&grant), None).unwrap();
+            assert!(hc.mounts.is_none(), "unlisted launch got the socket");
+            assert!(hc.devices.is_none(), "unlisted launch got a device");
+        }
+
+        let nobody = DockerGrant {
+            allowed: vec![],
+            ..docker_grant()
+        };
+        let admitted = launch_config_for_pair("acme/beacon", "build-image");
+        let hc = build_host_config(&admitted, None, None, Some(&nobody), None).unwrap();
+        assert!(hc.mounts.is_none(), "an empty allow-list grants nobody");
+
+        let hc = build_host_config(&admitted, None, None, None, None).unwrap();
+        assert!(
+            hc.mounts.is_none() && hc.devices.is_none() && hc.binds.is_none(),
+            "a node declaring no grant is what it was before this existed"
+        );
+    }
+
+    /// The socket is a fourth independent node property: a node that caches,
+    /// passes KVM through and grants the socket to the same launch carries all
+    /// of them, the socket writable and the toolchain pair still read-only, and
+    /// each grant is still decided on its own key.
+    #[test]
+    fn host_config_composes_the_docker_socket_with_the_other_node_properties() {
+        let dir = PathBuf::from("/var/cache/chuggernaut/sccache");
+        let hc = build_host_config(
+            &launch_config_for_pair("acme/beacon", "build-image"),
+            Some(dir.as_path()),
+            Some(&kvm_grant()),
+            Some(&docker_grant()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(hc.devices.map(|d| d.len()), Some(1));
+        let mounts = hc.mounts.expect("three properties carry mounts");
+        assert_eq!(mounts.len(), 4);
+        assert_eq!(
+            read_only_targets(&mounts),
+            vec![STORE_MOUNT_PATH, ANDROID_SDK_MOUNT_PATH],
+            "the socket is never counted among the read-only toolchain mounts"
+        );
+        assert_eq!(
+            source_at(&mounts, DOCKER_SOCKET_MOUNT_PATH),
+            Some("/var/run/docker.sock")
+        );
+
+        let kvm_only = build_host_config(
+            &launch_config_for_pair("acme/beacon", "code"),
+            None,
+            Some(&kvm_grant()),
+            Some(&docker_grant()),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            source_at(
+                &kvm_only.mounts.unwrap_or_default(),
+                DOCKER_SOCKET_MOUNT_PATH
+            ),
+            None,
+            "the KVM allow-list admits this launch and the docker one does not"
+        );
     }
 
     /// Every launch carries the managed marker plus the `(project, job, task)`

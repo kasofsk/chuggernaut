@@ -64,6 +64,8 @@ async fn setup(
         host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: None,
         kvm_projects: vec![],
+        docker_socket: None,
+        docker_grants: Vec::new(),
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         flutter_dir: None,
         jdk_dir: None,
@@ -859,6 +861,8 @@ fn spawn_daemon(
         host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: None,
         kvm_projects: vec![],
+        docker_socket: None,
+        docker_grants: Vec::new(),
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         flutter_dir: None,
         jdk_dir: None,
@@ -1153,6 +1157,43 @@ async fn refresh_cancel_aborts_only_its_own_sha() {
     daemon.abort();
 }
 
+/// A node wired for self-refresh with **no** git credential: the script is
+/// there, the key path is not, which is the one state the skip reply is about.
+fn refresh_credential_less_config(nats_url: &str) -> WorkerConfig {
+    let dir = unique_temp_dir("chug-worker-skip");
+    let channel = dir.join("chuggernaut-channel");
+    std::fs::write(&channel, b"x").unwrap();
+    WorkerConfig {
+        node: "w1".into(),
+        slots: 4,
+        slots_max: DAEMON_SLOTS_MAX,
+        modes: vec![WorkerMode::Container],
+        nats_url: nats_url.to_string(),
+        nats_creds: None,
+        docker_endpoint: local_docker_endpoint(),
+        channel_binary: channel,
+        cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-root-test"),
+        kvm_device: None,
+        kvm_projects: vec![],
+        docker_socket: None,
+        docker_grants: Vec::new(),
+        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        flutter_dir: None,
+        jdk_dir: None,
+        nix_gcroots_dir: None,
+        nix_projects: Vec::new(),
+        nix_flake_client: "/nix/var/nix/profiles/system/sw/bin/nix".into(),
+        nix_client: NIX_CLIENT_DEFAULT.into(),
+        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
+        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
+        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
+        refresh_script: Some(fake_refresh_script()),
+        refresh_git_url: None,
+        refresh_git_key: dir.join("worker_git"),
+    }
+}
+
 /// A refresh RPC to a node with a script but NO git credential reports the skip
 /// in the reply (spec §3.1 / #114) — `accepted == false`, `skipped == Some(..)`
 /// — instead of accepting and silently no-oping in the background. This is what
@@ -1170,36 +1211,7 @@ async fn refresh_reports_skip_without_git_credential() {
         return;
     }
 
-    let dir = unique_temp_dir("chug-worker-skip");
-    let channel = dir.join("chuggernaut-channel");
-    std::fs::write(&channel, b"x").unwrap();
-    let config = WorkerConfig {
-        node: "w1".into(),
-        slots: 4,
-        slots_max: DAEMON_SLOTS_MAX,
-        modes: vec![WorkerMode::Container],
-        nats_url: server.url().to_string(),
-        nats_creds: None,
-        docker_endpoint: local_docker_endpoint(),
-        channel_binary: channel,
-        cache_dir: None,
-        host_root: std::env::temp_dir().join("chug-host-root-test"),
-        kvm_device: None,
-        kvm_projects: vec![],
-        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
-        flutter_dir: None,
-        jdk_dir: None,
-        nix_gcroots_dir: None,
-        nix_projects: Vec::new(),
-        nix_flake_client: "/nix/var/nix/profiles/system/sw/bin/nix".into(),
-        nix_client: NIX_CLIENT_DEFAULT.into(),
-        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
-        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
-        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
-        refresh_script: Some(fake_refresh_script()),
-        refresh_git_url: None,
-        refresh_git_key: dir.join("worker_git"),
-    };
+    let config = refresh_credential_less_config(server.url());
     let daemon = tokio::spawn(async move {
         if let Err(e) = worker::run(config).await {
             eprintln!("daemon exited: {e}");
@@ -1268,6 +1280,8 @@ fn nix_rooted_config(dir: &std::path::Path, nats_url: &str) -> WorkerConfig {
         host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: Some("/dev/null".into()),
         kvm_projects: vec!["acme/nix".into()],
+        docker_socket: None,
+        docker_grants: Vec::new(),
         android_sdk_dir: dir.join("toolchain"),
         flutter_dir: None,
         jdk_dir: None,
@@ -1831,6 +1845,8 @@ async fn host_mode_without_one_slot_refuses_to_start() {
         host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: None,
         kvm_projects: vec![],
+        docker_socket: None,
+        docker_grants: Vec::new(),
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         flutter_dir: None,
         jdk_dir: None,
@@ -1881,6 +1897,8 @@ async fn host_mode_without_a_supervision_unit_refuses_to_start() {
         host_root: std::env::temp_dir().join("chug-host-supervision-test"),
         kvm_device: None,
         kvm_projects: vec![],
+        docker_socket: None,
+        docker_grants: Vec::new(),
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         flutter_dir: None,
         jdk_dir: None,
@@ -1934,6 +1952,8 @@ async fn declared_kvm_without_the_device_refuses_to_start() {
         host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: Some("/dev/definitely-not-kvm".into()),
         kvm_projects: vec!["acme/beacon".into()],
+        docker_socket: None,
+        docker_grants: Vec::new(),
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         flutter_dir: None,
         jdk_dir: None,

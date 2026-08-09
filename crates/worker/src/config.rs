@@ -1,6 +1,7 @@
 //! `chuggernaut worker` configuration — env-derived, mirroring the dispatcher
 //! pattern (crates/dispatcher/src/config.rs).
 
+use container::docker::DockerGrantEntry;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,19 @@ pub struct WorkerConfig {
     /// nobody, so enabling KVM on a node and granting it to a project are two
     /// separate acts (design #367 §2.3).
     pub kvm_projects: Vec<String>,
+    /// Host path of the docker socket this node binds into an allow-listed
+    /// launch (`WORKER_DOCKER_SOCKET`); `None` (unset) ⇒ no bind at all. A node
+    /// property provisioned exactly as [`Self::kvm_device`] is — worker-side,
+    /// never on the wire or the launch config (design #517 D3) — and the daemon
+    /// refuses to start when it is set and the socket is absent from the
+    /// daemon's own view.
+    pub docker_socket: Option<PathBuf>,
+    /// The `(project, job type)` pairs allowed that socket
+    /// (`WORKER_DOCKER_GRANTS`, `owner/project:job_type` entries). Empty ⇒
+    /// nobody, so binding a socket on a node and granting it to a workload are
+    /// two separate acts (design #517 D3) — and a granted launch holds node
+    /// root, which is why this is node config and never a job-type field.
+    pub docker_grants: Vec<DockerGrantEntry>,
     /// The node's Android SDK path (`WORKER_ANDROID_SDK_DIR`), mounted read-only
     /// for an allow-listed launch. It names the operator's activation-maintained
     /// **stable** path, which is why the parse rejects a nix store hash (design
@@ -208,6 +222,8 @@ impl WorkerConfig {
                 "WORKER_KVM_PROJECTS",
                 std::env::var("WORKER_KVM_PROJECTS").ok(),
             )?,
+            docker_socket: parse_docker_socket(std::env::var("WORKER_DOCKER_SOCKET").ok())?,
+            docker_grants: parse_docker_grants(std::env::var("WORKER_DOCKER_GRANTS").ok())?,
             android_sdk_dir: parse_android_sdk_dir(std::env::var("WORKER_ANDROID_SDK_DIR").ok())?,
             flutter_dir: parse_flutter_dir(std::env::var("WORKER_FLUTTER_DIR").ok())?,
             jdk_dir: parse_jdk_dir(std::env::var("WORKER_JDK_DIR").ok())?,
@@ -362,6 +378,46 @@ fn parse_projects(var: &str, raw: Option<String>) -> Result<Vec<String>, ConfigE
         "a parsed allow-list names at least one project"
     );
     Ok(projects)
+}
+
+/// Parse `WORKER_DOCKER_SOCKET` into the socket this node binds into an
+/// allow-listed launch (design #517 D3); absent or empty ⇒ `None`, which binds
+/// nothing. Held to [`parse_stable_path`]'s rule, so a relative path is a hard
+/// config error rather than a bind source the engine resolves somewhere
+/// unintended.
+fn parse_docker_socket(raw: Option<String>) -> Result<Option<PathBuf>, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    parse_stable_path("WORKER_DOCKER_SOCKET", &raw).map(Some)
+}
+
+/// Parse `WORKER_DOCKER_GRANTS` into the `(project, job type)` pairs allowed
+/// the node's docker socket (design #517 D3). Absent or empty ⇒ **nobody**, and
+/// a malformed or repeated entry is a hard config error rather than a grant
+/// that silently never matches a launch — the socket is root-equivalent, so
+/// every failure here fails closed and says so.
+fn parse_docker_grants(raw: Option<String>) -> Result<Vec<DockerGrantEntry>, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let mut allowed: Vec<DockerGrantEntry> = Vec::new();
+    for entry in raw.split(',') {
+        let parsed = DockerGrantEntry::parse(entry)
+            .map_err(|e| ConfigError(format!("WORKER_DOCKER_GRANTS {e}")))?;
+        if allowed.contains(&parsed) {
+            return Err(ConfigError(format!(
+                "WORKER_DOCKER_GRANTS lists {:?} more than once",
+                entry.trim()
+            )));
+        }
+        allowed.push(parsed);
+    }
+    debug_assert!(
+        !allowed.is_empty(),
+        "a parsed allow-list names at least one pair"
+    );
+    Ok(allowed)
 }
 
 /// Parse `WORKER_ANDROID_SDK_DIR` into the node's SDK path; absent or empty ⇒
@@ -717,6 +773,58 @@ mod tests {
             );
         }
         let err = parse_projects("WORKER_KVM_PROJECTS", Some("acme/api,acme/api".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("more than once"), "{err}");
+    }
+
+    /// `WORKER_DOCKER_SOCKET` (design #517 D3): unset binds nothing — today's
+    /// behavior on every node — an absolute path names the socket, and a
+    /// relative one or a store hash is refused rather than read as "off".
+    #[test]
+    fn docker_socket_parses_absent_present_and_rejections() {
+        assert_eq!(parse_docker_socket(None).unwrap(), None);
+        assert_eq!(parse_docker_socket(Some("  ".into())).unwrap(), None);
+        assert_eq!(
+            parse_docker_socket(Some(" /var/run/docker.sock ".into())).unwrap(),
+            Some(PathBuf::from("/var/run/docker.sock"))
+        );
+        let err = parse_docker_socket(Some("docker.sock".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("WORKER_DOCKER_SOCKET"), "{err}");
+    }
+
+    /// `WORKER_DOCKER_GRANTS` (design #517 D3): unset grants NOBODY — the
+    /// fail-closed rule that makes binding a socket on a node and granting it
+    /// to a workload two separate acts — and every malformed or repeated entry
+    /// is refused rather than kept as a grant that can never match a launch.
+    #[test]
+    fn docker_grants_parse_empty_list_and_rejections() {
+        for empty in [None, Some(String::new()), Some("  ".into())] {
+            assert_eq!(parse_docker_grants(empty).unwrap(), Vec::new());
+        }
+        assert_eq!(
+            parse_docker_grants(Some(" acme/beacon:build-image , acme/api:code ".into())).unwrap(),
+            vec![
+                DockerGrantEntry {
+                    project: "acme/beacon".into(),
+                    job_type: "build-image".into(),
+                },
+                DockerGrantEntry {
+                    project: "acme/api".into(),
+                    job_type: "code".into(),
+                },
+            ]
+        );
+
+        for bad in ["acme/beacon", "acme:code", "acme/beacon:", "code", ""] {
+            let err = parse_docker_grants(Some(format!("acme/api:code,{bad}")))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("WORKER_DOCKER_GRANTS"), "{bad:?}: {err}");
+        }
+        let err = parse_docker_grants(Some("acme/api:code,acme/api:code".into()))
             .unwrap_err()
             .to_string();
         assert!(err.contains("more than once"), "{err}");

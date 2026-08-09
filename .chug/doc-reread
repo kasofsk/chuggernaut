@@ -93,3 +93,8 @@ Doc-reread: deploy/prod/README.md
 Doc-reread: docs/design/313-workload-identity-image-builds.md
 
 Doc-reread: docs/reference/runbooks/chug-node-adoption.md
+
+Doc-reread: docs/spec.md
+Doc-reread: docs/design/517-docker-access-for-jobs.md
+
+Doc-reread: docs/implementation-notes.md

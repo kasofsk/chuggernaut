@@ -84,6 +84,8 @@ async fn worker_fleet(
         host_root: std::env::temp_dir().join("chug-host-root-test"),
         kvm_device: None,
         kvm_projects: vec![],
+        docker_socket: None,
+        docker_grants: Vec::new(),
         android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
         flutter_dir: None,
         jdk_dir: None,
