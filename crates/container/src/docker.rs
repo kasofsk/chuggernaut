@@ -22,6 +22,7 @@ use futures::StreamExt;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use types::job_type::RuntimeMode;
 
 /// Label stamped on every container we launch; placement counts by it and the
@@ -132,6 +133,38 @@ pub struct DockerNodeConfig {
     pub slots: u32,
 }
 
+/// One docker client for an endpoint — the single place the two supported
+/// transports are spelled, so a probe and a backend cannot disagree about what
+/// an endpoint string means. TLS: TODO (§3.1).
+fn connect_endpoint(endpoint: &str) -> Result<Docker, BackendError> {
+    if endpoint.starts_with("unix://") {
+        Docker::connect_with_unix(endpoint, 120, bollard::API_DEFAULT_VERSION)
+    } else if endpoint.starts_with("tcp://") || endpoint.starts_with("http://") {
+        Docker::connect_with_http(endpoint, 120, bollard::API_DEFAULT_VERSION)
+    } else {
+        return Err(BackendError::Unavailable(format!(
+            "unsupported endpoint {endpoint:?} (expected unix:// or tcp://)"
+        )));
+    }
+    .map_err(|e| BackendError::Unavailable(e.to_string()))
+}
+
+/// Whether a docker endpoint answers, asked with the API's own `GET /_ping` so
+/// the probe reads and never creates, starts or stops anything (design #517
+/// D4). Bounded by `timeout`, so an endpoint that accepts a connection and then
+/// never replies reports unreachable rather than hanging its caller.
+pub async fn endpoint_answers(endpoint: &str, timeout: Duration) -> Result<(), BackendError> {
+    let docker = connect_endpoint(endpoint)?;
+    match tokio::time::timeout(timeout, docker.ping()).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(BackendError::Unavailable(format!("{endpoint}: {e}"))),
+        Err(_) => Err(BackendError::Unavailable(format!(
+            "{endpoint}: no answer within {}s",
+            timeout.as_secs()
+        ))),
+    }
+}
+
 /// One node's boot-time probe, reported by [`DockerBackend::probe_all`]: its
 /// configured slot count and whether it answered its ping. A fleet owner (the
 /// dispatcher's fleet backend) uses these to apply the §3.6 "no live capacity"
@@ -193,17 +226,7 @@ impl DockerBackend {
     pub fn new(configs: Vec<DockerNodeConfig>) -> Result<Self, BackendError> {
         let mut nodes = Vec::new();
         for c in configs {
-            let docker = if c.endpoint.starts_with("unix://") {
-                Docker::connect_with_unix(&c.endpoint, 120, bollard::API_DEFAULT_VERSION)
-            } else if c.endpoint.starts_with("tcp://") || c.endpoint.starts_with("http://") {
-                Docker::connect_with_http(&c.endpoint, 120, bollard::API_DEFAULT_VERSION)
-            } else {
-                return Err(BackendError::Unavailable(format!(
-                    "unsupported endpoint {:?} (expected unix:// or tcp://)",
-                    c.endpoint
-                )));
-            }
-            .map_err(|e| BackendError::Unavailable(e.to_string()))?;
+            let docker = connect_endpoint(&c.endpoint)?;
             nodes.push(Node {
                 name: c.name,
                 slots: c.slots,

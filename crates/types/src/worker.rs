@@ -339,8 +339,9 @@ pub const REFRESH_STAGE_CANCELLED: &str = "cancelled";
 /// What a node can do, as opposed to how much of it (design #309 §4): the
 /// execution modes it serves, the platform it runs on, whether it enforces a
 /// task's resource limits, the exclusive resources it holds, the
-/// node-interpreted environments it discovered it can serve, and whether it
-/// discovered an agent CLI (design #490 D3).
+/// node-interpreted environments it discovered it can serve, whether it
+/// discovered an agent CLI (design #490 D3), and whether its daemon reached a
+/// docker endpoint (design #517 D4).
 ///
 /// Carried on both [`PingOk`] and [`WorkerAnnounce`] as an `Option`, additively,
 /// so a daemon predating the field needs no coordination and reads as
@@ -377,6 +378,13 @@ pub struct NodeCapabilities {
     /// a daemon predating the field ran no probe, so it promises nothing.
     #[serde(default)]
     pub agent_cli: bool,
+    /// Whether **this node's daemon** reached a docker endpoint when it probed
+    /// at boot (design #517 D4) — an audit record of what the node can reach,
+    /// never a promise that a given launch is handed the socket. Absent ⇒
+    /// `false`: a daemon predating the field ran no probe, so it promises
+    /// nothing.
+    #[serde(default)]
+    pub docker_reachable: bool,
 }
 
 /// [`NodeCapabilities::platform`] for a node that named none (design #309 §4).
@@ -403,6 +411,7 @@ impl Default for NodeCapabilities {
             leases: Vec::new(),
             envs: Vec::new(),
             agent_cli: false,
+            docker_reachable: false,
         }
     }
 }
@@ -1339,6 +1348,7 @@ mod tests {
             leases: vec!["kvm".into()],
             envs: vec!["xcode:26.5".into()],
             agent_cli: true,
+            docker_reachable: true,
         }
     }
 
@@ -1364,6 +1374,7 @@ mod tests {
         assert!(json.contains(r#""modes":["container","host"]"#), "{json}");
         assert!(json.contains(r#""envs":["xcode:26.5"]"#), "{json}");
         assert!(json.contains(r#""agent_cli":true"#), "{json}");
+        assert!(json.contains(r#""docker_reachable":true"#), "{json}");
 
         let ping = PingOk {
             running: 0,
@@ -1407,6 +1418,11 @@ mod tests {
             !absent.agent_cli,
             "a node that ran no probe cannot serve an agent host launch (design #490 D3)"
         );
+        assert!(
+            !absent.docker_reachable,
+            "a node that ran no probe reaches no docker endpoint it can be audited on \
+             (design #517 D4)"
+        );
         assert!(absent.serves(RuntimeMode::Container));
         assert!(!absent.serves(RuntimeMode::Host), "fails closed");
 
@@ -1433,6 +1449,12 @@ mod tests {
                 .unwrap()
                 .agent_cli,
             "a daemon predating the probe advertises no agent CLI"
+        );
+        assert!(
+            !serde_json::from_str::<NodeCapabilities>(r#"{"modes":["host"]}"#)
+                .unwrap()
+                .docker_reachable,
+            "a daemon predating the probe advertises no docker access"
         );
         assert_eq!(ObservedCapabilities::default().effective(), absent);
     }

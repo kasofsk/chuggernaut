@@ -91,3 +91,5 @@ Doc-reread: docs/design/440-native-worker-daemon.md
 Doc-reread: deploy/prod/README.md
 
 Doc-reread: docs/design/313-workload-identity-image-builds.md
+
+Doc-reread: docs/reference/runbooks/chug-node-adoption.md

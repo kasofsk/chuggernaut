@@ -1,6 +1,6 @@
 # Design #517 — Docker access for jobs, accepted (amending #309 §10 and #313 Decision 0)
 
-Status: PROPOSED — the decision is the operator's and taken; nothing is built, and host-mode access is already live.
+Status: IMPLEMENTED IN PART — S4 landed (job #519); S1-S3 and S5 are open, S6 deferred.
 
 Written against the tree at `ff3258a`. Every claim about current behavior below
 was read out of the source and out of [`docs/spec.md`](../spec.md), not inferred
@@ -23,13 +23,19 @@ get the socket too.
 current truth whenever anything below it changes. Everything after this section
 is append-only.*
 
-**Nothing is built. One thing is already live.** As of **2026-08-09**, agent
+**One slice is built. One thing was already live.** As of **2026-08-09**, agent
 host tasks on `gumbo-air-0` reach a working docker daemon, and every
 [`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) run since
 [#490](490-agent-work-on-a-mac.md) slice 6 has had that access. It was never
 granted and it is not declared anywhere; it is a consequence of the task user
 owning the colima socket. That is the production posture this document accepts
 rather than closes.
+
+**S4 (job #519) makes that posture visible.** Every daemon now probes at boot
+whether it reaches a docker endpoint and advertises the answer as
+`NodeCapabilities.docker_reachable`, for both modes, defaulting false. Nothing
+is granted, withheld or bound by it — the mechanism half (S1-S3, S5) is still
+proposed, and withholding host-mode access is still S6.
 
 | # | Decision | Argued in |
 | --- | --- | --- |
@@ -51,7 +57,7 @@ not at some future adoption. See [the trigger](#the-revisit-trigger-stated-as-a-
 | **S1** | Make the node's allow-list key unshadowable: reserve the dispatcher-composed `JOB_*` stamps the way `docs/spec.md` §5.3 reserves `CHUG_`, or move the matched name under that prefix. **Prerequisite for S3, and a fix to the shipped KVM grant** ([correction 3](#corrections-verified-against-the-tree)) | Proposed |
 | **S2** | Put the job type's name on the launch: one dispatcher-composed env entry in `container_env` ([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)). No schema field, no epoch, no `WORKER_RPC_VERSION` bump | Proposed — gated on S1 |
 | **S3** | A `DockerGrant` beside `KvmGrant` ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)): a node-side socket path plus a `(project, job type)` allow-list, bound into matching launches only, empty granting nobody | Proposed — gated on S1, S2 |
-| **S4** | Advertise the access on `NodeCapabilities` ([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)) for **both** modes, defaulting false so a daemon predating the field promises nothing. D4's audit half | Proposed |
+| **S4** | Advertise the access on `NodeCapabilities` ([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)) for **both** modes, defaulting false so a daemon predating the field promises nothing. D4's audit half | **Landed** (job #519): `docker_reachable`, additive with no `WORKER_RPC_VERSION` bump, probed by `worker::docker_access` at boot for both modes and never a boot refusal. See [what S4 landed](#what-s4-landed-job-519) |
 | **S5** | *Node config:* the allow-list and the pin on one builder node — [#313](313-workload-identity-image-builds.md) S8, minus the proxy | Proposed — gated on S3 |
 | **S6** | *Deferred:* per-task users ([#309](309-host-native-execution.md) P3 §8), the only mechanism that can withhold host-mode docker | Deferred — D4's enforcement half |
 
@@ -579,3 +585,52 @@ with the source.
 - **Anything about the registry, the provider registration, or the tagging
   discipline.** [#313](313-workload-identity-image-builds.md) S6, S7 and B4 are
   unaffected and keep their owners.
+
+## What S4 landed (job #519)
+
+The audit half of D4, and nothing else: no grant, no allow-list, no socket
+bound into any launch, and no change to how a launch is composed.
+
+- **`NodeCapabilities.docker_reachable`**
+  ([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)) —
+  `#[serde(default)]`, false when absent, so a daemon predating the field
+  promises nothing rather than accidentally advertising access. Additive on both
+  transports and **no `WORKER_RPC_VERSION` bump**, for the reason
+  [`crates/types/src/version.rs`](../../crates/types/src/version.rs) gives: an
+  N-1 daemon simply omits the key and reads as false, which is the same thing it
+  meant before the field existed.
+- **What it claims, and what it does not.** *This node's daemon reached a docker
+  endpoint.* It is not *this launch gets the socket* — under S3 a container
+  launch would get one only if the node's allow-list names its
+  `(project, job type)` — and the field's doc comment, `docs/spec.md` §3.1 and
+  the accessor `DockerAccess::reachable` all say the first rather than the
+  second.
+- **`worker::docker_access`**
+  ([`crates/worker/src/docker_access.rs`](../../crates/worker/src/docker_access.rs))
+  probes at boot beside `discover_agent_cli`, for **both** modes and every node
+  — a container-only node's answer is as much an audit record as a Mac's.
+- **The probe resolves the endpoint the way the docker CLI does**, and that is
+  not a decoration. H3 says "the daemon's own view", and on `gumbo-air-0` that
+  view has **no** `/var/run/docker.sock`: the CLI resolves the active context
+  under `HOME` to `~/.colima/default/docker.sock`, and `container::host`'s
+  inherited floor gives a host task the daemon's `HOME`. A probe that asked only
+  the conventional socket would have advertised `false` on the one node this
+  document measured as having access — a control reporting the opposite of the
+  truth, which is the failure mode [H2](#the-host-question-ambient-access-and-what-can-actually-be-done-about-it)
+  rejects. So the candidates are `DOCKER_HOST`, then the active context under the
+  daemon's `HOME`, then the node's configured `WORKER_DOCKER_ENDPOINT`, first one
+  that answers, deduplicated.
+- **A probe is a probe.** The reachability question is asked with the API's own
+  `GET /_ping` (`container::docker::endpoint_answers`), so discovery creates,
+  starts and stops nothing; a fixture unix socket in the worker suite asserts the
+  exact request line, which is what keeps that property from silently regressing.
+  Each candidate is bounded by a two-second timeout.
+- **Never a boot refusal.** `enforce_host_capacity` and
+  `enforce_host_supervision` refuse a boot by design; this does not. A node that
+  reaches no endpoint logs what it asked and boots — byte-identical in behaviour
+  apart from the new advertised `false`.
+
+Not done here, and still open: the shadowable grant key (S1), the job type's
+name on the launch (S2), the `DockerGrant` itself (S3), the node config (S5) and
+per-task users (S6). Nothing in this slice narrows or widens the capability any
+node already had.

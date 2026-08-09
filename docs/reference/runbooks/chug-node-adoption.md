@@ -399,7 +399,7 @@ from a conversion and from every self-refresh after it:
 
 | step | why a host-only node does not need it |
 | --- | --- |
-| the docker socket check | `local_backend` builds the host backend and **returns** before it opens a docker endpoint, so `WORKER_DOCKER_ENDPOINT` is never read |
+| the docker socket check | `local_backend` builds the host backend and **returns** before it opens a docker endpoint, so nothing this node runs *needs* one. Since job #519 the value **is** read at boot — the [#517](../../design/517-docker-access-for-jobs.md) D4 reachability probe (`crates/worker/src/docker_access.rs`) dials it as its last candidate — but reaching nothing is not a boot refusal: the node advertises `docker_reachable: false` and behaves identically otherwise |
 | `chuggernaut/agent` + `agent-rust` | a job type resolving to `runtime.mode: host` cannot declare an `image:` (`crates/types/src/job_type.rs`), so nothing here launches one |
 | `chuggernaut/worker` (Darwin only) | the daemon is compiled natively, and the image's only other passenger is the channel binary this node does not take |
 | the container-platform probe | there is no injected binary to judge |

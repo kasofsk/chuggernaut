@@ -537,6 +537,7 @@ async fn announced_capabilities_reach_the_backend() {
         leases: Vec::new(),
         envs: vec!["xcode:26.5".into()],
         agent_cli: true,
+        docker_reachable: true,
     };
     let mut with_caps = announce("mac", 1, "0.1.0+mac");
     with_caps.capabilities = Some(host.clone());

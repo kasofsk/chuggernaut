@@ -602,6 +602,7 @@ fn host_capable() -> types::worker::NodeCapabilities {
         leases: Vec::new(),
         envs: vec!["xcode:26.5".into()],
         agent_cli: true,
+        docker_reachable: true,
     }
 }
 

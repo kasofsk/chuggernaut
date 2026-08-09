@@ -13,6 +13,7 @@
 use crate::agent_cli::AgentCli;
 use crate::capacity::Capacity;
 use crate::config::{WorkerConfig, WorkerMode};
+use crate::docker_access::{DockerAccess, DockerEnv, PROBE_TIMEOUT};
 use crate::nix::{NIX_ENV_PREFIX, NixRoots, REAP_AGE_MIN, Realised, flake_installable};
 use crate::xcode::{DEVELOPER_DIR_VAR, XCODE_ENV_PREFIX, XcodeInstall, Xcodes};
 use container::docker::{DockerBackend, DockerNodeConfig, KvmGrant};
@@ -434,6 +435,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
     };
 
     let agent_cli = discover_agent_cli(&config.node, &config.modes);
+    let docker_access = discover_docker_access(&config).await;
     let backend = local_backend(&config, &agent_cli).await?;
     let cache_enabled = config.cache_dir.is_some();
     let kvm = kvm_grant(&config);
@@ -471,7 +473,7 @@ pub async fn run(config: WorkerConfig) -> Result<(), WorkerRunError> {
         nix: nix.clone(),
         nix_rooted: std::sync::Mutex::new(HashMap::new()),
         host_mode: serves_host(&config.modes),
-        capabilities: node_capabilities(&config.modes, &xcodes, &agent_cli),
+        capabilities: node_capabilities(&config.modes, &xcodes, &agent_cli, &docker_access),
         xcodes,
         refresh_script: config.refresh_script.clone(),
         refresh_git_url: config.refresh_git_url.clone(),
@@ -561,6 +563,7 @@ fn node_capabilities(
     modes: &[WorkerMode],
     xcodes: &Xcodes,
     agent_cli: &AgentCli,
+    docker_access: &DockerAccess,
 ) -> types::worker::NodeCapabilities {
     let mut served = Vec::new();
     if serves_container(modes) {
@@ -585,7 +588,36 @@ fn node_capabilities(
         leases: Vec::new(),
         envs,
         agent_cli: agent_cli.present(),
+        docker_reachable: docker_access.reachable(),
     }
+}
+
+/// Whether this node's daemon reaches a docker endpoint, probed once at boot for
+/// **both** modes (design #517 D4): a container node whose launches can be
+/// granted the socket, and a host node whose tasks reach it ambiently through
+/// the uid they run as. Reaching none is an ordinary node and never a refused
+/// boot — the advertisement is an audit record, not a grant.
+async fn discover_docker_access(config: &WorkerConfig) -> DockerAccess {
+    let access = DockerAccess::probe(
+        &DockerEnv::from_env(),
+        &config.docker_endpoint,
+        PROBE_TIMEOUT,
+    )
+    .await;
+    match access.endpoint() {
+        Some(endpoint) => tracing::info!(
+            node = %config.node,
+            endpoint = %endpoint,
+            "this node's daemon reaches a docker endpoint — advertised as a node capability, \
+             which is not a grant to any launch (design #517 D4)"
+        ),
+        None => tracing::info!(
+            node = %config.node,
+            searched = %access.searched_display(),
+            "this node's daemon reaches no docker endpoint — advertising none (design #517 D4)"
+        ),
+    }
+    access
 }
 
 /// The agent CLI a host-capable node serves agent work with, probed once at boot
@@ -2163,12 +2195,14 @@ mod tests {
 
         let none = Xcodes::default();
         let no_cli = AgentCli::default();
-        let default = node_capabilities(&crate::config::default_modes(), &none, &no_cli);
+        let no_docker = DockerAccess::default();
+        let default =
+            node_capabilities(&crate::config::default_modes(), &none, &no_cli, &no_docker);
         assert_eq!(default.modes, vec![RuntimeMode::Container]);
         assert!(default.resources_enforced);
         assert_eq!(
             default,
-            node_capabilities(&[], &none, &no_cli),
+            node_capabilities(&[], &none, &no_cli, &no_docker),
             "declaring nothing is the same node"
         );
         assert_eq!(
@@ -2180,11 +2214,16 @@ mod tests {
             "only the platform separates a container-only node from the absent reading"
         );
 
-        let both = node_capabilities(&[WorkerMode::Host, WorkerMode::Container], &none, &no_cli);
+        let both = node_capabilities(
+            &[WorkerMode::Host, WorkerMode::Container],
+            &none,
+            &no_cli,
+            &no_docker,
+        );
         assert_eq!(both.modes, vec![RuntimeMode::Container, RuntimeMode::Host]);
         assert!(both.resources_enforced, "it still has a docker daemon");
 
-        let host_only = node_capabilities(&[WorkerMode::Host], &none, &no_cli);
+        let host_only = node_capabilities(&[WorkerMode::Host], &none, &no_cli, &no_docker);
         assert_eq!(host_only.modes, vec![RuntimeMode::Host]);
         assert!(
             !host_only.resources_enforced,
@@ -2201,6 +2240,29 @@ mod tests {
             !default.agent_cli && !both.agent_cli && !host_only.agent_cli,
             "a node that discovered no CLI advertises none (design #490 D3)"
         );
+        assert!(
+            !default.docker_reachable && !both.docker_reachable && !host_only.docker_reachable,
+            "a node whose probe reached nothing advertises no docker access (design #517 D4)"
+        );
+    }
+
+    /// The advertisement follows the probe in **both** modes (design #517 D4),
+    /// which is what makes the answer a measurement of the node rather than a
+    /// property of the execution mode a job type happened to choose.
+    #[test]
+    fn docker_access_is_advertised_for_both_modes() {
+        let reachable = DockerAccess::fixture_reached("unix:///colima/docker.sock");
+        for modes in [
+            crate::config::default_modes(),
+            vec![WorkerMode::Host],
+            vec![WorkerMode::Container, WorkerMode::Host],
+        ] {
+            assert!(
+                node_capabilities(&modes, &Xcodes::default(), &AgentCli::default(), &reachable)
+                    .docker_reachable,
+                "{modes:?} advertises what the node's own probe reached"
+            );
+        }
     }
 
     /// A fixture `PATH` with the agent CLI on it, so every assertion about the
@@ -2230,13 +2292,15 @@ mod tests {
             &[WorkerMode::Container, WorkerMode::Host],
             &Xcodes::default(),
             &cli,
+            &DockerAccess::default(),
         );
         assert!(capable.agent_cli);
         assert!(
             !node_capabilities(
                 &[WorkerMode::Container],
                 &Xcodes::default(),
-                &AgentCli::default()
+                &AgentCli::default(),
+                &DockerAccess::default()
             )
             .agent_cli,
             "a container-only node's advertisement is unchanged"
@@ -2820,7 +2884,8 @@ mod tests {
             node_capabilities(
                 &[WorkerMode::Container, WorkerMode::Host],
                 &host,
-                &AgentCli::default()
+                &AgentCli::default(),
+                &DockerAccess::default()
             )
             .modes
             .contains(&types::job_type::RuntimeMode::Host),
@@ -2834,13 +2899,19 @@ mod tests {
     #[test]
     fn advertised_envs_are_the_discovered_set() {
         let (root, xcodes) = fixture_xcodes("advertise");
-        let capabilities = node_capabilities(&[WorkerMode::Host], &xcodes, &AgentCli::default());
+        let capabilities = node_capabilities(
+            &[WorkerMode::Host],
+            &xcodes,
+            &AgentCli::default(),
+            &DockerAccess::default(),
+        );
         assert_eq!(capabilities.envs, vec!["xcode:26.5".to_string()]);
         assert_eq!(
             node_capabilities(
                 &[WorkerMode::Container],
                 &Xcodes::default(),
-                &AgentCli::default()
+                &AgentCli::default(),
+                &DockerAccess::default()
             )
             .envs,
             Vec::<String>::new(),
@@ -3115,6 +3186,7 @@ mod tests {
                 },
                 &Xcodes::default(),
                 &AgentCli::default(),
+                &DockerAccess::default(),
             ),
             xcodes: Xcodes::default(),
             refresh_script: Some(script),
