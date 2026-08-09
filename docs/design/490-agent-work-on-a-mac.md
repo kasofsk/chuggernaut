@@ -1,6 +1,6 @@
 # Design — agent work on a Mac
 
-Status: IMPLEMENTED — slices 0–6 landed in jobs #491–#510; D6 amended in job #512, its sweep slice open; M7 at two samples.
+Status: IMPLEMENTED — slices 0–7 landed in jobs #491–#514; D6 amended in job #512 and its sweep landed in job #514; M7 at two samples.
 
 Written against the tree at `d556a6c` (job #489's `code` merge, the last commit
 touching source before this branch): every claim below was read out of the
@@ -55,8 +55,11 @@ population to count.
   command returns — so D6 keeps its decision and grows its teardown by exactly
   that one path. The M5 row's own "Teardown grows, or the daemon user does" is
   resolved in favour of the first, with the second rejected on the tree rather
-  than left hanging; [slice 7](#slices) is the `code` job that lands the sweep and
-  is the only slice still open.
+  than left hanging; [slice 7](#slices) landed that sweep in job #514, so the
+  teardown a host task's own wrapper begins now ends with the CLI's MCP-log
+  subtree for that task — listed out of the cache root by the task directory's
+  own name, never computed, and best-effort on the nix reaper's charter
+  (`sweep_agent_cache` and `reclaim_agent_cache`, `crates/container/src/host.rs`).
 - **[M7](#what-must-be-measured-on-the-air-first) has two samples and no
   verdict.** Simulator state the first task left made the second **cheaper**, not
   disturbed; two observations of "did not disturb" are not "cannot disturb", and
@@ -750,7 +753,7 @@ different decision on the other side of a "no".
 | **4** | `code` | D3: probe the agent CLI on the daemon's `PATH` at startup, advertise it, refuse by name when absent — **and put the CLI on that `PATH`**, which M3 says it is not | `NodeCapabilities`, additive — no `WORKER_RPC_VERSION` bump; `AGENT_PATH`/`WORKER_PATH` in `deploy/prod/install-worker-launchd.sh` | 0 (M3), 3 | **Landed** (job #496) |
 | **5** | `code` | D5: `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` test becomes a launch-time capability test; `validate_host_serves_commands_only` lifts | `HostBackend::admit`; spec §1.1's host row | 4 | **Landed** (job #497) |
 | **6** | `code` | The first agent host task actually run on `gumbo-air-0`, with the transcript resolved and harvested end to end; **M5's authenticated residual and M7 measured under the daemon** | The row's "none — this is the confirmation" was wrong twice over, and so was its promise that M5 and M7 would be *settled*: job #502 built the config half it said did not exist, and settling M7 needs two host tasks rather than one. What ran is two `mac-proof` jobs on the air, green end to end on the second, with two launch-blocking defects found and fixed between them; **M5's residual is measured and D6 is re-opened rather than settled, and M7 has two samples and no verdict** | 5 | **Landed** (job #510) — the runs are jobs #506 and #509, recorded in [the correction below](#correction--2026-08-09-job-510-slice-6-ran-what-two-host-tasks-on-the-air-measured); this row and the head are the deliverable a `mac-proof` job cannot carry, since its `wrap_up` is `type: none` and it merges nothing |
-| **7** | `code` | [D6's second amendment](#correction--2026-08-09-job-512-d6-amended-the-premise-is-false-the-guarantee-holds-and-the-teardown-grows-by-one-path): a host task's teardown reclaims the agent CLI's own MCP-log subtree for **that task**, located by **listing** the cache root and matching the task directory's own name — never by computing the CLI's slug | Held to `crates/worker/src/nix.rs`'s reaper charter — it leaks disk rather than ever failing a job — so an absent, unreadable or undeletable subtree is logged and skipped, and it never contributes to `remove`'s failure list. Only a subtree keyed under **this** task's directory; the node's unrelated ones (an actions-runner's, dated June) are untouched. Bounded in entries examined per pass | 6 | Open — this job amends the decision, the sweep is its own `code` job |
+| **7** | `code` | [D6's second amendment](#correction--2026-08-09-job-512-d6-amended-the-premise-is-false-the-guarantee-holds-and-the-teardown-grows-by-one-path): a host task's teardown reclaims the agent CLI's own MCP-log subtree for **that task**, located by **listing** the cache root and matching the task directory's own name — never by computing the CLI's slug | Held to `crates/worker/src/nix.rs`'s reaper charter — it leaks disk rather than ever failing a job — so an absent, unreadable or undeletable subtree is logged and skipped, and it never contributes to `remove`'s failure list. Only a subtree keyed under **this** task's directory; the node's unrelated ones (an actions-runner's, dated June) are untouched. Bounded in entries examined per pass | 6 | **Landed** (job #514) — `sweep_agent_cache` lists the cache root and removes each immediate child whose name contains the task directory's own, `reclaim_agent_cache` runs it from both `spawn_reaper` and `remove` and returns nothing a caller could fail on, and `AGENT_CACHE_ENTRIES_MAX` bounds the pass (`crates/container/src/host.rs`); a pass that matched nothing logs what it examined, because a silent miss is the failure mode the slice exists to avoid |
 
 Slice 6 was not ceremony, and neither was slice 0. Every decision above rested on
 reading the tree until slice 6 ran it, and the first attempt was refused before

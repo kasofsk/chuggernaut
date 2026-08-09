@@ -78,6 +78,16 @@ const CHUGGERNAUT_DIR: &str = "chuggernaut";
 /// already have.
 pub const AGENT_STATE_DIR: &str = "claude";
 
+/// The agent CLI's own MCP-log cache, relative to the daemon user's home
+/// (design #490 D6, second amendment). One subtree per workspace, keyed by a
+/// slug of that workspace's **resolved** realpath, which is why a teardown lists
+/// this directory instead of computing a name.
+const AGENT_CACHE_REL: &str = "Library/Caches/claude-cli-nodejs";
+
+/// How many cache-root entries one sweep examines, the bound
+/// `crates/worker/src/nix.rs`'s stale-root reaper carries for the same reason.
+const AGENT_CACHE_ENTRIES_MAX: usize = 4096;
+
 /// The total wire-path mapping, as pairs. Anything a path or an env value names
 /// outside these two prefixes is refused rather than reaching the node's own
 /// filesystem — a permissive mapping is how a `copy_file` bug becomes a write
@@ -1340,6 +1350,132 @@ fn reclaim_credentials(dir: &Path) -> std::io::Result<()> {
     failure.map_or(Ok(()), Err)
 }
 
+/// What one pass over the agent CLI's cache root did, returned rather than only
+/// logged so that a pass matching nothing is as observable as one that removed a
+/// subtree.
+#[derive(Debug, PartialEq, Eq)]
+enum AgentCacheSweep {
+    /// A name this backend never minted, so nothing in the cache is keyed by it
+    /// and matching on it could reach another tool's subtree.
+    Unkeyed,
+    /// No cache root on this node — the agent CLI never ran here.
+    Absent,
+    Unreadable(String),
+    Swept {
+        examined: usize,
+        removed: usize,
+        failed: usize,
+    },
+}
+
+/// Remove every immediate child of `cache_root` whose name contains `task`, the
+/// task directory's own name — [`TASK_PREFIX`] plus two hex fields, so it
+/// survives any character-mapping slugifier verbatim (design #490 D6, second
+/// amendment). Listing rather than computing the CLI's key is what makes a miss
+/// leak disk instead of deleting a subtree keyed to something else.
+fn sweep_agent_cache(cache_root: &Path, task: &str) -> AgentCacheSweep {
+    if !task.starts_with(TASK_PREFIX) || !is_task_id(task) {
+        return AgentCacheSweep::Unkeyed;
+    }
+    let entries = match std::fs::read_dir(cache_root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AgentCacheSweep::Absent,
+        Err(e) => return AgentCacheSweep::Unreadable(e.to_string()),
+    };
+    let (mut examined, mut removed, mut failed) = (0, 0, 0);
+    for entry in entries.take(AGENT_CACHE_ENTRIES_MAX).flatten() {
+        examined += 1;
+        if !entry.file_name().to_string_lossy().contains(task) {
+            continue;
+        }
+        let path = entry.path();
+        let result = if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match result {
+            Ok(()) => removed += 1,
+            Err(e) => {
+                failed += 1;
+                tracing::warn!(
+                    subtree = %path.display(),
+                    "host task MCP log subtree is unreclaimable — leaking it rather than \
+                     failing the task: {e}"
+                );
+            }
+        }
+    }
+    debug_assert!(
+        removed + failed <= examined,
+        "the sweep removes only what it listed"
+    );
+    AgentCacheSweep::Swept {
+        examined,
+        removed,
+        failed,
+    }
+}
+
+/// Reclaim the agent CLI's own MCP-log subtree for this task, beside the
+/// credential tree the same teardown empties (design #490 D6, second
+/// amendment). It is held to `crates/worker/src/nix.rs`'s reaper charter — it
+/// leaks disk rather than ever failing a job — so it returns nothing a caller
+/// could fail on.
+fn reclaim_agent_cache(dir: &Path) {
+    let Some(task) = dir.file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    let Some(home) = std::env::var_os(HOME_VAR).filter(|home| !home.is_empty()) else {
+        tracing::debug!(
+            task,
+            "host task MCP log sweep skipped: the daemon has no {HOME_VAR}"
+        );
+        return;
+    };
+    let root = PathBuf::from(home).join(AGENT_CACHE_REL);
+    let cache = root.display().to_string();
+    match sweep_agent_cache(&root, task) {
+        AgentCacheSweep::Unkeyed => tracing::warn!(
+            task,
+            "host task MCP log sweep refused a task name this backend did not mint"
+        ),
+        AgentCacheSweep::Absent => {
+            tracing::debug!(task, cache, "host task MCP log sweep found no cache root")
+        }
+        AgentCacheSweep::Unreadable(e) => tracing::warn!(
+            task,
+            cache,
+            "host task MCP log cache is unreadable — leaking it rather than failing the \
+             task: {e}"
+        ),
+        AgentCacheSweep::Swept {
+            examined,
+            removed: 0,
+            failed,
+        } => tracing::info!(
+            task,
+            cache,
+            examined,
+            failed,
+            "host task MCP log sweep matched no subtree — either this task ran no agent CLI, or \
+             the CLI's key no longer contains the task directory name (design #490 D6)"
+        ),
+        AgentCacheSweep::Swept {
+            examined,
+            removed,
+            failed,
+        } => tracing::info!(
+            task,
+            cache,
+            examined,
+            removed,
+            failed,
+            "reclaimed this host task's MCP log subtree"
+        ),
+    }
+}
+
 /// A reclaim's failure, or `None` when it succeeded or the path was already
 /// gone. Idempotence is the trait's documented contract for `remove`.
 fn reclaim_failure(result: std::io::Result<()>, what: &str) -> Option<String> {
@@ -1567,7 +1703,9 @@ impl ContainerBackend for HostBackend {
     }
 
     /// Delete the task directory and every path the launch wrote — since #322
-    /// W2 the clone and the credential tree are both inside it. Nothing else on
+    /// W2 the clone and the credential tree are both inside it — and sweep this
+    /// task's MCP-log subtree out of the agent CLI's own cache (#490 D6). Nothing
+    /// else on
     /// the node reclaims a 5–10 GB `target/`, so a failure is an error **and**
     /// an `error!` rather than a silent leak (#309 §2(c)).
     async fn remove(&self, id: &ContainerId) -> Result<(), BackendError> {
@@ -1575,6 +1713,7 @@ impl ContainerBackend for HostBackend {
         if !dir.exists() {
             return Ok(());
         }
+        reclaim_agent_cache(&dir);
         let meta = read_meta(&dir);
         let mut failed: Vec<String> = Vec::new();
         for path in meta.iter().flat_map(|m| m.files.iter()) {
@@ -1640,7 +1779,8 @@ fn read_fully(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize
 }
 
 /// Reap the spawned child, re-empty the credential tree the wrapper empties
-/// first, and, only if that wrapper never got to it, write the exit code.
+/// first, sweep this task's MCP-log subtree out of the agent CLI's own cache,
+/// and, only if that wrapper never got to it, write the exit code.
 /// Leaving the live set **last** is what closes the window in which a
 /// just-exited task would otherwise read as gone.
 fn spawn_reaper(
@@ -1654,6 +1794,7 @@ fn spawn_reaper(
         if let Err(e) = reclaim_credentials(&dir) {
             tracing::error!(task = %task, "host task credential tree is unreclaimable: {e}");
         }
+        reclaim_agent_cache(&dir);
         if dir.is_dir() && read_exit_code(&dir).is_none() {
             let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
             if let Err(e) = write_exit_code(&dir, code) {
@@ -1783,6 +1924,99 @@ mod tests {
             "the daemon's repeat of the teardown spares the same leaf"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The agent CLI's rule, as design #490's slice 0 correction measured it:
+    /// every character that is not alphanumeric becomes a dash, applied to the
+    /// **resolved** realpath of the cwd.
+    fn cache_key_of(workspace: &Path) -> String {
+        workspace
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
+    }
+
+    fn cache_test_dir(what: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("chug-host-{what}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// The sweep matches on the task directory's **own name** and never on a
+    /// computed slug (design #490 D6 second amendment): a task root reached
+    /// through a symlink is keyed by the resolved realpath, which a computed
+    /// name misses silently, and another tool's subtree is not this task's to
+    /// delete.
+    #[test]
+    fn the_mcp_log_sweep_finds_a_symlinked_task_root_and_spares_another_tools_subtree() {
+        let tmp = cache_test_dir("mcp-cache");
+        let task = format!("{TASK_PREFIX}1f2e-3");
+        let real = tmp.join("real");
+        std::fs::create_dir_all(real.join(&task).join(WORKSPACE_DIR)).unwrap();
+        std::os::unix::fs::symlink(&real, tmp.join("link")).unwrap();
+
+        let through_link = tmp.join("link").join(&task).join(WORKSPACE_DIR);
+        let key = cache_key_of(&through_link.canonicalize().unwrap());
+        assert!(
+            !key.contains("link") && key.contains(&task),
+            "the CLI keys on the resolved realpath, which still carries the task name: {key}"
+        );
+        let cache = tmp.join("cache");
+        std::fs::create_dir_all(cache.join(&key).join("mcp-logs-chuggernaut-channel")).unwrap();
+        let other = "-Users-runner-actions-runner--work-beacon";
+        std::fs::create_dir_all(cache.join(other)).unwrap();
+
+        assert_eq!(
+            sweep_agent_cache(&cache, &task),
+            AgentCacheSweep::Swept {
+                examined: 2,
+                removed: 1,
+                failed: 0
+            }
+        );
+        assert!(!cache.join(&key).exists(), "the task's own subtree is gone");
+        assert!(
+            cache.join(other).is_dir(),
+            "a subtree keyed to another tool outlives this task"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// A sweep that finds nothing **says so** — silence is the failure this
+    /// slice exists to avoid — and a name this backend never minted is refused
+    /// rather than matched, since a loose predicate would reach every subtree
+    /// the node holds.
+    #[test]
+    fn an_mcp_log_sweep_that_matches_nothing_is_observable() {
+        let tmp = cache_test_dir("mcp-miss");
+        let cache = tmp.join("cache");
+        let task = format!("{TASK_PREFIX}9a-1");
+        assert_eq!(
+            sweep_agent_cache(&cache, &task),
+            AgentCacheSweep::Absent,
+            "a node the CLI never ran on is a skip, not a failure"
+        );
+        let other = "-private-tmp-somebody-else";
+        std::fs::create_dir_all(cache.join(other)).unwrap();
+        assert_eq!(
+            sweep_agent_cache(&cache, &task),
+            AgentCacheSweep::Swept {
+                examined: 1,
+                removed: 0,
+                failed: 0
+            },
+            "a pass that matched nothing reports what it examined"
+        );
+        for name in ["", "-", "9a-1", "host", "?"] {
+            assert_eq!(
+                sweep_agent_cache(&cache, name),
+                AgentCacheSweep::Unkeyed,
+                "{name} is not a task directory this backend minted"
+            );
+        }
+        assert!(cache.join(other).is_dir());
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     /// The mapping is **total** (design #322 §2): each wire prefix lands under
