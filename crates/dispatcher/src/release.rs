@@ -170,17 +170,10 @@ pub async fn static_errors(
 
 /// The KV-name half of [`static_errors`] (§2.2), pure so it needs no repo or
 /// store: every declared secret and var must exist in the project's buckets, and
-/// neither may use the reserved `CHUG_` prefix.
-///
-/// The prefix rule covers **vars as well as secrets** (spec §5.3, extended by
-/// design #311 Decision 4). Reserved names are dispatcher-only origin
-/// credentials and §6.3 task-origin stamps, and var names are KV-validated to
-/// `[A-Za-z0-9_]+` at write time — so a project could declare `CHUG_PHASE`
-/// today and clobber an origin stamp at injection. Closing it here is also the
-/// prerequisite for inputs arriving under `CHUG_INPUT_*`: an unchecked var could
-/// otherwise shadow one.
+/// neither may use a reserved prefix ([`crate::exec::reserved_env_prefix`]).
+/// Spec §4.1 has what each prefix protects, and why the rule covers vars as well
+/// as secrets (design #311 Decision 4, design #517 S1).
 fn static_errors_kv(seq: Option<u64>, job_type: &JobType, kv: &KvNames) -> Vec<ValidationError> {
-    const RESERVED: &str = crate::forge_ingest::origin::RESERVED_SECRET_PREFIX;
     let secrets = job_type.work.secrets.iter().chain(
         job_type
             .eval
@@ -197,14 +190,11 @@ fn static_errors_kv(seq: Option<u64>, job_type: &JobType, kv: &KvNames) -> Vec<V
         );
     let mut errs = Vec::new();
     for (field, noun, name, present) in declared {
-        if name.starts_with(RESERVED) {
+        if let Some((prefix, why)) = crate::exec::reserved_env_prefix(name) {
             errs.push(ValidationError::new(
                 seq,
                 field,
-                format!(
-                    "{noun} '{name}' uses the reserved '{RESERVED}' prefix (dispatcher-only \
-                     origin credentials and task-origin stamps)"
-                ),
+                format!("{noun} '{name}' uses the reserved '{prefix}' prefix ({why})"),
             ));
         } else if !present {
             errs.push(ValidationError::new(
@@ -401,7 +391,53 @@ mod tests {
             let errs = static_errors_kv(Some(7), &jt, &kv(&["CHUG_ORIGIN_PAT"], &["CHUG_PHASE"]));
             assert_eq!(errs.len(), 1, "{errs:?}");
             assert_eq!(errs[0].field, field);
-            assert!(errs[0].message.contains("reserved"), "{errs:?}");
+            assert!(
+                errs[0].message.contains("reserved 'CHUG_' prefix"),
+                "{errs:?}"
+            );
+        }
+    }
+
+    /// Design #517 S1: `JOB_PROJECT` is what a node's KVM (and, after S3,
+    /// docker) grant matches on, so a job type may no more declare it than it
+    /// may declare `CHUG_PHASE` — the grant key must not be movable by project
+    /// config.
+    #[test]
+    fn the_dispatcher_composed_job_stamps_cannot_be_declared() {
+        for (secrets, vars, field) in [
+            (vec!["JOB_PROJECT"], vec![], "secrets"),
+            (vec![], vec!["JOB_PROJECT"], "vars"),
+            (vec![], vec!["JOB_ID"], "vars"),
+            (vec![], vec!["JOB_BRANCH"], "vars"),
+            (vec![], vec!["JOB_SHA"], "vars"),
+            (vec![], vec!["JOB_TASK_ID"], "vars"),
+        ] {
+            let jt = job_type_with(&secrets, &vars);
+            let name = secrets.first().or_else(|| vars.first()).unwrap();
+            let errs = static_errors_kv(Some(7), &jt, &kv(&[name], &[name]));
+            assert_eq!(errs.len(), 1, "{name} is declarable: {errs:?}");
+            assert_eq!(errs[0].field, field);
+            assert!(
+                errs[0].message.contains(name)
+                    && errs[0].message.contains("reserved 'JOB_' prefix")
+                    && errs[0].message.contains("allow-list"),
+                "the refusal names the variable and why: {errs:?}"
+            );
+        }
+    }
+
+    /// The reservation is a prefix and nothing wider: the unprefixed
+    /// dispatcher-composed names stay declarable, so no `.chug/jobs/*.yaml`
+    /// that validates today stops validating.
+    #[test]
+    fn the_reservation_is_no_wider_than_the_two_prefixes() {
+        for name in ["BASE_BRANCH", "REPO_URL", "NATS_URL", "JOBS", "CHUGGER"] {
+            let jt = job_type_with(&[], &[name]);
+            assert_eq!(
+                static_errors_kv(Some(7), &jt, &kv(&[], &[name])),
+                vec![],
+                "{name} is not reserved"
+            );
         }
     }
 

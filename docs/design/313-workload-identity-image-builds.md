@@ -177,7 +177,7 @@ of work.
 | **S5** | Discovery + JWKS routes on the api, unexposed — [`crates/api/src/oidc.rs`](../../crates/api/src/oidc.rs) | **Landed** (job #412) |
 | **S6** | *Operator:* register the provider with the uploaded JWK set; attribute condition; one IAM binding; prove it in a work container | Pending — the terraform and the six-rung proof are authored ([`infra/gcp-proof/`](../../infra/gcp-proof), [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml)); the `apply` is the operator's |
 | **S7** | *Operator:* a registry confirmed | Pending — runs in parallel with S1–S6 |
-| **S8** | *Node config:* allow-list + `placement.node` pin on one builder node | Proposed, **reduced 2026-08-09 (job #517)** — the proxy is superseded, so this is the socket bound node-side into allow-listed launches. Carried as [#517](./517-docker-access-for-jobs.md)'s S5, and gated on its S1 (the matched launch env is shadowable today) |
+| **S8** | *Node config:* allow-list + `placement.node` pin on one builder node | Proposed, **reduced 2026-08-09 (job #517)** — the proxy is superseded, so this is the socket bound node-side into allow-listed launches. Carried as [#517](./517-docker-access-for-jobs.md)'s S5. Its S1 prerequisite **landed in job #518**: the matched launch env is no longer shadowable, `JOB_` being a reserved secret/var prefix (`docs/spec.md` §4.1) |
 | **S9** | A real `build-image` job type: SHA tag, digest recorded, digest-resolves evaluator | Proposed — gated on S6, S7, S8 |
 
 ## Problem

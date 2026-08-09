@@ -47,6 +47,32 @@ pub(crate) use crate::decide::work::{INFRA_LOSS_REASON, INFRA_RELAUNCH_CAP, prov
 /// loudly beats spinning inside the single-writer loop.
 const WORK_FOLD_STEPS_MAX: usize = 4;
 
+/// Reserved prefix of the dispatcher-composed launch stamps — `JOB_ID`,
+/// `JOB_PROJECT`, `JOB_BRANCH`, `JOB_SHA`, `JOB_TASK_ID` (spec §4.1, §5.3).
+/// Sealed exactly as `CHUG_` is because a node's grant list matches on
+/// `JOB_PROJECT` (design #517 S1).
+pub const RESERVED_STAMP_PREFIX: &str = "JOB_";
+
+/// Which reserved prefix a declared secret or var name falls under, with the
+/// reason release validation gives when it refuses the declaration. `None` is a
+/// name a job type may declare and injection may deliver.
+pub(crate) fn reserved_env_prefix(name: &str) -> Option<(&'static str, &'static str)> {
+    const SECRET: &str = crate::forge_ingest::origin::RESERVED_SECRET_PREFIX;
+    if name.starts_with(SECRET) {
+        Some((
+            SECRET,
+            "dispatcher-only origin credentials, task-origin stamps and job inputs",
+        ))
+    } else if name.starts_with(RESERVED_STAMP_PREFIX) {
+        Some((
+            RESERVED_STAMP_PREFIX,
+            "dispatcher-composed launch stamps, which a node's allow-list matches on",
+        ))
+    } else {
+        None
+    }
+}
+
 /// Working memory for a job in Work/Evaluation. Restart rebuild is the
 /// reconcile slice; until then a dispatcher restart drops in-flight jobs.
 pub struct ExecState {
@@ -1623,7 +1649,7 @@ impl Core {
         }
         let vars = self.store.raw_bucket(store::buckets::VARS).await?;
         for name in &job_type.vars {
-            if name.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX) {
+            if reserved_env_prefix(name).is_some() {
                 continue;
             }
             if let Some(value) = vars
@@ -1635,7 +1661,7 @@ impl Core {
         }
         let injectable = secrets_declared
             .iter()
-            .filter(|n| !n.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX));
+            .filter(|n| reserved_env_prefix(n).is_none());
         match &self.secrets {
             Some(secrets) => {
                 use store::secrets::SecretStore;
@@ -2199,8 +2225,35 @@ mod tests {
     //! recover-or-reset lookup over a real bare repo. The end-to-end resume
     //! (crash-after-push → retry recovers + prompt notes it) is exercised in
     //! Tier-2 (`tests/execution.rs`).
-    use super::{channel_mcp_for, recover_or_reset_branch};
+    use super::{channel_mcp_for, recover_or_reset_branch, reserved_env_prefix};
     use test_utils::repo::TempRepo;
+
+    /// The single decision site `container_env`'s var and secret loops skip on
+    /// and release validation refuses on, so the two can never disagree about
+    /// which names project config may move (design #517 S1).
+    #[test]
+    fn injection_skips_exactly_the_names_release_validation_refuses() {
+        for name in [
+            "CHUG_PHASE",
+            "CHUG_ORIGIN_PAT",
+            "JOB_PROJECT",
+            "JOB_ID",
+            "JOB_BRANCH",
+            "JOB_SHA",
+            "JOB_TASK_ID",
+        ] {
+            assert!(reserved_env_prefix(name).is_some(), "{name} is injectable");
+        }
+        for name in [
+            "RUST_EDITION",
+            "BASE_BRANCH",
+            "REPO_URL",
+            "NATS_URL",
+            "JOBS",
+        ] {
+            assert_eq!(reserved_env_prefix(name), None, "{name} is refused");
+        }
+    }
 
     /// Design #490 D2: the channel binary rides into a **container** and is
     /// named, never sent, for a **host** task — routed by the image's presence,

@@ -1,6 +1,6 @@
 # Design #517 — Docker access for jobs, accepted (amending #309 §10 and #313 Decision 0)
 
-Status: IMPLEMENTED IN PART — S4 landed (job #519); S1-S3 and S5 are open, S6 deferred.
+Status: IMPLEMENTED IN PART — S1 (job #518) and S4 (job #519) landed; S2, S3 and S5 are open, S6 deferred. No grant is built, and host-mode access is already live.
 
 Written against the tree at `ff3258a`. Every claim about current behavior below
 was read out of the source and out of [`docs/spec.md`](../spec.md), not inferred
@@ -23,8 +23,16 @@ get the socket too.
 current truth whenever anything below it changes. Everything after this section
 is append-only.*
 
-**One slice is built. One thing was already live.** As of **2026-08-09**, agent
-host tasks on `gumbo-air-0` reach a working docker daemon, and every
+**Two slices are built; no grant is. One thing was already live.** As of
+**2026-08-09**, S1 has landed: `JOB_` is a reserved secret/var prefix alongside
+`CHUG_` (`docs/spec.md` §4.1, §5.3), so the `JOB_PROJECT` every node-side
+allow-list matches on can no longer be moved by a job type's `vars:` — which
+also closes [correction 3](#corrections-verified-against-the-tree) against the
+**shipped** KVM grant. S4 has landed beside it, advertising the access. No grant
+is built: no socket is bound into any container, and S2's job-type stamp does
+not exist.
+
+Agent host tasks on `gumbo-air-0` reach a working docker daemon, and every
 [`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) run since
 [#490](490-agent-work-on-a-mac.md) slice 6 has had that access. It was never
 granted and it is not declared anywhere; it is a consequence of the task user
@@ -34,8 +42,8 @@ rather than closes.
 **S4 (job #519) makes that posture visible.** Every daemon now probes at boot
 whether it reaches a docker endpoint and advertises the answer as
 `NodeCapabilities.docker_reachable`, for both modes, defaulting false. Nothing
-is granted, withheld or bound by it — the mechanism half (S1-S3, S5) is still
-proposed, and withholding host-mode access is still S6.
+is granted, withheld or bound by it — the rest of the mechanism (S2, S3, S5) is
+still proposed, and withholding host-mode access is still S6.
 
 | # | Decision | Argued in |
 | --- | --- | --- |
@@ -54,7 +62,7 @@ not at some future adoption. See [the trigger](#the-revisit-trigger-stated-as-a-
 
 | Slice | Content | State |
 | --- | --- | --- |
-| **S1** | Make the node's allow-list key unshadowable: reserve the dispatcher-composed `JOB_*` stamps the way `docs/spec.md` §5.3 reserves `CHUG_`, or move the matched name under that prefix. **Prerequisite for S3, and a fix to the shipped KVM grant** ([correction 3](#corrections-verified-against-the-tree)) | Proposed |
+| **S1** | Make the node's allow-list key unshadowable: reserve the dispatcher-composed `JOB_*` stamps the way `docs/spec.md` §5.3 reserves `CHUG_`, or move the matched name under that prefix. **Prerequisite for S3, and a fix to the shipped KVM grant** ([correction 3](#corrections-verified-against-the-tree)) | **Landed** (job #518) — the first fix, as a prefix: `exec::reserved_env_prefix` is the one decision site release validation refuses on and injection skips on. `BASE_BRANCH`/`REPO_URL`/`NATS_URL` deliberately stay declarable ([why](#which-of-the-two-fixes-s1-took-job-518-2026-08-09)) |
 | **S2** | Put the job type's name on the launch: one dispatcher-composed env entry in `container_env` ([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)). No schema field, no epoch, no `WORKER_RPC_VERSION` bump | Proposed — gated on S1 |
 | **S3** | A `DockerGrant` beside `KvmGrant` ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)): a node-side socket path plus a `(project, job type)` allow-list, bound into matching launches only, empty granting nobody | Proposed — gated on S1, S2 |
 | **S4** | Advertise the access on `NodeCapabilities` ([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)) for **both** modes, defaulting false so a daemon predating the field promises nothing. D4's audit half | **Landed** (job #519): `docker_reachable`, additive with no `WORKER_RPC_VERSION` bump, probed by `worker::docker_access` at boot for both modes and never a boot refusal. See [what S4 landed](#what-s4-landed-job-519) |
@@ -634,3 +642,57 @@ Not done here, and still open: the shadowable grant key (S1), the job type's
 name on the launch (S2), the `DockerGrant` itself (S3), the node config (S5) and
 per-task users (S6). Nothing in this slice narrows or widens the capability any
 node already had.
+
+## Which of the two fixes S1 took (job #518, 2026-08-09)
+
+**The first — the reserved prefix — and as a prefix rather than a name list.**
+`JOB_` joins `CHUG_` as a name a job type may not declare in `vars:` or
+`secrets:`: the declaration is a release-validation error, and injection skips
+it as the same defense in depth the `CHUG_` rule already carries. The rule is
+written up in `docs/spec.md` §4.1, cross-referenced from §2.2's validation
+checklist, §5.3 and §3.1's two grant paragraphs.
+
+**One decision site, because two would drift.** `exec::reserved_env_prefix`
+([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)) answers
+*which reserved prefix, and why*, and both `container_env`'s loops and
+`release::static_errors_kv` call it. A name refused at release but injected
+anyway — or the reverse — is the same class of hole as the one being closed, and
+a shared predicate is what makes that unrepresentable rather than merely
+untested. It returns the reason as well as the prefix so the refusal reads
+`var 'JOB_PROJECT' uses the reserved 'JOB_' prefix (dispatcher-composed launch
+stamps, which a node's allow-list matches on)` — the "why" was the thing the
+brief asked for and the thing a bare "reserved" does not give.
+
+**Why a prefix and not the five names.** The stamps `container_env` composes are
+`JOB_ID`, `JOB_PROJECT`, `JOB_BRANCH`, `JOB_SHA` and — on the eval path —
+`JOB_TASK_ID`, and a name list would have to be edited in step with that
+composition. A prefix seals them, seals whatever S2 adds under the same
+spelling, and needs no maintenance to keep covering the set. This is the gain
+the section above predicted for `JOB_ID` and `JOB_BRANCH`, extended.
+
+**`BASE_BRANCH`, `REPO_URL` and `NATS_URL` stay declarable, deliberately.** The
+question the section above left to S1, answered on the criterion that makes the
+defect a defect: a **grant key** is a name something *outside* the container
+reads to decide about the launch. `JOB_PROJECT` is one today
+(`KvmGrant::admits`, `nix` grants) and the job-type name will be one after S2;
+those three are read only by the container itself, so shadowing one misconfigures
+the shadowing project's own job and moves no policy. Reserving them would narrow
+project-owned config with no defect to point at, and the reservation is easier
+to widen later than to walk back. `NATS_CREDS` and `CHANNEL_ROLE` are the same
+case and left alone for the same reason — the container's NATS permissions are
+minted server-side per role, so a shadowed `CHANNEL_ROLE` grants nothing.
+
+**No `.chug/jobs/*.yaml` needed editing**, in this repo or by implication: no job
+type here declares `vars:` at all, and the reservation reaches nothing outside
+the two prefixes. No `WORKER_RPC_VERSION` bump and no `CONFIG_SCHEMA_EPOCH` bump:
+the launch wire is unchanged to the byte for every job type that validates today,
+and the change is a refusal on config that was already never meant to work — a
+project that *had* shipped a `JOB_`-prefixed var would newly fail release
+validation, which is the intended and only behaviour change.
+
+**What this does not do.** It does not seal the env against a node that composes
+its own, against an image whose entrypoint rewrites the variable before the
+task's command reads it, or against anything after the launch: the guarantee is
+that *the value the dispatcher put on the wire is the dispatcher's*, which is
+exactly what a node-side allow-list needs and no more. S3 still must not ship
+without `docs/spec.md` §3.1's amendment, which this job does not touch.

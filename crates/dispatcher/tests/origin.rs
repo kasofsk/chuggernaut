@@ -579,10 +579,10 @@ async fn held_job_lands_after_merged_release_sync() {
     assert_invariants_of(&sink);
 }
 
-/// Declared `CHUG_*` secrets **and vars** fail release validation, and the
-/// injection path never surfaces them in a container env. Vars joined the rule
-/// with design #311 Decision 4: `CHUG_` is the input namespace's prefix too, and
-/// an unchecked var could shadow an origin credential or a §6.3 origin stamp.
+/// Declared `CHUG_*` and `JOB_*` secrets **and vars** fail release validation,
+/// and the injection path never surfaces them in a container env. Vars joined
+/// the rule with design #311 Decision 4 and the launch stamps with design #517
+/// S1, so no job type can move the `JOB_PROJECT` a node's grant list reads.
 #[tokio::test]
 async fn reserved_chug_secrets_never_reach_containers() {
     let Some(rig) = rig().await else { return };
@@ -594,7 +594,7 @@ async fn reserved_chug_secrets_never_reach_containers() {
     commit_to_integration(&rig, &[
         (
             "jobs/sneaky.yaml",
-            "name: sneaky\nimage: img:latest\nwork:\n  type: agent\n  prompt: prompts/quick.md\n  secrets: [CHUG_ORIGIN_PAT]\nvars: [CHUG_PHASE]\n",
+            "name: sneaky\nimage: img:latest\nwork:\n  type: agent\n  prompt: prompts/quick.md\n  secrets: [CHUG_ORIGIN_PAT]\nvars: [CHUG_PHASE, JOB_PROJECT]\n",
         ),
         ("prompts/quick.md", "do the thing"),
     ])
@@ -646,6 +646,11 @@ async fn reserved_chug_secrets_never_reach_containers() {
     assert!(
         errs.iter().any(|e| e.field == "vars"),
         "the declared var is refused too (#311): {errs:?}"
+    );
+    assert!(
+        errs.iter()
+            .any(|e| e.message.contains("JOB_PROJECT") && e.message.contains("reserved 'JOB_'")),
+        "the grant key a node matches on is refused too (#517 S1): {errs:?}"
     );
     assert_invariants_of(&sink);
 }

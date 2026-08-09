@@ -451,8 +451,8 @@ mod tests {
     }
 
     /// A project's own `GOOGLE_APPLICATION_CREDENTIALS` var — legitimate, since
-    /// only `CHUG_` is reserved — survives an undeclared launch rather than
-    /// panicking the single writer.
+    /// it sits under neither reserved prefix — survives an undeclared launch
+    /// rather than panicking the single writer.
     #[test]
     fn a_project_owned_vendor_env_var_is_not_a_leaked_grant() {
         let mut env = HashMap::from([(
