@@ -198,3 +198,6 @@ Doc-reread: docs/design/529-secret-handling.md
 Doc-reread: docs/design/543-placement-granularity.md
 Doc-reread: docs/design/490-agent-work-on-a-mac.md
 Doc-reread: docs/design/308-gha-port.md
+
+Doc-reread: docs/design/529-secret-handling.md
+Doc-reread: docs/spec.md

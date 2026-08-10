@@ -337,12 +337,12 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::J
     .await
 }
 
-/// Design #529 S1a is observe-only: a `global/agents` name outside the
-/// provider-credential set is logged as a would-decline and still reaches the
-/// agent container, and a **command** container receives neither name — the
-/// grant is agent-CLI plumbing, so the slice changes nothing there either.
+/// Design #529 S1b: the `global/agents` grant carries the provider credential
+/// and nothing else — a name outside the set reaches no agent container — and a
+/// **command** container receives neither name, the grant being agent-CLI
+/// plumbing the slice does not touch.
 #[tokio::test]
-async fn every_global_agents_name_still_reaches_the_agent_and_no_command_container() {
+async fn only_a_provider_credential_rides_the_global_agents_grant() {
     let Some(rig) = rig().await else { return };
     let bucket = rig.store.raw_bucket(store::buckets::SECRETS).await.unwrap();
     for (name, value) in [
@@ -371,9 +371,13 @@ async fn every_global_agents_name_still_reaches_the_agent_and_no_command_contain
         Some("oauth-tok")
     );
     assert_eq!(
-        runs[0].env.get("EXTRA_MCP_TOKEN").map(String::as_str),
-        Some("extra-tok"),
-        "S1a reports this name as a would-decline and injects it regardless"
+        runs[0].env.get("EXTRA_MCP_TOKEN"),
+        None,
+        "S1b declines every global/agents name outside the provider set"
+    );
+    assert!(
+        !runs[0].env.values().any(|v| v == "extra-tok"),
+        "and its value reaches the agent under no other name either"
     );
 
     let eval = rig
@@ -2398,8 +2402,10 @@ work:
   secrets: [DEPLOY_KEY]
 "#;
 
-/// Full launch wiring (§4.2/§8.2): the channel MCP binary is injected with
-/// its config entry, and declared secrets arrive age-decrypted in the env.
+/// Full launch wiring (§4.2/§8.2): the channel MCP binary is injected with its
+/// config entry, and declared secrets arrive age-decrypted in the env. The
+/// `global/agents` half runs through the `SecretStore` branch of the injector,
+/// so it is where design #529 S1b's narrowing is proven on the age path.
 #[tokio::test]
 #[allow(
     clippy::too_many_lines,
@@ -2434,7 +2440,11 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
             .await
             .unwrap();
         api_side
-            .set("global", "agents", "PROVIDER_TOKEN", "tok-123")
+            .set("global", "agents", "ANTHROPIC_API_KEY", "tok-123")
+            .await
+            .unwrap();
+        api_side
+            .set("global", "agents", "EXTRA_MCP_TOKEN", "extra-tok")
             .await
             .unwrap();
     }
@@ -2516,8 +2526,17 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         Some("s3cret-value")
     );
     assert_eq!(
-        runs[0].env.get("PROVIDER_TOKEN").map(String::as_str),
+        runs[0].env.get("ANTHROPIC_API_KEY").map(String::as_str),
         Some("tok-123")
+    );
+    assert_eq!(
+        runs[0].env.get("EXTRA_MCP_TOKEN"),
+        None,
+        "S1b narrows the age-decrypting path too, not only the raw-bucket one"
+    );
+    assert!(
+        !runs[0].env.values().any(|v| v == "extra-tok"),
+        "and the declined name's value reaches the agent under no other name"
     );
     assert_eq!(runs[0].mcp_servers.len(), 1);
     assert_eq!(

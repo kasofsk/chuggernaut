@@ -1,13 +1,14 @@
 # Design #529 — Secret handling: the declarative model's edges, and the platform token's reach
 
-Status: IMPLEMENTED IN PART — S1a has landed (job #545) and is observe-only,
-and S2+M6 have landed together (job #547): the provider credential now reaches
-an agent container on an inherited descriptor rather than in its environment,
-and the kernel property that window rests on is asserted at every launch — though
-M6's scope read was wrong on every launch until job #554 corrected it, which the
-first canary after the deploy is what surfaced. M7 has
-since measured the host path (job #549) and S2 has not been extended to it.
-Everything else below is proposed.
+Status: IMPLEMENTED IN PART — S1 is complete: S1a landed observe-only (job #545)
+and **S1b now enforces** (job #555), so the reserved `global/agents` grant
+carries the provider-credential names and nothing else. S2+M6 landed together
+(job #547): the provider credential reaches an agent container on an inherited
+descriptor rather than in its environment, and the kernel property that window
+rests on is asserted at every launch — though M6's scope read was wrong on every
+launch until job #554 corrected it, which the first canary after the deploy is
+what surfaced. M7 has since measured the host path (job #549) and S2 has not been
+extended to it. Everything else below is proposed.
 
 Written against the tree at `927067b` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a
@@ -66,8 +67,8 @@ the argument and its dated corrections, never edited
 | The SSH key and certificate are minted per task at the same TTL | `ssh_credential_files`, `exec.rs` | **Landed** |
 | A workload token is minted per container, TTL-capped | [`docs/spec.md`](../spec.md) §8.3, [#313](313-workload-identity-image-builds.md) | **Landed** (epoch 5, proved in job #430) |
 | Declared secrets, project `vars` and `global/agents` carry a TTL | — | **No.** Injected verbatim; lifetime is rotation discipline |
-| `global/agents` is narrowed to what the agent CLI needs | `inject_platform_agent_secrets`, `exec.rs` | **No.** The *whole scope* still reaches every agent launch — S1a only logs, by name, what S1b would decline |
-| A provider-credential name set exists in the tree | `PROVIDER_CREDENTIAL_NAMES`, [`crates/agent/src/lib.rs`](../../crates/agent/src/lib.rs), from `claude::CREDENTIAL_ENV_NAMES` | **Landed** (S1a). Nothing consults it as an exclusion yet |
+| `global/agents` is narrowed to what the agent CLI needs | `inject_platform_agent_secrets`, `exec.rs` | **Landed** (S1b, job #555). A name outside the provider-credential set is declined by name and injected nowhere; **in effect from the next deploy**, not from the merge |
+| A provider-credential name set exists in the tree | `PROVIDER_CREDENTIAL_NAMES`, [`crates/agent/src/lib.rs`](../../crates/agent/src/lib.rs), from `claude::CREDENTIAL_ENV_NAMES` | **Landed** (S1a), and **it is the exclusion** since S1b — `is_provider_credential` decides what the grant carries |
 | The platform's provider token is out of the task's reach | `credential_delivery`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Narrowed, not closed** (S2, job #547), and **container launches only** — a host task is still env-delivered, which M7 now makes a choice rather than an unknown. A *window* instead of the process's lifetime; still no boundary, exactly as D5 says |
 | The agent CLI will take that token from a withdrawable source instead | `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, the shipped CLI | **Yes, measured** (M2, job #546) — an inherited fd, read once, leaving no file and no env entry. **In use** since S2 |
 | …and `apiKeyHelper` is the fallback if it will not | `--settings`, the same CLI | **No.** Measured: the helper's output is used as an API key and this credential is an OAuth token, rejected as `Invalid API key` |
@@ -179,7 +180,7 @@ that no cleanup path reaches.
 | # | What | State |
 | --- | --- | --- |
 | **S1a** | Log, by name, every `global/agents` name `inject_platform_agent_secrets` would decline under S1b's set — while still injecting all of them | **Landed** (job #545) — observe-only; one release, so S1b excludes nothing a run depends on |
-| **S1b** | Narrow the injector from "every name under `global/agents`" to a platform-configured provider-credential name set, injecting nothing else | Proposed — after S1a; no schema field, no epoch, moves *reach* |
+| **S1b** | Narrow the injector from "every name under `global/agents`" to a platform-configured provider-credential name set, injecting nothing else | **Landed** (job #555) — no schema field, no epoch; in effect at the next deploy. [The record](#landed--2026-08-10-job-555-s1b-the-grant-is-a-membership-test-and-what-s1as-release-could-and-could-not-show) |
 | **M2** | Measure whether the agent CLI authenticates from an inherited fd (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`) with no token in the env | **Landed** (job #546) — it does, proved by a real completion; the fallback (d) does **not** take this credential. [The record](#correction--2026-08-10-job-546-m2-measured-the-fd-source-authenticates-and-apikeyhelper-will-not-take-this-credential) |
 | **S2** | Deliver the provider credential on an inherited fd — the container's own `sh -c` entrypoint reads the injected file into a pipe, unlinks it, and runs the bootstrap with the pipe's read end at fd 9 — and stop putting it in the launch env | **Landed** (job #547), container mode only. [The record](#landed--2026-08-10-job-547-s2-and-m6-the-credential-arrives-on-a-descriptor-and-the-property-it-rests-on-is-asserted) |
 | **M6** | Assert `ptrace_scope` (and the absence of `CAP_SYS_PTRACE`) at launch instead of assuming it — the host-kernel property S2's window rests on (M1d) | **Landed** (job #547) — reported at every agent launch, never enforced; the fleet-policy half stays open. The scope half misreported `unknown` on every launch until job #554; [the correction](#correction--2026-08-10-job-554-m6s-scope-read-a-sysctl-file-answers-once-and-reads-status-is-not-a-verdict-on-what-it-read) |
@@ -1378,3 +1379,132 @@ that job #430 proved end to end.
 - **Nothing about reach.** These are ordinary forwarded secrets in whatever
   container or host task would hold them, with every caveat D1, D3 and M7 already
   state.
+
+## Landed — 2026-08-10, job #555 (S1b: the grant is a membership test, and what S1a's release could and could not show)
+
+S1a shipped so that **one release goes by first** and S1b could not silently
+break a run depending on a `global/agents` name nobody had written down. That
+release is on air (deployed by job #552, 2026-08-10). This section records what
+the evidence was, what it could not be, and what the enforcing change excludes —
+and from where, because job #547 moved the credential out of the launch env in
+between and the two slices are easy to conflate.
+
+### The evidence, and the shape of its limit
+
+**S1a's decline line is not reachable from a work container, and that is a
+property of the platform rather than an accident of this run.**
+`inject_platform_agent_secrets` writes it with `tracing::info!`, so it lands in
+the *dispatcher process's* log on the platform host. A work container has no
+`CHUG_API_URL`, no host access, and a NATS user JWT scoped to its own job: its
+publish allow-list is this job's channel, work-submit and step-report subjects
+plus direct KV reads of its own job/task/knowledge keys, and its subscribe
+allow-list is `_INBOX.>` and its own channel inbox. Nothing in that set reads a
+log, and no artifact kind carries the dispatcher's stdout.
+
+**So the measurement was taken from the receiving end instead** — inside this
+job's own work container, a Debian 12 agent launch composed by the post-#552
+dispatcher (`JOB_TYPE=code`, `CHUG_PHASE=Work`), which is the same population
+S1a's line reports, read at the other end of the same injection:
+
+- `/proc/1/environ` — pid 1 is the `sh -c` entrypoint, so this is the launch env
+  the dispatcher composed — holds **26 names**. Every one is accounted for: the
+  image's own `ENV` (`deploy/prod/Dockerfile.agent-rust` sets `CARGO_TARGET_DIR`
+  and `IS_SANDBOX`; `CARGO_HOME`, `RUSTUP_HOME` and `RUST_VERSION` are inherited
+  from its `rust:1.96-bookworm` base), the worker
+  daemon's runtime env (`RUSTC_WRAPPER`, `SCCACHE_DIR`, `CARGO_INCREMENTAL` —
+  [`crates/worker/src/daemon.rs`](../../crates/worker/src/daemon.rs)), the
+  platform's composed values (`JOB_*`, `CHUG_*`, `NATS_*`, `REPO_URL`,
+  `BASE_BRANCH`, `GIT_SSH_COMMAND`, `CHANNEL_ROLE`, `CLAUDE_CONFIG_DIR`,
+  `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`) or the shell (`PATH`, `HOME`,
+  `HOSTNAME`). **The `global/agents` contribution outside the provider set is
+  zero.**
+- The accounting is by *name*, and the injector writes with
+  `env.entry(name).or_insert(value)`, so a scope name colliding with one the
+  platform composed would hide behind that name rather than appear as a
+  twenty-seventh. It cannot have here: `.chug/jobs/code.yaml` declares no
+  `secrets:` and this project no vars, so no composed name is operator-chosen,
+  and the two names S1a's admit-everything path could have supplied under a
+  platform name are the provider pair itself.
+- That this is the right population to read is a property of the code, not an
+  assumption: under S1a the injector admits *every* non-reserved name, and
+  `credential_delivery` ([`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs))
+  removes exactly two names from the composed env — the OAuth token and
+  `CLAUDE_CODE_REMOTE`. Any *other* name the scope held would therefore have
+  arrived here intact, under its own name, and none did.
+
+**The limit, stated so nobody reads this as more than it is: n = 1 launch, on
+one deployment, and it is an inference from the injector's output rather than a
+reading of the line S1a writes.** It cannot see a name that sat in the scope at
+some other moment, and it says nothing whatever about another operator's
+deployment — the design has never been able to see those, which is why S1's
+mechanism rather than its measured blast radius is the point. Nothing outside
+the provider set was observed; *nothing observed* is not *nothing logged*, and
+an operator can settle the difference in one command by grepping the
+dispatcher's log for `global/agents:`. If a name does turn out to be needed, the
+decline line names it and the fix is to declare it as a job-type `secrets:`
+entry, which is scoped to the level that asked for it — strictly better than the
+platform-wide grant it is leaving.
+
+### What landed
+
+`inject_platform_agent_secrets_admit`
+([`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)) now
+returns `false` for a name `agent::is_provider_credential` does not hold, having
+recorded it, and the notice says `DECLINED` where S1a said `WOULD DECLINE`. The
+two declines stay separate functions of the same predicate, exactly as
+§[5](#5-the-cheap-half-and-why-it-is-a-different-cut-than-the-brief-proposed)
+framed it: the reserved **prefix** test is dispatcher-only plumbing and is never
+reported, and non-**membership** is the narrowing, always reported by name.
+Names only, never values, and the tests hold both halves — the tier-1 pair over
+the admit/notice pair, and two tier-2 launch tests each asserting the outside
+name reaches the agent container under **no** name and its value under no other.
+
+There are two of those launch tests because `inject_platform_agent_secrets` has
+**two branches** and the narrowing has to hold on both: the raw-bucket listing
+when no age identity is configured, and the `SecretStore` listing when one is.
+The shared `..._admit` helper is what makes them agree, so the tier-1 pair is the
+real proof and the tier-2 pair is the wiring check — but the branch split is easy
+to miss from the helper alone, and the pre-existing launch test that seeded a
+`global/agents` name went through the age branch only. That test is a small piece
+of evidence in its own right: written before this slice, it seeded the invented
+name `PROVIDER_TOKEN` and asserted it reached the agent env, which is exactly the
+whole-scope reach S1b removes. It now seeds `ANTHROPIC_API_KEY` — a real member,
+and the one §"What it still excludes" records as still env-delivered — alongside
+a non-member it asserts is declined.
+
+### What it still excludes, and from where
+
+The slice moves what enters the **composed launch env in the dispatcher**, which
+is one of three places a credential can be, so the boundaries are worth spelling
+out against #547:
+
+- **Excluded by this slice**: every `global/agents` name outside the
+  provider-credential set, from *every* agent container — work agents, agent
+  evaluators, forge-ingest triage — on both the container and host paths, since
+  the injector runs before either.
+- **Admitted here and then removed again by S2**: the OAuth credential. On a
+  container launch it is admitted by the membership test and taken straight back
+  out of the env by `credential_delivery`, arriving on fd 9. So on that path the
+  grant contributes no env name at all beyond the descriptor's number, and
+  S1b's exclusion is about the *other* names entirely.
+- **Admitted and still env-delivered**: `ANTHROPIC_API_KEY`, whose descriptor
+  variable job #546 did not measure, and both names on a **host** task, which
+  keeps env delivery (M7).
+- **Untouched**: declared `work.secrets`, project `vars` and the platform's own
+  composed values, all still env-delivered — that is S3. A command container
+  received none of this before the slice and receives none after.
+
+One divergence the slice deliberately leaves standing: `GET /platform/config`
+answers `agent_secrets` with **every** name under the scope
+([`crates/api/src/routes.rs`](../../crates/api/src/routes.rs)'s `names_under`), so
+the settings page §[5](#5-the-cheap-half-and-why-it-is-a-different-cut-than-the-brief-proposed)
+cites as the operator's view of the grant can now list a name that is
+visible-but-not-delivered. That is the right listing for a scope's *contents* and
+the wrong one for its *reach*; distinguishing them in the UI is a `web` change,
+not S1b.
+
+### It lands here and takes effect at the next deploy
+
+Nothing about a running dispatcher changes at the merge. The binary on air keeps
+injecting the whole scope until it is replaced, so the enforcement date is the
+next deploy — the same sequencing S1a was built for, one step further along.

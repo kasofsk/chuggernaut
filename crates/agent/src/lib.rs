@@ -168,13 +168,13 @@ impl AgentOutput {
 }
 
 /// Every env name an implemented provider's CLI reads a provider credential
-/// from — the default of the set design #529 S1b narrows the reserved
-/// `global/agents` grant to. [`codex::CodexProvider`] is a stub with no launch
-/// path, so it contributes none.
+/// from — the set the reserved `global/agents` grant admits, and nothing else
+/// (design #529 S1b). [`codex::CodexProvider`] is a stub with no launch path, so
+/// it contributes none.
 pub const PROVIDER_CREDENTIAL_NAMES: &[&str] = claude::CREDENTIAL_ENV_NAMES;
 
 /// Whether `name` is one of [`PROVIDER_CREDENTIAL_NAMES`] — the membership test
-/// that replaces nothing yet (design #529 S1a observes; S1b excludes).
+/// that replaced the reserved grant's whole-scope listing (design #529 S1b).
 pub fn is_provider_credential(name: &str) -> bool {
     PROVIDER_CREDENTIAL_NAMES.contains(&name)
 }

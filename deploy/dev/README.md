@@ -38,11 +38,12 @@ chug admin --keys-dir deploy/dev/data/keys project create \
   --repos-root deploy/dev/data/repos \
   --hook-bin /usr/local/bin/chuggernaut
 
-# 6. Agent containers need Claude credentials. The platform scope
-#    `global/agents` is injected into every agent container (work agents and
-#    agent evaluators) — set it once, no per-project or per-job-type
-#    declaration needed. Subscription auth via `claude setup-token`;
-#    an ANTHROPIC_API_KEY under the same scope works too. Reads from stdin.
+# 6. Agent containers need Claude credentials. The provider-credential names
+#    under the platform scope `global/agents` (CLAUDE_CODE_OAUTH_TOKEN,
+#    ANTHROPIC_API_KEY) reach every agent container (work agents and agent
+#    evaluators) — set one once, no per-project or per-job-type declaration
+#    needed; any OTHER name under that scope is declined (design #529 S1b).
+#    Subscription auth via `claude setup-token`. Reads from stdin.
 claude setup-token | tail -1 | chug admin --keys-dir deploy/dev/data/keys \
   secret set --project global/agents --name CLAUDE_CODE_OAUTH_TOKEN
 ```

@@ -159,7 +159,10 @@ export interface ProjectConfig {
 export interface PlatformConfig {
   /** null when the dispatcher hasn't published a snapshot (offline/older) */
   dispatcher: DispatcherConfigSnapshot | null;
-  /** global/agents secret NAMES injected into every agent container */
+  /**
+   * secret NAMES under the reserved `global/agents` scope — all of them, of
+   * which only the provider-credential names are injected since #529 S1b.
+   */
   agent_secrets: string[];
   vapid_public: boolean;
 }

@@ -160,7 +160,7 @@ pub enum SecretCmd {
         #[arg(long)]
         from: String,
         /// Destination `{owner}/{project}` scope (`global/agents` = injected
-        /// into every agent container).
+        /// into every agent container, provider-credential names only).
         #[arg(long)]
         to: String,
         #[arg(long)]
