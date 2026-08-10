@@ -47,8 +47,8 @@ pub use job::{
     BatchComposition, CreateSpec, Escalation, JOB_SUMMARY_EXTRA_FIELDS, Job, JobState, JobSummary,
 };
 pub use job_type::{
-    ConfigWarning, Evaluator, EvaluatorType, Input, InputKind, JobType, Placement, ProjectDefaults,
-    ReviewSpec, Runtime, RuntimeMode, WorkSpec, WorkType, WrapUpMode, WrapUpSpec,
+    AgentTool, ConfigWarning, Evaluator, EvaluatorType, Input, InputKind, JobType, Placement,
+    ProjectDefaults, ReviewSpec, Runtime, RuntimeMode, WorkSpec, WorkType, WrapUpMode, WrapUpSpec,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
 pub use platform::{
@@ -73,7 +73,7 @@ pub use task::{
 pub use user::{Identity, IdentityKind, ProjectRole, User};
 pub use version::{
     CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, ConfigSkew, INPUTS_SCHEMA_EPOCH,
-    RUNTIME_SCHEMA_EPOCH, SCHEDULE_INPUTS_SCHEMA_EPOCH, WORKER_RPC_VERSION,
+    RUNTIME_SCHEMA_EPOCH, SCHEDULE_INPUTS_SCHEMA_EPOCH, TOOLS_SCHEMA_EPOCH, WORKER_RPC_VERSION,
     WORKLOAD_IDENTITY_SCHEMA_EPOCH, config_requires_dispatcher, declared_min_dispatcher,
 };
 pub use worker::{

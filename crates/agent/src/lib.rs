@@ -121,6 +121,11 @@ pub struct AgentRunConfig {
     pub node: Option<String>,
     /// Which tools this run may use (spec §4.3). See [`PermissionProfile`].
     pub permissions: PermissionProfile,
+    /// The job type's `tools:` grant for this run (design #533 S1), added to the
+    /// profile's allow list. Empty for every type that declares none, and for
+    /// the platform's own agents, so the payload is byte-identical to one
+    /// composed before the feature existed.
+    pub tools: Vec<types::AgentTool>,
     /// The job type's declared `runtime.env` (spec §1.1, design #373 P2),
     /// forwarded to the backend at launch beside [`Self::image`]. `None` for a
     /// job type that declares none, and for the platform's own agents.

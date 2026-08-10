@@ -111,7 +111,7 @@ under `dispatcher`
 entries carry no epoch at all — `WorkerNode::version` is the *worker daemon's*
 build string, last reported by that node's ping — so the two nodes agreeing is
 evidence about the worker refresh, never about the dispatcher's epoch. The
-tree's `CONFIG_SCHEMA_EPOCH` is 5 as well, and that is *not* what satisfies the
+tree's `CONFIG_SCHEMA_EPOCH` was 5 as well when this landed, and that is *not* what satisfies the
 slice: §14.3's merge gate compares a config's `min_dispatcher` against the epoch
 the **running** binary reports, which is exactly what that snapshot measures
 (`schema_epoch` is set from the binary's own constant —

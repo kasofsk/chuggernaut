@@ -126,6 +126,7 @@ work:                          # required
   # type: agent or command
   secrets: [string]            # optional; injected into the work container only — scoped here because that is the only container top-level-declared secrets ever reached; evaluators declare their own. Disallowed for human work (no container).
   workload_identities: [string] # optional; cloud identities (§8.3) the work container may exchange a workload token for, each naming a cloud-identities.{owner}.{project}.{name} record. Scoped like secrets: and inherited from nothing; never a secret, so it can never ride the reserved global/agents grant (§8.2). A non-empty list requires min_dispatcher >= the workload-identity epoch (§14.2). Disallowed for human work (no container)
+  tools: [AgentTool]           # optional; AGENT WORK ONLY. Extra agent tools added to the run's Work profile (§4.3): Task, Workflow. Additive only — the role's deny still applies, and the set is closed, so Bash/Edit/Write are not expressible. A non-empty list requires min_dispatcher >= the tools epoch (§14.2)
 
   # type: human only
   prompt: string               # required; shown to operator in task inbox
@@ -166,6 +167,7 @@ eval:                          # optional; omit or leave empty for auto-pass
     image: string              # optional; falls back to top-level image; one of the two is required in container mode — not under runtime.mode: host, where an evaluator with no image of its own is a host task (see note 2)
     secrets: [string]          # evaluator-specific secrets; not inherited from top-level
     workload_identities: [string] # evaluator-specific cloud identities (§8.3); not inherited from work.workload_identities. Disallowed for a human evaluator (no container)
+    tools: [AgentTool]         # AGENT EVALUATORS ONLY; not inherited from work.tools. The same closed, additive set as above
 
     # type: agent only
     provider: claude | codex
@@ -220,6 +222,7 @@ inputs:                        # optional; the values a job of this type accepts
 | `model` | disallowed | optional | disallowed |
 | `secrets` | optional | optional | disallowed |
 | `workload_identities` | optional | optional | disallowed |
+| `tools` | disallowed | optional | disallowed |
 | `required` | optional | optional | optional |
 | `stage` | optional | optional | optional |
 
@@ -1505,8 +1508,12 @@ Provider and model are configured at platform level (see §12.4) with per-job-ty
 
 | Role | Profile | Policy |
 |---|---|---|
-| Work (§3.2), factory triage (§13.4) | `Work` | Permissive: `Bash`, `Edit`, `Write`, the read tools, and the channel MCP server. Work agents build, edit, commit and push. |
+| Work (§3.2), factory triage (§13.4) | `Work` | Permissive: `Bash`, `Edit`, `Write`, the read tools, `Task`, `WebFetch`/`WebSearch`, and the channel MCP server. Work agents build, edit, commit and push. |
 | Agent evaluator (§3.3), job triage (§1.2) | `Review` | Read-only: the read tools, the channel MCP server, and a narrow set of `Bash(git …)`/inspection prefixes. **No bare `Bash`**, so any unlisted command is denied; `cargo`, `npm`, `npx` and `make` are additionally denied explicitly. |
+
+**The allow list is the real control, not the deny list.** Deny beats allow in the CLI's resolution, but `Review` allowing no bare `Bash` is what closes the escapes a denylist alone leaves open — `sh -c "cargo test"`, `make`, an `&&` chain behind a permitted prefix. The explicit denies are belt-and-braces on the two tools the profile exists to stop. `mcp__chuggernaut-channel` is allowed in both profiles because it is how a run reports (`update_status`) and how it terminates meaningfully (`submit_result`/`submit_eval`, §4.2): a reviewer that cannot call `submit_eval` looks exactly like a broken reviewer.
+
+A job type may **add** to its run's allow list with the `tools:` grant on an agent `work:` block or an agent evaluator (§1.1). The grant is additive only and the role's `deny` is applied after it, so a project cannot grant its reviewer a build; the grantable set is closed (`Task`, `Workflow`), so `Bash`, `Edit` and `Write` are not expressible and stay the role's to decide. Subagents inherit the run's settings file, which is why the grant widens *effort* rather than capability: a `Review` child is as read-only as its parent. A type declaring a non-empty grant must declare `min_dispatcher` at least `TOOLS_SCHEMA_EPOCH` (§14.2), which the merge gate enforces at landing (§14.3), because the nested blocks carry `deny_unknown_fields` and an N-1 dispatcher rejects the whole config rather than dropping the field.
 
 The container remains the security boundary (there is no adversary model here — a work agent is trusted with the workspace). The profiles exist to direct *effort*: an evaluator that runs the build spends minutes of a shared Docker host reproducing exactly the signal the stage-1 `ci` command evaluator is about to produce, and delays its verdict to do it. Compiling, testing and linting belong to command evaluators; agent evaluators read the diff and judge it against the brief.
 
@@ -2628,12 +2635,14 @@ against the image's toolchain instead of as declared. A non-empty
 `workload_identities:` (§1.1, §8.3) is gated for the mirror-image reason: it sits
 *inside* a nested block, so an N-1 dispatcher does not tolerate it at all — it
 rejects the whole config and parks every job of the type, which is the correct
-failure and exactly why the declaration must be authored with the epoch. The rule exists because `min_dispatcher` is the one field an
+failure and exactly why the declaration must be authored with the epoch. A
+non-empty `tools:` grant (§1.1, §4.3) is gated for that same nested-block reason.
+The rule exists because `min_dispatcher` is the one field an
 N-1 dispatcher **does** parse — it cannot see `inputs:` or `runtime:` at all, so
 without the declaration it would accept the config and run the job
 unparameterized. Each feature freezes its own constant at the epoch it shipped
 (`types::version::INPUTS_SCHEMA_EPOCH`, `SCHEDULE_INPUTS_SCHEMA_EPOCH`,
-`RUNTIME_SCHEMA_EPOCH`, `WORKLOAD_IDENTITY_SCHEMA_EPOCH`), so a later bump for an unrelated feature never
+`RUNTIME_SCHEMA_EPOCH`, `WORKLOAD_IDENTITY_SCHEMA_EPOCH`, `TOOLS_SCHEMA_EPOCH`), so a later bump for an unrelated feature never
 retroactively raises what an existing config must declare — and those constants,
 not `CONFIG_SCHEMA_EPOCH`, are where a reader finds which epoch bought what.
 

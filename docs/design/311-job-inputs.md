@@ -4,10 +4,11 @@ Status: IMPLEMENTED — slices A, B and C shipped in jobs #314–#319, #369
 and #376.
 
 [Slice A](#minimum-useful-version) — the recommended first ship — landed end to
-end and is deployed: `CONFIG_SCHEMA_EPOCH` was 2 when it landed and is 5 today
-(slice C's `SCHEDULE_INPUTS_SCHEMA_EPOCH` took it to 3, #401's
-`RUNTIME_SCHEMA_EPOCH` to 4, and #313 S3's `WORKLOAD_IDENTITY_SCHEMA_EPOCH` to
-5; `INPUTS_SCHEMA_EPOCH` stays frozen at 2) in
+end and is deployed: `CONFIG_SCHEMA_EPOCH` was 2 when it landed
+(`crates/types/src/version.rs` is the authority today; slice C's
+`SCHEDULE_INPUTS_SCHEMA_EPOCH` took it to 3, #401's `RUNTIME_SCHEMA_EPOCH` to 4,
+then #313 S3's `WORKLOAD_IDENTITY_SCHEMA_EPOCH` to 5 and #533 S1's
+`TOOLS_SCHEMA_EPOCH` to 6; `INPUTS_SCHEMA_EPOCH` stays frozen at 2) in
 `crates/types/src/version.rs`, `crates/types/src/inputs.rs` holds the shared
 rules and `crates/domain/src/inputs.rs` the pure decider, `CHUG_INPUT_*` is
 injected into work, eval and wrap-up containers, and `.chug/jobs/rollback.yaml`

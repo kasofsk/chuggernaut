@@ -3597,6 +3597,7 @@ async fn job_level_evaluators_run_alongside_type_evaluators() {
         model: None,
         secrets: vec![],
         workload_identities: vec![],
+        tools: vec![],
         required: None,
         stage: 0,
     }];
@@ -3680,6 +3681,7 @@ async fn job_evaluator_name_collision_fails_release() {
         model: None,
         secrets: vec![],
         workload_identities: vec![],
+        tools: vec![],
         required: None,
         stage: 0,
     }];

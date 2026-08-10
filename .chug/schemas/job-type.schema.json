@@ -144,6 +144,21 @@
     "work"
   ],
   "$defs": {
+    "AgentTool": {
+      "description": "A tool a job type may grant an agent on top of its role profile (design #533\nS1). A **closed** set rather than an open string list, so `Bash`, `Edit` and\n`Write` stay the role's — spec §4.3 has why.",
+      "oneOf": [
+        {
+          "description": "Spawn subagents. They inherit the run's settings file, so a `Review`\nchild stays read-only: this widens effort, never capability.",
+          "type": "string",
+          "const": "Task"
+        },
+        {
+          "description": "Drive a deterministic multi-agent workflow, which is `Task` with a script\naround it and the same inheritance.",
+          "type": "string",
+          "const": "Workflow"
+        }
+      ]
+    },
     "Evaluator": {
       "type": "object",
       "properties": {
@@ -205,6 +220,13 @@
           "format": "uint32",
           "default": 0,
           "minimum": 0
+        },
+        "tools": {
+          "description": "Extra agent tools this evaluator may use, added to the `Review` profile\n(spec §4.3). Not inherited from `work.tools`, and disallowed for a\ncommand or human evaluator, which run no agent.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentTool"
+          }
         },
         "type": {
           "$ref": "#/$defs/EvaluatorType"
@@ -473,6 +495,13 @@
           "default": [],
           "items": {
             "type": "string"
+          }
+        },
+        "tools": {
+          "description": "Extra agent tools this work agent may use, added to the role's permission\nprofile (spec §4.3). Orchestration only, and agent work only — the role\nstill owns whether the run may edit or build.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AgentTool"
           }
         },
         "type": {

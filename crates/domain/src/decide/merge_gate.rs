@@ -627,6 +627,7 @@ mod tests {
             model: None,
             secrets: vec![],
             workload_identities: vec![],
+            tools: vec![],
             required: None,
             stage,
         }

@@ -153,6 +153,7 @@ pub fn approval_evaluator(resolved: &[Evaluator]) -> Option<Evaluator> {
         model: None,
         secrets: Vec::new(),
         workload_identities: Vec::new(),
+        tools: vec![],
         required: Some(true),
         stage,
     })
@@ -263,6 +264,7 @@ resources:
                 model: None,
                 secrets: vec![],
                 workload_identities: vec![],
+                tools: vec![],
                 required: None,
                 stage: 0,
             }],
@@ -412,6 +414,7 @@ resources:
             model: None,
             secrets: vec![],
             workload_identities: vec![],
+            tools: vec![],
             required: None,
             stage: 7,
         }];

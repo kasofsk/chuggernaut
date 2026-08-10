@@ -47,7 +47,7 @@
 /// generation cannot safely ignore — never for a tolerated additive change, and
 /// the per-feature constants below are where a reader finds what each epoch
 /// bought.
-pub const CONFIG_SCHEMA_EPOCH: u32 = 5;
+pub const CONFIG_SCHEMA_EPOCH: u32 = 6;
 
 /// The epoch at which job `inputs:` landed (#311, spec §1.1). A job type
 /// declaring a non-empty `inputs:` must declare `min_dispatcher` at least this
@@ -86,6 +86,13 @@ pub const RUNTIME_SCHEMA_EPOCH: u32 = 4;
 /// a later bump for an unrelated feature never retroactively raises what an
 /// existing declaration must carry.
 pub const WORKLOAD_IDENTITY_SCHEMA_EPOCH: u32 = 5;
+
+/// The epoch at which the per-agent `tools:` grant landed (design #533 S1, spec
+/// §1.1): an agent block declaring one must declare `min_dispatcher` at least
+/// this high ([`crate::JobType::validate`]), for the same
+/// `deny_unknown_fields` reason [`WORKLOAD_IDENTITY_SCHEMA_EPOCH`] exists.
+/// Frozen at the epoch the feature shipped, like the four constants above.
+pub const TOOLS_SCHEMA_EPOCH: u32 = 6;
 
 /// A config file that requires a newer dispatcher than the one reading it
 /// (spec §14.2): where the file was found, the epoch it declares, and the
@@ -202,6 +209,7 @@ mod tests {
             ("schedule-inputs", SCHEDULE_INPUTS_SCHEMA_EPOCH),
             ("runtime", RUNTIME_SCHEMA_EPOCH),
             ("workload-identity", WORKLOAD_IDENTITY_SCHEMA_EPOCH),
+            ("tools", TOOLS_SCHEMA_EPOCH),
         ];
         for (name, epoch) in feature_epochs {
             assert!(

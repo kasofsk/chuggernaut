@@ -12,6 +12,12 @@
  */
 
 /**
+ * A tool a job type may grant an agent on top of its role profile (design #533
+ * S1). A **closed** set rather than an open string list, so `Bash`, `Edit` and
+ * `Write` stay the role's — spec §4.3 has why.
+ */
+export type AgentTool = "Task" | "Workflow";
+/**
  * Where the slot count the scheduler is using came from (design #293 §7/§8).
  * Reported per node on the fleet roster and `fleet.status` so a node running
  * on the boot seed is *visible* rather than indistinguishable from a healthy
@@ -629,6 +635,12 @@ export interface Evaluator {
    * unstaged behavior. Non-negative (`u32`, enforced at parse).
    */
   stage: number;
+  /**
+   * Extra agent tools this evaluator may use, added to the `Review` profile
+   * (spec §4.3). Not inherited from `work.tools`, and disallowed for a
+   * command or human evaluator, which run no agent.
+   */
+  tools?: AgentTool[];
   type: EvaluatorType;
   /**
    * Cloud identities (design #313 A5) this evaluator's container may
@@ -1356,6 +1368,12 @@ export interface WorkSpec {
    * their own (§4.1). Disallowed for human work (no container).
    */
   secrets: string[];
+  /**
+   * Extra agent tools this work agent may use, added to the role's permission
+   * profile (spec §4.3). Orchestration only, and agent work only — the role
+   * still owns whether the run may edit or build.
+   */
+  tools?: AgentTool[];
   type: WorkType;
   /**
    * Cloud identities (design #313 A5) the work container may exchange a

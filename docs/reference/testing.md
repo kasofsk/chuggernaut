@@ -381,6 +381,17 @@ these suites cover.
 
 - `test-utils` owns: the NATS harness (shared: `CHUG_TEST_NATS_URL`, else a testcontainers-run `nats` container; private: a local `nats-server -js` process per caller, else a private container), temp-repo builder, fake backend/provider, record-fixture builders (`fixture::job` — one blank `types::Job` a test edits into its case, not a project fixture), and the skip guards: the `require_nats!`/`require_nats_config!` macros for NATS and `backend_suite::docker_available()` for Docker. There is no `e2e!` macro
 - Every bug fix lands with a regression test at the lowest tier that can express it
+- **Assert the invariant, not the feature's absence.** A golden that says "this
+  field is off for every shipped job type" expires silently the day a type adopts
+  it, and reads as passing until someone notices. Two such tests in
+  `crates/types/src/job_type.rs` had been false for two epochs — `mac-proof`
+  declares `runtime.mode: host` and `gcp-proof` declares `workload_identities:` —
+  and neither was caught, because the `REPO_JOB_TYPES` array they judged had
+  drifted to ten of twelve and those were the two missing files. The durable form
+  is the pair the feature actually promises: a type that declares the field carries
+  its epoch, and one that does not leaves the wire clean. Where a golden judges a
+  population read from the tree, assert the population is complete too, or the
+  goldens quietly judge a subset
 - Coverage is tracked per crate (v1 discipline carries over); `chuggernaut_domain::state` and `release` validation are held to ~100% branch coverage — they are the correctness core
 
 ## Coverage: on demand, never a gate

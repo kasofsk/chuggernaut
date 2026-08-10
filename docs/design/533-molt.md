@@ -1,6 +1,7 @@
 # Design #533 — The molt: shedding the doc corpus at a milestone
 
-Status: PROPOSED — nothing below is built, and the slice table is the programme.
+Status: IMPLEMENTED IN PART — S1's capability is in the tree; its deploy and
+S2–S6 are the remaining programme, and the slice table says where each stands.
 
 Written against the tree at `ef11e80` (2026-08-09). Every number here was read out
 of that commit and the command is given so a reader can re-run it rather than
@@ -56,8 +57,9 @@ Measured at `ef11e80`:
 | Job-number references in *reference* docs | ~578 | `grep -oE '(#\|job )[0-9]{3}'` over the reference tier |
 | Anchored links, and dangling ones | 1,307 and **0** | check 6, live since job #532 |
 
-`440-native-worker-daemon.md` is the shape of the problem: 3,451 lines and 20
-corrections, of which five (jobs #455–#459) are one debugging chain whose durable
+`440-native-worker-daemon.md` is the shape of the problem: 3,451 lines and 22
+dated appendages, 19 of them `## Correction`, of which five (jobs #455–#459) are
+one debugging chain whose durable
 residue is a single sentence. Its head, whose stated purpose in
 `docs/reference/docs.md` is to spare a reader "reconstructing the present from an
 original plus N corrections", opens with three paragraphs doing exactly that.
@@ -65,7 +67,14 @@ original plus N corrections", opens with three paragraphs doing exactly that.
 ### The deletable set
 
 The seven docs whose `Status:` leads with `IMPLEMENTED` and is not `IMPLEMENTED IN
-PART`, with the referrers that survive them:
+PART`, with the referrers that survive them. **The counting rule** — because S5
+and S6 must recompute the same numbers, and a plain `git grep -l` gives a larger
+answer: a referrer is a tracked file naming the doc by a backticked path claim
+(`check-doc-facts.sh --emit-paths`) or a relative link (`doc-lint.sh
+--emit-links`), excluding the doc itself, `docs/README.md`'s catalogue row, and
+any doc in this table. Counted that way the figures below are ±1; a full-path
+`git grep` reaches 18 for `321-job-groups.md` and is counting mentions rather
+than citations.
 
 | Doc | Lines | Surviving referrers | Of which non-doc |
 | --- | --- | --- | --- |
@@ -84,15 +93,18 @@ than a deferral — see [what 415 costs](#what-415-costs-and-why-it-is-not-in-th
 
 | Slice | What | Gate on |
 | --- | --- | --- |
-| **S1** | Per-type `tools:` grant so a job type may declare `Task`/`Workflow`, epoch-gated as `workload_identities:` is; then a **deploy**, because a config declaring the new epoch cannot merge until a dispatcher carrying it runs | Proposed |
+| **S1** | Per-type `tools:` grant so a job type may declare `Task`/`Workflow`, epoch-gated as `workload_identities:` is | **Landed** (job #535) |
+| **S1b** | The **deploy** carrying `TOOLS_SCHEMA_EPOCH` to the running dispatcher, because a config declaring the new epoch cannot merge until a dispatcher carrying it runs (spec §14.3) | Proposed |
 | **S2** | The machinery: `.chug/jobs/molt.yaml` <!-- intent -->, its work prompt and evaluators, and `.chug/tasks/check-molt.sh` <!-- intent --> with a `.test.sh` sibling | Proposed |
 | **S3** | `.chug/tasks/molt-debt.sh` <!-- intent --> — the git-derived reader that says how much shell has re-grown since the last molt | Proposed |
 | **S4** | The first molt's cheap half: the reference tier and `CLAUDE.md`, where narrating a change is *already* out of policy, and the 24 design **heads**, which are already mutable | Proposed |
 | **S5** | The deletions — six of the seven docs above, with every surviving referrer repointed or stubbed | Proposed |
 | **S6** | #415's own disposition, decided on its own evidence rather than by the rule that covers the other six | Proposed |
 
-No row is landed, so `Status:` stays `PROPOSED`. S1 must precede S2 and S4 must
-precede S5, for reasons the body gives; the rest is orderable.
+S1 is landed and nothing else is, so `Status:` is `IMPLEMENTED IN PART`. S1b is
+S2's real prerequisite rather than S1 — the capability being in the tree is not
+the same as a dispatcher that parses it — and S4 must precede S5, for reasons the
+body gives; the rest is orderable.
 
 ### Not registered as a concept
 

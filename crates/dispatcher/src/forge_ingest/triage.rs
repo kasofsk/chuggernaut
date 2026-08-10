@@ -175,6 +175,7 @@ impl Core {
             session_id: session_id.clone(),
             node: None,
             permissions: agent::PermissionProfile::Review,
+            tools: vec![],
             runtime_env: None,
         };
         let provider = self.provider.clone();

@@ -138,3 +138,13 @@ Doc-reread: docs/README.md
 Doc-reread: docs/reference/docs.md
 
 Doc-reread: docs/design/309-host-native-execution.md
+
+Doc-reread: docs/spec.md
+Doc-reread: docs/design/313-workload-identity-image-builds.md
+
+Doc-reread: docs/reference/testing.md
+
+Doc-reread: docs/design/533-molt.md
+Doc-reread: docs/design/311-job-inputs.md
+Doc-reread: docs/spec.md
+Doc-reread: infra/README.md

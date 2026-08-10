@@ -340,7 +340,7 @@ read that number, and they fire at different moments:
   config-skew gate is the advisory, earlier signal: it asks the *deployed*
   dispatcher only when `CHUG_API_URL` is set, which it is not inside an
   evaluator container, and otherwise compares against the checkout's own
-  `CONFIG_SCHEMA_EPOCH` (5).
+  `CONFIG_SCHEMA_EPOCH` (6).
 - **At release**, the running dispatcher enforces it for real (spec §14.2): a
   `gcp-proof` job released against a pre-epoch-5 dispatcher parks `Stalled` with
   `config_schema_skew` and launches nothing.

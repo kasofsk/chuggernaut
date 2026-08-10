@@ -79,6 +79,7 @@ fn sample_evaluator() -> types::Evaluator {
         model: None,
         secrets: vec!["CI_TOKEN".into()],
         workload_identities: vec![],
+        tools: vec![],
         required: Some(true),
         stage: 1,
     }

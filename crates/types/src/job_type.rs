@@ -148,6 +148,36 @@ pub struct WorkSpec {
     /// anywhere, never secrets, and disallowed for human work (no container).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workload_identities: Vec<String>,
+    /// Extra agent tools this work agent may use, added to the role's permission
+    /// profile (spec §4.3). Orchestration only, and agent work only — the role
+    /// still owns whether the run may edit or build.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<AgentTool>,
+}
+
+/// A tool a job type may grant an agent on top of its role profile (design #533
+/// S1). A **closed** set rather than an open string list, so `Bash`, `Edit` and
+/// `Write` stay the role's — spec §4.3 has why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
+pub enum AgentTool {
+    /// Spawn subagents. They inherit the run's settings file, so a `Review`
+    /// child stays read-only: this widens effort, never capability.
+    Task,
+    /// Drive a deterministic multi-agent workflow, which is `Task` with a script
+    /// around it and the same inheritance.
+    Workflow,
+}
+
+impl AgentTool {
+    /// The CLI tool name the permission profile allows.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Task => "Task",
+            Self::Workflow => "Workflow",
+        }
+    }
 }
 
 pub const DEFAULT_REVIEW_ITERATIONS: u32 = 5;
@@ -486,6 +516,11 @@ pub struct Evaluator {
     /// evaluator (no container).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workload_identities: Vec<String>,
+    /// Extra agent tools this evaluator may use, added to the `Review` profile
+    /// (spec §4.3). Not inherited from `work.tools`, and disallowed for a
+    /// command or human evaluator, which run no agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<AgentTool>,
     /// Default true; false = advisory.
     pub required: Option<bool>,
     /// Staged evaluation ordering (spec §3.3): evaluators run in ascending
@@ -789,6 +824,7 @@ impl JobType {
         errs.extend(self.validate_runtime());
         errs.extend(self.validate_inputs());
         errs.extend(self.validate_workload_identities());
+        errs.extend(self.validate_tools());
         errs
     }
 
@@ -841,6 +877,46 @@ impl JobType {
                 context: format!(
                     "a job type declaring 'workload_identities:' (needs min_dispatcher >= {})",
                     crate::version::WORKLOAD_IDENTITY_SCHEMA_EPOCH
+                ),
+            });
+        }
+        errs
+    }
+
+    /// The `tools:` grant rules (spec §1.1, design #533 S1): agent-only on both
+    /// sides, and a non-empty declaration requires the skew gate. A job type
+    /// granting none produces no errors here.
+    fn validate_tools(&self) -> Vec<FieldRuleError> {
+        let mut errs = Vec::new();
+        let mut declared = false;
+        if !self.work.tools.is_empty() {
+            declared = true;
+            if self.work.r#type != WorkType::Agent {
+                errs.push(FieldRuleError::Disallowed {
+                    field: "work.tools",
+                    context: format!("work.type: {:?}", self.work.r#type).to_lowercase(),
+                });
+            }
+        }
+        for e in &self.eval {
+            if e.tools.is_empty() {
+                continue;
+            }
+            declared = true;
+            if e.r#type != EvaluatorType::Agent {
+                let kind = format!("{:?}", e.r#type).to_lowercase();
+                errs.push(FieldRuleError::Disallowed {
+                    field: "eval.tools",
+                    context: format!("evaluator '{}' with type: {kind}", e.name),
+                });
+            }
+        }
+        if declared && self.min_dispatcher.unwrap_or(0) < crate::version::TOOLS_SCHEMA_EPOCH {
+            errs.push(FieldRuleError::Required {
+                field: "min_dispatcher",
+                context: format!(
+                    "a job type declaring 'tools:' (needs min_dispatcher >= {})",
+                    crate::version::TOOLS_SCHEMA_EPOCH
                 ),
             });
         }
@@ -1205,14 +1281,18 @@ mod tests {
 
     /// Every job type this repo ships, so a golden "the feature is off"
     /// assertion is judged against all of `.chug/jobs/` rather than a subset
-    /// that can drift from it.
-    const REPO_JOB_TYPES: [&str; 10] = [
+    /// that can drift from it. `gcp-proof` and `mac-proof` were missing for two
+    /// epochs, and `repo_job_types_covers_every_shipped_type` now measures the
+    /// claim instead of trusting it.
+    const REPO_JOB_TYPES: [&str; 12] = [
         include_str!("../../../.chug/jobs/android-proof.yaml"),
         include_str!("../../../.chug/jobs/code.yaml"),
         include_str!("../../../.chug/jobs/coverage.yaml"),
         include_str!("../../../.chug/jobs/deploy.yaml"),
         include_str!("../../../.chug/jobs/design.yaml"),
         include_str!("../../../.chug/jobs/docs.yaml"),
+        include_str!("../../../.chug/jobs/gcp-proof.yaml"),
+        include_str!("../../../.chug/jobs/mac-proof.yaml"),
         include_str!("../../../.chug/jobs/manual.yaml"),
         include_str!("../../../.chug/jobs/rollback.yaml"),
         include_str!("../../../.chug/jobs/web-publish.yaml"),
@@ -2170,8 +2250,12 @@ min_dispatcher: 5
         .expect("runtime block should parse")
     }
 
+    /// A type that declares `runtime:` carries its epoch, and one that does not is
+    /// byte-identical on the wire to a config written before the field existed.
+    /// This replaced an absence assertion that had gone false — see
+    /// `docs/reference/testing.md`'s conventions.
     #[test]
-    fn runtime_absent_leaves_every_existing_job_type_untouched() {
+    fn runtime_is_declared_only_with_its_epoch_across_shipped_job_types() {
         let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
         assert_eq!(jt.runtime, None);
         assert_eq!(jt.validate(), vec![]);
@@ -2182,15 +2266,18 @@ min_dispatcher: 5
         );
         let defaults =
             ProjectDefaults::parse(include_str!("../../../.chug/jobs/_defaults.yaml")).unwrap();
+        let mut declaring = 0;
         for yaml in REPO_JOB_TYPES {
             let jt = JobType::parse(yaml).unwrap();
-            assert_eq!(jt.runtime, None, "{}: declares runtime", jt.name);
-            assert!(
-                jt.min_dispatcher.unwrap_or(0) < crate::version::RUNTIME_SCHEMA_EPOCH,
-                "{}: declares the new epoch, which no config may until the dispatcher \
-                 carrying it is deployed (spec §14.3)",
-                jt.name
-            );
+            if jt.runtime.is_none() {
+                assert!(
+                    !serde_yaml::to_string(&jt).unwrap().contains("runtime"),
+                    "{}: an undeclared runtime must not appear on the wire",
+                    jt.name
+                );
+            } else {
+                declaring += 1;
+            }
             assert_eq!(
                 jt.with_defaults(&defaults).unwrap().validate(),
                 vec![],
@@ -2198,6 +2285,11 @@ min_dispatcher: 5
                 jt.name
             );
         }
+        assert!(
+            declaring > 0,
+            "no shipped type declares runtime — if that is true again, this test is \
+             asserting nothing and the absence form should come back"
+        );
     }
 
     #[test]
@@ -2800,11 +2892,146 @@ rework_budget: 1
         }
     }
 
-    /// The feature is **off** for every job type in this repo, not merely
-    /// unused: no declaration, nothing new on the wire, and no config declaring
-    /// the new epoch until a dispatcher carrying it is deployed (spec §14.3).
+    /// A `tools:` grant needs the skew gate, for the reason
+    /// `workload_identities:` does: the nested blocks carry
+    /// `deny_unknown_fields`, so an N-1 dispatcher rejects the whole config and
+    /// parks every job of the type rather than dropping the field.
     #[test]
-    fn workload_identities_absent_leaves_every_existing_job_type_untouched() {
+    fn tools_grant_requires_the_skew_declaration() {
+        let base = "name: t\nimage: img\nwork:\n  type: agent\n  prompt: p.md\n  tools: [Task]\n";
+        let errs = JobType::parse(base).unwrap().validate();
+        assert!(
+            errs.iter().any(|e| matches!(
+                e,
+                FieldRuleError::Required {
+                    field: "min_dispatcher",
+                    ..
+                }
+            )),
+            "{errs:?}"
+        );
+        let declared = format!(
+            "{base}min_dispatcher: {}\n",
+            crate::version::TOOLS_SCHEMA_EPOCH
+        );
+        assert_eq!(JobType::parse(&declared).unwrap().validate(), vec![]);
+    }
+
+    /// Agent-only, both sides. A command or human run has no agent to hand a tool
+    /// to, so the declaration is a config error rather than a silent no-op.
+    #[test]
+    fn tools_grant_is_agent_only() {
+        for (yaml, field) in [
+            (
+                "name: t\nmin_dispatcher: 6\nwork:\n  type: command\n  run: ./b.sh\n  tools: [Task]\n",
+                "work.tools",
+            ),
+            (
+                "name: t\nmin_dispatcher: 6\nwork:\n  type: agent\n  prompt: p.md\n\
+                 eval:\n  - name: ci\n    type: command\n    run: ./c.sh\n    tools: [Workflow]\n",
+                "eval.tools",
+            ),
+        ] {
+            let errs = JobType::parse(yaml).unwrap().validate();
+            assert!(
+                errs.iter().any(
+                    |e| matches!(e, FieldRuleError::Disallowed { field: f, .. } if *f == field)
+                ),
+                "{field}: {errs:?}"
+            );
+        }
+    }
+
+    /// The grantable set is CLOSED at the type level, which is what keeps a
+    /// project from granting its reviewer a build: `Bash` is not expressible, so
+    /// no composition step has to defend against it.
+    #[test]
+    fn only_orchestration_tools_are_grantable() {
+        for name in ["Bash", "Edit", "Write", "bash", "task"] {
+            let yaml = format!(
+                "name: t\nmin_dispatcher: 6\nwork:\n  type: agent\n  prompt: p.md\n  tools: [{name}]\n"
+            );
+            assert!(
+                JobType::parse(&yaml).is_err(),
+                "{name} must not parse as a grantable tool"
+            );
+        }
+        let ok = "name: t\nimage: img\nmin_dispatcher: 6\nwork:\n  type: agent\n  prompt: p.md\n  tools: [Task, Workflow]\n";
+        let jt = JobType::parse(ok).unwrap();
+        assert_eq!(jt.work.tools, vec![AgentTool::Task, AgentTool::Workflow]);
+        assert_eq!(jt.validate(), vec![]);
+    }
+
+    /// The project-default merge appends evaluators and never rebuilds one, so a
+    /// grant survives it. A dropped grant would degrade an orchestrating evaluator
+    /// to a single agent with nothing but a permission-denial warning to say so.
+    #[test]
+    fn a_grant_survives_the_project_default_merge() {
+        let jt = JobType::parse(
+            "name: t\nimage: img\nmin_dispatcher: 6\nwork:\n  type: agent\n  prompt: p.md\n  \
+             tools: [Task, Workflow]\neval:\n  - name: review\n    type: agent\n    \
+             prompt: r.md\n    tools: [Task]\n",
+        )
+        .unwrap();
+        let defaults =
+            ProjectDefaults::parse(include_str!("../../../.chug/jobs/_defaults.yaml")).unwrap();
+        let merged = jt.with_defaults(&defaults).unwrap();
+        assert_eq!(
+            merged.work.tools,
+            vec![AgentTool::Task, AgentTool::Workflow]
+        );
+        let review = merged.eval.iter().find(|e| e.name == "review").unwrap();
+        assert_eq!(review.tools, vec![AgentTool::Task]);
+        let ci = merged.eval.iter().find(|e| e.name == "ci").unwrap();
+        assert!(ci.tools.is_empty(), "an appended default grants nothing");
+        assert_eq!(merged.validate(), vec![]);
+    }
+
+    /// An undeclared grant is absent from the wire, so a dispatcher that cannot
+    /// see the field receives a byte-identical config.
+    #[test]
+    fn an_undeclared_tools_grant_is_absent_from_the_wire() {
+        let jt = JobType::parse(SPEC_EXAMPLE).unwrap();
+        assert!(!serde_yaml::to_string(&jt).unwrap().contains("tools"));
+    }
+
+    /// The doc comment on [`REPO_JOB_TYPES`] claims it holds every shipped type.
+    /// It held ten of twelve for two epochs, and the goldens below are only worth
+    /// their name if the population is the real one — so the claim is measured
+    /// against the directory rather than trusted.
+    #[test]
+    fn repo_job_types_covers_every_shipped_type() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.chug/jobs");
+        let mut shipped: Vec<String> = std::fs::read_dir(&dir)
+            .expect("read .chug/jobs")
+            .filter_map(|e| {
+                let name = e.ok()?.file_name().to_string_lossy().into_owned();
+                let stem = name.strip_suffix(".yaml")?;
+                (stem != "_defaults").then(|| stem.to_string())
+            })
+            .collect();
+        shipped.sort();
+        let mut covered: Vec<String> = REPO_JOB_TYPES
+            .iter()
+            .map(|y| JobType::parse(y).expect("parses").name)
+            .collect();
+        covered.sort();
+        assert_eq!(
+            covered, shipped,
+            "REPO_JOB_TYPES must hold every .chug/jobs/*.yaml — add the include_str! \
+             for a new type, or the goldens judge a subset"
+        );
+    }
+
+    /// The same reframing as the runtime golden above, and for the same reason:
+    /// `gcp-proof` declares `workload_identities:` at epoch 5, so "absent for every
+    /// existing job type" stopped being true when it shipped, and the drifted
+    /// [`REPO_JOB_TYPES`] was what hid it. `CLAUDE.md` states that `gcp-proof` is
+    /// the only type that may declare them — that rule is reviewer-held, and what
+    /// is mechanical is the pair: a declaration carries its epoch, an absence
+    /// leaves the wire clean.
+    #[test]
+    fn workload_identities_are_declared_only_with_their_epoch_across_shipped_job_types() {
         let spec_example = JobType::parse(SPEC_EXAMPLE).unwrap();
         assert!(
             !serde_yaml::to_string(&spec_example)
@@ -2814,26 +3041,39 @@ rework_budget: 1
         );
         let defaults =
             ProjectDefaults::parse(include_str!("../../../.chug/jobs/_defaults.yaml")).unwrap();
+        let mut declaring = 0;
         for yaml in REPO_JOB_TYPES {
             let jt = JobType::parse(yaml)
                 .unwrap()
                 .with_defaults(&defaults)
                 .unwrap();
             assert_eq!(jt.validate(), vec![], "{}: field rules", jt.name);
-            assert!(jt.work.workload_identities.is_empty(), "{}", jt.name);
-            assert!(jt.wrap_up.workload_identities.is_empty(), "{}", jt.name);
-            assert!(
-                jt.eval.iter().all(|e| e.workload_identities.is_empty()),
-                "{}",
-                jt.name
-            );
-            assert!(
-                jt.min_dispatcher.unwrap_or(0) < crate::version::WORKLOAD_IDENTITY_SCHEMA_EPOCH,
-                "{}: declares the new epoch, which no config may until the dispatcher \
-                 carrying it is deployed (spec §14.3)",
-                jt.name
-            );
+            let declares = !jt.work.workload_identities.is_empty()
+                || !jt.wrap_up.workload_identities.is_empty()
+                || jt.eval.iter().any(|e| !e.workload_identities.is_empty());
+            if declares {
+                declaring += 1;
+                assert!(
+                    jt.min_dispatcher.unwrap_or(0)
+                        >= crate::version::WORKLOAD_IDENTITY_SCHEMA_EPOCH,
+                    "{}: declares workload_identities without its epoch",
+                    jt.name
+                );
+            } else {
+                assert!(
+                    !serde_yaml::to_string(&jt)
+                        .unwrap()
+                        .contains("workload_identities"),
+                    "{}: an undeclared workload_identities must not appear on the wire",
+                    jt.name
+                );
+            }
         }
+        assert_eq!(
+            declaring, 1,
+            "exactly one shipped type declares workload_identities (gcp-proof); a second \
+             one is the reviewer-held rule in CLAUDE.md changing, not a test to relax"
+        );
     }
 
     #[test]

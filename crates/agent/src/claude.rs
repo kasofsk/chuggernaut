@@ -86,7 +86,7 @@ impl ClaudeProvider {
         }
         let mut files = vec![InjectedFile {
             container_path: SETTINGS_PATH.to_string(),
-            contents: settings_json(config.permissions).into_bytes(),
+            contents: settings_json(config.permissions, &config.tools).into_bytes(),
             mode: 0o644,
             artifact: None,
         }];
@@ -279,22 +279,11 @@ fn mcp_config_json(servers: &[McpServerConfig]) -> String {
     serde_json::json!({ "mcpServers": map }).to_string()
 }
 
-/// The `--settings` payload for a [`PermissionProfile`] (spec §4.3).
-///
-/// Deny beats allow in the CLI's resolution, but the **allow list is the real
-/// control** here: `Review` never allows a bare `Bash`, so a command that
-/// matches no allowed prefix is denied outright. That closes the escapes a
-/// denylist alone leaves open — `sh -c "cargo test"`, `make`, an `&&` chain
-/// behind a permitted prefix. The explicit denies are belt-and-braces on the
-/// two tools this exists to stop, and they document the intent at the point
-/// someone would go looking for it.
-///
-/// `mcp__chuggernaut-channel` must be allowed in both profiles: it is how a run
-/// reports (`update_status`) and how it terminates meaningfully
-/// (`submit_result` / `submit_eval`, spec §4.2). A reviewer that cannot call
-/// `submit_eval` looks exactly like a broken reviewer.
-pub fn settings_json(profile: PermissionProfile) -> String {
-    let permissions = match profile {
+/// The `--settings` payload for a [`PermissionProfile`], plus the job type's
+/// `tools:` grant appended to its allow list. Why the allow list is the control
+/// and why the grant cannot reach the deny list are spec §4.3.
+pub fn settings_json(profile: PermissionProfile, grant: &[types::AgentTool]) -> String {
+    let mut permissions = match profile {
         PermissionProfile::Work => serde_json::json!({
             "defaultMode": "acceptEdits",
             "allow": [
@@ -348,6 +337,17 @@ pub fn settings_json(profile: PermissionProfile) -> String {
             ],
         }),
     };
+    if let Some(allow) = permissions
+        .get_mut("allow")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for tool in grant {
+            let name = serde_json::Value::from(tool.as_str());
+            if !allow.contains(&name) {
+                allow.push(name);
+            }
+        }
+    }
     serde_json::json!({ "permissions": permissions }).to_string()
 }
 
@@ -399,6 +399,7 @@ mod tests {
             session_id: "da08d5f3-844e-430e-8363-39b4882f437b".into(),
             node: None,
             permissions: PermissionProfile::Work,
+            tools: vec![],
             runtime_env: None,
         }
     }
@@ -647,6 +648,69 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap().to_string())
             .collect()
+    }
+
+    fn settings_with_grant(
+        profile: PermissionProfile,
+        grant: &[types::AgentTool],
+    ) -> serde_json::Value {
+        serde_json::from_str(&settings_json(profile, grant)).expect("valid JSON")
+    }
+
+    /// The grant is what lets an orchestrating evaluator fan out, and `Review` is
+    /// the profile that does not already allow `Task`.
+    #[test]
+    fn a_grant_adds_to_the_review_allow_list() {
+        let before = allow_list(PermissionProfile::Review);
+        assert!(!before.contains(&"Task".to_string()));
+        let after = settings_with_grant(PermissionProfile::Review, &[types::AgentTool::Task]);
+        let allow: Vec<&str> = after["permissions"]["allow"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(allow.contains(&"Task"));
+        assert_eq!(allow.len(), before.len() + 1, "additive, nothing dropped");
+    }
+
+    /// Additive only: the role's deny survives a grant untouched, which is what
+    /// keeps a project from granting its reviewer a build.
+    #[test]
+    fn a_grant_cannot_disturb_the_review_deny_list() {
+        let plain = settings_with_grant(PermissionProfile::Review, &[]);
+        let granted = settings_with_grant(
+            PermissionProfile::Review,
+            &[types::AgentTool::Task, types::AgentTool::Workflow],
+        );
+        assert_eq!(
+            plain["permissions"]["deny"], granted["permissions"]["deny"],
+            "the deny list is the role's and a grant may not reach it"
+        );
+        let allow = granted["permissions"]["allow"].to_string();
+        assert!(
+            !allow.contains("\"Bash\""),
+            "a bare Bash must never appear in Review's allow list: {allow}"
+        );
+    }
+
+    /// `Work` already allows `Task`, so granting it is a no-op rather than a
+    /// duplicate entry — the payload stays byte-identical.
+    #[test]
+    fn granting_a_tool_the_role_already_allows_changes_nothing() {
+        let plain = settings_json(PermissionProfile::Work, &[]);
+        let granted = settings_json(PermissionProfile::Work, &[types::AgentTool::Task]);
+        assert_eq!(plain, granted);
+    }
+
+    /// An empty grant is the default for every job type that declares none, so the
+    /// settings payload must be exactly what it was before the feature existed.
+    #[test]
+    fn an_empty_grant_leaves_both_profiles_untouched() {
+        for profile in [PermissionProfile::Work, PermissionProfile::Review] {
+            let settings = settings_with_grant(profile, &[]);
+            assert_eq!(settings, settings_for(profile));
+        }
     }
 
     /// The point of the whole change: an evaluator cannot build. Note this is

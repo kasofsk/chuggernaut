@@ -491,6 +491,7 @@ impl Core {
                     session_id: session_id.clone().unwrap_or_default(),
                     node: job_type.placement_node().map(String::from),
                     permissions: agent::PermissionProfile::Work,
+                    tools: job_type.work.tools.clone(),
                     runtime_env: job_type.level_runtime_env(Level::Work).map(String::from),
                 };
                 let provider = self.provider.clone();

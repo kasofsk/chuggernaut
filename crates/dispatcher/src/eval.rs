@@ -939,6 +939,7 @@ impl Core {
             session_id: session_id.unwrap_or_default(),
             node: job_type.placement_node().map(String::from),
             permissions: agent::PermissionProfile::Review,
+            tools: evaluator.tools.clone(),
             runtime_env: job_type
                 .level_runtime_env(Level::Eval(evaluator))
                 .map(String::from),
