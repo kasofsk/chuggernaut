@@ -267,8 +267,9 @@ fn credential_fd_bootstrap(script: &str, path: &str, assertion: &str) -> String 
 /// question #529 explicitly leaves open.
 fn credential_ptrace_assertion(scope_path: &str, status_path: &str) -> String {
     format!(
-        "chug_scope=unknown; \
-         if [ -r {scope_path} ]; then read -r chug_scope < {scope_path} || chug_scope=unknown; fi; \
+        "chug_scope=; \
+         if [ -r {scope_path} ]; then read -r chug_scope < {scope_path} || :; fi; \
+         case \"$chug_scope\" in '' | *[!0-9]*) chug_scope=unknown ;; esac; \
          chug_cap=unknown; \
          if [ -r {status_path} ]; then \
          while read -r chug_key chug_value; do \
@@ -818,12 +819,15 @@ mod tests {
 
     /// The M6 assertion's own verdict, against a faked view of the two kernel
     /// files — it must never fail, whatever it reads.
+    ///
+    /// `scope` is written VERBATIM, so a fixture with no trailing newline is the
+    /// shape a sysctl file delivers to a byte-at-a-time reader (job #554).
     fn ptrace_verdict(scope: Option<&str>, cap_eff: Option<&str>) -> String {
         let dir = tempfile::tempdir().unwrap();
         let scope_path = dir.path().join("ptrace_scope");
         let status_path = dir.path().join("status");
         if let Some(scope) = scope {
-            std::fs::write(&scope_path, format!("{scope}\n")).unwrap();
+            std::fs::write(&scope_path, scope).unwrap();
         }
         if let Some(cap_eff) = cap_eff {
             std::fs::write(
@@ -939,13 +943,74 @@ mod tests {
 
     /// Design #529 M6, satisfied: this fleet's measured values — Yama at 1 and
     /// docker's default drop of `CAP_SYS_PTRACE`.
+    ///
+    /// Both delivered shapes, because job #554's defect was exactly the one the
+    /// newline-terminated fixture could not express.
     #[test]
     fn the_ptrace_assertion_passes_on_a_node_that_holds_the_property() {
-        let verdict = ptrace_verdict(Some("1"), Some(CAP_EFF_DROPPED));
-        assert!(verdict.contains(CREDENTIAL_LOG_MARKER), "{verdict}");
-        assert!(verdict.contains("ok: ptrace_scope=1"), "{verdict}");
-        assert!(verdict.contains("CAP_SYS_PTRACE=dropped"), "{verdict}");
-        assert!(!verdict.contains("WARNING"), "{verdict}");
+        for (label, scope) in [
+            ("as a sysctl file delivers it, no delimiter", "1"),
+            ("newline-terminated", "1\n"),
+        ] {
+            let verdict = ptrace_verdict(Some(scope), Some(CAP_EFF_DROPPED));
+            assert!(
+                verdict.contains(CREDENTIAL_LOG_MARKER),
+                "{label}: {verdict}"
+            );
+            assert!(verdict.contains("ok: ptrace_scope=1"), "{label}: {verdict}");
+            assert!(
+                verdict.contains("CAP_SYS_PTRACE=dropped"),
+                "{label}: {verdict}"
+            );
+            assert!(!verdict.contains("WARNING"), "{label}: {verdict}");
+        }
+    }
+
+    /// A read that ends at EOF without a delimiter still read a value, and job
+    /// #554's fix is that the VALUE decides the verdict rather than `read`'s status.
+    ///
+    /// A sysctl file serves its whole content on the first `read()` and returns
+    /// EOF at any non-zero offset, so a byte-at-a-time reader never sees the
+    /// trailing newline the file does carry.
+    #[test]
+    fn a_scope_read_ending_at_eof_without_a_delimiter_still_reports_the_value() {
+        for scope in ["0", "1", "2", "3"] {
+            let verdict = ptrace_verdict(Some(scope), Some(CAP_EFF_DROPPED));
+            assert!(
+                verdict.contains(&format!("ptrace_scope={scope}")),
+                "{scope}: {verdict}"
+            );
+            assert!(
+                !verdict.contains("ptrace_scope=unknown"),
+                "{scope}: {verdict}"
+            );
+        }
+    }
+
+    /// The other half of the same fix: a file that genuinely yields no value is
+    /// still `unknown`, on every route it can yield none.
+    ///
+    /// A directory is the uid-independent unreadable case — `[ -r ]` passes and
+    /// the read delivers nothing, which is where the old `||` fallback was right.
+    #[test]
+    fn a_scope_that_cannot_be_read_is_still_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let status_path = dir.path().join("status");
+        std::fs::write(&status_path, format!("CapEff:\t{CAP_EFF_DROPPED}\n")).unwrap();
+        let unreadable = dir.path().join("scope-is-a-directory");
+        std::fs::create_dir(&unreadable).unwrap();
+        for (label, scope_path) in [
+            ("absent", dir.path().join("no-such-file")),
+            ("unreadable", unreadable),
+        ] {
+            let (stdout, stderr, ok) = run_sh(&credential_ptrace_assertion(
+                &scope_path.display().to_string(),
+                &status_path.display().to_string(),
+            ));
+            assert!(ok, "{label} must never fail a launch: {stderr}");
+            assert!(stdout.contains("WARNING"), "{label}: {stdout}");
+            assert!(stdout.contains("ptrace_scope=unknown"), "{label}: {stdout}");
+        }
     }
 
     /// M6's whole point: each way the property can be absent is REPORTED rather
@@ -967,6 +1032,18 @@ mod tests {
                 "CAP_SYS_PTRACE=held",
             ),
             ("no files at all", None, None, "ptrace_scope=unknown"),
+            (
+                "readable but empty",
+                Some(""),
+                Some(CAP_EFF_DROPPED),
+                "ptrace_scope=unknown",
+            ),
+            (
+                "not a scope at all",
+                Some("garbage"),
+                Some(CAP_EFF_DROPPED),
+                "ptrace_scope=unknown",
+            ),
             (
                 "unreadable mask",
                 Some("1"),

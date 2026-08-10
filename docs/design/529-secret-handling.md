@@ -3,7 +3,9 @@
 Status: IMPLEMENTED IN PART — S1a has landed (job #545) and is observe-only,
 and S2+M6 have landed together (job #547): the provider credential now reaches
 an agent container on an inherited descriptor rather than in its environment,
-and the kernel property that window rests on is asserted at every launch. M7 has
+and the kernel property that window rests on is asserted at every launch — though
+M6's scope read was wrong on every launch until job #554 corrected it, which the
+first canary after the deploy is what surfaced. M7 has
 since measured the host path (job #549) and S2 has not been extended to it.
 Everything else below is proposed.
 
@@ -69,7 +71,7 @@ the argument and its dated corrections, never edited
 | The platform's provider token is out of the task's reach | `credential_delivery`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Narrowed, not closed** (S2, job #547), and **container launches only** — a host task is still env-delivered, which M7 now makes a choice rather than an unknown. A *window* instead of the process's lifetime; still no boundary, exactly as D5 says |
 | The agent CLI will take that token from a withdrawable source instead | `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, the shipped CLI | **Yes, measured** (M2, job #546) — an inherited fd, read once, leaving no file and no env entry. **In use** since S2 |
 | …and `apiKeyHelper` is the fallback if it will not | `--settings`, the same CLI | **No.** Measured: the helper's output is used as an API key and this credential is an OAuth token, rejected as `Invalid API key` |
-| A credential in the agent CLI's *memory* is out of the task's reach | Yama `ptrace_scope`, the node's kernel; `credential_ptrace_assertion`, `crates/agent/src/claude.rs` | **True today, and not by this platform's doing — now asserted rather than assumed** (M6, job #547). Every agent launch reads both properties in the container's own view and prints the verdict; it never refuses |
+| A credential in the agent CLI's *memory* is out of the task's reach | Yama `ptrace_scope`, the node's kernel; `credential_ptrace_assertion`, `crates/agent/src/claude.rs` | **True today, and not by this platform's doing — now asserted rather than assumed** (M6, job #547, [corrected in job #554](#correction--2026-08-10-job-554-m6s-scope-read-a-sysctl-file-answers-once-and-reads-status-is-not-a-verdict-on-what-it-read)). Every agent launch reads both properties in the container's own view and prints the verdict; it never refuses |
 | …and the same holds on a **host** node, by a mechanism the run did not separate | `task_for_pid`, macOS code-signing and entitlements | **True, measured, and asserted nowhere** (M7, job #549). Unsigned code got no task port; that this holds whatever its relation to the target is macOS's documented gating rather than M7's result, whose control went unreported. The launch-time assertion above reads `/proc` and so cannot see this property either way. Entitled system tools on the node are the open half (M9) |
 | Credential-bearing payloads are kept out of argv | `claude_invocation`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Landed**, with a test asserting it |
 | The same reasoning is applied to the env | `credential_delivery`, `crates/agent/src/claude.rs` | **For the provider credential, yes** (S2). Declared `work.secrets` and project `vars` are still env-delivered — that is S3 |
@@ -180,7 +182,7 @@ that no cleanup path reaches.
 | **S1b** | Narrow the injector from "every name under `global/agents`" to a platform-configured provider-credential name set, injecting nothing else | Proposed — after S1a; no schema field, no epoch, moves *reach* |
 | **M2** | Measure whether the agent CLI authenticates from an inherited fd (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`) with no token in the env | **Landed** (job #546) — it does, proved by a real completion; the fallback (d) does **not** take this credential. [The record](#correction--2026-08-10-job-546-m2-measured-the-fd-source-authenticates-and-apikeyhelper-will-not-take-this-credential) |
 | **S2** | Deliver the provider credential on an inherited fd — the container's own `sh -c` entrypoint reads the injected file into a pipe, unlinks it, and runs the bootstrap with the pipe's read end at fd 9 — and stop putting it in the launch env | **Landed** (job #547), container mode only. [The record](#landed--2026-08-10-job-547-s2-and-m6-the-credential-arrives-on-a-descriptor-and-the-property-it-rests-on-is-asserted) |
-| **M6** | Assert `ptrace_scope` (and the absence of `CAP_SYS_PTRACE`) at launch instead of assuming it — the host-kernel property S2's window rests on (M1d) | **Landed** (job #547) — reported at every agent launch, never enforced; the fleet-policy half stays open |
+| **M6** | Assert `ptrace_scope` (and the absence of `CAP_SYS_PTRACE`) at launch instead of assuming it — the host-kernel property S2's window rests on (M1d) | **Landed** (job #547) — reported at every agent launch, never enforced; the fleet-policy half stays open. The scope half misreported `unknown` on every launch until job #554; [the correction](#correction--2026-08-10-job-554-m6s-scope-read-a-sysctl-file-answers-once-and-reads-status-is-not-a-verdict-on-what-it-read) |
 | **M7** | Measure M1c/M1d's equivalents on the **host** node path, where there is no `/proc` and `task_for_pid` governs | **Measured** (job #549) — both carry over, the memory half by a mechanism the run did not separate; S2 is **not** extended to the host path here. [The record](#measured--2026-08-10-job-549-m7-the-host-paths-equivalents--env-readable-task_for_pid-denied-and-why-sample-proves-nothing) |
 | **M9** | Measure whether a task's own code can drive an **entitled** system tool on a host node (`sample`, `vmmap`, `lldb` with a session that can authorize it) to extract a credential its own `task_for_pid` cannot | Proposed — the half M7 leaves open; it bounds how much D3's window is worth on a host node |
 | **S3** | A per-level file-delivery declaration for project secrets, over the existing `InjectedFile` plumbing, using the `{NAME}_FILE` convention `.chug/tasks/deploy.sh` already anticipates | Proposed — **costs an epoch bump**, moves *reach* |
@@ -1213,3 +1215,85 @@ before then should read it as pointing at this section.
 
 So M7 licenses a slice and is not one. Extending S2 to the host path is future
 work carrying an assertion of its own to design, and nothing here does it.
+
+## Correction — 2026-08-10, job #554 (M6's scope read: a sysctl file answers once, and `read`'s status is not a verdict on what it read)
+
+M6 landed with the deploy on 2026-08-10 (job #552) and the **first canary launch
+after it** — job #553's own work container, on `gumbo-nuc-0` — printed the
+WARNING branch:
+
+> `ptrace_scope=unknown CAP_SYS_PTRACE=dropped — a task process CAN read this
+> credential out of the agent CLI's memory … Launching anyway`
+
+The property holds on that node. `kernel.yama.ptrace_scope` is `1`, the file is
+present, `yama` is in `/sys/kernel/security/lsm`, and a container on that node
+`cat`s `1` out of it. The capability half was reported correctly; only the scope
+half was wrong, and because `chug_scoped` then stayed `no` the branch was the
+WARNING one on **every** launch. That is the failure mode this document exists to
+close: a control that fires everywhere is indistinguishable from one that fires
+nowhere.
+
+### The cause, and it is not the one the shape suggests
+
+The prelude read the sysctl as `read -r chug_scope < $P || chug_scope=unknown`.
+Run in `chuggernaut/agent-rust:prod`, the `read` returns **non-zero** — so the
+`||` fallback fired and overwrote the value the same command had just set
+correctly to `1`.
+
+`ls -l` reporting size 0 is the visible symptom and not the mechanism, and
+neither is a missing trailing newline: the file's content genuinely is `1\n`.
+Two facts compose:
+
+1. **A `/proc/sys/*` file is served once.** The sysctl read handler formats the
+   whole value on the first `read()` and returns 0 for a read at any non-zero
+   offset, whatever is left. Measured in a work container: one `dd bs=64 count=1`
+   yields `1\n` (2 bytes), while `dd bs=1 count=4` yields `1` and then EOF.
+2. **`sh` consumes it a byte at a time.** The image's `/bin/sh` is dash, whose
+   `read` builtin reads one byte per `read()` so it need not seek back. It takes
+   the `1`, asks for the next byte, and gets EOF — before the newline the file
+   does carry ever reaches it.
+
+POSIX has `read` exit greater than zero when it reaches end-of-file before a
+delimiter, so a non-zero status here means "the input ended", **not** "nothing
+was read" — and `$chug_scope` was already `1` when the fallback clobbered it.
+bash returns 0 on the same file because it reads a block and seeks back, which
+is why the line looks correct when tried in an interactive shell and why the
+newline-terminated tempfile in the tree's own test could not express the defect.
+
+### The fix, which follows the cause
+
+The value decides the verdict; `read`'s exit status no longer does.
+
+```sh
+chug_scope=; if [ -r $P ]; then read -r chug_scope < $P || :; fi
+case "$chug_scope" in '' | *[!0-9]*) chug_scope=unknown ;; esac
+```
+
+`unknown` is now what a read genuinely yielding nothing produces — an absent
+file, an unreadable one, an empty one, or a value that is not a scope — which is
+the same shape `chug_cap` already used for its mask one line below, and one M6
+should have used for both halves. All three properties job #547 built in are
+unchanged: no value reaches a log line, the read happens in the container so it
+measures the node the task runs on, and the not-satisfied path still warns and
+launches. The `CapEff` loop is untouched and was never affected — `/proc/<pid>/status`
+is a seq_file that serves successive reads, and the loop breaks on a line it
+found rather than on the reader's status.
+
+Verified in a work container on this fleet: the corrected shape run against the
+live `/proc/sys/kernel/yama/ptrace_scope` reports `scope=1 cap=00000000a80425fb`,
+which is the `ok:` branch.
+
+### What the tree's own test missed, and what replaces it
+
+`ptrace_verdict` wrote its fixture as `format!("{scope}\n")`. That newline is
+exactly what a sysctl file never delivers to this reader, so the test asserted
+`ok: ptrace_scope=1` against a shape the production node does not produce, and
+passed while the property it stood for was reported wrong on every launch. The
+helper now writes the scope **verbatim** and the satisfied-node test runs both
+shapes; three of the four scope tests go red against the unfixed prelude, and the
+one that does not is the genuinely-unreadable case the old fallback got right.
+
+**This lands but does not take effect until a deploy.** Until the dispatcher on
+the fleet is the one carrying this change, every agent launch keeps printing
+`ptrace_scope=unknown`, and a WARNING line read before then is the defect rather
+than the node.
