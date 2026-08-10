@@ -1,0 +1,82 @@
+# A `molt` job sheds the doc corpus at a milestone (design #533). It is the only
+# job type whose product is a corpus stating strictly FEWER facts than before:
+# every other doc job removes false sentences or adds missing ones, a molt
+# removes true ones, and every removal must be licensed by a named class.
+#
+# That inversion is why this is a job type and not a large `docs` job. The five
+# gates in docs/reference/docs.md are all built to catch a doc saying something
+# WRONG; shedding produces docs that say something LESS, which none of them can
+# see. So the type carries its own accounting gate and its own loss adversary:
+#   stage 0 — .chug/tasks/review-molt.md, the ordinary agent reviewer, and
+#             .chug/tasks/check-molt.sh, the mechanical accounting (a landed
+#             slice row that vanished, a surviving doc whose last inbound
+#             reference went with the deletion, a design deleted while still
+#             ineligible, a deleted path still cited with no stub, a deletion
+#             with no ledger line). It cannot ask "was anything lost" — loss is
+#             the point — so it asks whether the books balance.
+#   stage 1 — the shared doc lint, alongside the appended `ci` default.
+#   stage 2 — .chug/tasks/review-molt-loss.md, an ORCHESTRATING adversary that
+#             fans out one reader per changed doc and is instructed to refute.
+#             Last, because it is the most expensive and the least likely to be
+#             the thing wrong on a first attempt.
+#
+# THE PREREQUISITE IS A DEPLOY, NOT A MERGE. min_dispatcher is the `tools:`
+# grant's epoch (TOOLS_SCHEMA_EPOCH, design #533 S1). A dispatcher below it
+# rejects this whole file — the nested config blocks deny unknown fields — and
+# escalates merge_config_skew rather than degrading to a pass. CI's skew gate is
+# advisory and asks no dispatcher, so a green CI is not evidence one was
+# consulted. #533 S1b deployed epoch 6; the next bump needs its own deploy.
+name: molt
+display_name: Molt
+description: Shed the doc corpus at a milestone — compact heads, delete fully-implemented designs, repoint every referrer.
+image: chuggernaut/agent-rust:prod
+min_dispatcher: 6
+# Asserted equal to exactly these two by crates/dispatcher/src/knowledge.rs.
+# The molt policy itself travels in the work prompt, not here: a second copy of
+# a rule is what drifts (design #415 D4).
+knowledge:
+  - docs/reference/style.md
+  - docs/README.md
+work:
+  type: agent
+  prompt: .chug/prompts/work/molt.md
+  # The molt's reading cost is the whole corpus, and it parallelises perfectly
+  # because the survey phase writes nothing. Task and Workflow widen EFFORT, not
+  # capability: subagents inherit this run's settings file, so a grant cannot
+  # reach past the role's own deny list (spec §4.3).
+  tools: [Task, Workflow]
+eval:
+  - name: review-molt
+    type: agent
+    prompt: .chug/tasks/review-molt.md
+    stage: 0
+  - name: check-molt
+    type: command
+    run: ./.chug/tasks/check-molt.sh
+    stage: 0
+  # Shared with .chug/jobs/docs.yaml and .chug/jobs/design.yaml.
+  - name: doc-lint
+    type: command
+    run: ./.chug/tasks/doc-lint.sh
+    stage: 1
+  - name: review-molt-loss
+    type: agent
+    prompt: .chug/tasks/review-molt-loss.md
+    stage: 2
+    # Fans out one reader per changed doc, then a small panel per candidate
+    # finding. No Workflow: the shape is a flat fan-out, not a pipeline.
+    tools: [Task]
+resources:
+  # Sized for a fan-out of in-process subagents, which are network-bound rather
+  # than CPU-bound — the cap is memory and the CLI's own Task limit, not cores.
+  # Unmeasured until the first real molt; #533 S4 is where these get numbers.
+  cpu: 4
+  memory: 8Gi
+  # Four phases over the whole corpus, one commit at the end.
+  task_timeout: 4h
+# ZERO ON PURPOSE. A retry re-invokes an agent that has already deleted files,
+# against a branch holding half its own work. A molt that dies is reworked with
+# its predecessor's ledger as input, which is a human's decision to make.
+work_retries: 0
+eval_retries: 1
+rework_budget: 2

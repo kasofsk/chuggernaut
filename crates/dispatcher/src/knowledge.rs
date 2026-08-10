@@ -163,7 +163,7 @@ mod tests {
     #[test]
     fn repo_agent_job_types_inject_the_defining_pages() {
         let root = repo_root();
-        for job_type in ["code", "design", "docs", "web"] {
+        for job_type in ["code", "design", "docs", "molt", "web"] {
             let yaml = std::fs::read_to_string(
                 root.join(".chug/jobs")
                     .join(job_type)

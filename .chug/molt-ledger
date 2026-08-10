@@ -1,0 +1,24 @@
+The molt's shed ledger — design #533 D2 and S2. One line per shed passage: what
+it said, the NAMED CLASS that licensed shedding it, and where the survivor went.
+
+    <path> — class: <class>; survivor: <where it went, or none>
+
+The five classes are #533 D4, and naming one is not a formality: the class is a
+schema field on every survey subagent's structured return, so an agent that
+cannot name a class cannot emit the shed at all. `live constraint`,
+`rejected alternative`, `open hole`, `measurement` and `world fact` are the
+classes that SURVIVE; a shed line names the class it was weighed against and
+found not to be, and `saga` is the residue.
+
+THIS IS A SCRATCH SLATE, NOT A REGISTRY — the same contract as `.chug/doc-reread`
+and for the same reason. `.chug/tasks/check-molt.sh` reads the lines your diff
+ADDS against its base, never this file's contents, so every line below is inert
+the moment it merges and licenses nothing on any later branch. A rebase cannot
+destroy a real assertion, and a merged line cannot become a standing waiver.
+Nothing prunes it and nothing has to.
+
+There is no archive. Git holds the history and the job records hold the work, so
+the sheddings themselves are deleted rather than filed: a tracked archive is
+corpus the next molt must molt, and an untracked one is out of every gate's and
+job's reach. The absence of a third option is #533 D2's whole argument, and this
+ledger is the accounting, not the archive.

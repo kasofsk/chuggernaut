@@ -293,7 +293,7 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-26 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
+27 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
 a throwaway repo against stubbed
 `cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
@@ -342,6 +342,15 @@ these suites cover.
   of the build context it was posted. It binds a real `AF_UNIX` file with
   `python3` (falling back to `perl`), because `[ -S ]` is rung 1's whole question
   and a regular file standing in for the socket would answer it wrong.
+  `check-molt.test.sh` (design #533 S2, job #548) adds ~2s (measured 2026-08-10)
+  and stubs nothing —
+  every check it pins is a **before-and-after**, so each case needs a
+  fixture with real history: a base commit holding the pre-molt corpus, a second
+  commit doing the shedding, and `BASE_BRANCH` pointing at the first. The molt
+  commit must also sit on its **own branch**, which is where the cost goes and
+  where the first draft went wrong — on `main` the merge-base with `BASE_BRANCH`
+  is HEAD itself, so the diff is empty, every deletion check goes quiet, and five
+  cases passed while proving nothing.
   The total is checked **between** suites, not after the loop — otherwise the
   real ceiling would be suite-count × per-suite cap — and the failure names the
   suites it therefore never ran. The per-suite cap is applied with `timeout`,

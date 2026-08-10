@@ -158,3 +158,14 @@ Doc-reread: docs/design/529-secret-handling.md
 Doc-reread: docs/design/529-secret-handling.md
 Doc-reread: docs/design/529-secret-handling.md
 Doc-reread: docs/spec.md
+
+Doc-reread: docs/spec.md
+Doc-reread: docs/reference/docs.md
+Doc-reread: docs/reference/style.md
+Doc-reread: docs/reference/testing.md
+Doc-reread: docs/design/533-molt.md
+Doc-reread: CLAUDE.md
+
+Doc-reread: .chug/prompts/work/molt.md
+Doc-reread: .chug/tasks/review-molt.md
+Doc-reread: .chug/tasks/docs-update.md

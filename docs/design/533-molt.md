@@ -1,7 +1,7 @@
 # Design #533 — The molt: shedding the doc corpus at a milestone
 
-Status: IMPLEMENTED IN PART — S1 and S1b are landed; S2–S6 remain.
-The slice table says where each stands.
+Status: IMPLEMENTED IN PART — the machinery is built and no molt has run yet.
+S1, S1b and S2 are landed; S3–S6 remain, and the slice table says where each stands.
 
 Written against the tree at `ef11e80` (2026-08-09). Every number here was read out
 of that commit and the command is given so a reader can re-run it rather than
@@ -95,21 +95,34 @@ than a deferral — see [what 415 costs](#what-415-costs-and-why-it-is-not-in-th
 | --- | --- | --- |
 | **S1** | Per-type `tools:` grant so a job type may declare `Task`/`Workflow`, epoch-gated as `workload_identities:` is | **Landed** (job #535) |
 | **S1b** | The **deploy** carrying `TOOLS_SCHEMA_EPOCH` to the running dispatcher, because a config declaring the new epoch cannot merge until a dispatcher carrying it runs (spec §14.3) | **Landed** — the dispatcher runs `fa1c414`, reporting `schema_epoch: 6` |
-| **S2** | The machinery: `.chug/jobs/molt.yaml` <!-- intent -->, its work prompt and evaluators, and `.chug/tasks/check-molt.sh` <!-- intent --> with a `.test.sh` sibling | Proposed |
+| **S2** | The machinery: `.chug/jobs/molt.yaml`, its work prompt and evaluators, and `.chug/tasks/check-molt.sh` with a `.test.sh` sibling | **Landed** (job #548) |
 | **S3** | `.chug/tasks/molt-debt.sh` <!-- intent --> — the git-derived reader that says how much shell has re-grown since the last molt. Read [the 2026-08-10 correction](#correction-2026-08-10--s3s-rename-detection-requirement-was-misdiagnosed-job-544) before implementing it: the body's stated requirement is the wrong one | Proposed |
 | **S4** | The first molt's cheap half: the reference tier and `CLAUDE.md`, where narrating a change is *already* out of policy, and the 24 design **heads**, which are already mutable | Proposed |
 | **S5** | The deletions — six of the seven docs above, with every surviving referrer repointed or stubbed | Proposed |
 | **S6** | #415's own disposition, decided on its own evidence rather than by the rule that covers the other six | Proposed |
 
-S1 and S1b are landed and nothing else is, so `Status:` is `IMPLEMENTED IN PART`.
+S1, S1b and S2 are landed, so `Status:` is `IMPLEMENTED IN PART`: **the molt can
+now be run, and has not been.** S3–S6 remain, and S4 is the first actual molt.
+
 S1b was S2's real prerequisite rather than S1 — the capability being in the tree is
-not the same as a dispatcher that parses it — and it is now **satisfied**, so S2 is
-unblocked: the running dispatcher and both worker nodes report
-`0.1.0+fa1c4140`, and `GET /api/v1/platform/config` answers `schema_epoch: 6`.
-Its cell carries no `(job #N)` because a deploy job merges nothing, so there is no
-`job/N: deploy` squash for check 3 to resolve — a bare `**Landed**` is the shape
-that check skips, and the sha is the evidence in its place. S4 must precede S5, for
-reasons the body gives; the rest is orderable.
+not the same as a dispatcher that parses it. Its cell carries no `(job #N)` because
+a deploy job merges nothing, so there is no `job/N: deploy` squash for check 3 to
+resolve; a bare `**Landed**` is the shape that check skips, and the sha is the
+evidence in its place. S4 must precede S5, for reasons the body gives; the rest is
+orderable.
+
+Two things S2 settled that the body below predates, because implementing them
+changed the answer. **`check-molt.sh` cannot source a deleted doc's surviving
+citations from `check-doc-facts.sh --emit-paths`**: that emitter prints a claim
+only when it *resolves*, deliberately, so a path a molt just deleted is invisible
+to it by design. The gate uses a literal `git grep` over tracked files instead,
+which also reaches the citers `check-doc-facts.sh` never scans at all — it reads
+`*.md` only, and a citation sitting in a `.yaml`, a `.ts` or a generated file is
+exactly the contract a stub exists to keep. And **a stub is exempt from the
+vanished-landed-row check**: a stub drops its slice table by definition, so
+demanding it keep the table it was shed to remove would make stubs pointless. What
+that check is for is a row silently *rewritten* — `**Landed** (job #N)` turned back
+into `Proposed` — which leaves the table in place.
 
 ### Not registered as a concept
 

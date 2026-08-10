@@ -1,8 +1,9 @@
 # The doc policy — how documentation works in this repo
 
 **Audience:** whoever is about to write or change a document here — most often
-the agent running a `docs`, `design`, `code` or `web` job, and the reviewer
-holding its output to these rules. This page is the rules, in the present tense.
+the agent running a `docs`, `design`, `molt`, `code` or `web` job, and the
+reviewer holding its output to these rules. This page is the rules, in the
+present tense.
 The argument for them, with the measurements that produced each one, is design
 [#415](../design/415-knowledge-architecture.md); read it when you want to know
 *why*, or before proposing a change to a rule.
@@ -60,6 +61,18 @@ not something a reader should have to do. There is no syntactic boundary to look
 for — `docs/design/415-knowledge-architecture.md` marks it with a rule and a
 `## The record` heading, most docs do not, and a `---` in a design doc is usually
 just a section separator.
+
+**One job type may delete a design doc outright, and none may rewrite a body.**
+A `molt` job (`docs/design/533-molt.md`) sheds the corpus at a milestone, and its
+licence is *deletion of a whole design whose `Status:` leads with `IMPLEMENTED`
+and is not `IMPLEMENTED IN PART`* — never compaction of a body. That is the point
+of the shape rather than a technicality: removing a file does not edit an
+append-only body, so the exception stays a licensed **deletion** and append-only
+needs no exception at all. Heads are already mutable, so compacting one needs no
+licence. The jobs remain in git history and in the job records, so what a molt
+destroys is the narration, never the record. `.chug/tasks/check-molt.sh` holds
+the eligibility test mechanically, and `.chug/molt-ledger` records the named
+class that licensed each shed.
 
 ### The header contract
 
@@ -227,7 +240,7 @@ because its own `job/N` commit cannot exist yet when the commit is gated.
 
 ## What checks this, and what only reports it
 
-Five gates read the docs. Four of them fail a job, and knowing which is which is
+Six gates read the docs. Five of them fail a job, and knowing which is which is
 the difference between a rework cycle and a warning you can read at your
 leisure.
 
@@ -235,12 +248,21 @@ leisure.
 | --- | --- | --- | --- |
 | `.chug/tasks/check-doc-facts.sh` | pre-stage of **every** job, whole-tree; `--staged` in the pre-commit hook | paths, restated constants, landed-slice rows, owned definitions, the catalogue, heading anchors | **error** |
 | `.chug/tasks/check-comments.sh` | pre-stage of every job | non-doc comments, and the two-sentence cap on doc comments | **error** |
-| `.chug/tasks/doc-lint.sh` | stage 1 of `docs` and `design` jobs | markdown well-formedness, relative links, the `{seq}-{slug}.md` filename shape | **error** for those two job types |
+| `.chug/tasks/doc-lint.sh` | stage 1 of `docs`, `design` and `molt` jobs | markdown well-formedness, relative links, the `{seq}-{slug}.md` filename shape | **error** for those three job types |
 | `.chug/tasks/review-docs-updated.md` | evaluation of every `code` and `web` job | cross-doc state claims, behavioural claims about symbols the diff touched, a design slice landed without its head updated | **error** — an agent evaluator, so it reads and never runs |
+| `.chug/tasks/check-molt.sh` | stage 0 of `molt` jobs | the accounting of a shedding: a vanished landed-slice claim, a doc that lost its last referrer, a deletion that was not eligible, a deleted path still cited from a non-doc file with no stub, a shed with no ledger line | **error** for that one job type |
 | `.chug/tasks/doc-staleness.sh` | every job, and the pre-commit hook | whether a file a doc names has moved since the doc did, and whether anything under `docs/` is named by nothing | **advisory** — *suspect*, not wrong |
 
-Two things about that table are decisions rather than accidents:
+Three things about that table are decisions rather than accidents:
 
+- **No gate can ask whether a molt lost something.** Every other row catches a doc
+  saying something *wrong*; shedding produces docs that say something *less*, and
+  a gate that failed a diff for removing a true sentence would fail every molt.
+  So `check-molt.sh` asks accounting instead, and the judgement — was the
+  shedding well-aimed, and did a load-bearing fact die — belongs to two agent
+  evaluators, one of which is instructed to refute rather than approve. A gate
+  that cannot run is worse here than anywhere else, so an unresolvable base exits
+  as a linter error: "nothing lost" and "never looked" must not print the same.
 - **The fatal ones are all mechanical.** A gate that errors in the pre-stage of
   every job stops the fleet when it is wrong, so each of those checks refuses to
   judge what it cannot parse: an unresolvable token, an unrecognised assertion
@@ -277,9 +299,9 @@ doc-claim rule is where each one's meaning is stated.
 
 - [design #415](../design/415-knowledge-architecture.md) — the argument for
   every rule on this page, and the measurements behind it.
-- [design #533](../design/533-molt.md) — a **proposed** exception to the
-  append-only rule, for a project-level shedding of the corpus at a milestone.
-  Nothing on this page changes until a slice of it lands.
+- [design #533](../design/533-molt.md) — the argument behind the licensed
+  deletion above, and the shedding it exists for. Its machinery is landed (S2,
+  job #548); no molt has run yet.
 - [`docs/reference/style.md`](style.md) — the blessed practices, including the
   doc-claim rule and the marker syntax.
 - [`docs/concepts.md`](../concepts.md) — the concept registry, and the criterion

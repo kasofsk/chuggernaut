@@ -319,7 +319,10 @@ verify it in seconds and must name it when rejecting.
    marker is a way to silence a path that is simply stale — that is an edit, not
    a marker. An append-only design body is no exemption: it cannot be rewritten,
    but it can be annotated, so the sentence keeps the path and says what happened
-   to it. *Why:* one week produced five — a `.github/`
+   to it. The one licensed exception is not a rewrite either — a `molt` job may
+   **delete** a whole design whose `Status:` leads with `IMPLEMENTED` and is not
+   `IMPLEMENTED IN PART` (`docs/reference/docs.md`), and removing a file
+   annotates no body. *Why:* one week produced five — a `.github/`
    workflow mirror that did not exist and a `tier-2 ENABLED` announcement over a
    tier that self-skipped (#375, #378/#382), 17 shell suites nothing executed
    (#385), a duplication gate analysing no `.nix` files (#383), `check-modules.sh`

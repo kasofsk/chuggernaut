@@ -94,7 +94,7 @@ the absence of a workflow file.
   the comment lint, `.chug/tasks/check-shell-quoting.sh`, the shell-quoting gate,
   `.chug/tasks/check-doc-facts.sh`, the doc-fact gate,
   `.chug/tasks/doc-staleness.sh`, the staleness ledger, and
-  since #385 **the repo's 26 `*.test.sh` shell suites**.
+  since #385 **the repo's 27 `*.test.sh` shell suites**.
   Any clone fails the gate.
 - **A quote inside the word of a `${VAR:-word}` expansion is a gate, because
   CI's shell and production's disagree about it.** bash parses quotes inside
@@ -244,6 +244,27 @@ the absence of a workflow file.
   verdict is the same on every host and every awk (macOS's BWK awk aborts on the
   tree's astral-plane characters in a UTF-8 locale); a file the scanner cannot
   finish exits **2** as a `LINTER ERROR`, never as a comment violation.
+- **One job type removes *true* sentences, and it has its own gates because no
+  other gate can judge it.** A `molt` job (design
+  [#533](docs/design/533-molt.md), machinery landed by #548) sheds the corpus at a
+  milestone: heads compacted, fully-implemented designs **deleted outright**,
+  every referrer repointed or stubbed. The five doc gates above all catch a doc
+  saying something *wrong*; shedding produces docs that say something *less*, so
+  `.chug/tasks/check-molt.sh` asks **accounting** instead — a vanished
+  landed-slice claim, a surviving doc that lost its last referrer, a deletion
+  that was not eligible, a deleted path still cited from a **non-doc** file with
+  no stub, a shed with no `.chug/molt-ledger` line — and an unresolvable base
+  exits **2**, because "nothing lost" and "never looked" must not print the same.
+  Two things it cannot borrow: `check-doc-facts.sh --emit-paths` prints only
+  claims that **resolve**, so a just-deleted path is invisible to it by design
+  (the gate greps literally instead, which also reaches the `.yaml`/`.ts`/
+  generated citers nothing else scans, since check-doc-facts reads `*.md` only);
+  and a **stub is exempt** from the vanished-row check, because a stub drops its
+  slice table by definition. Judgement stays with two agent evaluators, the
+  stage-2 one instructed to **refute**. It is the only type that may delete a
+  design doc, and only one whose `Status:` leads with `IMPLEMENTED` and is not
+  `IMPLEMENTED IN PART` — which is why the licence is a *deletion* and
+  append-only needs no exception at all. **No molt has run yet.**
 - **The fast half of that gate also runs at the commit.** `.githooks/pre-commit`
   formats staged Rust/web files with `rustfmt`/`prettier` and re-stages them,
   then runs the comment lint (`--staged` mode), the registry check, the
@@ -263,7 +284,7 @@ the absence of a workflow file.
   `container::bootstrap_cmd`; **a local checkout needs `git config
   core.hooksPath .githooks` once.** Its test is `.githooks/pre-commit.test.sh`.
 - Per-type **stage-0 agent reviewers** run first (`.chug/tasks/review-*.md`), so the
-  slow gate is spent only on changes the reviewer accepts; `docs`/`design`
+  slow gate is spent only on changes the reviewer accepts; `docs`/`design`/`molt`
   jobs additionally gate on `.chug/tasks/doc-lint.sh` at stage 1.
 - **Reviewers read; they do not run.** Agent evaluators launch under the
   read-only `Review` permission profile (spec §4.3) — no `cargo`, no `npm`.

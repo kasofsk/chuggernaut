@@ -1284,7 +1284,7 @@ mod tests {
     /// that can drift from it. `gcp-proof` and `mac-proof` were missing for two
     /// epochs, and `repo_job_types_covers_every_shipped_type` now measures the
     /// claim instead of trusting it.
-    const REPO_JOB_TYPES: [&str; 13] = [
+    const REPO_JOB_TYPES: [&str; 14] = [
         include_str!("../../../.chug/jobs/android-proof.yaml"),
         include_str!("../../../.chug/jobs/code.yaml"),
         include_str!("../../../.chug/jobs/coverage.yaml"),
@@ -1295,6 +1295,7 @@ mod tests {
         include_str!("../../../.chug/jobs/gcp-proof.yaml"),
         include_str!("../../../.chug/jobs/mac-proof.yaml"),
         include_str!("../../../.chug/jobs/manual.yaml"),
+        include_str!("../../../.chug/jobs/molt.yaml"),
         include_str!("../../../.chug/jobs/rollback.yaml"),
         include_str!("../../../.chug/jobs/web-publish.yaml"),
         include_str!("../../../.chug/jobs/web.yaml"),
@@ -3084,6 +3085,7 @@ rework_budget: 1
         for (name, yaml) in [
             ("design", include_str!("../../../.chug/jobs/design.yaml")),
             ("docs", include_str!("../../../.chug/jobs/docs.yaml")),
+            ("molt", include_str!("../../../.chug/jobs/molt.yaml")),
         ] {
             let jt =
                 JobType::parse(yaml).unwrap_or_else(|e| panic!("{name}.yaml parse error: {e}"));
