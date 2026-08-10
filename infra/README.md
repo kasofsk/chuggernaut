@@ -92,9 +92,12 @@ that has been pushed is rotated, not reverted.**
 
 ## `gcp-proof` — proving the boundary against ourselves first
 
-Half A is unexercised. The first consumer of a workload-identity path should not
-be a live project's deploy path, so this proves it against **this platform**,
-where a wrong answer costs a report rather than a deploy.
+Half A was unexercised when this root was written, and this root is what
+exercised it — job #430 climbed the whole ladder and reported `VERDICT PASS`
+([the retraction below](#the--is-literal--and-this-is-a-retraction)). The first
+consumer of a workload-identity path should not be a live project's deploy path,
+so this proves it against **this platform**, where a wrong answer costs a report
+rather than a deploy.
 
 What the terraform declares, and why the shape is asymmetric:
 

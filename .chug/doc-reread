@@ -184,3 +184,7 @@ Doc-reread: docs/design/543-placement-granularity.md
 Doc-reread: docs/reference/runbooks/worker-docker-grant.md
 Doc-reread: docs/spec.md
 Doc-reread: docs/implementation-notes.md
+
+Doc-reread: docs/design/313-workload-identity-image-builds.md
+Doc-reread: docs/design/308-gha-port.md
+Doc-reread: infra/README.md

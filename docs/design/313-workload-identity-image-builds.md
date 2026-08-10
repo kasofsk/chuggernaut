@@ -1,11 +1,22 @@
 # Design #313 — Workload identity (OIDC issuer) and image build/push
 
-Status: IMPLEMENTED IN PART — half A shipped and is deployed at epoch 5; S6 is the operator's, half B is still a design.
+Status: IMPLEMENTED IN PART — half A is deployed and proven end to end (job #430); S6's consumer half and half B remain.
 
 Half A's code landed across jobs #410 (S1), #411 (S2), #412 (S5), #413 (S3)
 and #414 (S4), and prod was observed on 2026-08-09 running a dispatcher at
-epoch 5 (S3d), at the commit job #508's deploy carried. The operator's provider
-registration (S6) is the one link still open.
+epoch 5 (S3d), at the commit job #508's deploy carried. S6 — the operator's
+provider registration — has since split in two: the **proof** half is applied
+and proven (job #430), and the **consumer** half, a provider in whichever GCP
+project holds the registry, is not.
+
+**Amended 2026-08-10 (job #553): S6 splits, and only its proof half is
+satisfied.** This head said provider registration was undone and that S6 was
+"the single remaining link". Job #430 had already climbed the whole ladder
+against an applied pool, provider and IAM binding, reporting `VERDICT PASS` —
+and a `gcp-proof` job merges nothing, so no commit moved to prompt the
+correction. What remains of S6 is the **consumer** half, which is S7's question
+and beacon-side. See [the 2026-08-10
+amendment](#amendment--2026-08-10-job-553-s6-splits-into-a-proof-half-and-a-consumer-half).
 
 **Amended 2026-08-09 (job #517): Decision 0 is amended and half B collapses to
 B-I.** The operator has accepted docker access for jobs, so the recommended
@@ -38,7 +49,8 @@ merged, and the qualifier says which. S1 generates a keypair, S2 is the pure
 mint, S5 serves two documents on a loopback bind, and S3 parses and gates the
 declaration; the first slice a job container sees is **S4, which has since
 shipped** — a declared identity now produces a usable credential inside its own
-container, valid at a provider nobody has registered yet (S6).
+container, and job #430 exchanged one at a registered provider end to end
+(S6's proof half).
 
 Written against the tree at `d7ebfae`. Every claim about current behavior below
 was read out of [docs/spec.md](../spec.md) and the source in this repo; where the
@@ -92,12 +104,41 @@ rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument and its dated amendments,
 never edited into the prose above them.*
 
-**Half A's code is done and deployed; its provider registration is not, and half
-B is still a design.** S3d was observed satisfied on 2026-08-09, so **S6 (the operator registers
-the provider) is the single remaining link** in half A: a declared identity
-mints a real token inside its own container against an issuer no cloud provider
-has been told about, so nothing authenticates end to end yet. Half B — the image
-build and push — has no slice past S9 and no owner.
+**Half A's code is done, deployed and proven end to end; what is left of S6 is
+its consumer half, and half B is still a design.** S3d was observed satisfied on
+2026-08-09, and **S6 is two halves rather than one link**.
+
+- **The proof half is satisfied.** A pool, an OIDC provider over the uploaded JWK
+  set, and one `workloadIdentityUser` binding are applied in the shared
+  `daekon-ai` project, with an attribute condition naming **`kasofsk/chuggernaut`**
+  ([`infra/gcp-proof/mod.tf`](../../infra/gcp-proof)). Job #430 climbed every rung
+  of [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml)'s ladder
+  against them and reported `VERDICT PASS`: a declared identity mints a token a
+  real STS accepts, impersonates the granted service account, reads the granted
+  bucket, is refused the denied one, and an evaluator declaring no identity gets
+  nothing.
+- **The consumer half is not.** No provider is registered for beacon or any other
+  consumer project, and none ever will be **here**:
+  [`infra/README.md`](../../infra/README.md) states that there are no beacon
+  resources in this repo and there never will be — beacon's
+  `kasofsk/beacon:infra/gcp-workload-id/` is operator-owned and lives in beacon's
+  own repo — and this root's attribute condition names `kasofsk/chuggernaut`
+  precisely so beacon's eventual provider is a **separate resource** that this one
+  cannot grow into by accident. So what gates S9 is not "register a provider" in
+  general but *that* provider, in whichever GCP project holds the registry, which
+  is [S7](#sequencing-and-what-ships-first)'s question.
+
+Half B — the image build and push — has no slice past S9 and no owner.
+
+**The proof half is satisfied by an observation, not a commit, and that is why
+this head was five days stale.** A `gcp-proof` job is a report: its `wrap_up` is
+`type: none` and its branch carries no commits, so no `job/429` or `job/430`
+commit exists and nothing in the tree moved to prompt an update. The record lives
+beside the terraform instead — the `principal_set` comment in
+[`infra/gcp-proof/mod.tf`](../../infra/gcp-proof) and the retraction section of
+[`infra/README.md`](../../infra/README.md), both written by job #431 on
+2026-08-05, which is also where job #429's earlier refusal is disposed of as IAM
+propagation rather than evidence about the member.
 
 **What satisfies it is an observation, not a commit.** `GET
 /api/v1/platform/config` against prod reported `dispatcher.schema_epoch: 5`
@@ -147,7 +188,8 @@ S3d's row below deliberately breaks the table's `**Landed** (job #N)` shape. A
 ([`.chug/jobs/deploy.yaml`](../../.chug/jobs/deploy.yaml)), so no `job/508`
 commit exists — and `.chug/tasks/check-doc-facts.sh` check 3 resolves that shape
 against exactly such a commit. An operator slice is recorded by observation
-instead, which is also how S6 will have to be recorded when it lands.
+instead, which is exactly how S6's proof half is recorded above — and its
+consumer half will have to be recorded the same way.
 
 **Half A's four decisions**, lifted from [Decisions taken,
 2026-08-04](#decisions-taken-2026-08-04). The operator took all four on that
@@ -175,10 +217,10 @@ of work.
 | **S3d** | *Deploy:* a dispatcher carrying epoch 5 reaches prod | **Observed satisfied 2026-08-09** — prod's `/api/v1/platform/config` reports `dispatcher.schema_epoch: 5` at `dispatcher_sha` `8da61424b9bf53a7322bf5aa5f39d92a35c2ebc2`, the commit job #508's deploy carried; both `nodes[]` entries report a matching worker build version, which is a separate fact. Not a code slice, so no merge commit bears it |
 | **S4** | Injection at launch: two injected files, `GOOGLE_APPLICATION_CREDENTIALS`, audit fields — [`crates/dispatcher/src/workload.rs`](../../crates/dispatcher/src/workload.rs) | **Landed** (job #414) |
 | **S5** | Discovery + JWKS routes on the api, unexposed — [`crates/api/src/oidc.rs`](../../crates/api/src/oidc.rs) | **Landed** (job #412) |
-| **S6** | *Operator:* register the provider with the uploaded JWK set; attribute condition; one IAM binding; prove it in a work container | Pending — the terraform and the six-rung proof are authored ([`infra/gcp-proof/`](../../infra/gcp-proof), [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml)); the `apply` is the operator's |
-| **S7** | *Operator:* a registry confirmed | Pending — runs in parallel with S1–S6 |
+| **S6** | *Operator:* register the provider with the uploaded JWK set; attribute condition; one IAM binding; prove it in a work container | **Split — the proof half is satisfied, the consumer half is not.** *Proof:* applied in `daekon-ai` against `kasofsk/chuggernaut` and observed end to end — job #430 reported `VERDICT PASS` over the whole ladder. A proof job merges nothing, so no commit bears it; the record is [`infra/gcp-proof/mod.tf`](../../infra/gcp-proof) and [`infra/README.md`](../../infra/README.md), written by job #431 on 2026-08-05. *Consumer:* pending, and **not this repo's to apply** — a separate provider in whichever GCP project holds the registry (S7), beacon-side |
+| **S7** | *Operator:* a registry confirmed | Pending — runs in parallel with S1–S6, and it now also **names where S6's consumer half must be applied**: the provider S9 needs lives in whichever GCP project holds the registry |
 | **S8** | *Node config:* allow-list + `placement.node` pin on one builder node | Proposed, **reduced 2026-08-09 (job #517)** — the proxy is superseded, so this is the socket bound node-side into allow-listed launches. Carried as [#517](./517-docker-access-for-jobs.md)'s S5. Its S1 prerequisite **landed in job #518**: the matched launch env is no longer shadowable, `JOB_` being a reserved secret/var prefix (`docs/spec.md` §4.1) |
-| **S9** | A real `build-image` job type: SHA tag, digest recorded, digest-resolves evaluator | Proposed — gated on S6, S7, S8 |
+| **S9** | A real `build-image` job type: SHA tag, digest recorded, digest-resolves evaluator | Proposed — gated on **S6's consumer half**, S7 and S8. S6's proof half does not gate it: the provider it proved fences on `kasofsk/chuggernaut`, so no consumer project's build can exchange a token there |
 
 ## Problem
 
@@ -1705,3 +1747,99 @@ toward narrowness, never sideways.
 injected credential, runs `docker build` against the node's own daemon through a
 bound socket, pushes by SHA, and records the digest. That is B2's sketch plus a
 node-side bind.
+
+---
+
+## Amendment — 2026-08-10, job #553 (S6 splits into a proof half and a consumer half)
+
+**A correction to this document's own head, on evidence its own history already
+held.** Nothing about the design changes; what changes is what the head says is
+outstanding. S6 was written as one operator act — *register the provider* — and
+it is two, of which only one is this repo's to perform.
+
+### What the head said, and what falsifies it
+
+The head said half A's "provider registration is not" done and that **S6 was "the
+single remaining link"**, and the paragraph above the slice table said a declared
+identity mints a token "valid at a provider nobody has registered yet (S6)".
+
+Both were false when written, and the tree says so in two places, neither of them
+a design doc:
+
+- [`infra/gcp-proof/mod.tf`](../../infra/gcp-proof), beside the `principal_set`
+  local: *"NOW PROVEN. Job #430 climbed the whole ladder against this applied
+  member and reported `VERDICT PASS`"* — so rung 3b, which **is** the
+  `workloadIdentityUser` binding, is observed rather than argued.
+- [`infra/README.md`](../../infra/README.md)'s retraction section: *"This is now
+  settled by observation, not just argument."* The same section disposes of job
+  #429's earlier rung-3b refusal as **IAM propagation** — #429 ran inside the
+  window between the apply and the binding taking effect, and #430 changed no
+  terraform.
+
+Both were written by **job #431 on 2026-08-05**. [#529
+§6](529-secret-handling.md) already reads it correctly ("proved end to end
+against a real provider (job #430), deployed at epoch 5"), so this head was the
+outlier rather than the consensus.
+
+**Why nothing prompted the fix.** A `gcp-proof` job is a report, not a change:
+`wrap_up: type: none` and a branch carrying no commits
+([`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml)), so jobs #429
+and #430 left no `job/N:` commit. `.chug/tasks/check-doc-facts.sh` check 3 resolves a
+`**Landed** (job #N)` row against exactly such a commit, and
+`.chug/tasks/doc-staleness.sh` compares a doc against commits touching the files
+it names — so a fact established by *running* something, rather than by merging
+something, is invisible to every gate this repo has. That is the same hole S3d's
+row already names, and it is now two slices wide.
+
+### The split
+
+| Half | What it is | State |
+| --- | --- | --- |
+| **Proof** | A pool, an OIDC provider over the uploaded JWK set, one `workloadIdentityUser` binding and the two-SA/two-bucket fixture, applied in the shared `daekon-ai` project, fenced by `attribute_condition = assertion.project == 'kasofsk/chuggernaut'` | **Satisfied**, by observation (job #430) |
+| **Consumer** | The equivalent provider for a project that actually deploys — beacon first — in whichever GCP project holds the registry, with its own attribute condition and its own bindings | **Not started, and not this repo's to apply** |
+
+The consumer half cannot be reached from the proof half by editing this root, and
+that is deliberate rather than incidental:
+[`infra/README.md`](../../infra/README.md) states that there are no beacon
+resources here and there never will be, that beacon's
+`kasofsk/beacon:infra/gcp-workload-id/` is operator-owned and lives in beacon's
+own repo, and that the `kasofsk/chuggernaut` condition exists **so that beacon's
+eventual provider is a separate resource this one cannot grow into by accident**.
+A tenancy fence that could be widened by one variable would not be a fence.
+
+### S9's dependency, re-read
+
+[Sequencing](#sequencing-and-what-ships-first) gives S9 (`build-image`) the
+dependencies **S6, S7, S8**. Under the split that line should be read as **S6's
+consumer half, S7, S8** — and S6's *proof* half, satisfied though it is, buys S9
+nothing. A build job for a consumer project mints a token whose `project` claim
+is that project's, which the proof provider's attribute condition refuses before
+any binding is consulted.
+
+The dependency also collapses into S7 more than the table suggests. S7 is "a
+registry confirmed", and [correction
+2](#corrections-verified-against-the-tree)'s scope note makes its likely content
+"confirm and grant" against beacon's existing Artifact Registry. The GCP project
+that answer names is the project the consumer provider must be registered in — so
+S7 does not merely run in parallel with S6 any more; it **determines where S6's
+consumer half happens**.
+
+### One corollary about S3d, recorded rather than acted on
+
+[`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml) declares
+`min_dispatcher: 5`, and `docs/spec.md` §14.2 has a running dispatcher below that
+epoch **park** such a job with `config_schema_skew` and launch nothing. Job #430
+launched containers and climbed to rung 5b, so a dispatcher at epoch ≥ 5 was
+running on **2026-08-05** — four days before the `/api/v1/platform/config`
+snapshot the S3d row records. The row is not wrong: it says an operator slice is
+recorded by observation, and its date is when someone looked. It is left as it
+is, and this is the note saying an earlier observation exists.
+
+### What this amendment does not change
+
+- **No decision.** D1–D4 stand exactly as taken on 2026-08-04, and Decision 0
+  keeps its 2026-08-09 amendment.
+- **No terraform.** The operator applies; no job and no gate runs `terraform
+  apply` ([`infra/README.md`](../../infra/README.md)).
+- **S6 is not satisfied.** It is split. Marking the row `Landed` would claim a
+  consumer registration nobody has performed.

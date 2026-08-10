@@ -61,9 +61,10 @@ written and all four have shipped code — [#309](309-host-native-execution.md) 
 [#313](313-workload-identity-image-builds.md) half A (job #413). Shipped is not
 the same as in use, and the two halves of that sentence have moved apart: #309
 P0 is now **on for one node** — `gumbo-air-0` advertises `host` and has run
-agent host tasks ([#490](490-agent-work-on-a-mac.md) slice 6) — while #313 half
-A's deploy and provider registration are still open, both as the rows below
-say. The port itself — beacon's workflows actually running here — has not
+agent host tasks ([#490](490-agent-work-on-a-mac.md) slice 6) — and #313 half A
+is deployed and **proven end to end** against chuggernaut's own provider
+(job #430), leaving open only a **consumer** project's provider registration,
+which that doc's head now carries as the second half of its S6. The port itself — beacon's workflows actually running here — has not
 begun, and **cannot be judged from this tree**: `~/beacon` is not checked out,
 so every phase whose work lives in that repo is reported below as unknown
 rather than guessed.
@@ -79,7 +80,7 @@ argument. **Phase numbers are never reassigned** — the children cite them.
 | **1** | CI as evaluators (category B) | Unknown here — same reason |
 | **2** | Host-exec backend prototype on one node | **Landed** (job #434) as [#309](309-host-native-execution.md) P0, and now **on for one node**: `gumbo-air-0` advertises `host` and host tasks have run on it |
 | **3** | Cron (category E) | **Landed** (job #359), with (job #360) for the dispatcher half — [#310](310-scheduled-jobs.md)'s minimum useful version |
-| **4** | OIDC issuer + JWKS + WIF provider | **Landed** (job #413) in part — [#313](313-workload-identity-image-builds.md) half A's code; the deploy and the provider registration are open |
+| **4** | OIDC issuer + JWKS + WIF provider | **Landed** (job #413) in part — [#313](313-workload-identity-image-builds.md) half A's code, deployed at epoch 5 and proven end to end against chuggernaut's own provider (job #430). A **consumer** project's provider registration is still open — #313's S6, consumer half |
 | **5** | Deploys, forward-only (category C) | Not started |
 | **6** | Image build and push (category D) | Not started — #313 half B is still a design |
 | **7** | Node-level exclusive resources | Not started — #309 P4 |
