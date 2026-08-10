@@ -10,6 +10,17 @@ taken by the operator on `gumbo-air-0` on 2026-08-10 and is reproduced verbatim
 in the first section, with a line drawn under what it licenses and what it does
 not.
 
+**One of the two things that measurement left open has since been answered by the
+operator rather than by a measurement.** Signing does not use the login keychain
+section 1 found absent — real builds are signed by fastlane from ordinary
+secrets — so **D8 is closed and slice 6 with it**, and the file-keychain
+direction §[5](#5-signing) records is retired. What that changes here, what it
+changes in [#322](322-macos-native-runtime.md), and the one thing it hands to
+[#529](529-secret-handling.md) are in
+[the 2026-08-10 correction](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it).
+M1 — the measurement that can send this design to its rejected alternative —
+is untouched and still gates every slice.
+
 ## Current state
 
 *This section is the mutable head: it is rewritten to current truth whenever
@@ -39,7 +50,7 @@ the argument and its dated corrections, never edited
 | **D5** | **No new boot gate. `WORKER_HOST_PROJECTS` becomes the roster.** The deploy refuses a listed project whose user does not resolve on the node; the daemon refuses that project's *launch* by name. | [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s do-not-advertise rule and the tenancy list would otherwise be two gates over one fact; the list already enumerates exactly the set of users that must exist. |
 | **D6** | **The user name is derived, `chug-{project}` from the slug's second component, and a derivation collision is a hard parse error.** | A silent collision between `a/beacon` and `b/beacon` would hand two projects one uid — precisely the failure this design exists to prevent — and `parse_projects` already refuses a repeated entry in the same shape. |
 | **D7** | **`WORKER_HOST_ROOT` moves out of the login user's home** to a node-wide root — `0711`, owned by the daemon's uid, **created by the operator with root** at provisioning, and traversable but not listable by every project user. | A root under `/Users/worksalot` is unreachable to another uid if that home is `0700`, and the whole task directory hangs off it; the daemon creates its root at boot and cannot create one outside its own home, so the operator has to hand it one that already exists. |
-| **D8** | **Signing is not designed here.** A per-project file keychain unlocked per task is the recorded direction; beacon's real setup is **operator input required** before any certificate is installed on the node. | The node has **zero** valid signing identities in any session today ([#322](322-macos-native-runtime.md), job #526's rung table), so nothing is lost by moving to a session-less user and nothing is known well enough to design against. |
+| **D8** | **Signing needs nothing from this design** (operator, 2026-08-10). Real builds are signed by **fastlane** from keys supplied as ordinary **secrets**; local work uses ad-hoc debug keys. The per-project file keychain this row used to record as the direction is **retired**, and slice 6 closes with it. | `match` installs certificates into a keychain fastlane creates and unlocks itself, and an Android upload keystore arrives inline as base64 — so nothing reads the login keychain section 1 measured absent, and a session-less task user is not disadvantaged. [The record](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it). |
 | **D9** | **Provisioning is the operator's, by runbook, and it is not symmetric.** Creation over ssh works; directory-services deletion is refused (`eDSPermissionError -14120`). Every procedure is idempotent against a stale account record. | A platform that assumed it could delete a user would be assuming an access path the operator measured as absent. |
 | **D10** | **[#534](309-host-native-execution.md#phasing)'s deferred cache namespacing is retired by construction, and so is the *placement* half of its eviction slice. The ceiling and the LRU are not.** | Per-user homes make the collision impossible rather than avoided, and they move the caches out of the operator's own home — which was the stated reason placement had to precede eviction. |
 | **D11** | **Host-mode docker stops being ambient.** [#517](517-docker-access-for-jobs.md) D1 is untouched — jobs may use docker — but the host half's default inverts from granted-for-free to unreachable-unless-granted. | That is #517 D4's own S6 arriving early: per-task users were named there as the **only** mechanism that can withhold host-mode docker, and a uid change withholds it whether or not anyone intended it to. |
@@ -54,7 +65,7 @@ the argument and its dated corrections, never edited
 | 3 | `deploy` — `build-worker.sh` refuses a listed project whose user does not resolve on the node; `WORKER_HOST_ROOT` guidance and `deploy/prod/env.example` follow D7, including that the root is now an operator precondition on macOS | the node run spec | 1 | Proposed |
 | 4 | `docs` — a provisioning runbook (create the user, the group, the home, the `sudoers` line and **the `WORKER_HOST_ROOT` root itself**; verify; decommission; and the deletion asymmetry); `docs/reference/runbooks/worker-host-projects.md` §2 stops arguing single-tenancy as the boundary | runbook set | 3 | Proposed |
 | 5 | `design` — amend [#322](322-macos-native-runtime.md)'s job #526 correction and [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)/§10 with what this replaces | design record | 1 | Proposed |
-| 6 | deferred — signing, once D8's operator input exists | — | 0 (M5) | Deferred |
+| 6 | signing — formerly *deferred, once D8's operator input exists* | none | — | **Closed** (2026-08-10). D8 is answered and no platform work survives it; nothing smaller is left to do. [The record](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it) |
 | 7 | deferred — the cache ceiling and LRU eviction inherited from #534(b) | node cache policy | 1 | Deferred |
 
 **Slice 0 gates every other row**, and the ordering inside it matters: M1 is the
@@ -816,3 +827,97 @@ the source.
    session, and its own working device set. The keychain half is untested and is
    D8. This matters because it is the load-bearing objection to C2, and half of
    it is gone.
+
+## Correction — 2026-08-10, job #558 (signing is answered: fastlane from secrets, so D8 closes and slice 6 with it)
+
+Appended by the job recording an **operator decision on signing**, taken on
+2026-08-10 against the tree at `4bbdb52`. Nothing above the rule is edited: D8
+and slice 6 are head rows and are rewritten to this, §[5](#5-signing) stands as
+the argument that asked the question, and the answer is here.
+
+**The decision.** Signing is out of the platform's way. Real builds are signed by
+**fastlane**, with the keys supplied as ordinary **secrets**; local work uses
+ad-hoc debug keys. Nothing needs the login keychain of an interactive session.
+
+### The evidence, and it is secondhand
+
+beacon is a separate repository and is **not** checked out in this workspace, so
+the reading below is the operator's 2026-08-10 inspection and is marked as such,
+the same way [#313](313-workload-identity-image-builds.md) marks its own beacon
+facts. Every path is qualified with its repository because a bare one would be a
+claim about *this* tree.
+
+- `kasofsk/beacon:.github/workflows/ios-fastlane-deploy.yml` passes
+  `match_password`, `match_service_account_key`, `app_store_connect_key_id`,
+  `app_store_connect_issuer_id` and `app_store_connect_key_content` — all from
+  repository secrets.
+- `kasofsk/beacon:mobile/app/ios/fastlane/Matchfile` declares
+  `storage_mode("google_cloud")` against the bucket `daekon-match-certs`.
+- `kasofsk/beacon:.github/workflows/android-fastlane-deploy.yml` passes
+  `android_upload_keystore_base64`, its three passwords, and
+  `play_store_service_account_key` — again all secrets.
+
+**Why that closes D8.** `match` fetches certificates from its storage backend and
+installs them into a keychain **it creates and unlocks itself** from
+`MATCH_PASSWORD`; Android's upload keystore arrives inline as base64 and is
+written wherever the build wants it. Neither path reads a login keychain. So
+section 1's `security list-keychains` result — only
+`/Library/Keychains/System.keychain` for a uid that has never logged in — costs
+the signing story nothing, and a task user with no console session is not
+disadvantaged relative to the login user this design moves work off.
+
+### What it changes in this document
+
+- **D8 and slice 6 close.** The per-project **file** keychain §[5](#5-signing)
+  records as "the direction" is retired rather than deferred: `match` creates and
+  unlocks its own keychain per run, so provisioning one at the node would be a
+  second mechanism doing the first one's job. Nothing smaller survives, which is
+  why slice 6 is closed rather than reduced.
+- **§[6](#6-provisioning-and-the-two-gates-smell)'s five root-requiring acts
+  become four.** Item 4 — *the per-project file keychain, once D8's operator
+  input exists* — is gone. Provisioning a project on a node is the user, the
+  group, the `sudoers` line and the `WORKER_HOST_ROOT` directory, and slice 4's
+  runbook writes exactly those.
+- **§[5](#5-signing)'s cost claim survives and gets one line stronger.** "What
+  the per-project user costs signing today: nothing" was argued from there being
+  no working setup to break; it now holds for a better reason — the mechanism
+  beacon actually uses is indifferent to which uid runs it. What the uid still
+  buys signing is confinement: the keychain fastlane creates per run lands under
+  `chug-beacon`'s home rather than in the home the daemon and the operator share.
+  That is a bonus, not a requirement, and it is not a reason to take this design.
+- **"[What this does not decide](#what-this-does-not-decide)"'s signing bullet is
+  answered**, and only that bullet — the other five stand.
+- **M5 keeps its own reason and loses its dependent.** It asks whether a fresh
+  uid builds with Xcode without a per-user first launch, which decides whether
+  provisioning is one command or a procedure; it was never a signing measurement.
+  Slice 6's `0 (M5)` dependency goes with slice 6, and M5 stays in slice 0.
+- **Correction 3's remaining half stops being load-bearing, without becoming
+  false.** [#440](440-native-worker-daemon.md) D2 rests the GUI domain on
+  CoreSimulator *and* the keychain. The first is falsified by section 1. The
+  second is not falsified — a session-less user really has no login keychain —
+  but no signing path this platform serves needs one, so it is no longer a reason
+  to keep the daemon in the login user's GUI domain. Both premises of D2 are now
+  spent, which strengthens **C2**'s case exactly as
+  §[3](#c2--a-root-daemon-launchdaemon-spawning-with-setuid) says and changes
+  nothing about C2's cost. Recorded, still not scheduled: the three triggers there
+  are unchanged.
+
+### What it does not settle
+
+- **The secrets themselves.** Signing keys delivered as secrets are ordinary
+  forwarded values — untimed, injected verbatim, and on a host task readable out
+  of the running process by the same uid (§[4](#4-what-the-uid-restores-and-what-stays-shared),
+  bound 3). This design narrows *who* that uid is and closes nothing about
+  lifetime. Two of the names above are stored cloud service-account keys and are
+  carried to [#529](529-secret-handling.md) as a candidate for
+  [#313](313-workload-identity-image-builds.md)'s mechanism —
+  [recorded there](529-secret-handling.md#candidate--2026-08-10-job-558-a-named-consumer-for-313s-mechanism-arriving-from-beacons-real-workflows),
+  as a candidate and not as a decision.
+- **Whether a host task can run fastlane at all.** Nothing here was run on a
+  node. #526's rung table still measures **zero** valid signing identities on
+  `gumbo-air-0` in any session, and no job type in this repo declares any of the
+  names above. "Signing does not block the uid change" is what closed; "iOS
+  release builds work on this fleet" is not, and no row here claims it.
+- **Anything about which repository the keys live in.** They are beacon's, in
+  beacon's secrets, and they reach this platform only if beacon's deploy becomes
+  a chuggernaut job.

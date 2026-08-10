@@ -74,6 +74,16 @@ user pool is untouched for a Linux host node, of which there are none. The
 record, with each bound read out of the tree and the partial non-Aqua
 measurement that does **not** yet answer the revisit condition, is
 [the 2026-08-09 correction](#correction--2026-08-09-job-526-host-tasks-run-as-the-login-user-the-secret-boundary-is-absent-and-what-bounds-it-is-thinner-than-5-says).
+That condition has since been answered by
+[#537](537-per-project-users-macos.md) §1, whose session-less uid drove
+simulators and had **no login keychain** — and the operator has since decided
+that the missing keychain **bounds nothing**, because real signing runs through
+fastlane from ordinary secrets rather than through a login keychain. So
+§[5](#5-ios-specifics)'s second collision, and §5's reading of what a device
+build needs, are corrected in
+[the 2026-08-10 correction](#correction--2026-08-10-job-558-the-missing-login-keychain-is-no-longer-a-bound-signing-does-not-use-it);
+what does *not* change is that the node still has zero valid signing identities
+in any session, so nothing here says iOS release builds work.
 
 **The `/workspace` rebase has landed (job #485), and three and a half of the
 other phases were satisfied generically by somebody else.** W2's remaining half
@@ -1470,3 +1480,68 @@ therefore *"a Background session can drive simulators belonging to a uid that
 has an Aqua session"*, which is **not** the question §5 asks. A user that has
 never logged in at the console is untested, and answering the revisit condition
 needs one provisioned.
+
+## Correction — 2026-08-10, job #558 (the missing login keychain is no longer a bound: signing does not use it)
+
+Appended by the job recording an **operator decision on signing**, taken on
+2026-08-10 against the tree at `4bbdb52`. Nothing above is edited. Two
+measurements stand exactly as taken and neither is withdrawn; what changes is
+what they are evidence *for*.
+
+**The two measurements, restated so the correction is not read as overturning
+them.** The [2026-08-09 correction](#correction--2026-08-09-job-526-host-tasks-run-as-the-login-user-the-secret-boundary-is-absent-and-what-bounds-it-is-thinner-than-5-says)'s
+rung table found **0 valid signing identities on the node in any session**, and
+called the keychain axis untested rather than cleared. The 2026-08-10
+session-less measurement in [#537](537-per-project-users-macos.md) §1 then found
+that a uid which has never logged in at the console lists **only**
+`/Library/Keychains/System.keychain` — no login keychain, because there is no
+session to unlock one. Both hold.
+
+**The decision.** Real builds are signed by **fastlane**, with the keys supplied
+as ordinary **secrets**; local work uses ad-hoc debug keys. `match` fetches
+certificates from its storage backend and installs them into a keychain **it
+creates and unlocks itself**, and an Android upload keystore arrives inline as
+base64. Neither reads a login keychain. The evidence is three files in a
+repository that is **not** in this workspace and is therefore secondhand — the
+operator's 2026-08-10 inspection, marked as such the way
+[#313](313-workload-identity-image-builds.md) marks its own beacon facts:
+`kasofsk/beacon:.github/workflows/ios-fastlane-deploy.yml`,
+`kasofsk/beacon:mobile/app/ios/fastlane/Matchfile` and
+`kasofsk/beacon:.github/workflows/android-fastlane-deploy.yml`. The full reading
+is in [#537's 2026-08-10 correction](537-per-project-users-macos.md#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it),
+which is where it decides something.
+
+### What it corrects here
+
+- **§[5](#5-ios-specifics)'s second collision — *"signing identities live in a
+  specific user's keychain, and an unlocked keychain is a session property"* — is
+  true of the **login** keychain and is no longer a constraint this platform must
+  respect.** It was one of three reasons #309 §8's per-task user pool was said
+  not to port to macOS; the first (CoreSimulator needing a session) is falsified
+  by #537 §1, and this one now names a keychain the signing path does not use.
+  What is left of the three is the third, and #537 §3 is the design against it.
+- **§[Signing: out of scope for phase 1](#signing-out-of-scope-for-phase-1-and-deliberately)
+  is right about the scope and wrong about the reason.** It reads device builds,
+  archives, notarization and upload as needing "a keychain, a provisioning
+  profile, and an Apple ID, each of which is per-user session state with its own
+  secret shape". In the fastlane shape they are a keychain fastlane creates, a
+  profile `match` installs, and an App Store Connect **API key** — a secret, not
+  an Apple ID with a session. So restricting phase 1 to simulator work stays a
+  **phasing choice**, and stops being a statement that the alternative needs
+  session state the platform cannot provision.
+- **The 2026-08-09 correction's own reasoning inherits the same fix.** Its "what
+  it ratifies, and the half it does not" repeats §5's three collisions as the
+  reason a provisioned user cannot be given a session; two of the three are now
+  spent. The **decision** it records is untouched — host tasks run as the login
+  user today — and what supersedes it is [#537](537-per-project-users-macos.md),
+  not this paragraph.
+
+### What it does not change
+
+- **Nothing has been signed on this fleet.** Zero valid identities, no job type
+  in this repo declaring any signing secret, and no host task has run fastlane.
+  This correction removes a *blocker*; it demonstrates nothing.
+- **The keychain measurement itself**, which stands as measured and is now
+  evidence about a keychain nothing needs.
+- **W3, the `simctl`-scoped teardown, the retention sweep and N1/N3**, none of
+  which this touches.

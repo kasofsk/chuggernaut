@@ -195,6 +195,16 @@ available to this platform shortens the lifetime of a forwarded secret, and
 inventing a slice that claimed to would be exactly the defect
 [#322](322-macos-native-runtime.md)'s open item recorded.
 
+**One named consumer for the other axis has since arrived from outside this
+repo, and it is a candidate rather than a row.** §6 sized #313's reach against
+the two secret names `.chug/jobs/` declares and found neither adoptable by that
+mechanism. beacon's fastlane workflows declare two more — both **stored cloud
+service-account keys**, one of them against a Google Cloud Storage bucket, which
+is a workload-identity-federation consumer. That is the first concrete candidate
+for #313's mechanism to arrive from a real workflow rather than from argument;
+whether either downstream accepts a federated token is **unmeasured**, so it adds
+no slice and no decision. [The record](#candidate--2026-08-10-job-558-a-named-consumer-for-313s-mechanism-arriving-from-beacons-real-workflows).
+
 ---
 
 ## 1. The four classes, re-read out of the tree
@@ -1297,3 +1307,74 @@ one that does not is the genuinely-unreadable case the old fallback got right.
 the fleet is the one carrying this change, every agent launch keeps printing
 `ptrace_scope=unknown`, and a WARNING line read before then is the defect rather
 than the node.
+
+## Candidate — 2026-08-10, job #558 (a named consumer for #313's mechanism, arriving from beacon's real workflows)
+
+Appended against the tree at `4bbdb52`. §[6](#6-does-313-generalise) asked
+whether [#313](313-workload-identity-image-builds.md)'s minted, TTL-bounded token
+generalises, and sized the answer against the **two** distinct secret names
+`.chug/jobs/` declares. This records a third and fourth, from outside this repo,
+because the brief for that section was to size the remainder rather than
+hand-wave it — and because §6's answer was "none of the three untimed classes as
+they stand", which a named counter-example is the only honest way to revisit.
+
+**It is a candidate, not a decision, and the distinction is this document's
+subject.** Whether either downstream below accepts a federated token is
+unmeasured; asserting that it does would be exactly the defect
+§[6](#6-does-313-generalise) closes when it says *no bound is asserted, because
+no mechanism exists to assert one with*.
+
+### The two names, and where they came from
+
+Secondhand: beacon is a separate repository, not checked out in this workspace,
+so this is the operator's 2026-08-10 inspection, marked the way
+[#313](313-workload-identity-image-builds.md) marks its own beacon facts. The
+full reading and the decision it settled — that signing needs nothing from the
+platform — are in
+[#537's 2026-08-10 correction](537-per-project-users-macos.md#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it).
+
+| Name | Declared in | Downstream | Class here |
+| --- | --- | --- | --- |
+| `MATCH_SERVICE_ACCOUNT_KEY` | `kasofsk/beacon:.github/workflows/ios-fastlane-deploy.yml`, from a repository secret | Google Cloud Storage — `kasofsk/beacon:mobile/app/ios/fastlane/Matchfile` sets `storage_mode("google_cloud")` against the bucket `daekon-match-certs` | A stored GCP service-account key: §[1](#1-the-four-classes-re-read-out-of-the-tree)'s fourth row — injected verbatim, **no TTL** |
+| `PLAY_STORE_SERVICE_ACCOUNT_KEY` | `kasofsk/beacon:.github/workflows/android-fastlane-deploy.yml`, likewise | the Google Play Developer API | The same class |
+
+Both are precisely what #313 half A replaced for the cloud case: a long-lived key
+sitting in a secret store, forwarded whole into a build, with a lifetime that is
+rotation discipline. And the first one's downstream is **GCS**, which is a
+workload-identity-federation consumer — so the crux #313
+[A4](313-workload-identity-image-builds.md#a4-the-public-reachability-problem-the-crux)
+solved (an STS that can fetch our JWKS) is already solved for it by the issuer
+that job #430 proved end to end.
+
+### What is unmeasured, and it is the whole reason this is a candidate
+
+- **Whether `match` will take a federated credential.** It is handed a service
+  account **key** today. A Google external-account credential file is a different
+  shape, resolved by the client library rather than by fastlane, and whether
+  fastlane's `google_cloud` storage backend routes through a library that reads
+  it is not readable from this workspace. This is the same gap
+  [#313 A3](313-workload-identity-image-builds.md) already names for its own
+  claim that "every Google client library already reads this shape" — proven for
+  the STS by `curl`, never for a library.
+- **Whether the Play Developer API path does.** Not sized at all here.
+- **Whether the key is even reachable this way.** The token #313 mints is scoped
+  to a `(project, job type, phase)` and issued per container; a `match` bucket in
+  someone else's GCP project needs an IAM binding nobody has written, which is
+  the operator/beacon-side half [#313 S7](313-workload-identity-image-builds.md)
+  already carries as pending.
+
+### What it does not change here
+
+- **No slice moves and none is added.** The lifetime axis stays empty in the
+  slice table, and §6's conclusion — that the pattern reaches downstreams the
+  platform or a federated provider owns, and that **this repo's** two declared
+  secrets are not among them — is untouched and still correct as written about
+  this repo.
+- **Neither name is declared by any chuggernaut job type.** `.chug/jobs/` still
+  declares exactly `MINI_DEPLOY_KEY` and `DEPLOY_HEALTH_API_TOKEN`. These two
+  reach this platform only if beacon's deploy becomes a chuggernaut job — the
+  port [#308](308-gha-port.md) surveys and #313 half B serves — so this is a
+  candidate for that work, not a change to anything running today.
+- **Nothing about reach.** These are ordinary forwarded secrets in whatever
+  container or host task would hold them, with every caveat D1, D3 and M7 already
+  state.
