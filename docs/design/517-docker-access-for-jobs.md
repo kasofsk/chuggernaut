@@ -1,6 +1,14 @@
 # Design #517 — Docker access for jobs, accepted (amending #309 §10 and #313 Decision 0)
 
-Status: IMPLEMENTED IN PART — S1 (job #518), S2 (job #521), S3 (job #522), S4 (job #519) and S5a (job #523) landed, and S5b now has a job type to name (job #538); S5b's own half is open, S6 deferred. The grant mechanism exists, the deploy can now declare one, and nothing is granted: no node declares one, and host-mode access is already live.
+Status: IMPLEMENTED IN PART — S1–S5a landed and S5b is declared on nuc and exercised (job #542); S6 deferred.
+
+Slice by slice: S1 (job #518), S2 (job #521), S3 (job #522), S4 (job #519), S5a
+(job #523) and the job type S5b names (job #538), then **S5b declared on
+`gumbo-nuc-0` and exercised** (job #542). The mechanism is no longer theoretical:
+one `(project, job type)` holds the socket, and the first run measured that an
+**evaluator** holds it too — a granularity question decided in
+[#543](543-placement-granularity.md) D5, and recorded in the 2026-08-10 note at
+the foot of this document.
 
 Written against the tree at `ff3258a`. Every claim about current behavior below
 was read out of the source and out of [`docs/spec.md`](../spec.md), not inferred
@@ -990,3 +998,37 @@ allow-list entry exists in this tree, and no deploy. No `crates/container` or
 (`REPO_JOB_TYPES` in [`crates/types/src/job_type.rs`](../../crates/types/src/job_type.rs)),
 which the tree gates to hold every shipped job type. No epoch bump, no
 `WORKER_RPC_VERSION` bump, and no change to any other job type.
+
+## Note — 2026-08-10, S5b declared and the first grant exercised (job #542)
+
+The operator declared the first grant on `gumbo-nuc-0`:
+`WORKER_DOCKER_SOCKET=/var/run/docker.sock` and
+`WORKER_DOCKER_GRANTS=kasofsk/chuggernaut:docker-proof`, applied with
+[`deploy/prod/build-worker.sh`](../../deploy/prod/build-worker.sh) from an
+operator laptop. The daemon logged the parsed entry at boot. Job #542 then ran
+`docker-proof` and every rung passed: the socket bound writable at the fixed
+path, `DOCKER_HOST` absent so a client finds it by convention, the daemon
+answering, an image built from a base the node already had, that image run and
+its token checked, and the cleanup proved by re-listing.
+
+**The finding this run was written to look for.** The stage-0 `identity`
+evaluator reported that its own container holds `/var/run/docker.sock`:
+`DockerGrant::admits` reads `JOB_PROJECT` and `JOB_TYPE` out of the composed
+launch env, an evaluator launch carries both stamps, so the match succeeds at
+**every level by construction** — including the `ci` evaluator
+`.chug/jobs/_defaults.yaml` appends. Harmless for a proof type whose whole
+purpose is the socket; not obviously right for the `build-image` type
+[#313](313-workload-identity-image-builds.md) S9 will add, where it would give a
+test runner node root.
+
+That is D3's granularity question, and it is answered in
+[#543](543-placement-granularity.md) D5 — scope the match to work-level launches,
+because a grant is the **node operator** consenting to a workload while `ci` is
+appended by project defaults rather than written by the job type's author. #543
+S3 is the slice. Nothing here is changed on the strength of the measurement.
+
+**One operational fact the runbook should carry.** Nothing scheduled re-applies
+`deploy/prod/chuggernaut.env` to a node: <!-- runtime --> Tailscale SSH blocks tagged-to-tagged,
+so `WORKER_SSH` is unset for both prod nodes and `build-worker.sh` no-ops on
+every deploy. This grant therefore lives on the node until someone rebuilds it
+from the file by hand, and vanishes if the node is recreated without that step.
