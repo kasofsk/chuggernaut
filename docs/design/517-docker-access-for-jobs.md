@@ -1,6 +1,6 @@
 # Design #517 — Docker access for jobs, accepted (amending #309 §10 and #313 Decision 0)
 
-Status: IMPLEMENTED IN PART — S1 (job #518), S2 (job #521), S3 (job #522), S4 (job #519) and S5a (job #523) landed; S5b is open, S6 deferred. The grant mechanism exists, the deploy can now declare one, and nothing is granted: no node declares one, and host-mode access is already live.
+Status: IMPLEMENTED IN PART — S1 (job #518), S2 (job #521), S3 (job #522), S4 (job #519) and S5a (job #523) landed, and S5b now has a job type to name (job #538); S5b's own half is open, S6 deferred. The grant mechanism exists, the deploy can now declare one, and nothing is granted: no node declares one, and host-mode access is already live.
 
 Written against the tree at `ff3258a`. Every claim about current behavior below
 was read out of the source and out of [`docs/spec.md`](../spec.md), not inferred
@@ -44,6 +44,16 @@ Agent host tasks on `gumbo-air-0` reach a working docker daemon, and every
 granted and it is not declared anywhere; it is a consequence of the task user
 owning the colima socket. That is the production posture this document accepts
 rather than closes.
+
+**There is now something to name (job #538), and naming it is still the
+operator's act.** `.chug/jobs/docker-proof.yaml` and `.chug/tasks/docker-proof.sh`
+are the first consumer this document has ever had: a **command** job type pinned
+to `nuc` whose six-rung ladder builds an image against that node's own daemon
+through the granted socket, runs it, and proves the cleanup. It grants nothing
+either — the pin and a node's allow-list entry are two halves, and only the pin
+is in this repo — and until a worker carrying S3 is deployed *and* an operator
+writes the entry, releasing it fails at rung 1 by design. See
+[what job #538 added](#what-job-538-added-a-consumer-to-name-2026-08-10).
 
 **S5a (job #523) makes a grant declarable without hand-editing a node.** The
 deploy composes the node's whole run spec, so until it forwarded these two knobs
@@ -92,7 +102,7 @@ not at some future adoption. See [the trigger](#the-revisit-trigger-stated-as-a-
 | **S3** | A `DockerGrant` beside `KvmGrant` ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)): a node-side socket path plus a `(project, job type)` allow-list, bound into matching launches only, empty granting nobody | **Landed** (job #522): `WORKER_DOCKER_SOCKET` + `WORKER_DOCKER_GRANTS`, fail-closed at parse, at boot and at every launch. `docs/spec.md` §3.1's owed amendment landed with it ([what S3 landed](#what-s3-landed-job-522)) |
 | **S4** | Advertise the access on `NodeCapabilities` ([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)) for **both** modes, defaulting false so a daemon predating the field promises nothing. D4's audit half | **Landed** (job #519): `docker_reachable`, additive with no `WORKER_RPC_VERSION` bump, probed by `worker::docker_access` at boot for both modes and never a boot refusal. See [what S4 landed](#what-s4-landed-job-519) |
 | **S5a** | *Deploy plumbing:* forward `WORKER_DOCKER_SOCKET` and `WORKER_DOCKER_GRANTS` through [`deploy/prod/build-worker.sh`](../../deploy/prod/build-worker.sh), with pre-flight refusals mirroring the daemon's, and the operator runbook | **Landed** (job #523): both per-node overridable, unset byte-identical, four refusals ahead of the restart. The containerized-daemon precondition S3 left open is answered ([what S5a landed](#what-s5as-deploy-plumbing-landed-job-523)) |
-| **S5b** | *Node config:* the allow-list entry itself and the pin on one builder node — [#313](313-workload-identity-image-builds.md) S8, minus the proxy | Proposed — operator config, and the pin waits on [#313](313-workload-identity-image-builds.md) S9's `build-image` |
+| **S5b** | *Node config:* the allow-list entry itself and the pin on one builder node — [#313](313-workload-identity-image-builds.md) S8, minus the proxy | Proposed — and no longer waiting on [#313](313-workload-identity-image-builds.md) S9's `build-image`: the **pin** landed with `docker-proof` (job #538), so what is left is the operator's entry and a deploy ([what job #538 added](#what-job-538-added-a-consumer-to-name-2026-08-10)) |
 | **S6** | *Deferred:* per-task users ([#309](309-host-native-execution.md) P3 §8), the only mechanism that can withhold host-mode docker | Deferred — D4's enforcement half |
 
 [#313](313-workload-identity-image-builds.md) S6 (the operator's provider
@@ -905,3 +915,78 @@ waits on [#313](313-workload-identity-image-builds.md) S9's `build-image`, which
 is the first consumer this document names. No `crates/worker` or
 `crates/container` change, no epoch bump, no `WORKER_RPC_VERSION` bump and no
 `.chug/jobs/*.yaml` edit.
+
+## What job #538 added: a consumer to name (2026-08-10)
+
+**A proof job type, and it grants nothing.** S1–S5a all landed and *nothing had
+ever received the socket*: no node declared a grant, no allow-list entry existed
+in the tree, and every test was a unit or integration test of the mechanism's
+parts. [#490](490-agent-work-on-a-mac.md) slice 6 is the precedent — five slices
+and fifteen green evaluators had passed before anyone ran a host task, and
+running one surfaced three launch-blocking defects nobody's tests had caught.
+This slice is what lets the grant be exercised without waiting on
+[#313](313-workload-identity-image-builds.md) S9's `build-image`, which is gated
+on a WIF registration and a registry.
+
+- **[`.chug/jobs/docker-proof.yaml`](../../.chug/jobs/docker-proof.yaml)** — a
+  **command** work step, per [Which job types](#which-job-types): the first
+  consumer should be a build type, because an agent type on a node's allow-list
+  means *the agent* holds node root for the run. Not in
+  [`.chug/jobs/_defaults.yaml`](../../.chug/jobs/_defaults.yaml), wired into no
+  gate, released by hand — `mac-proof.yaml`'s deliberate shape, for the reason
+  D1 makes sharper here than anywhere else.
+- **The pin and the entry must name each other, and only the pin is in this
+  repo.** `placement.node: nuc` — a Linux container-mode node with a real daemon
+  at the conventional path, where the air's is colima's under a login user's
+  `HOME` and reaches host tasks by uid rather than by any grant. The matching
+  `WORKER_DOCKER_GRANTS` entry is the node's own environment file (D2, S5b), so
+  a merge of this file still grants nobody anything.
+- **[`.chug/tasks/docker-proof.sh`](../../.chug/tasks/docker-proof.sh) is a
+  six-rung ladder**, `gcp-proof.sh`'s shape: the socket is bound *and writable*;
+  no `DOCKER_HOST` is set, asserted as **absent** rather than empty, because S3
+  injects none; the daemon answers; an image builds; that image runs and prints
+  the marker this run baked into it; and the cleanup is **re-listed rather than
+  assumed** — a proof that leaks an image onto a node is worse than no proof, so
+  a failed removal is a FAIL and a ladder that dies earlier sweeps what it made.
+- **It speaks the Engine API over `curl` + `jq`, not `docker`** — `gcp-proof`'s
+  move for the absent gcloud SDK, and forced by the same gap: neither agent image
+  carries a docker CLI. What that costs is recorded rather than hidden: it proves
+  the socket answers the calls a `docker build` makes and does not exercise a
+  CLI's own endpoint resolution. Rung 2 covers the half of that the grant decides.
+- **It prefers a base the node already has** (`chuggernaut/agent:prod`, which is
+  what the job type itself runs as) over a pull, announcing and bounding the
+  fallback: a proof that fails on a registry hiccup measured the registry.
+- **The prerequisite is a deploy, not a merge**, and rung 1 says which half is
+  missing rather than reading as a broken daemon. The fleet ran `0.1.0+8da61424`
+  (job #507) when this landed, which predates S3 *and* S2 — measured in this
+  job's own work container, where `JOB_TYPE` was absent from the composed env.
+  With no `JOB_TYPE` on the launch, `DockerGrant::admits` matches **nothing at
+  all**, so the ladder shouts that case by name.
+
+### The measurement this slice makes and does not decide
+
+`DockerGrant::admits` matches on `(JOB_PROJECT, JOB_TYPE)` read out of the
+composed launch env — and an **evaluator** launch carries both stamps too
+(`Core::container_env`,
+[`crates/dispatcher/src/exec.rs`](../../crates/dispatcher/src/exec.rs)). So the
+allow-list appears to be keyed per **job type** and not per **level**, which
+would mean every evaluator of an allow-listed type — including the appended `ci`
+one — holds node root for its run.
+
+**Job #538 measures that and changes nothing.** The `identity` stage-0 evaluator
+([`.chug/tasks/docker-proof-identity.sh`](../../.chug/tasks/docker-proof-identity.sh))
+prints the identity it runs under and whether it holds the socket, and **always
+passes**: a socket there is a FINDING for this document, not a defect for a job
+type to fix. It is the mirror of `gcp-proof`'s `no-identity` evaluator in shape
+and its opposite in force — that one fails on what it finds, because
+[#313](313-workload-identity-image-builds.md) A5 had already decided
+non-inheritance, and nothing has decided this. Job #507 is the precedent for
+finding a level-versus-type confusion the expensive way, from the other
+direction: a container evaluator inheriting a host job type's runtime.
+
+**Not done here, and it is the rest of S5b:** no node declares a socket, no
+allow-list entry exists in this tree, and no deploy. No `crates/container` or
+`crates/worker` change — the one Rust edit is a test const
+(`REPO_JOB_TYPES` in [`crates/types/src/job_type.rs`](../../crates/types/src/job_type.rs)),
+which the tree gates to hold every shipped job type. No epoch bump, no
+`WORKER_RPC_VERSION` bump, and no change to any other job type.

@@ -94,7 +94,7 @@ the absence of a workflow file.
   the comment lint, `.chug/tasks/check-shell-quoting.sh`, the shell-quoting gate,
   `.chug/tasks/check-doc-facts.sh`, the doc-fact gate,
   `.chug/tasks/doc-staleness.sh`, the staleness ledger, and
-  since #385 **the repo's 25 `*.test.sh` shell suites**.
+  since #385 **the repo's 26 `*.test.sh` shell suites**.
   Any clone fails the gate.
 - **A quote inside the word of a `${VAR:-word}` expansion is a gate, because
   CI's shell and production's disagree about it.** bash parses quotes inside

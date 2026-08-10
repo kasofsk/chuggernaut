@@ -1284,12 +1284,13 @@ mod tests {
     /// that can drift from it. `gcp-proof` and `mac-proof` were missing for two
     /// epochs, and `repo_job_types_covers_every_shipped_type` now measures the
     /// claim instead of trusting it.
-    const REPO_JOB_TYPES: [&str; 12] = [
+    const REPO_JOB_TYPES: [&str; 13] = [
         include_str!("../../../.chug/jobs/android-proof.yaml"),
         include_str!("../../../.chug/jobs/code.yaml"),
         include_str!("../../../.chug/jobs/coverage.yaml"),
         include_str!("../../../.chug/jobs/deploy.yaml"),
         include_str!("../../../.chug/jobs/design.yaml"),
+        include_str!("../../../.chug/jobs/docker-proof.yaml"),
         include_str!("../../../.chug/jobs/docs.yaml"),
         include_str!("../../../.chug/jobs/gcp-proof.yaml"),
         include_str!("../../../.chug/jobs/mac-proof.yaml"),

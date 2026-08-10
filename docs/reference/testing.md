@@ -293,7 +293,7 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-25 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
+26 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
 a throwaway repo against stubbed
 `cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
@@ -335,6 +335,13 @@ these suites cover.
   last commit: that is the ordering `--gate` used to block on and no rework
   commit could clear, and it is pinned beside the non-doc ordering that still
   blocks.
+  `docker-proof.test.sh` (design #517, job #538) adds ~2.5s, and its stub answers
+  the **Engine API** rather than a URL: it keeps the image and the container the
+  earlier rungs created, so rung 6's re-listing is answered by what the ladder
+  actually did rather than by a constant, and it reads the run's marker back out
+  of the build context it was posted. It binds a real `AF_UNIX` file with
+  `python3` (falling back to `perl`), because `[ -S ]` is rung 1's whole question
+  and a regular file standing in for the socket would answer it wrong.
   The total is checked **between** suites, not after the loop — otherwise the
   real ceiling would be suite-count × per-suite cap — and the failure names the
   suites it therefore never ran. The per-suite cap is applied with `timeout`,

@@ -1,0 +1,99 @@
+# The docker-grant proof — design #517, on demand, and the FIRST consumer of a
+# mechanism that has never granted anything to anyone. Releasing it climbs
+# .chug/tasks/docker-proof.sh's six-rung ladder against the pinned node's real
+# daemon: the bound socket, the absent DOCKER_HOST, /_ping + /version + /info,
+# a real image build, that image run, and a cleanup it re-lists rather than
+# assumes. It is a report, not a change: nothing merges.
+#
+# WHY IT EXISTS. #517 S1-S5a all landed and nothing has ever received the
+# socket — no node declares a grant and no allow-list entry exists in this tree,
+# so every test of the mechanism is a unit or integration test of its parts.
+# #490 slice 6 is the precedent: five slices and fifteen green evaluators had
+# passed before anyone ran a host task, and running one surfaced three
+# launch-blocking defects nobody's tests had caught. The first consumer #517
+# names — #313 S9's `build-image` — is gated on a WIF registration and a
+# registry, so this job type is what exercises the grant without waiting on
+# either.
+#
+# THE PREREQUISITE IS A DEPLOY, NOT A MERGE. Merging this grants nothing. It
+# needs (a) a worker daemon carrying #517 S3 (job #522) — the fleet ran
+# 0.1.0+8da61424 (job #507) when this was written, which predates both #522 and
+# #523 — and (b) that node declaring WORKER_DOCKER_SOCKET and a
+# WORKER_DOCKER_GRANTS entry naming `kasofsk/chuggernaut:docker-proof`.
+# Released before both, it fails at rung 1, and rung 1's message names those two
+# causes rather than reading as a broken daemon.
+#
+# NEITHER HALF OF THAT PAIR IS IN THIS REPO, AND THE PIN AND THE ENTRY MUST NAME
+# EACH OTHER. `placement.node: nuc` below and the node's allow-list entry are
+# two halves of one decision: the entry lives in the node's own environment file
+# as operator config (#517 D2, S5b) — never a job-type field, because a field
+# would let a merge grant node root — and a pin naming a node whose entry names
+# a different job type grants nothing at all.
+#
+# IT IS DELIBERATELY NOT IN .chug/jobs/_defaults.yaml AND WIRED INTO NO GATE —
+# mac-proof.yaml's shape, android-proof.yaml's and gcp-proof.yaml's before it.
+# Releasing it is an operator act on purpose: a granted container holds NODE
+# ROOT for its run (#517 D1, accepted rather than mitigated), so the question it
+# answers is one you ask after touching the node's grant, never on every push.
+#
+# The deliverable is the task's STDOUT. The dispatcher harvests a command work
+# task's container logs into its `stdout.log` artifact (spec §3.2) and a worker
+# keeps only the final 700 KiB, so the script prints its LADDER summary last, on
+# the failing path as much as the passing one.
+name: docker-proof
+display_name: Docker grant proof
+description: Build and run an image against the pinned node's own docker daemon through the granted socket, then prove the cleanup. A report, not a change; nothing is merged.
+# Neither agent image carries a docker CLI, so the ladder speaks the Engine API
+# over `curl` + `jq` and packs its build context with `tar` — gcp-proof.yaml's
+# move for the absent gcloud SDK (#313 gap 11), and all three tools are on this
+# image. Rung 3 reports NOT REACHED rather than a false PASS if one is missing,
+# so a wrong image is legible.
+image: chuggernaut/agent:prod
+work:
+  # A command, not an agent, and #517's "Which job types" says why in as many
+  # words: the first consumer should be a build type, which has no agent
+  # steering it. An AGENT type on a node's allow-list means the agent holds node
+  # root for the duration — inside D1's acceptance and at its widest.
+  type: command
+  run: ./.chug/tasks/docker-proof.sh
+eval:
+  # The measurement nobody has decided (#517), and the reason it is a separate
+  # container: DockerGrant::admits matches on (JOB_PROJECT, JOB_TYPE), which an
+  # EVALUATOR launch stamps too, so the grant looks per job type rather than per
+  # level. This evaluator declares nothing and reports what it holds; it always
+  # PASSES. A socket here is a finding for the design doc, not a defect for this
+  # job type to fix — and job #507 found the mirror-image confusion (a container
+  # evaluator inheriting a host job type's runtime) the expensive way.
+  - name: identity
+    type: command
+    image: chuggernaut/agent:prod
+    run: ./.chug/tasks/docker-proof-identity.sh
+    stage: 0
+  # The appended project ci default (.chug/jobs/_defaults.yaml) stays at stage 1
+  # and runs only once this passes. A proof job carries no commits, so ci sees an
+  # empty diff and glob-skips its cargo build in seconds.
+wrap_up:
+  # A proof produces a report, not a change: the branch carries no commits, so
+  # eval-pass goes straight to Done with the branch discarded (spec §3.3 step
+  # 12). android-proof.yaml's shape, and coverage.yaml's before it.
+  type: none
+# Pinned by NODE NAME to `nuc` — a Linux container-mode node with a real docker
+# daemon at the conventional path, where the air's is colima's under the login
+# user's HOME (#517's 2026-08-09 measurement) and reaches host tasks by uid
+# rather than by any grant. android-proof.yaml pins the same node for the same
+# kind of reason: a proof of one node's capability that lands wherever the fleet
+# is freest has proved nothing.
+placement:
+  node: nuc
+resources:
+  # Small on purpose: the build runs on the DAEMON, not in this container, which
+  # holds a shell, curl and a one-file build context. 20m against a ladder whose
+  # every wait is bounded well inside it (a 600s build, a 300s pull, a 120s run),
+  # so a hung exchange fails its rung by name instead of being killed here.
+  cpu: 1
+  memory: 512Mi
+  task_timeout: 20m
+# rework_budget is omitted because it is DISALLOWED for work.type: command (spec
+# §1.1 field-rules table). work_retries stays at its default 0: a failed proof is
+# a finding, and re-running it automatically would spend another node-root
+# container to learn the same thing.

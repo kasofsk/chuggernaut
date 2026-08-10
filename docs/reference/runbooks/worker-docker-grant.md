@@ -16,12 +16,21 @@ the third, and the containment this grant's acceptance leans on. For capacity se
 [`worker-capacity.md`](worker-capacity.md);
 for the standing deploy story, [`deploy/prod/README.md`](../../../deploy/prod/README.md) §6.
 
-**This repo grants nothing.** No node in the fleet declares a socket, no
-allow-list entry exists anywhere in the tree, and picking the workloads is the
-operator's act by design — which is the whole reason the mechanism is node-side
-([#517 D2](../../design/517-docker-access-for-jobs.md)). Everything below uses
-`<owner>/<project>` and `<job-type>` placeholders; nothing here works if pasted
-unedited, deliberately.
+**This repo grants nothing.** No node in the fleet declares a socket and no
+allow-list entry exists anywhere in the tree: picking the workloads is the
+operator's act by design, which is the whole reason the mechanism is node-side
+([#517 D2](../../design/517-docker-access-for-jobs.md)).
+
+**There is one pair worth naming first, and it is a proof.**
+`kasofsk/chuggernaut:docker-proof`
+([`.chug/jobs/docker-proof.yaml`](../../../.chug/jobs/docker-proof.yaml),
+design #517 job #538) is a command job type whose whole job is to exercise this
+procedure end to end against `nuc`'s daemon and then clean up after itself — the
+worked example below uses it, and it is the one command on this page that is
+*meant* to be pasted. It grants node root for its run like anything else here, so
+paste it as a decision and not as a demo. Everywhere else the page still uses
+`<owner>/<project>` and `<job-type>` placeholders, because which of **your**
+workloads gets a socket is not a question this repo may answer.
 
 ---
 
@@ -115,12 +124,19 @@ of the project's `.chug/jobs/` file.
 first provisioning the node:
 
 ```sh
+# The worked example: the docker-proof job type on the node it is pinned to.
+# Swap the entry for your own <owner>/<project>:<job-type> for anything else.
 WORKER_SSH=worksalot@gumbo-nuc-0 CHUG_WORKER_NODE=nuc \
   WORKER_NATS_URL=nats://100.116.243.42:4222 WORKER_SLOTS=2 \
   WORKER_DOCKER_SOCKET=/var/run/docker.sock \
-  WORKER_DOCKER_GRANTS=<owner>/<project>:<job-type> \
+  WORKER_DOCKER_GRANTS=kasofsk/chuggernaut:docker-proof \
   deploy/prod/build-worker.sh
 ```
+
+`nuc` is not a free choice in that line: `.chug/jobs/docker-proof.yaml` pins
+`placement.node: nuc`, and **the pin and the entry must name each other**. An
+entry on a node the job type never lands on grants nothing, and the job fails at
+rung 1 having proved only that the two halves disagree.
 
 Pass **every** var the node should keep, not just the new ones: this rewrites
 the node's whole run spec, so a var you omit is a var the node loses. The
@@ -170,13 +186,33 @@ ssh worksalot@gumbo-nuc-0 docker inspect <job-container> \
 #   [{"Type":"bind","Source":"/var/run/docker.sock","Target":"/var/run/docker.sock", …}]
 ```
 
-The end-to-end check is a job: release the granted type and have it run `docker
-info`. A launch that is *not* on the list gets no bind and no error until the
-docker command itself fails with `Cannot connect to the Docker daemon` — loud,
-late, and diagnosable only from the container log. That is the known cost of a
-node-side allow-list ([#517 C3](../../design/517-docker-access-for-jobs.md));
+**The end-to-end check is a job, and it is written: release `docker-proof`.**
+Its ladder ([`.chug/tasks/docker-proof.sh`](../../../.chug/tasks/docker-proof.sh))
+reads the bind, asserts no `DOCKER_HOST` was injected, asks the daemon, builds an
+image from a base the node already has, runs it, and then **removes what it made
+and re-lists to prove it** — a proof that leaks an image onto a node is worse
+than no proof. Its stdout is the report (`stdout.log`), and its `VERDICT` line is
+last. Two failure modes read differently on purpose:
+
+- **rung 1, socket absent** — the grant did not reach the launch. Either this
+  node's daemon predates #517 S3 (job #522) or the entry above is missing or
+  misspelled. It is *not* a broken docker daemon, and the message says so.
+- **rung 1, the path is not a socket** — the bind exists and no client can dial
+  it, which is the shape `build-worker.sh` refuses in advance (§4).
+
+A launch that is *not* on the list gets no bind and no error until the docker
+command itself fails with `Cannot connect to the Docker daemon` — loud, late, and
+diagnosable only from the container log. That is the known cost of a node-side
+allow-list ([#517 C3](../../design/517-docker-access-for-jobs.md));
 `NodeCapabilities.docker_reachable` (design #517 S4) is what makes the node's
 half of it auditable from the fleet view.
+
+**Read the `identity` evaluator's log too.** The allow-list is matched on
+`(JOB_PROJECT, JOB_TYPE)`, and an **evaluator** launch carries both stamps — so
+an evaluator of an allow-listed job type may hold the socket as well, including
+the appended `ci` one. `docker-proof`'s stage-0 `identity` evaluator reports
+which it got and always passes; whether that is intended is design #517's
+question, not this page's.
 
 ---
 
