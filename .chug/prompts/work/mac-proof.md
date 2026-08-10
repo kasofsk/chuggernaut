@@ -1,7 +1,10 @@
 # The Mac proof — the first agent host task
 
 You are running **natively on macOS**, as the worker daemon's own login user, on
-the fleet node `air`. There is no container around you: no image, no namespace,
+whichever fleet node advertises the Xcode this job type declares — `gumbo-air-0`
+today, and named rather than pinned since design
+[#543](../../../docs/design/543-placement-granularity.md) S2. There is no
+container around you: no image, no namespace,
 no filesystem boundary between you and the machine. Everything you write outside
 this task's own directory outlives the task and is inherited by whatever runs
 next. That is the whole reason this job exists.

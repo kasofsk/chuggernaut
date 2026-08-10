@@ -60,8 +60,8 @@ const AIR_ENVS: &[&str] = &["xcode:26.5"];
 /// The live fleet's shape (`deploy/prod/README.md`): docker-endpoint and
 /// container-only worker nodes, plus the one dual-mode Mac, which advertises
 /// `resources_enforced: true` because it has a docker daemon and its discovered
-/// Xcode set in `envs`. `air` is a real node name here because `mac-proof.yaml`
-/// pins to it.
+/// Xcode set in `envs`. `air` is the live fleet's own node name, and the only
+/// node advertising `host` and an Xcode — which is what the tests below turn on.
 fn fleet(air_envs: &[String]) -> [PlacementCandidate<'_>; 3] {
     let load = |running, free| Some(NodeLoad { running, free });
     [
@@ -92,8 +92,144 @@ fn fleet(air_envs: &[String]) -> [PlacementCandidate<'_>; 3] {
     ]
 }
 
+/// A second Mac's discovered Xcode set, differing from [`AIR_ENVS`]: the node
+/// design #543 §5 says must never take `mac-proof` once its pin is gone.
+const OTHER_XCODE: &[&str] = &["xcode:25.4"];
+
 fn air_envs() -> Vec<String> {
     AIR_ENVS.iter().map(|e| (*e).to_string()).collect()
+}
+
+fn envs_of(refs: &[&str]) -> Vec<String> {
+    refs.iter().map(|e| (*e).to_string()).collect()
+}
+
+/// The live fleet plus a **second** host-capable node — the case `mac-proof`'s
+/// removed pin was written against (design #543 S2). The air's load is a
+/// parameter because a host node holds one slot node-wide (#490 D4), so "the air
+/// is busy" is the only way a second Mac is ever reached.
+fn fleet_with_second_mac<'a>(
+    air_envs: &'a [String],
+    air_load: NodeLoad,
+    second_envs: &'a [String],
+) -> [PlacementCandidate<'a>; 4] {
+    let [mini, nuc, mut air] = fleet(air_envs);
+    air.load = Some(air_load);
+    [
+        mini,
+        nuc,
+        air,
+        PlacementCandidate {
+            index: 3,
+            name: "book",
+            load: Some(NodeLoad {
+                running: 0,
+                free: 1,
+            }),
+            modes: HOST_AND_CONTAINER,
+            resources_enforced: true,
+            envs: second_envs,
+        },
+    ]
+}
+
+fn mac_proof() -> JobType {
+    job_types()
+        .into_iter()
+        .find(|(file, _)| file == "mac-proof.yaml")
+        .expect("mac-proof.yaml is the host job type these guards are about")
+        .1
+}
+
+fn mac_proof_work_requirements(job_type: &JobType) -> LaunchRequirements<'_> {
+    LaunchRequirements {
+        mode: job_type.level_mode(Level::Work),
+        resource_limits: job_type
+            .resources
+            .as_ref()
+            .is_some_and(|r| r.cpu.is_some() || r.memory.is_some()),
+        env: job_type.level_runtime_env(Level::Work),
+    }
+}
+
+/// Design #543 S2: `mac-proof` states its requirement as `runtime.env` and names
+/// no machine, so what holds the proof to the air is S1's `envs` match. A second
+/// Mac carrying a different Xcode never takes it — the pin's own stated reason,
+/// enforced rather than approximated.
+#[test]
+fn the_unpinned_mac_proof_is_held_to_its_xcode_and_not_to_a_node_name() {
+    let job_type = mac_proof();
+    assert_eq!(
+        job_type.placement_node(),
+        None,
+        "mac-proof declares placement.node again; design #543 S2 dropped it because runtime.env \
+         states the requirement and a node name only approximates it"
+    );
+    let required = mac_proof_work_requirements(&job_type);
+    assert_eq!(required.mode, RuntimeMode::Host);
+    assert_eq!(required.node_env(), Some(AIR_ENVS[0]));
+
+    let air = air_envs();
+    let other = envs_of(OTHER_XCODE);
+    let idle = NodeLoad {
+        running: 0,
+        free: 1,
+    };
+    assert_eq!(
+        choose_placement(
+            PlacementPolicy::Busyness,
+            &fleet_with_second_mac(&air, idle, &other),
+            job_type.placement_node(),
+            required,
+        )
+        .map_err(|e| e.to_string()),
+        Ok(2),
+        "the air is the node advertising xcode:26.5, and an equally idle second Mac must not \
+         attract the proof away from it"
+    );
+
+    let busy = NodeLoad {
+        running: 1,
+        free: 0,
+    };
+    assert!(
+        choose_placement(
+            PlacementPolicy::Busyness,
+            &fleet_with_second_mac(&air, busy, &other),
+            job_type.placement_node(),
+            required,
+        )
+        .is_err(),
+        "with the air busy the proof must QUEUE, not fall onto a Mac carrying another Xcode — \
+         which is what the pin was protecting and design #543 D2 now protects by matching"
+    );
+}
+
+/// The other half of design #543 §5's argument, which is why the pin's removal
+/// loses nothing: a second Mac carrying the **same** Xcode is a legitimate host
+/// for the proof, and the pin would have refused it.
+#[test]
+fn a_second_mac_carrying_the_same_xcode_serves_the_proof() {
+    let job_type = mac_proof();
+    let required = mac_proof_work_requirements(&job_type);
+    let air = air_envs();
+    let same = air_envs();
+    let busy = NodeLoad {
+        running: 1,
+        free: 0,
+    };
+    assert_eq!(
+        choose_placement(
+            PlacementPolicy::Busyness,
+            &fleet_with_second_mac(&air, busy, &same),
+            job_type.placement_node(),
+            required,
+        )
+        .map_err(|e| e.to_string()),
+        Ok(3),
+        "a node advertising the declared runtime.env is a host for this proof by definition; \
+         placement.node: air would have queued behind the air instead"
+    );
 }
 
 fn placement(pin: Option<&str>, required: LaunchRequirements<'_>) -> String {

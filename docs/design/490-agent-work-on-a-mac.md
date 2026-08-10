@@ -86,6 +86,19 @@ population to count.
   but no `uname`. `.chug/prompts/work/mac-proof.md` §2 had asked for a command
   that cannot pass anywhere, and now asks for one that does.
 
+**The machinery has since lost its pin, and the reason it was written for is
+what removed it.** Slice 6 gave `.chug/jobs/mac-proof.yaml` a `placement: {node:
+air}` on the argument that an unpinned release "could satisfy `host` on some
+future second Mac and prove nothing about this one". Job #556
+([#543](543-placement-granularity.md) S2) deleted the block, because job #550
+had made `choose_placement` match the declared `runtime.env` against
+`NodeCapabilities.envs`: a second Mac carrying a different Xcode does not
+advertise `xcode:26.5` and cannot take the proof, one carrying 26.5 is a
+legitimate host for it, and the requirement is now checked rather than
+approximated. The dated bullet in [the job #502
+correction](#correction--2026-08-08-job-502-slice-6-needed-machinery-and-the-appended-ci-refuses-an-xcode-job-type)
+records the pin as slice 6 landed it and is history, not current shape.
+
 Everything else about the machinery holds. The platform gap job #502 found is
 closed: a container level of a host job type is handed no `runtime.env`, so the
 appended `ci` evaluator runs as the ordinary container task its own image makes

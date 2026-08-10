@@ -194,3 +194,7 @@ Doc-reread: docs/design/529-secret-handling.md
 Doc-reread: docs/design/537-per-project-users-macos.md
 Doc-reread: docs/design/322-macos-native-runtime.md
 Doc-reread: docs/design/529-secret-handling.md
+
+Doc-reread: docs/design/543-placement-granularity.md
+Doc-reread: docs/design/490-agent-work-on-a-mac.md
+Doc-reread: docs/design/308-gha-port.md

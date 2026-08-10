@@ -118,8 +118,11 @@ Row 8 said "**Linux-proven only**, with no macOS node in the fleet" until
 "category F is done" — so what the two `mac-proof` runs on `gumbo-air-0` do and
 do not license is worth stating in full. The record is
 [#490](490-agent-work-on-a-mac.md)'s job #510 correction, and the machinery is
-`.chug/jobs/mac-proof.yaml` (`runtime: {mode: host, env: "xcode:26.5"}`,
-`placement: {node: air}`).
+`.chug/jobs/mac-proof.yaml` (`runtime: {mode: host, env: "xcode:26.5"}`). Both
+runs were pinned with `placement: {node: air}`; the pin came out in job #556
+once placement began matching the declared environment against what a node
+advertises ([#543](543-placement-granularity.md) S2), and the type now names no
+machine.
 
 **What the runs demonstrated:**
 

@@ -71,29 +71,57 @@ wrap_up:
   # eval-pass goes straight to Done with the branch discarded (spec §3.3 step
   # 12). android-proof.yaml's shape, coverage.yaml's before it.
   type: none
-# Pinned by NODE NAME because the air is the only host-capable node, exactly as
-# android-proof.yaml pins `nuc` for the only node with /dev/kvm. Placement by
-# capability already exists — #309 P2 slice 6 excludes a launch from every node
-# not advertising its mode — so the pin is not what routes the host work; it is
-# what keeps the proof on the node whose Xcode and simulators are the subject.
-# An unpinned release could satisfy `host` on some future second Mac and prove
-# nothing about this one.
-placement:
-  node: air
+# NO `placement:` BLOCK, AND THE ABSENCE IS THE REQUIREMENT STATED RATHER THAN
+# APPROXIMATED (design #543 S2, job #556). This file pinned `node: air` until
+# then, on the argument that an unpinned release "could satisfy host on some
+# future second Mac and prove nothing about this one". #543 S1 (job #550) made
+# that argument better served WITHOUT the pin: choose_placement now matches the
+# runtime.env above against NodeCapabilities.envs, so a launch declaring
+# xcode:26.5 is admitted only by a node advertising it. A second Mac carrying a
+# different Xcode does not match and can never take this proof; one carrying
+# 26.5 is a legitimate host for it. The subject is the toolchain, and now the
+# config says so — restoring the pin would re-approximate a requirement the
+# platform can already check. crates/test-utils/tests/placement_guard.rs asserts
+# both halves against this file.
+#
+# WHAT THE PIN ALSO COST is the whole node. #490 D4 gives a host-capable node ONE
+# task slot node-wide, and the pin bound every LEVEL of this job — including the
+# appended `ci` evaluator, an ordinary Linux container that needs nothing of this
+# machine — so a proof's CI took the air's only slot (#543 §3). Unpinned it runs
+# wherever the fleet is freest.
+#
+# WHAT PLACEMENT STILL CANNOT SEE is the node's own consent: WORKER_HOST_PROJECTS
+# is an allow-list the daemon enforces and deliberately never advertises (#543
+# D6). The day a SECOND host node carries xcode:26.5 under a different tenancy,
+# placement may route this there and the node refuses it at launch — loudly, and
+# #309 §3.5 requeues it. That is the first case that would reopen D6, and #543 §7
+# says to measure it before admitting a second host node, not after.
+#
+# android-proof.yaml and docker-proof.yaml KEEP their pins, for the mirror
+# reason: neither requirement is an env. android-proof declares a top-level
+# `image:` and no `runtime:` block at all, and its /dev/kvm is advertised by no
+# field (#543 Correction 7, which is what #367 A4 must build first); docker-proof
+# needs a grant, which #543 D6 keeps invisible to placement on purpose.
 resources:
   # NEITHER cpu NOR memory, deliberately, and since job #524 the platform
   # enforces that rather than warning about it. A host task is not cgroup-bounded
   # (#490 D7, #309 §7), so declaring either field makes this job type unplaceable:
   # choose_placement admits a launch declaring them only on a node that enforces
-  # them for its mode, and the pin here would carry it to HostBackend::admit,
-  # which refuses it by name. task_timeout is unaffected and is the bound below.
+  # them for its mode, and NO node enforces them for host mode — `bounds` in
+  # crates/container/src/lib.rs reads resources_enforced only for container-mode
+  # launches. So such a declaration is refused at placement, on every candidate
+  # rather than on any one node; HostBackend::admit's refusal by name is the
+  # backstop behind that, not the check that fires first. This was true under the
+  # pin too — the pin routed the refusal, it never caused it, which is why its
+  # removal above changes nothing here. task_timeout is unaffected and is the
+  # bound below.
   #
-  # 45m, and short on purpose rather than generous. D4 gives a host-capable node
-  # ONE task slot node-wide, and #440 slice 3 has a running host task decline the
-  # daemon's own swap, so an over-generous timeout on a proof costs the node its
-  # container capacity and its updates for the duration. Every wait in the prompt
-  # is bounded well inside this, so a hung simulator boot fails its rung by name
-  # instead of being killed here.
+  # 45m, and short on purpose rather than generous. #490 D4 gives a host-capable
+  # node ONE task slot node-wide, and #440 slice 3 has a running host task
+  # decline the daemon's own swap, so an over-generous timeout on a proof costs
+  # the node its container capacity and its updates for the duration. Every wait
+  # in the prompt is bounded well inside this, so a hung simulator boot fails its
+  # rung by name instead of being killed here.
   task_timeout: 45m
 # rework_budget is omitted — for agent work it is legal and defaults to 0, which
 # is what a proof wants: a failed proof is a FINDING, and reworking it would

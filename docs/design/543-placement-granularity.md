@@ -1,7 +1,7 @@
 # Design #543 — Placement granularity: what a task needs, and where it says so
 
-Status: IMPLEMENTED IN PART — S1 landed (job #550) and S3 landed (job #551);
-S2 and S4 remain.
+Status: IMPLEMENTED IN PART — S1, S2 and S3 landed (jobs #550, #556, #551); S4
+remains.
 
 Written against the tree at `fa1c414` (2026-08-10), and reworked against it
 after review. Every claim about current behaviour was read out of the source
@@ -13,12 +13,13 @@ findings, three of which correct earlier cycles of this document. S1 needs no
 schema field and no epoch bump; S4 needs one **and** a node-side advertisement
 this tree does not yet have; S2 and S3 are gated on S1 and D5 respectively.
 
-**Two slices have since landed.** S1 (job #550) matches a launch's `runtime.env`
-against `NodeCapabilities.envs` in `choose_placement`. S3 (job #551) requires
-`CHUG_PHASE=Work` in `DockerGrant::admits` alongside the `(project, job type)`
-pair it already matched, so an allow-listed type's evaluators — the appended
-`ci` one included — receive no socket. S2 and S4 are untouched, and no schema
-epoch has moved.
+**Three slices have since landed.** S1 (job #550) matches a launch's
+`runtime.env` against `NodeCapabilities.envs` in `choose_placement`. S2 (job #556)
+then dropped `mac-proof`'s `node: air` pin, which that match makes redundant.
+S3 (job #551) requires `CHUG_PHASE=Work` in `DockerGrant::admits`
+alongside the `(project, job type)` pair it already matched, so an allow-listed
+type's evaluators — the appended `ci` one included — receive no socket. S4 is
+untouched, and no schema epoch has moved.
 
 ## Current state
 
@@ -41,9 +42,11 @@ the argument and its dated corrections, never edited
 | A node-side grant is visible to placement | `DockerGrant::admits`, [`crates/container/src/docker.rs`](../../crates/container/src/docker.rs) | **No**, and D6 keeps it that way |
 | A node-side grant can see a launch's level | same | The docker one can and does — `CHUG_PHASE=Work` (S3, job #551). The other three stay level-blind, per section 7 |
 
-Every job type that pins today is a **proof** type — `android-proof`,
-`docker-proof`, `mac-proof`, which is the whole of `.chug/jobs/` that carries a
-`placement:` block — and each pins for a requirement it cannot otherwise state.
+**Two** job types pin today, `android-proof` and `docker-proof`, and that is the
+whole of `.chug/jobs/` carrying a `placement:` block. Each pins for a requirement
+it cannot otherwise state — section 2's third column — and neither is reachable
+by S1. `mac-proof` was the third until job #556; its requirement *is* an env, so
+it now states it and names no machine.
 
 ## Decisions
 
@@ -88,7 +91,7 @@ Every job type that pins today is a **proof** type — `android-proof`,
 | # | What | State |
 | --- | --- | --- |
 | **S1** | Match `runtime.env` against `NodeCapabilities.envs` in `choose_placement`, with a refusal naming the ref and the node's set | **Landed** (job #550) — no field, no epoch; [the note](#note--2026-08-10--s1-landed-envs-has-a-reader-job-550) records the one decision it had to make |
-| **S2** | Drop the pin from `mac-proof` only, and assert placement is unchanged | Proposed — gated on S1 |
+| **S2** | Drop the pin from `mac-proof` only, and assert placement is unchanged | **Landed** (job #556) — one pin, one file, no epoch; [what it removed and what it did not](#what-s2-landed-2026-08-10-job-556) |
 | **S3** | Scope `DockerGrant::admits` to work-level launches keyed on `CHUG_PHASE` (D5), and amend #517 D3 | **Landed** (job #551) — [what it changed](#what-s3-landed-2026-08-10-job-551) |
 | **S4** | `placement.features` as the general form (#367 A4): the node-side advertisement first, then the matcher, with its epoch bump | Proposed — gated on S1, so one matcher serves both |
 
@@ -654,3 +657,68 @@ D5, and only D5. The placement half of this document is untouched: no
   `WORKER_HOST_PROJECTS` would break a host job type whose evaluators must be
   admitted by the same tenancy its work was, and `/dev/kvm` and the nix store are
   not in the socket's class.
+
+## What S2 landed (2026-08-10, job #556)
+
+One pin, in one file, exactly as section 5 measured: the `placement:` block is
+gone from [`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) and
+nothing else in `.chug/jobs/` is touched. No schema field, no epoch, no source
+change to `choose_placement` — S1 built the whole mechanism and this slice is
+the config catching up to it.
+
+- **The comment was rewritten, not deleted, and that is half the slice.** The
+  file argued *for* the pin in its own words — *"an unpinned release could
+  satisfy `host` on some future second Mac and prove nothing about this one"* —
+  and a comment left standing over a removed block is how a later reader
+  restores it. It now argues for the match: a second Mac carrying a different
+  Xcode does not advertise `xcode:26.5` and cannot take the proof, one carrying
+  26.5 is a legitimate host for it, and the subject was always the toolchain
+  rather than the machine.
+- **Three things were checked before the block came out**, because *placeable*
+  and *servable* are separate questions. The declared `runtime.env` is
+  `xcode:26.5`, which `types::job_type::env_is_node_advertised` reads as
+  node-interpreted (the `xcode:` scheme S1 fixed on); `gumbo-air-0` advertises
+  exactly that set and is the only node doing so — an `envs` entry is what
+  `crates/worker/src/xcode.rs` discovers on the node it runs on (job #489), and
+  the air is the only Mac in the fleet; and it is the only node advertising
+  `host` at all, which is [`deploy/prod/README.md`](../../deploy/prod/README.md)'s
+  claim rather than this doc's — `WORKER_MODES` names runtimes and never a
+  count, `container` is its default and what the whole fleet runs, and
+  `gumbo-air-0` has advertised `host` since 2026-08-08. **No second host-capable
+  node existed when this ran**, so the removal is safe under either dispatcher
+  generation: one carrying S1 holds the work to the air by the `envs` match, and
+  one predating S1 holds it there by the mode filter alone, since no other node
+  serves `host`. The two readings agree today, which is what makes this slice a
+  config change with no deploy ordering.
+- **The `ci` evaluator is what the removal actually frees.** Section 3's sharp
+  case: the pin bound *every* level, so an ordinary Linux container needing
+  nothing of the machine took a host node's one node-wide slot
+  ([#490](./490-agent-work-on-a-mac.md) D4, `enforce_host_capacity`).
+  Unpinned it places by busyness like any other container task.
+- **`android-proof` and `docker-proof` keep their pins**, for the reason section
+  2's third column gives and Correction 5 restates. `android-proof` declares a
+  top-level `image:` and no `runtime:` block, so it has no `runtime.env` for any
+  matcher to read, and its `/dev/kvm` is advertised by no field at all — that
+  advertisement is S4's first half (Correction 7). `docker-proof`'s requirement
+  is a grant, which D6 keeps invisible to placement on purpose. Neither pin is
+  removable by env matching, and this slice did not try.
+- **The latent consequence in section 7 is now live rather than hypothetical.**
+  `mac-proof` is placed by mode plus `envs`, and `WORKER_HOST_PROJECTS` is a
+  grant placement cannot see, so a second host node carrying `xcode:26.5` under
+  a different tenancy could be selected and would refuse at launch — loudly,
+  requeued by #309 §3.5. That is the first case that reopens D6, and it should
+  be measured before such a node is admitted rather than after.
+- **The guard is
+  [`crates/test-utils/tests/placement_guard.rs`](../../crates/test-utils/tests/placement_guard.rs)**,
+  where the `envs` claim already lived. Two new tests read this repo's own
+  `.chug/jobs/` against a fleet carrying a **second** Mac: the proof stays on the
+  air when that Mac is equally idle but carries another Xcode, queues rather than
+  falling onto it when the air is busy, and does land on it when it carries the
+  same Xcode — the last being the case the pin would have refused. Both read
+  `placement_node()` from the file, so restoring the pin fails them by name.
+  `the_predicate_moves_no_job_type_in_this_repo` is unaffected: it compares a
+  level's placement with and without its declared environment, and both sides
+  move together.
+- **Nothing runs by accident.** `mac-proof` is not in `.chug/jobs/_defaults.yaml`
+  and is wired into no gate, so the next placement this decides is whenever an
+  operator releases the type by hand.
