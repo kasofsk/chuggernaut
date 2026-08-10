@@ -1,6 +1,7 @@
 # Design #543 — Placement granularity: what a task needs, and where it says so
 
-Status: IMPLEMENTED IN PART — S1 landed (job #550); S2, S3 and S4 remain.
+Status: IMPLEMENTED IN PART — S1 landed (job #550) and S3 landed (job #551);
+S2 and S4 remain.
 
 Written against the tree at `fa1c414` (2026-08-10), and reworked against it
 after review. Every claim about current behaviour was read out of the source
@@ -11,6 +12,13 @@ own brief** — two of the brief's assertions do not survive that reading
 findings, three of which correct earlier cycles of this document. S1 needs no
 schema field and no epoch bump; S4 needs one **and** a node-side advertisement
 this tree does not yet have; S2 and S3 are gated on S1 and D5 respectively.
+
+**Two slices have since landed.** S1 (job #550) matches a launch's `runtime.env`
+against `NodeCapabilities.envs` in `choose_placement`. S3 (job #551) requires
+`CHUG_PHASE=Work` in `DockerGrant::admits` alongside the `(project, job type)`
+pair it already matched, so an allow-listed type's evaluators — the appended
+`ci` one included — receive no socket. S2 and S4 are untouched, and no schema
+epoch has moved.
 
 ## Current state
 
@@ -31,6 +39,7 @@ the argument and its dated corrections, never edited
 | `NodeCapabilities.leases` is ever populated | same | **No** — hardcoded empty, and correctly so ([#309](309-host-native-execution.md) P4 is unbuilt) |
 | A node advertises a device or named feature | `node_capabilities`, [`crates/worker/src/daemon.rs`](../../crates/worker/src/daemon.rs) | **No** — no field carries one, so S4 builds the advertisement before the matcher |
 | A node-side grant is visible to placement | `DockerGrant::admits`, [`crates/container/src/docker.rs`](../../crates/container/src/docker.rs) | **No**, and D6 keeps it that way |
+| A node-side grant can see a launch's level | same | The docker one can and does — `CHUG_PHASE=Work` (S3, job #551). The other three stay level-blind, per section 7 |
 
 Every job type that pins today is a **proof** type — `android-proof`,
 `docker-proof`, `mac-proof`, which is the whole of `.chug/jobs/` that carries a
@@ -80,7 +89,7 @@ Every job type that pins today is a **proof** type — `android-proof`,
 | --- | --- | --- |
 | **S1** | Match `runtime.env` against `NodeCapabilities.envs` in `choose_placement`, with a refusal naming the ref and the node's set | **Landed** (job #550) — no field, no epoch; [the note](#note--2026-08-10--s1-landed-envs-has-a-reader-job-550) records the one decision it had to make |
 | **S2** | Drop the pin from `mac-proof` only, and assert placement is unchanged | Proposed — gated on S1 |
-| **S3** | Scope `DockerGrant::admits` to work-level launches keyed on `CHUG_PHASE` (D5), and amend #517 D3 | Proposed — independent of S1 |
+| **S3** | Scope `DockerGrant::admits` to work-level launches keyed on `CHUG_PHASE` (D5), and amend #517 D3 | **Landed** (job #551) — [what it changed](#what-s3-landed-2026-08-10-job-551) |
 | **S4** | `placement.features` as the general form (#367 A4): the node-side advertisement first, then the matcher, with its epoch bump | Proposed — gated on S1, so one matcher serves both |
 
 ---
@@ -583,3 +592,65 @@ resolver and to `envs` without being added to this predicate is placed
 unfiltered, exactly as today. That predicate is the seam #543's "what this does
 not decide" reserves for S4 — a second source list on one matcher, never a
 second matcher.
+
+## What S3 landed (2026-08-10, job #551)
+
+D5, and only D5. The placement half of this document is untouched: no
+`PlacementCandidate` field, no matcher, no pin removed, and no schema epoch.
+
+- **One condition, ahead of the pair.** `DockerGrant::admits`
+  ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs))
+  returns false unless the launch env carries `CHUG_PHASE=Work`, then matches
+  `(JOB_PROJECT, JOB_TYPE)` against the allow-list as before. A launch carrying
+  another level, an empty one, or no level stamp at all is admitted by nothing —
+  the fail-closed reading a missing project or type already had.
+- **Section 7's trap, avoided by construction rather than by care.** The level is
+  read from `CHUG_PHASE` and never from the `CHANNEL_ROLE` beside it, because
+  only the first is under a prefix `docs/spec.md` §4.1 seals. The two literals
+  the dispatcher stamps and the node matches are now pinned against each other by
+  a test (`exec::tests::the_level_stamp_a_node_side_grant_scopes_on_is_spelled_once`),
+  which reads `container::docker::PHASE_ENV` and `PHASE_WORK` — exported for that
+  purpose — so a node reading `Work` while the dispatcher stamps something else
+  fails a unit test rather than failing open on a live node.
+- **Wrap-up keeps the socket; a merge-gate re-run does not.** A `wrap_up.run`
+  command launches under `ChannelRole::Work`
+  ([`crates/dispatcher/src/eval.rs`](../../crates/dispatcher/src/eval.rs)) and so
+  stamps `Work`, while the merge gate re-runs *evaluators* and stamps
+  `Evaluation`. That is the authorship line D5 argues from rather than an
+  accident of the enum: `wrap_up:` is the type author's own block, `ci` is not.
+  An operator-dispatched **triage** agent
+  ([`crates/dispatcher/src/forge_ingest/triage.rs`](../../crates/dispatcher/src/forge_ingest/triage.rs))
+  stamps `Evaluation` as well and so receives nothing — the case where the old
+  behaviour handed node root to an *agent* nobody declared, and the one this
+  slice is most worth having for.
+- **The tests are the level cases, and each was red before the change**
+  (`container::docker::tests::a_docker_grant_reaches_work_level_launches_only`):
+  work admitted, `Evaluation` refused, no stamp refused, a lowercase `work`
+  refused, a launch declaring `CHANNEL_ROLE=work` at `CHUG_PHASE=Evaluation`
+  refused, and a job type the allow-list never named refused at every level. The
+  node-declares-no-grant case stays byte-identical and is still asserted where it
+  was. A `debug_assert` on the built `HostConfig` states the negative space: the
+  socket rides no launch at any level but work, whatever the allow-list says.
+- **What a `docker-proof` run should now print**, since its `identity` evaluator
+  exists to report exactly this: `no /var/run/docker.sock here, so the grant is
+  work-level as #543 S3 scoped it`, and no finding. The work container is
+  unchanged. A socket still present in that evaluator means the node's
+  `chug-worker` predates this change — the daemon composes the bind, so it clears
+  with a worker deploy — and the script names that cause first and still exits 0,
+  because failing there would measure the fleet's version rather than the branch.
+- **One knowingly-stale sentence is left behind, and it is left on purpose.** The
+  `eval:` comment in
+  [`.chug/jobs/docker-proof.yaml`](../../.chug/jobs/docker-proof.yaml) still
+  reads that this is "the measurement nobody has decided (#517)" and that "the
+  grant looks per job type rather than per level", which D5 decided and this
+  slice made false. The ticket's acceptance criteria forbade editing
+  `.chug/jobs/*.yaml` at all, and no gate reads a YAML comment, so the debt is
+  recorded here rather than fixed quietly: the next job to touch that file —
+  [#313](313-workload-identity-image-builds.md) S9's `build-image` type is the
+  expected one — repoints it at
+  [`.chug/tasks/docker-proof-identity.sh`](../../.chug/tasks/docker-proof-identity.sh)'s
+  rewritten header.
+- **The other three grants stay level-blind**, per section 7: narrowing
+  `WORKER_HOST_PROJECTS` would break a host job type whose evaluators must be
+  admitted by the same tenancy its work was, and `/dev/kvm` and the nix store are
+  not in the socket's class.

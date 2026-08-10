@@ -128,6 +128,19 @@ impl KvmGrant {
 /// looks when nothing names an endpoint (design #517 D3).
 pub const DOCKER_SOCKET_MOUNT_PATH: &str = "/var/run/docker.sock";
 
+/// The launch-env stamp naming the level a launch runs at, which
+/// [`DockerGrant::admits`] scopes the socket on (design #543 D5). The
+/// `CHANNEL_ROLE` stamp beside it says the same thing, but only this name is
+/// under a prefix spec §4.1 seals — a job type's `vars:` may declare that one
+/// and would re-obtain node root with it.
+pub const PHASE_ENV: &str = "CHUG_PHASE";
+
+/// The [`PHASE_ENV`] value a work or wrap-up launch carries, and the only level
+/// a docker grant admits. Exported so the dispatcher composing the stamp pins
+/// the spelling this crate matches, rather than two crates sharing a literal by
+/// convention.
+pub const PHASE_WORK: &str = "Work";
+
 /// One `owner/project:job_type` allow-list entry, the `(project, job type)`
 /// identity a node consents to (design #517 D3). Parsed once at declaration so
 /// a malformed entry is a refusal rather than a grant that silently never
@@ -169,8 +182,8 @@ impl DockerGrantEntry {
 /// `(project, job type)` launches allowed it — node root, accepted rather than
 /// mitigated, which is why it is node config and never a job-type field.
 ///
-/// [`admits`](Self::admits) is the single decision site, matched on the two
-/// dispatcher-composed stamps the `JOB_` prefix seals (spec §4.1).
+/// [`admits`](Self::admits) is the single decision site, matched on the
+/// dispatcher-composed stamps the `JOB_` and `CHUG_` prefixes seal (spec §4.1).
 #[derive(Debug, Clone)]
 pub struct DockerGrant {
     /// Host path of the socket, bound writable at
@@ -179,15 +192,21 @@ pub struct DockerGrant {
     pub socket: PathBuf,
     /// `owner/project:job_type` allow-list; empty grants nobody, so binding a
     /// socket on a node and granting it to a workload are two separate acts.
+    /// It names the launches of that pair the node consents to at **work
+    /// level**, never that pair's evaluators (design #543 D5).
     pub allowed: Vec<DockerGrantEntry>,
 }
 
 impl DockerGrant {
-    /// Whether a launch carrying this env is admitted, matched on
-    /// `(JOB_PROJECT, JOB_TYPE)` — the identity a node can observe, sealed
-    /// against project config by spec §4.1's reserved prefix. A launch missing
-    /// either stamp is admitted by nothing.
+    /// Whether a launch carrying this env is admitted: an allow-listed
+    /// `(JOB_PROJECT, JOB_TYPE)` at work level, the three stamps a node can
+    /// observe and project config cannot move (spec §4.1, design #543 D5). A
+    /// launch missing any of them, or carrying any other [`PHASE_ENV`] value,
+    /// is admitted by nothing.
     pub fn admits(&self, env: &HashMap<String, String>) -> bool {
+        if env.get(PHASE_ENV).map(String::as_str) != Some(PHASE_WORK) {
+            return false;
+        }
         let (Some(project), Some(job_type)) = (env.get("JOB_PROJECT"), env.get("JOB_TYPE")) else {
             return false;
         };
@@ -913,12 +932,29 @@ fn build_host_config(
         "a launch carries the KVM device and the read-only toolchain mounts together or carries \
          neither"
     );
+    build_host_config_socket_invariants(&host_config, &config.env, socket.is_some());
+    Ok(host_config)
+}
+
+/// The socket's negative space, asserted on the built config rather than on the
+/// decision that produced it: it rides exactly the launches the node's
+/// allow-list names, once (design #517 D3), and none at any level but work
+/// (design #543 D5).
+fn build_host_config_socket_invariants(
+    host_config: &HostConfig,
+    env: &HashMap<String, String>,
+    granted: bool,
+) {
     debug_assert_eq!(
-        mounts_target_count(&host_config, DOCKER_SOCKET_MOUNT_PATH),
-        usize::from(socket.is_some()),
+        mounts_target_count(host_config, DOCKER_SOCKET_MOUNT_PATH),
+        usize::from(granted),
         "the socket rides exactly the launches the node's allow-list names, once (design #517 D3)"
     );
-    Ok(host_config)
+    debug_assert!(
+        !granted || env.get(PHASE_ENV).map(String::as_str) == Some(PHASE_WORK),
+        "the socket rides no launch at any level but work, whatever the allow-list says \
+         (design #543 D5)"
+    );
 }
 
 /// How many mounts a built host config lands at `target` — the negative-space
@@ -1727,10 +1763,30 @@ mod tests {
         }
     }
 
+    /// A work-level launch of `(project, job_type)` — the level a grant admits,
+    /// so it is what every socket case that is not about the level uses.
     fn launch_config_for_pair(project: &str, job_type: &str) -> ContainerLaunchConfig {
+        launch_config_at_level(project, job_type, Some(PHASE_WORK))
+    }
+
+    /// The same launch at whichever level the dispatcher stamped, `None` being
+    /// a launch carrying no level stamp at all.
+    fn launch_config_at_level(
+        project: &str,
+        job_type: &str,
+        phase: Option<&str>,
+    ) -> ContainerLaunchConfig {
         let mut config = launch_config_for(project);
         config.env.insert("JOB_TYPE".into(), job_type.to_string());
+        if let Some(phase) = phase {
+            config.env.insert(PHASE_ENV.into(), phase.to_string());
+        }
         config
+    }
+
+    fn socket_bound(config: &ContainerLaunchConfig, grant: &DockerGrant) -> bool {
+        let hc = build_host_config(config, None, None, Some(grant), None).unwrap();
+        mounts_target_count(&hc, DOCKER_SOCKET_MOUNT_PATH) == 1
     }
 
     /// An entry is `owner/project:job_type` and nothing else: every malformed
@@ -1829,6 +1885,51 @@ mod tests {
             hc.mounts.is_none() && hc.devices.is_none() && hc.binds.is_none(),
             "a node declaring no grant is what it was before this existed"
         );
+    }
+
+    /// The grant is scoped to work level (design #543 D5): the allow-listed
+    /// pair that holds the socket while its work step runs holds nothing as an
+    /// evaluator — the appended `ci` one included — and nothing a job type can
+    /// declare moves that, because the level is read from the `CHUG_` stamp
+    /// spec §4.1 seals rather than from the `CHANNEL_ROLE` beside it.
+    #[test]
+    fn a_docker_grant_reaches_work_level_launches_only() {
+        let grant = docker_grant();
+        let at = |phase| launch_config_at_level("acme/beacon", "build-image", phase);
+
+        assert!(
+            socket_bound(&at(Some(PHASE_WORK)), &grant),
+            "the work step of an allow-listed pair is what the node consented to"
+        );
+        for withheld in [
+            at(Some("Evaluation")),
+            at(None),
+            at(Some("work")),
+            at(Some("")),
+        ] {
+            assert!(
+                !socket_bound(&withheld, &grant),
+                "only {PHASE_WORK} is work level: {:?}",
+                withheld.env.get(PHASE_ENV)
+            );
+        }
+
+        let mut spoofed = at(Some("Evaluation"));
+        spoofed.env.insert("CHANNEL_ROLE".into(), "work".into());
+        assert!(
+            !socket_bound(&spoofed, &grant),
+            "a declarable var must not buy the level a sealed stamp decides"
+        );
+
+        for phase in [Some(PHASE_WORK), Some("Evaluation"), None] {
+            assert!(
+                !socket_bound(
+                    &launch_config_at_level("acme/beacon", "code", phase),
+                    &grant
+                ),
+                "a job type the allow-list never named is unaffected at every level"
+            );
+        }
     }
 
     /// The socket is a fourth independent node property: a node that caches,

@@ -832,8 +832,9 @@ async fn docker_backend(
         tracing::info!(
             socket = %grant.socket.display(),
             allowed = ?grant.allowed,
-            "docker socket bound for the allow-listed (project, job type) pairs — each holds node \
-             root for the duration (design #517 D1)"
+            "docker socket bound for the WORK-LEVEL launches of the allow-listed (project, job \
+             type) pairs — each holds node root for the duration (design #517 D1, scoped to work \
+             by #543 D5)"
         );
         backend = backend.with_docker_grant(grant);
     }

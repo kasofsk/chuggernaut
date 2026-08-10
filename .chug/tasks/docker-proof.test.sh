@@ -443,25 +443,26 @@ run_identity() { # run_identity <outfile> <socket>
 		sh "$IDENTITY" >"$1" 2>&1 || ISTATUS=$?
 }
 
-echo "case 13: an evaluator holding the socket is a FINDING, reported and passed"
+echo "case 13: an evaluator STILL holding the socket after #543 S3 is a FINDING, reported and passed"
 reset_case
 run_identity "$SANDBOX/out13.txt" "$SOCKET"
 
 verdict "exits 0" "$(yes_no "$ISTATUS")"
-verdict "calls it a finding for #517" "$(found "$SANDBOX/out13.txt" "FINDING for design #517")"
+verdict "calls it a finding for #543 S3" "$(found "$SANDBOX/out13.txt" "FINDING for design #543 S3")"
 verdict "names the level it measured" "$(found "$SANDBOX/out13.txt" "CHUG_EVALUATOR=identity")"
-verdict "names what it would mean" "$(found "$SANDBOX/out13.txt" "per JOB TYPE and not per level")"
+verdict "names the scope it contradicts" "$(found "$SANDBOX/out13.txt" "CHUG_PHASE=Work alone")"
+verdict "names the likelier cause first" "$(found "$SANDBOX/out13.txt" "predates S3")"
 verdict "names the appended evaluator it would reach" "$(found "$SANDBOX/out13.txt" "appended \`ci\` one")"
-verdict "changes nothing on the strength of it" "$(found "$SANDBOX/out13.txt" "nothing here is changed")"
+verdict "changes nothing on the strength of it" "$(found "$SANDBOX/out13.txt" "is changed on the strength of it")"
 verdict "reports a measurement, not a verdict" "$(found "$SANDBOX/out13.txt" "MEASURED — an evaluator DOES receive the socket")"
 
-echo "case 14: an evaluator without the socket reports that, and passes too"
+echo "case 14: an evaluator without the socket is what S3 intends, and passes"
 reset_case
 run_identity "$SANDBOX/out14.txt" "$SANDBOX/absent.sock"
 
 verdict "exits 0" "$(yes_no "$ISTATUS")"
-verdict "says the grant did not reach it" "$(found "$SANDBOX/out14.txt" "did not reach this evaluator")"
-verdict "raises no finding" "$(missing "$SANDBOX/out14.txt" "FINDING for design #517")"
+verdict "says the grant is work-level" "$(found "$SANDBOX/out14.txt" "work-level as #543 S3 scoped it")"
+verdict "raises no finding" "$(missing "$SANDBOX/out14.txt" "FINDING for design #543")"
 verdict "still prints the identity" "$(found "$SANDBOX/out14.txt" "JOB_TYPE=docker-proof")"
 
 echo

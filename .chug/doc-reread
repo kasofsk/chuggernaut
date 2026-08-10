@@ -177,3 +177,10 @@ Doc-reread: docs/design/543-placement-granularity.md
 Doc-reread: docs/design/322-macos-native-runtime.md
 Doc-reread: docs/spec.md
 Doc-reread: docs/implementation-notes.md
+
+Doc-reread: deploy/prod/README.md
+Doc-reread: docs/design/517-docker-access-for-jobs.md
+Doc-reread: docs/design/543-placement-granularity.md
+Doc-reread: docs/reference/runbooks/worker-docker-grant.md
+Doc-reread: docs/spec.md
+Doc-reread: docs/implementation-notes.md

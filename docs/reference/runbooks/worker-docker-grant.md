@@ -78,6 +78,15 @@ place that shape is spelled; `build-worker.sh` refuses at the declaration
 anything that parse would refuse, so a malformed entry never reaches a node as a
 grant that silently never matches.
 
+**An entry grants the pair's *work* level and nothing else.** The match also
+requires the launch's `CHUG_PHASE=Work`, so the work and wrap-up commands of that
+job type hold the socket and **none of its evaluators do** — including the `ci`
+one project defaults append, which the type's author never wrote (design
+[#543](../../design/543-placement-granularity.md) D5, amending
+[#517 D3](../../design/517-docker-access-for-jobs.md); job #551). A node whose
+`chug-worker` predates that job still grants every level, and the fix is a
+deploy.
+
 **Renaming a job type silently revokes its grant.** That is the failure mode to
 prefer — revocation, not escalation — but it is a real operational trap: an
 entry naming a type nobody declares any more is indistinguishable from a working
@@ -173,8 +182,8 @@ and proceeds.
 ```sh
 # the daemon came up and says what it enabled, and what that costs
 ssh worksalot@gumbo-nuc-0 journalctl -u chug-worker -b 2>&1 | grep -i docker
-#   docker socket bound for the allow-listed (project, job type) pairs — each
-#   holds node root for the duration …
+#   docker socket bound for the WORK-LEVEL launches of the allow-listed
+#   (project, job type) pairs — each holds node root for the duration …
 
 # the declaration itself, which is the half people forget
 ssh worksalot@gumbo-nuc-0 grep WORKER_DOCKER /etc/chuggernaut/worker.env
@@ -207,12 +216,14 @@ allow-list ([#517 C3](../../design/517-docker-access-for-jobs.md));
 `NodeCapabilities.docker_reachable` (design #517 S4) is what makes the node's
 half of it auditable from the fleet view.
 
-**Read the `identity` evaluator's log too.** The allow-list is matched on
-`(JOB_PROJECT, JOB_TYPE)`, and an **evaluator** launch carries both stamps — so
-an evaluator of an allow-listed job type may hold the socket as well, including
-the appended `ci` one. `docker-proof`'s stage-0 `identity` evaluator reports
-which it got and always passes; whether that is intended is design #517's
-question, not this page's.
+**Read the `identity` evaluator's log too — it is how you tell which worker the
+node is running.** The allow-list is matched on `(JOB_PROJECT, JOB_TYPE)` and an
+**evaluator** launch carries both stamps, so before job #551 an evaluator of an
+allow-listed type held the socket too; since #551 the match also requires
+`CHUG_PHASE=Work` and it does not. `docker-proof`'s stage-0 `identity` evaluator
+reports which it got and always passes: `no /var/run/docker.sock here, so the
+grant is work-level as #543 S3 scoped it` is the expected line, and a socket
+there means this node's daemon predates the change — deploy it.
 
 ---
 
@@ -241,4 +252,5 @@ is deferred as S6.
 | `build-worker: … that is not a socket on <node>` | the path is absent, or is a regular file — the second boots the daemon and then hands every granted launch a bind no client can dial | fix the path (§4); the deploy refused with the live daemon still running |
 | the daemon logs `WORKER_DOCKER_SOCKET is set but WORKER_DOCKER_GRANTS is empty` | the capability is on and granted to nobody — fail-closed, working as intended | add the entry and recreate the daemon |
 | a granted job still fails with `Cannot connect to the Docker daemon` | its `(project, job type)` did not match: the allow-list is matched on `JOB_PROJECT` **and** `JOB_TYPE`, both exactly | compare the entry against the job's project and the type's declared `name:`; a renamed type revokes its own grant (§2) |
+| an **evaluator** of a granted type fails that way, its work step fine | working as intended — the grant is work level only (§2) | if that evaluator genuinely needs a daemon, it is a decision for design [#543](../../design/543-placement-granularity.md) D5 and not a setting on this page |
 | a job that should *not* have the socket has it, in host mode | host access is ambient — the task's uid owns the socket, and nothing granted it | nothing to change here; this is design #517 D4, measured and accepted |

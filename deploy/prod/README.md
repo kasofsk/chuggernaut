@@ -1108,9 +1108,13 @@ Notes:
   is the procedure, [design #517](../../docs/design/517-docker-access-for-jobs.md)
   the decision. `WORKER_DOCKER_SOCKET` says the node has a socket to give and
   `WORKER_DOCKER_GRANTS` (`owner/project:job_type` entries) says which launches
-  may hold it; both ride the same `<VAR>_<node>` resolution as `WORKER_SLOTS` and
-  are written into the node's environment file, and unset ⇒ no bind at all, which
-  is **every node in this fleet today**. A container holding the socket can
+  may hold it — the pair's **work** level only, never its evaluators (design
+  [#543](../../docs/design/543-placement-granularity.md) D5); both ride the same
+  `<VAR>_<node>` resolution as `WORKER_SLOTS` and are written into the node's
+  environment file, and unset ⇒ no bind at all, which is every node in this
+  fleet but `gumbo-nuc-0` — it declares the socket and
+  `kasofsk/chuggernaut:docker-proof`, the fleet's only grant (#517 S5b, job
+  #542). A container holding the socket can
   bind-mount the node and reach the daemon's credentials, so the allow-list is
   fail-closed — an empty one grants nobody — and `build-worker.sh` refuses, live
   daemon untouched, anything the daemon would refuse at parse or at boot: a

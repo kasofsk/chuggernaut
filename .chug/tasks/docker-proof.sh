@@ -127,11 +127,12 @@ rung_unreachable() {
 	exit 1
 }
 
-# The measurement #517 has not decided: DockerGrant::admits matches on
-# (JOB_PROJECT, JOB_TYPE), which an EVALUATOR launch stamps too, so the grant
-# looks per job type rather than per level. Printed here and by the
-# `identity` stage-0 evaluator (.chug/tasks/docker-proof-identity.sh), so one
-# release answers it from two containers' logs. Nothing here changes behaviour.
+# The measurement #517 left open and #543 D5 decided: DockerGrant::admits
+# matched on (JOB_PROJECT, JOB_TYPE), which an EVALUATOR launch stamps too, and
+# #543 S3 scoped it to CHUG_PHASE=Work — so this WORK container must find the
+# socket PRESENT and the `identity` stage-0 evaluator
+# (.chug/tasks/docker-proof-identity.sh) must find it ABSENT. One release
+# answers both from two containers' logs. Nothing here changes behaviour.
 report_identity() {
 	echo "docker-proof: identity — JOB_PROJECT=${JOB_PROJECT:-<unset>} JOB_TYPE=${JOB_TYPE:-<unset>} CHUG_PHASE=${CHUG_PHASE:-<unset>} CHUG_EVALUATOR=${CHUG_EVALUATOR:-<none>}"
 	if [ -S "$SOCKET" ]; then

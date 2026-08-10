@@ -2273,8 +2273,8 @@ mod tests {
     //! (crash-after-push → retry recovers + prompt notes it) is exercised in
     //! Tier-2 (`tests/execution.rs`).
     use super::{
-        channel_mcp_for, inject_platform_agent_secrets_admit, inject_platform_agent_secrets_notice,
-        recover_or_reset_branch, reserved_env_prefix,
+        ChannelRole, channel_mcp_for, inject_platform_agent_secrets_admit,
+        inject_platform_agent_secrets_notice, recover_or_reset_branch, reserved_env_prefix,
     };
     use test_utils::repo::TempRepo;
 
@@ -2342,6 +2342,30 @@ mod tests {
             inject_platform_agent_secrets_notice(&[]),
             None,
             "a scope holding only provider credentials logs nothing"
+        );
+    }
+
+    /// The level stamp a node-side grant reads back: `container_env` composes
+    /// it, and `DockerGrant::admits` binds the socket for the work spelling
+    /// alone (design #543 D5), so these two literals are a cross-crate contract
+    /// rather than a label. Pinned here because a node reading `Work` while the
+    /// dispatcher stamps something else fails open at eval level.
+    #[test]
+    fn the_level_stamp_a_node_side_grant_scopes_on_is_spelled_once() {
+        assert_eq!(container::docker::PHASE_ENV, "CHUG_PHASE");
+        assert_eq!(ChannelRole::Work { task_id: 7 }.phase(), "Work");
+        assert_eq!(
+            ChannelRole::Work { task_id: 7 }.phase(),
+            container::docker::PHASE_WORK
+        );
+        assert_ne!(
+            ChannelRole::Eval {
+                task_id: 7,
+                evaluator: "ci".into(),
+            }
+            .phase(),
+            container::docker::PHASE_WORK,
+            "an evaluator must not spell itself work level"
         );
     }
 

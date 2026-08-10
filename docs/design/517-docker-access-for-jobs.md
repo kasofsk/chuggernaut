@@ -1,14 +1,16 @@
 # Design #517 — Docker access for jobs, accepted (amending #309 §10 and #313 Decision 0)
 
-Status: IMPLEMENTED IN PART — S1–S5a landed and S5b is declared on nuc and exercised (job #542); S6 deferred.
+Status: IMPLEMENTED IN PART — S1–S5a landed and S5b is declared on nuc and exercised (job #542); D3 amended by [#543](543-placement-granularity.md) D5 and narrowed in the tree (job #551); S6 deferred.
 
 Slice by slice: S1 (job #518), S2 (job #521), S3 (job #522), S4 (job #519), S5a
 (job #523) and the job type S5b names (job #538), then **S5b declared on
 `gumbo-nuc-0` and exercised** (job #542). The mechanism is no longer theoretical:
 one `(project, job type)` holds the socket, and the first run measured that an
 **evaluator** holds it too — a granularity question decided in
-[#543](543-placement-granularity.md) D5, and recorded in the 2026-08-10 note at
-the foot of this document.
+[#543](543-placement-granularity.md) D5 and **now narrowed in the tree**: since
+job #551 the match also requires `CHUG_PHASE=Work`, so an allow-listed pair's
+evaluators receive nothing. The measurement is the 2026-08-10 note at the foot
+of this document and the change is the S3 note after it.
 
 Written against the tree at `ff3258a`. Every claim about current behavior below
 was read out of the source and out of [`docs/spec.md`](../spec.md), not inferred
@@ -31,8 +33,9 @@ get the socket too.
 current truth whenever anything below it changes. Everything after this section
 is append-only.*
 
-**Four slices are built; nothing is granted. One thing was already live.** As of
-**2026-08-09**, S1 has landed: `JOB_` is a reserved secret/var prefix alongside
+**Four slices are built, one node grants, and the grant is work-level only. One
+thing was already live.** As of **2026-08-10**, S1 has landed: `JOB_` is a
+reserved secret/var prefix alongside
 `CHUG_` (`docs/spec.md` §4.1, §5.3), so the `JOB_PROJECT` every node-side
 allow-list matches on can no longer be moved by a job type's `vars:` — which
 also closes [correction 3](#corrections-verified-against-the-tree) against the
@@ -41,10 +44,14 @@ also closes [correction 3](#corrections-verified-against-the-tree) against the
 at the node, and [correction 2](#corrections-verified-against-the-tree) is
 historical. S4 has landed beside them, advertising the access. **S3 has landed
 on top of all three**: `container::docker::DockerGrant` binds the node's socket
-into the launches a node's own `WORKER_DOCKER_GRANTS` names, matched on both
-stamps, failing closed everywhere else. It grants nothing today — **no node
-declares a socket or an allow-list**, which is S5 — so every launch on the live
-fleet is byte-identical to what it was.
+into the **work-level** launches a node's own `WORKER_DOCKER_GRANTS` names —
+matched on both stamps and, since job #551, on `CHUG_PHASE=Work` ([the S3
+note](#what-543-s3-narrowed-2026-08-10-job-551)) — failing closed everywhere
+else. One node grants today: `gumbo-nuc-0` declares the socket and
+`kasofsk/chuggernaut:docker-proof`, exercised by job #542 (S5b, [its
+note](#note--2026-08-10-s5b-declared-and-the-first-grant-exercised-job-542)).
+Every launch on the live fleet that pair does not name is byte-identical to what
+it was.
 
 Agent host tasks on `gumbo-air-0` reach a working docker daemon, and every
 [`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) run since
@@ -92,7 +99,7 @@ host-mode access is still S6.
 | --- | --- | --- |
 | **D1** | **Jobs may use docker, and this is wanted rather than tolerated.** The escalation to node root is **accepted, not mitigated**, under a stated condition | [The decision](#the-decision-and-the-argument-that-carries-it), [The cost](#the-cost-stated-precisely), [The trigger](#the-revisit-trigger-stated-as-a-condition) |
 | **D2** | **The mechanism stays node-side.** [#309 §10](309-host-native-execution.md#10-trust-and-tenancy)'s *shape* clause survives intact — a node-side allow-list entry, never a job-type field the platform honors on request. Only the default and the justification invert | [What survives of §10](#what-survives-of-the-309-rule) |
-| **D3** | **Container jobs get the socket, allow-listed node-side per (project, job type),** failing closed. This is [#313](313-workload-identity-image-builds.md) **B-I**, whose rejection is hereby reversed — not a fifth option | [The container question](#the-question-this-job-decides-container-jobs), [Naming the shape](#naming-the-adopted-shape-honestly-this-is-b-i) |
+| **D3** | **Container jobs get the socket, allow-listed node-side per (project, job type),** failing closed. This is [#313](313-workload-identity-image-builds.md) **B-I**, whose rejection is hereby reversed — not a fifth option. **Amended** by [#543](543-placement-granularity.md) D5: the allow-list admits a pair's **work-level** launches only, never its evaluators (job #551, [the S3 note](#what-543-s3-narrowed-2026-08-10-job-551)) | [The container question](#the-question-this-job-decides-container-jobs), [Naming the shape](#naming-the-adopted-shape-honestly-this-is-b-i) |
 | **D4** | **Host-mode docker becomes advertised, not enforced.** The node reports the access as a capability so it is auditable; withholding it needs per-task users and waits on [#309](309-host-native-execution.md) P3 | [The host question](#the-host-question-ambient-access-and-what-can-actually-be-done-about-it) |
 
 **The revisit trigger, and it is nearer than it looks.** D1 holds *while every
@@ -1032,3 +1039,56 @@ S3 is the slice. Nothing here is changed on the strength of the measurement.
 so `WORKER_SSH` is unset for both prod nodes and `build-worker.sh` no-ops on
 every deploy. This grant therefore lives on the node until someone rebuilds it
 from the file by hand, and vanishes if the node is recreated without that step.
+
+## What #543 S3 narrowed (2026-08-10, job #551)
+
+**D3's allow-list now admits work-level launches only**, which is
+[#543](543-placement-granularity.md) D5 applied to the tree. The note above
+records the measurement; this one records the change, and nothing about the
+mechanism, the config surface or the wire moves with it.
+
+- **`DockerGrant::admits`
+  ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs))
+  requires a third stamp**: `CHUG_PHASE=Work`, checked before the
+  `(JOB_PROJECT, JOB_TYPE)` pair it already matched. A launch carrying any other
+  level, or no level stamp at all, is admitted by nothing — the same fail-closed
+  reading a missing project or type already got.
+- **The stamp is the sealed one, and that is the whole of why it was chosen.**
+  `container_env` composes **two** level discriminators and only `CHUG_PHASE` is
+  under a reserved prefix (`docs/spec.md` §4.1, §5.3); `CHANNEL_ROLE` is
+  declarable in a job type's `vars:`, so matching it would have handed a job type
+  a way to spell itself work level and re-obtain node root — the exact hole S1
+  was written to close, reintroduced by the slice meant to narrow the grant. The
+  two spellings are pinned against each other by a dispatcher unit test
+  (`exec::tests::the_level_stamp_a_node_side_grant_scopes_on_is_spelled_once`)
+  rather than shared by convention: `container::docker::PHASE_ENV` and
+  `PHASE_WORK` are exported for it.
+- **Wrap-up is inside the grant, and that is deliberate.** `ChannelRole::Work`
+  is what a `wrap_up.run` command launches under
+  ([`crates/dispatcher/src/eval.rs`](../../crates/dispatcher/src/eval.rs)), so it
+  stamps `Work` and keeps the socket. The asymmetry D5 argues from is authorship,
+  not lifecycle position: `wrap_up:` is written by the job type's author in the
+  same file as `work:`, where the `ci` evaluator is appended by
+  [`.chug/jobs/_defaults.yaml`](../../.chug/jobs/_defaults.yaml). A merge-gate
+  re-run is an evaluator (`ChannelRole::Eval`) and receives nothing, as does an
+  operator-dispatched triage agent — which is the case this document's own
+  [Which job types](#which-job-types) section warns hardest about, an *agent*
+  holding node root without anyone declaring it.
+- **What a `docker-proof` run should now print.** Its work container is
+  unchanged — rung 1 still finds the socket bound and writable at
+  `/var/run/docker.sock`, and every rung after it behaves as job #542 measured.
+  Its stage-0 `identity` evaluator, which job #538 built to report exactly this,
+  should now print `no /var/run/docker.sock here, so the grant is work-level as
+  #543 S3 scoped it` and raise **no** finding. A socket still there means the
+  node's `chug-worker` predates this change — the daemon binds the mount, so the
+  fix is a worker deploy, not a merge — and the script says so rather than
+  reading as a regression by default. It still always exits 0: a proof that fails
+  on the fleet's deployed version measures the fleet, not the branch.
+- **What was not spent:** no `CONFIG_SCHEMA_EPOCH` bump, no `WORKER_RPC_VERSION`
+  bump, no `.chug/jobs/*.yaml` edit, no schema field and no change to what the
+  dispatcher puts on the wire — the stamp being matched has ridden every launch
+  since §6.3. A node declaring no grant is byte-identical, as it was before.
+- **The other three node-side grants are untouched**, per D5's own reasoning:
+  `WORKER_HOST_PROJECTS`, `WORKER_KVM_PROJECTS` and `WORKER_NIX_PROJECTS` stay
+  level-blind, and narrowing the tenancy boundary would in fact break a host job
+  type whose evaluators must be admitted by the same tenancy its work was.
