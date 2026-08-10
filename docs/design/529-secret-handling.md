@@ -1,6 +1,6 @@
 # Design #529 — Secret handling: the declarative model's edges, and the platform token's reach
 
-Status: PROPOSED — nothing below is built, and S2 is gated on a measurement.
+Status: PROPOSED — nothing below is built; M2 is answered and S2 is no longer gated on it.
 
 Written against the tree at `927067b` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a
@@ -12,8 +12,18 @@ work container** — a Debian 12 Linux container on the production fleet running
 `claude` 2.1.226, `JOB_TYPE=design`, `CHUG_PHASE=Work` — and the rest out of
 this repo's own source. The brief asked for a measurement rather than an assumption
 about the agent CLI's credential sources;
-§[3](#3-decision-1-what-the-measurement-says) is that measurement, one row of it
-is deliberately **unverified**, and between them they change the answer.
+§[3](#3-decision-1-what-the-measurement-says) is that measurement, and it changes
+the answer.
+
+**M2 — the one row §3 left unverified — was run in job #546 and it holds.** The
+agent CLI authenticates from an inherited file descriptor with
+`CLAUDE_CODE_OAUTH_TOKEN` absent from its environment, and the source is genuinely
+consumed: a second launch on the drained pipe fails, and nothing lands on disk.
+The `apiKeyHelper` fallback §[4](#4-the-options-for-decision-1)(d) named is **not**
+a drop-in — it delivers an API key, and this platform's credential is an OAuth
+token, which it rejects. Both results, their invocations and their limits are in
+the [2026-08-10 correction](#correction--2026-08-10-job-546-m2-measured-the-fd-source-authenticates-and-apikeyhelper-will-not-take-this-credential),
+which is what S2 should be built against.
 
 Two of those rows are new in this revision and both were assumptions before. **M1d**
 settles the premise every slice here rests on — that a credential in the agent
@@ -41,6 +51,8 @@ the argument and its dated corrections, never edited
 | Declared secrets, project `vars` and `global/agents` carry a TTL | — | **No.** Injected verbatim; lifetime is rotation discipline |
 | `global/agents` is narrowed to what the agent CLI needs | `inject_platform_agent_secrets`, `exec.rs` | **No.** The *whole scope* reaches every agent launch |
 | The platform's provider token is out of the task's reach | — | **No.** Env-delivered, and the env is readable for the process's life (§[3](#3-decision-1-what-the-measurement-says)) |
+| The agent CLI will take that token from a withdrawable source instead | `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, the shipped CLI | **Yes, measured** (M2, job #546) — an inherited fd, read once, leaving no file and no env entry. Unused today |
+| …and `apiKeyHelper` is the fallback if it will not | `--settings`, the same CLI | **No.** Measured: the helper's output is used as an API key and this credential is an OAuth token, rejected as `Invalid API key` |
 | A credential in the agent CLI's *memory* is out of the task's reach | Yama `ptrace_scope`, the node's kernel | **True today, and not by this platform's doing.** Measured `1` in a work container (M1d); a node sysctl, unasserted — M6 |
 | Credential-bearing payloads are kept out of argv | `claude_invocation`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Landed**, with a test asserting it |
 | The same reasoning is applied to the env | — | **No.** That asymmetry is what D3 names |
@@ -96,10 +108,13 @@ that no cleanup path reaches.
   container mode until M7 answers the host path.
 
 - **D4. What credential sources the agent CLI accepts is a measurement, and the
-  measurement is half-taken.** §[3](#3-decision-1-what-the-measurement-says)
-  establishes the current behaviour exactly, and finds a named fd-delivery source
-  in the shipped bundle whose semantics are **not** established. M2 is the
-  experiment that settles it, and S2 is gated on M2 rather than assuming it.
+  measurement is now taken.** §[3](#3-decision-1-what-the-measurement-says)
+  established the current behaviour and found a named fd-delivery source in the
+  shipped bundle whose semantics it could not establish; M2 ran that source and it
+  works, so S2 builds on a measured mechanism rather than a hoped-for one. The
+  half of D4 that still stands is the discipline, not the doubt: the answer is a
+  third party's behaviour at **one version**, so S2 ships an assertion at launch
+  the way M6 does, not a comment.
 
 - **D5. Decision 1 as written is satisfiable today only by a boundary this
   design does not build.** "The task must not be able to read the file holding
@@ -136,8 +151,8 @@ that no cleanup path reaches.
 | --- | --- | --- |
 | **S1a** | Log, by name, every `global/agents` name `inject_platform_agent_secrets` would decline under S1b's set — while still injecting all of them | Proposed — observe-only; one release, so S1b excludes nothing a run depends on |
 | **S1b** | Narrow the injector from "every name under `global/agents`" to a platform-configured provider-credential name set, injecting nothing else | Proposed — after S1a; no schema field, no epoch, moves *reach* |
-| **M2** | Measure whether the agent CLI authenticates from an inherited fd (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`) with no token in the env | Proposed — a **measurement**, and S2's gate |
-| **S2** | Deliver the provider credential by the narrowest source M2 establishes and stop putting it in the launch env; fall back to §[4](#4-the-options-for-decision-1)(d) if M2 fails | Proposed — gated on M2, ships with M6, moves *reach* |
+| **M2** | Measure whether the agent CLI authenticates from an inherited fd (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`) with no token in the env | **Landed** (job #546) — it does, proved by a real completion; the fallback (d) does **not** take this credential. [The record](#correction--2026-08-10-job-546-m2-measured-the-fd-source-authenticates-and-apikeyhelper-will-not-take-this-credential) |
+| **S2** | Deliver the provider credential on an inherited fd — the container's own `sh -c` entrypoint opens the injected file, unlinks it and execs `claude` with the fd number — and stop putting it in the launch env | Proposed — **no longer gated**; ships with M6, moves *reach*. (d) is not the fallback it was written as |
 | **M6** | Assert `ptrace_scope` (and the absence of `CAP_SYS_PTRACE`) at launch instead of assuming it — the host-kernel property S2's window rests on (M1d) | Proposed — ships **with** S2; without it S2 asserts a bound whose mechanism it never checks |
 | **M7** | Measure M1c/M1d's equivalents on the **host** node path, where there is no `/proc` and `task_for_pid` governs | Proposed — a **measurement**; until it lands, S2's window claim is container-mode only |
 | **S3** | A per-level file-delivery declaration for project secrets, over the existing `InjectedFile` plumbing, using the `{NAME}_FILE` convention `.chug/tasks/deploy.sh` already anticipates | Proposed — **costs an epoch bump**, moves *reach* |
@@ -757,3 +772,136 @@ it.
    `mem` is gated by `PTRACE_MODE_ATTACH`, which it does — the two reads land on
    opposite sides of one distinction, and getting the reason wrong would have
    predicted `mem` readable and sunk the recommended slice.
+
+## Correction — 2026-08-10, job #546 (M2 measured: the fd source authenticates, and apiKeyHelper will not take this credential)
+
+§[3](#3-decision-1-what-the-measurement-says)'s M2 row was a name-level reading of
+a minified third-party bundle and said so. It has now been run. **The fd source
+works**, and the fallback §[4](#4-the-options-for-decision-1)(d) named for the case
+where it did not **does not take this platform's credential**. Both halves change
+S2, so both are recorded here rather than in the row.
+
+Taken inside this job's own work container — Debian 12, `aarch64`, `JOB_TYPE=design`,
+`CHUG_PHASE=Work` — against the shipped `claude`, which reports **2.1.220**. §3's
+rows were taken at 2.1.226; the difference is recorded rather than explained, and
+it is the reason D4's surviving half asks S2 for a launch-time assertion.
+
+### What the fd source expects, read before it was exercised
+
+A wrong argument shape is not a negative result, so the resolver was read first.
+`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` is a **decimal file-descriptor number**:
+the CLI `parseInt`s it, opens `/proc/self/fd/<n>`, reads at most 65536 bytes and
+trims. A non-numeric value logs an error and resolves to no credential. On any
+read failure — and when the variable is absent entirely — it falls back to a
+hardcoded well-known path, `/home/claude/.claude/remote/.oauth_token`. The
+resolver caches, so one successful read serves the process. Source precedence is
+`apiKeyHelper` (third-party mode only) → `ANTHROPIC_AUTH_TOKEN` →
+`CLAUDE_CODE_OAUTH_TOKEN` → the fd → the well-known file → `apiKeyHelper` →
+a local profile → an interactive `claude.ai` login, so removing the env var is
+what lets the fd be reached.
+
+### The five runs
+
+Every run is a real single-turn completion of the same prompt, judged on its
+output and exit code, never on the process starting. Each launched under `env -i`
+with exactly `PATH`, `HOME`, `CLAUDE_CONFIG_DIR` and whatever the row adds.
+
+| # | Credential source | Result |
+| --- | --- | --- |
+| 1 | none (control) | `Not logged in · Please run /login`, exit 1 |
+| 2 | `CLAUDE_CODE_OAUTH_TOKEN` in the env (control) | model output, exit 0 |
+| 3 | **an inherited pipe at fd 9**, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=9` | **model output, exit 0** |
+| 4 | the **same fd**, relaunched after run 3 drained the pipe | `Not logged in · Please run /login`, exit 1 |
+| 5 | `apiKeyHelper` via `--settings`, the helper printing the same token | `Invalid API key · Fix external API key`, exit 1 |
+
+The invocation for run 3, with the token read out of `/proc/1/environ` and never
+printed:
+
+```sh
+exec 9< <(printf '%s' "$TOK")
+env -i PATH=... HOME=... CLAUDE_CONFIG_DIR=... \
+  CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=9 \
+  claude -p '...' < /dev/null
+```
+
+**The token was genuinely absent from the new process's environment.** Read from
+`/proc/<pid>/environ` of run 3's process while it was authenticating, it held four
+names — `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CONFIG_DIR`, `HOME`,
+`PATH` — and **zero** occurrences of the token's value.
+
+**Run 4 is the withdrawal proof, and it is the one that matters.** The same fd,
+after the CLI had consumed the pipe, authenticates nothing: the source is spent.
+Nothing was left behind to make up for it — the well-known fallback path did not
+exist before the runs or after them, and a value-scan of the CLI's whole config
+directory found no copy.
+
+### What a descendant can still reach, measured rather than argued
+
+D3 claims the fd buys a *window* where the env buys a lifetime. That claim now has
+the same treatment M1c and M1d gave the env, taken from a process the CLI itself
+spawned (its own shell tool), which is the relation a task's code stands in:
+
+- The spawned process does **not** hold fd 9 — the CLI does not pass it to
+  children. (M1b's stripping of `CLAUDE_CODE_OAUTH_TOKEN` from a child's
+  environment has an analogue here, and it is worth no more trust than M1b was.)
+- It **can** reach the CLI's own fd through `/proc/<cli-pid>/fd/9`, exactly as
+  M1c reads `/proc/<cli-pid>/environ` — the same `PTRACE_MODE_READ` gate, the same
+  descendant direction, no permission in the way.
+- Reading it returns **0 bytes**. The pipe was drained by the CLI and its writer
+  had closed, so the path resolves to a credential that is no longer there.
+
+So the residue is a reachable *handle* to nothing, which is what "window rather
+than lifetime" has to mean if it is to mean anything. The race the design already
+names is **not** measured: a task process that opens the fd *before* the CLI reads
+it would drain the pipe, and how long that window is was not established.
+
+### The trap S2 must assert against: `CLAUDE_CODE_REMOTE`
+
+The same code path that reads the fd will **write what it read to disk** — at
+`/home/claude/.claude/remote/.oauth_token`, mode `0600`, described in the bundle as
+"for subprocess access" — and it does so if and only if `CLAUDE_CODE_REMOTE` is
+set in the CLI's environment. Measured with a dummy string rather than the real
+token: with the variable set, the file appeared at that path and mode with the
+dummy's contents. The platform does not set it today (it is absent from this
+container's `/proc/1/environ`). **If it ever were set, fd delivery would persist
+the credential to a file no cleanup path deletes and S2 would buy nothing** —
+which makes its absence a launch-time assertion for S2, on the same footing as M6.
+
+### Why (d) is not the fallback §4 wrote it as
+
+Run 5's failure is a *rejection*, not a non-read: the error moved from
+`Not logged in` (run 1, nothing supplied) to `Invalid API key`, which is only
+reachable once a credential has been obtained and sent. The helper ran and its
+output was consumed — as an **API key**. This platform's `global/agents`
+credential is an OAuth token, and the two are different headers. Sweeping the
+bundle's settings surface for helper-shaped keys finds `apiKeyHelper` as the only
+Anthropic-credential one (`otelHeadersHelper` and `proxyAuthHelper` are neither).
+
+So (d) is available only to a deployment whose provider credential is an
+`ANTHROPIC_API_KEY`. Whether it authenticates with one is **unmeasured**: no API
+key exists in this container, and obtaining one is outside a measurement job. The
+honest ordering therefore tightens rather than moves: **(c), now measured, is the
+recommendation and no longer has a same-cost fallback behind it**; if (c) is
+rejected for some reason this measurement did not surface, the next option is (e)
+or (f), not (d).
+
+### The seam S2 gets for free, and the limits of all of the above
+
+This container's pid 1 is `sh -c 'claude -p "$(cat /chuggernaut/prompt.md)"
+--settings /chuggernaut/agent-settings.json --output-format stream-json ...'`,
+which confirms M4 from the process rather than from the source and hands S2 its
+mechanism: the dispatcher cannot pass a file descriptor across the docker
+boundary, but the entrypoint shell it already composes can open one from an
+`InjectedFile`, unlink the file and exec `claude` with the number. No new
+plumbing, and the unlink is what makes the file a delivery rather than a residue.
+
+Stated limits, so the next reader does not over-read this:
+
+- **Single-turn `-p` only.** The platform's real launch is a long
+  `--output-format stream-json` session with MCP attached. The resolver caches and
+  this credential class carries no refresh token by the CLI's own error text, so
+  one read should serve the session — inference from the cache and the strings,
+  not a measured long run.
+- **Container mode only**, like M1a–M5. M7 is untouched by this.
+- **One CLI version**, 2.1.220, and a third party's behaviour at one version is
+  what M1b already warned this class of finding is.

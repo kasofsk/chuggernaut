@@ -152,3 +152,5 @@ Doc-reread: infra/README.md
 Doc-reread: docs/design/440-native-worker-daemon.md
 
 Doc-reread: docs/design/517-docker-access-for-jobs.md
+
+Doc-reread: docs/design/529-secret-handling.md
