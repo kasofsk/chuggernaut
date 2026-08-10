@@ -136,3 +136,5 @@ Doc-reread: .chug/tasks/docs-update.md
 
 Doc-reread: docs/README.md
 Doc-reread: docs/reference/docs.md
+
+Doc-reread: docs/design/309-host-native-execution.md

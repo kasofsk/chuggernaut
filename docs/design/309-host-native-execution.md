@@ -45,6 +45,17 @@ See
 [the 2026-08-09 amendment on tenancy](#amendment--2026-08-09-job-526-8s-recommendation-is-unavailable-on-macos-and-10s-tenancy-list-is-now-the-only-bound)
 and [#322](322-macos-native-runtime.md), which owns the decision.
 
+**[§9](#9-environment-and-state)'s declared caches — P5 — split three ways on
+2026-08-10 (job #534).** On a host node there is no container, so `~/.gradle`,
+`~/.pub-cache` and DerivedData already persist in the login user's home between
+tasks and nothing reclaims them: the *persistence* half of §9 is free and the
+*bound* is missing. So **placement + eviction is the live gap**, namespacing is
+deferred behind single-tenancy, and §9's `chug.caches` flake attribute — kept,
+not deleted — has **no carrier** on a Mac, whose environment reference is
+`xcode:`. The intended declaration site is recorded as intent rather than taken.
+See
+[the 2026-08-10 correction](#correction--2026-08-10-job-534-9s-p5-splits-the-caches-already-work-so-the-live-gap-is-placement-and-eviction).
+
 Written against the tree at `b801b76`. Every claim about current behavior was
 read out of the source and out of [docs/spec.md](../spec.md), not inferred from
 the docs; where the job brief and the tree disagree, the tree wins and the
@@ -129,7 +140,11 @@ declare neither, and the platform now says so at placement instead of at nothing
 The rest of P3 — per-task users ([§8](#8-secrets-on-a-shared-host)), transient
 scopes as a *limits* mechanism ([§7](#7-resource-limits)) — and everything from
 P4 on is unstarted. [#440](440-native-worker-daemon.md) is the design for the
-native-supervision prerequisite P0 named and left unowned.
+native-supervision prerequisite P0 named and left unowned. **P5 is unbuilt as
+code and re-scoped as plan**: its GC-root and warm-set thirds were settled
+elsewhere, and what is left of its declared caches now names one live slice —
+relocating a host node's caches into a platform-owned root and evicting it — over
+two deferrals, per the 2026-08-10 correction linked above.
 
 The rows below are the states of [Phasing](#phasing)'s table, which keeps each
 phase's full argument; the seven-row table in
@@ -143,7 +158,7 @@ is the same work sliced by contract, not a second plan.
 | **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | **Landed** (job #483) for slice 5 — the record on both transports, additive, ingested in `probe_worker` with ping authoritative and docker-endpoint nodes synthesized; **Landed** (job #484) for slice 6 — `choose_placement` takes the required mode, excludes the nodes that do not serve it, and answers "no node advertises it" differently from "every capable node is full". P2 is complete: host work is routable |
 | **P3** | Per-task users; `resources_enforced`; transient scopes | **Partly landed** (job #524) — `resources_enforced` is consumed: `choose_placement` treats a launch declaring `resources.cpu`/`memory` as requiring enforcement **for its resolved mode**, and `HostBackend::admit` refuses one that reaches a node anyway ([the 2026-08-09 note](#note-2026-08-09--7s-predicate-and-backstop-landed-job-524)). Per-task users ([§8](#8-secrets-on-a-shared-host)) and transient scopes for *limits* ([§7](#7-resource-limits)) stay Proposed |
 | **P4** | Device leases | Proposed — only when a host node must run a second, non-device-bound task concurrently |
-| **P5** | Declared caches + GC roots + warm set | Proposed — gated on P1, independent of P2–P4 |
+| **P5** | Declared caches + GC roots + warm set | **Split** (job #534), and two thirds of the row have moved: GC roots shipped under [#373](373-project-toolchains.md) P1 (job #384) and the daemon warm set was withdrawn by #373 C4. What remains — declared caches — is three parts with three urgencies: **placement + eviction is the live gap** (unbuilt, and unblocked: it is node config), **namespacing is deferred** behind #525's single-tenancy, and **the declaration site is deferred** with its intended answer recorded, §9's flake attribute having no macOS carrier ([the 2026-08-10 correction](#correction--2026-08-10-job-534-9s-p5-splits-the-caches-already-work-so-the-live-gap-is-placement-and-eviction)) |
 
 ## Scope
 
@@ -1922,3 +1937,189 @@ structurally blocked on macOS by the daemon's GUI-domain requirement
 `resources_enforced` third is in, and nothing bounds a host task's cpu or memory
 on any platform — a host job type must still declare neither, which the platform
 now says out loud instead of implying.
+
+## Correction — 2026-08-10, job #534 (§9's P5 splits: the caches already work, so the live gap is placement and eviction)
+
+An operator decision re-scoping [§9's declared caches](#declared-mutable-caches)
+and the [P5](#phasing) row. §9's analysis is not withdrawn and nothing above is
+edited; what changes is which of its parts is urgent, which is deferred behind a
+stated trigger, and which has no carrier on the one host node that exists.
+
+### What the tree says, measured 2026-08-10
+
+**The persistence §9 designs is already there, and nobody built it.** A host
+task's environment inherits exactly `PATH` and `HOME` from the daemon
+(`INHERITED`, `crates/container/src/host.rs`), and the macOS daemon is a launchd
+**agent** in the login user's GUI domain — `deploy/prod/install-worker-launchd.sh`
+renders into that user's `Library/LaunchAgents`
+([#440](440-native-worker-daemon.md) D2), which is what
+[job #526](#amendment--2026-08-09-job-526-8s-recommendation-is-unavailable-on-macos-and-10s-tenancy-list-is-now-the-only-bound)
+accepted when the login user became the task user. So a host task's `$HOME`
+**is** the login user's home, and `~/.pub-cache`, `~/.gradle` and Xcode's
+DerivedData survive between tasks with no bind, no declaration and no mechanism
+at all. There is no container, so there is nothing to make them survive.
+[#308](308-gha-port.md)'s [A2](308-gha-port.md#a2-the-keyed-caching-gap-was-overstated)
+said this before there was a host node to check it against: what makes `gumbo`'s
+builds fast is *implicit host state, not a configured cache*.
+
+**Nothing reclaims them.** `HostBackend::remove` deletes the task directory, the
+files the launch's own metadata records outside it, and this task's MCP-log
+subtree out of the agent CLI's cache root (`crates/container/src/host.rs`,
+[#490](490-agent-work-on-a-mac.md) D6) — three reclaims, all three keyed to one
+task. The only other node-owned sweep is the stale-root reaper in
+`crates/worker/src/nix.rs`, which reaps GC **roots** rather than caches. No sweep
+anywhere touches a directory under the login user's home. So the caches are
+unbounded, on the node whose boot volume also holds `/nix/store` and every task's
+workspace — which is the node §9 says fills in a month.
+
+So §9's mechanism was designed to buy two things, host-task persistence and a
+bound on it, and the tree already has the first for free. P5 therefore splits
+into three parts with three different urgencies.
+
+### (a) Namespacing — deferred, trigger-gated
+
+`{root}/{owner}/{project}/{purpose}` exists so that two projects cannot collide
+on `~/.gradle`. Since job #525 host nodes are single-tenant **and enforced at the
+node**: `WORKER_HOST_PROJECTS`, read in `container::host::HostTenancy` at
+`HostBackend::admit`, a hard `BackendError::Launch` for any other project, and
+fail-closed when unset
+([the note above](#note-2026-08-09--10s-tenancy-list-is-built-job-525)). One
+project per host node makes the collision the thing that cannot happen.
+
+The trigger, in the shape [P4](#phasing) and [#367](367-android-emulator-execution.md)'s
+A3 row already use: **namespacing becomes live when a host node serves more than
+one project.** The dependency is inherited rather than intrinsic — the bound is
+job #525's policy, not a property of the caches — so if single-tenancy is ever
+relaxed, namespacing stops being deferred in the same breath, and the change that
+relaxes it owns this.
+
+### (b) Placement and eviction — the live gap, and one slice rather than two
+
+§9's *"Eviction is mandatory, not optional"* (docs/reference/style.md Tier 2 rule 3) is what is
+still owed, and it cannot be built on its own.
+
+**Eviction needs something to evict, and today the caches are in the login user's
+home, which the platform does not own.** A daemon deleting from the operator's
+own home is a different and worse act than one reclaiming a root the platform
+created — the same distinction #526 leaned on when it accepted the absent user
+boundary. So bounding requires **placing** first, and the two are one slice:
+
+1. the node relocates a set of caches into a platform-owned root and exports each
+   tool's own variable into the task (`PUB_CACHE`, `GRADLE_USER_HOME`, …), the
+   same shape `WORKER_CACHE_DIR`'s `RUSTC_WRAPPER`/`SCCACHE_DIR` injection
+   already has — worker-side, nothing on the wire;
+2. the node then evicts **that** root by LRU against a ceiling, bounded and loud
+   on hitting it.
+
+This is **node configuration** — a root, a ceiling, and the set the node
+relocates — so it needs no declaration site, which is exactly why it is not
+blocked on the question below. Not designed further here; a code job follows.
+
+### (c) The declaration site — deferred, with its intended answer recorded
+
+§9 recommends deriving the cache set node-side from a `chug.caches` attribute on
+the flake output the node is already evaluating. **That recommendation is not
+deleted and is not wrong; it has no carrier on macOS.** The one host node's
+environment reference is `xcode:26.5` (`.chug/jobs/mac-proof.yaml`), resolved by
+`crates/worker/src/xcode.rs` out of an installed app bundle into `DEVELOPER_DIR`
+plus `CHUG_ENV_PATH` ([#322](322-macos-native-runtime.md) W4). There is no flake,
+so there is no attribute to read.
+
+**Recorded as intent rather than as a decision taken** — the decision happens
+when the trigger fires, and this exists so it is not re-argued from scratch:
+**a file in the project repo, naming caches from a vocabulary the node defines**,
+read node-side against the job branch at its commit.
+
+The reasoning, which is the whole value of recording it:
+
+- **It keeps both properties the flake attribute kept.** Repo-versioned and
+  travelling with the project ([#308](308-gha-port.md)'s
+  [H.6](308-gha-port.md#h6-nixos-layering-where-tooling-lives) layering, and the
+  rule that config travels with the project repo), **and** the dispatcher
+  entirely cache-ignorant ([docs/spec.md](../spec.md) §3.1) — nothing rides the wire.
+- **That is not a coincidence.** The flake attribute worked *because* the node
+  was already reading something out of the project's own tree at the job's
+  commit. On a Mac there is no flake, but there is still a job branch to read.
+  Same idea, different carrier — and it serves a nix node equally, which
+  **retires** the scheme-specific answer instead of adding a second one beside it.
+- **The safety rule is load-bearing: the file selects names from a fixed
+  node-known vocabulary, never paths.** Otherwise a project names `~/.ssh` and
+  the node binds it. The node maps name → `{root}/{owner}/{project}/{name}` and
+  refuses a name it does not know. Reading a declarative file is strictly *less*
+  dangerous than evaluating a flake, which runs project-controlled code on the
+  node — something [§10](#10-trust-and-tenancy) already accepts for `nix:`.
+
+**One thing this correction fixes in §9's own reasoning, and the intent inherits
+it.** §9 states the host bootstrap is *"clone → realise → exec"*, and that is not
+the ordering the tree has. The clone is inside the task's **own command**
+(`bootstrap_cmd`, `crates/container/src/lib.rs`, spec §4.1), so at launch time
+the node holds no checkout; and a relative `nix:.#attr` is rewritten node-side to
+`git+{REPO_URL}?ref={JOB_BRANCH}&rev={JOB_SHA}#attr` and realised **before** the
+task runs (spec §3.1, `realise_for_launch` in `crates/worker/src/daemon.rs`) —
+nix fetches the repository itself rather than resolving against a clone. So "the
+file is already on disk when the node wants it" is false in both modes, and the
+honest precondition is what the landed nix path already does: **the node fetches
+the file itself, with the read-only single-repository git credential it already
+holds** (spec §5.2), at the same commit. A fetch to specify, not a blocker —
+stating it now is what keeps the slice from being designed against an ordering
+this tree does not have.
+
+Rejected, with their costs:
+
+- **Node config for the *set*.** Breaks #308 H.6's layering: a cache set is a
+  property of the project's toolchain, not of the machine, so every node needs
+  editing when a project adds one. Note carefully that this does **not** apply to
+  (b) — there the node declares its own disk, a root and a ceiling, which is a
+  machine fact and belongs in node config precisely because it is one.
+- **A wire field (`runtime.caches:`).** Costs a `CONFIG_SCHEMA_EPOCH` bump *and*
+  §3.1's cache-ignorance, and buys nothing the file does not. §9 already named it
+  the obvious answer and already declined it; nothing since has made it cheaper.
+- **Convention alone** — the node relocates a fixed set and nobody declares
+  anything. It guesses, and it does not extend: the set that is right for a
+  Flutter project is wrong for the next one and the project has no way to say so.
+  Fine as (b)'s *starting* set, because (b) is node config an operator can edit;
+  not an answer to who declares.
+
+### `WORKER_CACHE_DIR` is untouched
+
+Unchanged for container mode: one host dir, one bind at `CACHE_MOUNT_PATH`
+(`crates/container/src/docker.rs`), `RUSTC_WRAPPER`/`SCCACHE_DIR` injected
+worker-side, justified by sccache's cache being content-addressed and carrying no
+job state — §3.1's one permitted exception to "no host bind-mounts". §9 is
+explicit that a declared per-project cache is a **new mechanism, not a widening**
+of that one, and this correction does not blur them: a relocated `~/.gradle`
+carries job state and is not content-addressed, which is the same property that
+makes it need the eviction policy the sccache dir does not.
+
+### What is left of P5, and how the siblings citing it should be read
+
+P5's row read *"Declared caches + GC roots + warm set"*. Two of those three have
+already moved elsewhere, and the head's row now says so:
+
+- **GC roots landed** under [#373](373-project-toolchains.md) P1 (job #384),
+  `crates/worker/src/nix.rs`: one indirect root per task, released at exit, with
+  a bounded stale-root reaper.
+- **The warm set was withdrawn** by #373's
+  [C4](373-project-toolchains.md#c4-309-9s-daemon-warm-set-is-withdrawn-the-substituter-half-survives),
+  in both modes — a daemon-held warm set is a platform-owned list of project
+  environments, and a scheduled job declaring the env ([#310](310-scheduled-jobs.md))
+  is the same warming with the project owning the list and the cadence. The
+  substituter half survives.
+- **Declared caches** is what remains, and it is the three parts above.
+
+Three documents cite "#309 P5" and **none is edited**: each is true as the record
+of what was believed when it was written, which is what an append-only body is
+for. Two would mislead a reader arriving today, so what they should now be read
+as is stated here instead:
+
+- **#367's T4** describes P5 as the flake-attribute-derived per-project cache set
+  scoped to `WORKER_HOST_CACHE_ROOT` and derived from `runtime.env`. The
+  derivation is exactly what (c) defers; T4's actual conclusion — that this is
+  host-mode machinery and not something container-mode #367 should wait on — is
+  unaffected.
+- **#308's gap-4 row** calls the remnant *"one namespaced persistent directory in
+  the worker — #309 §9, no platform change"*. "No platform change" still holds;
+  "namespaced" is (a) and is now deferred. What that row is asking for is (b).
+- **#373's [C2](373-project-toolchains.md#c2-309-9s-mechanism-is-not-host-mode-only)**
+  cites P5's "Independent of P2–P4" only to extend that independence to the
+  environment mechanism, which this split does not touch.
