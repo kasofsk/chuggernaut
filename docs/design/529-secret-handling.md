@@ -1,6 +1,8 @@
 # Design #529 — Secret handling: the declarative model's edges, and the platform token's reach
 
-Status: PROPOSED — nothing below is built; M2 is answered and S2 is no longer gated on it.
+Status: IMPLEMENTED IN PART — S1a has landed (job #545) and is observe-only;
+everything else below is proposed, and M2 is answered so S2 is no longer gated
+on it.
 
 Written against the tree at `927067b` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a
@@ -49,7 +51,8 @@ the argument and its dated corrections, never edited
 | The SSH key and certificate are minted per task at the same TTL | `ssh_credential_files`, `exec.rs` | **Landed** |
 | A workload token is minted per container, TTL-capped | [`docs/spec.md`](../spec.md) §8.3, [#313](313-workload-identity-image-builds.md) | **Landed** (epoch 5, proved in job #430) |
 | Declared secrets, project `vars` and `global/agents` carry a TTL | — | **No.** Injected verbatim; lifetime is rotation discipline |
-| `global/agents` is narrowed to what the agent CLI needs | `inject_platform_agent_secrets`, `exec.rs` | **No.** The *whole scope* reaches every agent launch |
+| `global/agents` is narrowed to what the agent CLI needs | `inject_platform_agent_secrets`, `exec.rs` | **No.** The *whole scope* still reaches every agent launch — S1a only logs, by name, what S1b would decline |
+| A provider-credential name set exists in the tree | `PROVIDER_CREDENTIAL_NAMES`, [`crates/agent/src/lib.rs`](../../crates/agent/src/lib.rs), from `claude::CREDENTIAL_ENV_NAMES` | **Landed** (S1a). Nothing consults it as an exclusion yet |
 | The platform's provider token is out of the task's reach | — | **No.** Env-delivered, and the env is readable for the process's life (§[3](#3-decision-1-what-the-measurement-says)) |
 | The agent CLI will take that token from a withdrawable source instead | `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, the shipped CLI | **Yes, measured** (M2, job #546) — an inherited fd, read once, leaving no file and no env entry. Unused today |
 | …and `apiKeyHelper` is the fallback if it will not | `--settings`, the same CLI | **No.** Measured: the helper's output is used as an API key and this credential is an OAuth token, rejected as `Invalid API key` |
@@ -149,7 +152,7 @@ that no cleanup path reaches.
 
 | # | What | State |
 | --- | --- | --- |
-| **S1a** | Log, by name, every `global/agents` name `inject_platform_agent_secrets` would decline under S1b's set — while still injecting all of them | Proposed — observe-only; one release, so S1b excludes nothing a run depends on |
+| **S1a** | Log, by name, every `global/agents` name `inject_platform_agent_secrets` would decline under S1b's set — while still injecting all of them | **Landed** (job #545) — observe-only; one release, so S1b excludes nothing a run depends on |
 | **S1b** | Narrow the injector from "every name under `global/agents`" to a platform-configured provider-credential name set, injecting nothing else | Proposed — after S1a; no schema field, no epoch, moves *reach* |
 | **M2** | Measure whether the agent CLI authenticates from an inherited fd (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`) with no token in the env | **Landed** (job #546) — it does, proved by a real completion; the fallback (d) does **not** take this credential. [The record](#correction--2026-08-10-job-546-m2-measured-the-fd-source-authenticates-and-apikeyhelper-will-not-take-this-credential) |
 | **S2** | Deliver the provider credential on an inherited fd — the container's own `sh -c` entrypoint opens the injected file, unlinks it and execs `claude` with the fd number — and stop putting it in the launch env | Proposed — **no longer gated**; ships with M6, moves *reach*. (d) is not the fallback it was written as |

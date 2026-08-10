@@ -25,6 +25,11 @@ use std::sync::Arc;
 /// container's own root can read it.
 pub const MCP_CONFIG_PATH: &str = "/chuggernaut/mcp-config.json";
 
+/// The env names this CLI authenticates from — an OAuth token or a long-lived
+/// API key (design #529 M8). The platform reads neither itself; it forwards
+/// them, so the list is a statement about the CLI rather than about this crate.
+pub const CREDENTIAL_ENV_NAMES: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+
 pub struct ClaudeProvider {
     backend: Arc<dyn ContainerBackend>,
 }

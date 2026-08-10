@@ -337,6 +337,60 @@ async fn wait_for_state(store: &NatsStore, seq: u64, want: JobState) -> types::J
     .await
 }
 
+/// Design #529 S1a is observe-only: a `global/agents` name outside the
+/// provider-credential set is logged as a would-decline and still reaches the
+/// agent container, and a **command** container receives neither name — the
+/// grant is agent-CLI plumbing, so the slice changes nothing there either.
+#[tokio::test]
+async fn every_global_agents_name_still_reaches_the_agent_and_no_command_container() {
+    let Some(rig) = rig().await else { return };
+    let bucket = rig.store.raw_bucket(store::buckets::SECRETS).await.unwrap();
+    for (name, value) in [
+        ("CLAUDE_CODE_OAUTH_TOKEN", "oauth-tok"),
+        ("EXTRA_MCP_TOKEN", "extra-tok"),
+    ] {
+        bucket
+            .put_json(&format!("global.agents.{name}"), &value.to_string())
+            .await
+            .unwrap();
+    }
+    commit_work(&rig);
+    rig.backend
+        .put_file("/workspace/eval-result.json", br#"{"ok": true}"#.to_vec());
+
+    let job = rig.handle.create_job(req("impl-cmd")).await.unwrap();
+    rig.handle.release_job("acme", "api", job.id).await.unwrap();
+    wait_for_state(&rig.store, job.id, JobState::Done).await;
+
+    let runs = rig.provider.runs();
+    assert_eq!(
+        runs[0]
+            .env
+            .get("CLAUDE_CODE_OAUTH_TOKEN")
+            .map(String::as_str),
+        Some("oauth-tok")
+    );
+    assert_eq!(
+        runs[0].env.get("EXTRA_MCP_TOKEN").map(String::as_str),
+        Some("extra-tok"),
+        "S1a reports this name as a would-decline and injects it regardless"
+    );
+
+    let eval = rig
+        .backend
+        .launches()
+        .into_iter()
+        .find(|c| c.cmd.iter().any(|arg| arg.contains("./ci.sh")))
+        .expect("the ci evaluator ran in a container");
+    for name in ["CLAUDE_CODE_OAUTH_TOKEN", "EXTRA_MCP_TOKEN"] {
+        assert!(
+            !eval.env.contains_key(name),
+            "a command container receives no global/agents name: {name}"
+        );
+    }
+    assert_invariants_of(&rig.invariants);
+}
+
 #[tokio::test]
 async fn agent_work_commits_eval_passes_squash_merges_to_done() {
     let Some(rig) = rig().await else { return };

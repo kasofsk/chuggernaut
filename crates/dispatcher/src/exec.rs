@@ -74,6 +74,38 @@ pub(crate) fn reserved_env_prefix(name: &str) -> Option<(&'static str, &'static 
     }
 }
 
+/// Whether [`Core::inject_platform_agent_secrets`] injects this `global/agents`
+/// name, pushing it onto `declined` when the membership test design #529 S1b
+/// will add would have excluded it. The reserved-**prefix** test stays separate
+/// from that **membership** test: the prefix declines a name today, a
+/// would-decline is still injected and only observed.
+fn inject_platform_agent_secrets_admit(name: &str, declined: &mut Vec<String>) -> bool {
+    if name.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX) {
+        return false;
+    }
+    if !agent::is_provider_credential(name) {
+        declined.push(name.to_string());
+    }
+    true
+}
+
+/// The S1a observation line, or `None` when the scope holds nothing outside the
+/// provider-credential set. Names only, never values — the point of the slice is
+/// that an operator sees which names a later release would stop injecting while
+/// every one of them is still injected.
+fn inject_platform_agent_secrets_notice(declined: &[String]) -> Option<String> {
+    (!declined.is_empty()).then(|| {
+        format!(
+            "global/agents: injected {} name(s) outside the provider-credential set ({}) — \
+             design #529 S1b WOULD DECLINE {}, and nothing is excluded yet. A run depending \
+             on one of these names must have it declared elsewhere before S1b lands.",
+            declined.len(),
+            agent::PROVIDER_CREDENTIAL_NAMES.join(", "),
+            declined.join(", ")
+        )
+    })
+}
+
 /// Working memory for a job in Work/Evaluation. Restart rebuild is the
 /// reconcile slice; until then a dispatcher restart drops in-flight jobs.
 pub struct ExecState {
@@ -1789,21 +1821,23 @@ impl Core {
 
     /// Platform agent credentials (§8.2): every secret under the reserved
     /// `global/agents` scope is injected into every *agent* container — work
-    /// agents and agent evaluators — env-named by the secret. Declared
-    /// (project/evaluator) secrets win on name collision. Command containers
-    /// never receive them: the provider credential is agent-CLI plumbing,
-    /// not task input.
+    /// agents, agent evaluators and forge-ingest triage — env-named by the
+    /// secret, with declared (project/evaluator) secrets winning on name
+    /// collision. Command containers never receive them, and a name outside
+    /// [`agent::PROVIDER_CREDENTIAL_NAMES`] is injected exactly as before and
+    /// only *reported* (design #529 S1a).
     pub(crate) async fn inject_platform_agent_secrets(
         &self,
         env: &mut HashMap<String, String>,
     ) -> Result<()> {
         const SCOPE: &str = "agents";
         let owner = store::keys::RESERVED_OWNER;
+        let mut declined: Vec<String> = Vec::new();
         match &self.secrets {
             Some(secrets) => {
                 use store::secrets::SecretStore;
                 for name in secrets.list(owner, SCOPE).await? {
-                    if name.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX) {
+                    if !inject_platform_agent_secrets_admit(&name, &mut declined) {
                         continue;
                     }
                     if let Some(value) = secrets.get(owner, SCOPE, &name).await? {
@@ -1818,12 +1852,15 @@ impl Core {
                     if let (Some(name), Some(value)) = (
                         key.strip_prefix(&prefix),
                         bucket.get_json::<String>(&key).await?,
-                    ) && !name.starts_with(crate::forge_ingest::origin::RESERVED_SECRET_PREFIX)
+                    ) && inject_platform_agent_secrets_admit(name, &mut declined)
                     {
                         env.entry(name.to_string()).or_insert(value);
                     }
                 }
             }
+        }
+        if let Some(notice) = inject_platform_agent_secrets_notice(&declined) {
+            tracing::info!("{notice}");
         }
         Ok(())
     }
@@ -2235,8 +2272,78 @@ mod tests {
     //! recover-or-reset lookup over a real bare repo. The end-to-end resume
     //! (crash-after-push → retry recovers + prompt notes it) is exercised in
     //! Tier-2 (`tests/execution.rs`).
-    use super::{channel_mcp_for, recover_or_reset_branch, reserved_env_prefix};
+    use super::{
+        channel_mcp_for, inject_platform_agent_secrets_admit, inject_platform_agent_secrets_notice,
+        recover_or_reset_branch, reserved_env_prefix,
+    };
     use test_utils::repo::TempRepo;
+
+    /// One `global/agents` scope listing, as the injector reads it: a provider
+    /// credential, a name S1b's set does not hold, and a reserved-prefix name.
+    fn scope_listing() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("CLAUDE_CODE_OAUTH_TOKEN", "oauth-value-aaa"),
+            ("EXTRA_MCP_TOKEN", "mcp-value-bbb"),
+            ("CHUG_ORIGIN_PAT", "pat-value-ccc"),
+        ]
+    }
+
+    /// Replays the injector's own loop over [`scope_listing`], returning what
+    /// reached the env and what S1b would have declined.
+    fn admit_scope_listing() -> (Vec<&'static str>, Vec<String>) {
+        let mut declined = Vec::new();
+        let injected = scope_listing()
+            .into_iter()
+            .filter(|(name, _)| inject_platform_agent_secrets_admit(name, &mut declined))
+            .map(|(name, _)| name)
+            .collect();
+        (injected, declined)
+    }
+
+    /// Design #529 S1a: the observe-only release excludes nothing. A name
+    /// outside the provider-credential set is reported as a would-decline and
+    /// injected anyway; a name inside it is injected and reported by nobody.
+    #[test]
+    fn a_name_outside_the_provider_set_is_reported_and_still_injected() {
+        let (injected, declined) = admit_scope_listing();
+
+        assert_eq!(
+            injected,
+            ["CLAUDE_CODE_OAUTH_TOKEN", "EXTRA_MCP_TOKEN"],
+            "every non-reserved name still reaches the env — S1a excludes nothing"
+        );
+        assert_eq!(
+            declined,
+            ["EXTRA_MCP_TOKEN"],
+            "only the name outside the set is a would-decline"
+        );
+        assert!(
+            !declined.iter().any(|n| n == "CHUG_ORIGIN_PAT"),
+            "the reserved prefix declines today — it is not an S1b would-decline"
+        );
+    }
+
+    /// The log line names names and nothing else: no value from the scope may
+    /// appear in it, and it must read as a decline S1b *would* make.
+    #[test]
+    fn the_decline_notice_carries_names_never_values() {
+        let (_, declined) = admit_scope_listing();
+        let notice = inject_platform_agent_secrets_notice(&declined).expect("a would-decline");
+
+        assert!(notice.contains("EXTRA_MCP_TOKEN"), "{notice}");
+        assert!(notice.contains("WOULD DECLINE"), "{notice}");
+        for (_, value) in scope_listing() {
+            assert!(
+                !notice.contains(value),
+                "a secret value reached the log: {notice}"
+            );
+        }
+        assert_eq!(
+            inject_platform_agent_secrets_notice(&[]),
+            None,
+            "a scope holding only provider credentials logs nothing"
+        );
+    }
 
     /// The single decision site `container_env`'s var and secret loops skip on
     /// and release validation refuses on, so the two can never disagree about
