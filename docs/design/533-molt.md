@@ -1,7 +1,7 @@
 # Design #533 — The molt: shedding the doc corpus at a milestone
 
-Status: IMPLEMENTED IN PART — S1's capability is in the tree; its deploy and
-S2–S6 are the remaining programme, and the slice table says where each stands.
+Status: IMPLEMENTED IN PART — S1 and S1b are landed; S2–S6 remain.
+The slice table says where each stands.
 
 Written against the tree at `ef11e80` (2026-08-09). Every number here was read out
 of that commit and the command is given so a reader can re-run it rather than
@@ -43,7 +43,7 @@ verification and its own job type rather than being a large `docs` job.
 | **D4** | Five **surviving-fact classes**, named so a reviewer rejects by name; everything else is saga, and the default is keep | [D4](#d4-what-survives-and-the-default-is-keep) |
 | **D5** | A mechanical **eligibility test** for deletion, so a gate can hold it rather than a reviewer's judgement alone | [D5](#d5-when-a-design-doc-may-be-deleted) |
 | **D6** | Execution is **one job with a fan-out inside it**, and the apply phase is **partitioned by destination file** so conflicts cannot form | [D6](#d6-one-job-a-fan-out-and-a-partition) |
-| **D7** | **Quiescence is operator discipline**, and it is also what makes "dirtied since the last molt" a well-defined question | [D7](#d7-quiescence-is-discipline-and-it-buys-a-watermark) |
+| **D7** | **Quiescence is operator discipline**, and it is also what makes "dirtied since the last molt" a well-defined question | [D7](#d7-quiescence-is-discipline-and-it-buys-a-watermark), then [the 2026-08-10 correction](#correction-2026-08-10--s3s-rename-detection-requirement-was-misdiagnosed-job-544) — D7's stated requirement for S3's reader is wrong |
 
 ### What the corpus looks like now
 
@@ -94,17 +94,22 @@ than a deferral — see [what 415 costs](#what-415-costs-and-why-it-is-not-in-th
 | Slice | What | Gate on |
 | --- | --- | --- |
 | **S1** | Per-type `tools:` grant so a job type may declare `Task`/`Workflow`, epoch-gated as `workload_identities:` is | **Landed** (job #535) |
-| **S1b** | The **deploy** carrying `TOOLS_SCHEMA_EPOCH` to the running dispatcher, because a config declaring the new epoch cannot merge until a dispatcher carrying it runs (spec §14.3) | Proposed |
+| **S1b** | The **deploy** carrying `TOOLS_SCHEMA_EPOCH` to the running dispatcher, because a config declaring the new epoch cannot merge until a dispatcher carrying it runs (spec §14.3) | **Landed** — the dispatcher runs `fa1c414`, reporting `schema_epoch: 6` |
 | **S2** | The machinery: `.chug/jobs/molt.yaml` <!-- intent -->, its work prompt and evaluators, and `.chug/tasks/check-molt.sh` <!-- intent --> with a `.test.sh` sibling | Proposed |
-| **S3** | `.chug/tasks/molt-debt.sh` <!-- intent --> — the git-derived reader that says how much shell has re-grown since the last molt | Proposed |
+| **S3** | `.chug/tasks/molt-debt.sh` <!-- intent --> — the git-derived reader that says how much shell has re-grown since the last molt. Read [the 2026-08-10 correction](#correction-2026-08-10--s3s-rename-detection-requirement-was-misdiagnosed-job-544) before implementing it: the body's stated requirement is the wrong one | Proposed |
 | **S4** | The first molt's cheap half: the reference tier and `CLAUDE.md`, where narrating a change is *already* out of policy, and the 24 design **heads**, which are already mutable | Proposed |
 | **S5** | The deletions — six of the seven docs above, with every surviving referrer repointed or stubbed | Proposed |
 | **S6** | #415's own disposition, decided on its own evidence rather than by the rule that covers the other six | Proposed |
 
-S1 is landed and nothing else is, so `Status:` is `IMPLEMENTED IN PART`. S1b is
-S2's real prerequisite rather than S1 — the capability being in the tree is not
-the same as a dispatcher that parses it — and S4 must precede S5, for reasons the
-body gives; the rest is orderable.
+S1 and S1b are landed and nothing else is, so `Status:` is `IMPLEMENTED IN PART`.
+S1b was S2's real prerequisite rather than S1 — the capability being in the tree is
+not the same as a dispatcher that parses it — and it is now **satisfied**, so S2 is
+unblocked: the running dispatcher and both worker nodes report
+`0.1.0+fa1c4140`, and `GET /api/v1/platform/config` answers `schema_epoch: 6`.
+Its cell carries no `(job #N)` because a deploy job merges nothing, so there is no
+`job/N: deploy` squash for check 3 to resolve — a bare `**Landed**` is the shape
+that check skips, and the sha is the evidence in its place. S4 must precede S5, for
+reasons the body gives; the rest is orderable.
 
 ### Not registered as a concept
 
@@ -370,3 +375,69 @@ targeted one is not.
 - [#415](415-knowledge-architecture.md) — the knowledge architecture, whose S2
   sweep is the closest thing the tree has to a molt and whose S9 precedent is why a
   path can outlive its document.
+
+## Correction, 2026-08-10 — S3's rename-detection requirement was misdiagnosed (job #544)
+
+D7's paragraph on the watermark stated a requirement for S3's reader and got both
+halves wrong: the figure it cites was never measured, and the property it demands is
+one git already provides. The second half matters more, because an implementer
+following it as written would have produced a reader that silently reports every
+moved doc as a total rewrite while appearing to have taken the precaution.
+
+**The figure.** The paragraph gives `docs/spec.md` as `+243 / −71` since job #441
+moved it. That pair corresponds to no measurement. With
+`git diff -M --numstat 15dccc6~1..<sha> | grep 'spec\.md'`:
+
+| At | Figure |
+| --- | --- |
+| `ccb9cad`, the commit that wrote the sentence | `+112 / −49` |
+| `fa1c414`, this correction | `+124 / −52` |
+
+**The diagnosis.** The paragraph says "rename detection must be on". Rename
+detection **is** on: `diff.renames` has defaulted to true since git 2.9, this repo
+does not set it (`git config --get diff.renames` is empty), and both gits that have
+measured this — 2.39.5 in the job container, 2.50.1 on the operator's host — are
+well past 2.9. Passing `-M` changes nothing. What actually produces the
+total-rewrite misreading is the **pathspec** — limiting the diff to the doc's
+current path drops the deletion of the old path, so no rename pair exists for the
+detection to find, with `-M` or without it. Four forms over `15dccc6~1..fa1c414`:
+
+| Form | Result |
+| --- | --- |
+| `git diff -M --numstat A..B -- docs/spec.md` | `2714 0 docs/spec.md` — `-M` present and useless |
+| `git diff -M --numstat A..B`, filtered for `spec.md` | `124 52 spec.md => docs/spec.md` |
+| `git diff --numstat A..B`, no `-M` at all | `124 52 spec.md => docs/spec.md` |
+| `git diff -M --numstat A..B -- docs/spec.md spec.md` | `124 52 spec.md => docs/spec.md` |
+
+The original sentence's `+2,705 / −0` re-measures as `+2,714 / −0`, which is the
+other reason to quote a sha: that number grows with every edit to the doc.
+
+**So S3's requirement is restated.** It is not "turn `-M` on" but **never limit the
+diff to a single doc's current path** — take the whole-tree diff and match the
+`old => new` row, or name both paths in the pathspec.
+
+One further trap, since it produces a plausible wrong number rather than an obvious
+one: `git log --follow --numstat` **summed** is a different quantity, and the
+command is quoted here because this correction's own first draft got it wrong.
+Summing both columns of `git log --follow --numstat --pretty=tformat:
+15dccc6~1..fa1c414 -- docs/spec.md` gives `+156 / −84` over 31 rows, against the
+end-to-end `+124 / −52`, because per-commit deltas count twice any line touched in
+more than one commit. The range matters as much as the method: dropping the `~1`
+excludes the move commit's own `9 9  spec.md => docs/spec.md` row and yields a third
+plausible number, `+147 / −75`. Neither may be printed as the end-to-end figure.
+`--follow` stays correct for **counting commits**, which is the only thing D7 uses
+it for.
+
+Three neighbouring figures were re-measured and are **right**, so they are recorded
+here rather than changed. D4's "113 lines narrating 18 corrections" for #415 holds —
+that doc carries exactly 18 dated appendages and opens `## Current state` at line
+130. The 440 figures in the head are correct as of `ef11e80`, the tree this document
+was written against; 440 is now 3,564 lines with 20 corrections, which is drift in
+another doc and precisely what S3 exists to report. And
+`415-knowledge-architecture.md`'s statement about the epoch `infra/README.md`
+carried sits inside that doc's append-only body as a dated 2026-08-05 finding. The
+epoch has moved since, and the sentence is still correct as history — which is the
+reading that paragraph itself argues for. Editing it would break append-only in
+order to introduce an error. That this correction's own first draft tripped the
+stale-constant gate on that very sentence is the argument in miniature: a number
+restated outside the body that dated it goes wrong on its own.
