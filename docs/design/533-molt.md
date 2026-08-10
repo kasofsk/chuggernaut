@@ -1,0 +1,360 @@
+# Design #533 — The molt: shedding the doc corpus at a milestone
+
+Status: PROPOSED — nothing below is built, and the slice table is the programme.
+
+Written against the tree at `ef11e80` (2026-08-09). Every number here was read out
+of that commit and the command is given so a reader can re-run it rather than
+trust it. One prerequisite is already live and is not a slice of this design: the
+heading-anchor invariant, check 6 of `.chug/tasks/check-doc-facts.sh`, landed in
+jobs #531 and #532 before this document was argued. A molt rewrites headings and
+moves docs, so it needed a corpus where a dangling `#anchor` fails a job; that
+corpus now exists, at zero dangling links out of 1,307.
+
+## Current state
+
+*This section is the **mutable head**: it is rewritten to current truth whenever
+anything below it changes. Everything after the horizontal rule is append-only —
+the argument and its dated corrections, never edited. The head is what you read to
+know where things stand; the body is what you read to know why. This follows
+[#415](415-knowledge-architecture.md) D2.*
+
+### The rule, in one sentence
+
+**A molt removes true sentences.** Every other doc job removes false ones or adds
+missing ones; a molt is the only one whose product is a corpus that states
+strictly fewer facts than it did, and whose every removal is named and licensed by
+a rule.
+
+### Why the existing gates cannot cover it
+
+The five gates in `docs/reference/docs.md` are all built to catch a doc saying
+something **wrong**. Shedding produces docs that say something **less**. Nothing
+in the tree can tell compaction from amputation, which is why a molt needs its own
+verification and its own job type rather than being a large `docs` job.
+
+### Decisions
+
+| # | Decision | Where argued |
+| --- | --- | --- |
+| **D1** | A molt is **per project, at a milestone** — one event, with other work stopped, not a routine per-doc chore | [D1](#d1-per-project-at-a-milestone) |
+| **D2** | Sheddings are **deleted**. No archive directory, no retrieval key: git holds the history and the job records hold the work | [D2](#d2-there-is-nowhere-for-sheddings-to-go) |
+| **D3** | A **completely-implemented** design doc is deleted outright rather than compacted, which keeps the licensed exception to append-only as small as possible | [D3](#d3-delete-the-doc-do-not-compact-the-body) |
+| **D4** | Five **surviving-fact classes**, named so a reviewer rejects by name; everything else is saga, and the default is keep | [D4](#d4-what-survives-and-the-default-is-keep) |
+| **D5** | A mechanical **eligibility test** for deletion, so a gate can hold it rather than a reviewer's judgement alone | [D5](#d5-when-a-design-doc-may-be-deleted) |
+| **D6** | Execution is **one job with a fan-out inside it**, and the apply phase is **partitioned by destination file** so conflicts cannot form | [D6](#d6-one-job-a-fan-out-and-a-partition) |
+| **D7** | **Quiescence is operator discipline**, and it is also what makes "dirtied since the last molt" a well-defined question | [D7](#d7-quiescence-is-discipline-and-it-buys-a-watermark) |
+
+### What the corpus looks like now
+
+Measured at `ef11e80`:
+
+| Figure | Value | Command |
+| --- | --- | --- |
+| Design corpus | 28,327 lines, 24 docs | `git ls-files 'docs/design/*.md' \| xargs wc -l` |
+| Lines below a doc's first `## Correction`/`Finding`/`Amendment` | **17,949 — 63%** | per-doc, first such heading to EOF |
+| Docs whose `Status:` is completely `IMPLEMENTED` | **7 docs, 11,508 lines — 40%** | `grep -m1 '^Status:'` per doc |
+| Job-number references in *reference* docs | ~578 | `grep -oE '(#\|job )[0-9]{3}'` over the reference tier |
+| Anchored links, and dangling ones | 1,307 and **0** | check 6, live since job #532 |
+
+`440-native-worker-daemon.md` is the shape of the problem: 3,451 lines and 20
+corrections, of which five (jobs #455–#459) are one debugging chain whose durable
+residue is a single sentence. Its head, whose stated purpose in
+`docs/reference/docs.md` is to spare a reader "reconstructing the present from an
+original plus N corrections", opens with three paragraphs doing exactly that.
+
+### The deletable set
+
+The seven docs whose `Status:` leads with `IMPLEMENTED` and is not `IMPLEMENTED IN
+PART`, with the referrers that survive them:
+
+| Doc | Lines | Surviving referrers | Of which non-doc |
+| --- | --- | --- | --- |
+| `docs/design/440-native-worker-daemon.md` | 3,451 | 13 | 3 |
+| `docs/design/415-knowledge-architecture.md` | 2,853 | **21** | 3 |
+| `docs/design/490-agent-work-on-a-mac.md` | 1,755 | 11 | 4 |
+| `docs/design/311-job-inputs.md` | 993 | 12 | **6** |
+| `docs/design/310-scheduled-jobs.md` | 841 | 5 | 0 |
+| `docs/design/293-worker-capacity.md` | 838 | 7 | 0 |
+| `docs/design/321-job-groups.md` | 777 | 10 | **7** |
+
+**#415 is excluded from the first molt**, and that exclusion is a decision rather
+than a deferral — see [what 415 costs](#what-415-costs-and-why-it-is-not-in-the-first-molt).
+
+### Slices
+
+| Slice | What | Gate on |
+| --- | --- | --- |
+| **S1** | Per-type `tools:` grant so a job type may declare `Task`/`Workflow`, epoch-gated as `workload_identities:` is; then a **deploy**, because a config declaring the new epoch cannot merge until a dispatcher carrying it runs | Proposed |
+| **S2** | The machinery: `.chug/jobs/molt.yaml` <!-- intent -->, its work prompt and evaluators, and `.chug/tasks/check-molt.sh` <!-- intent --> with a `.test.sh` sibling | Proposed |
+| **S3** | `.chug/tasks/molt-debt.sh` <!-- intent --> — the git-derived reader that says how much shell has re-grown since the last molt | Proposed |
+| **S4** | The first molt's cheap half: the reference tier and `CLAUDE.md`, where narrating a change is *already* out of policy, and the 24 design **heads**, which are already mutable | Proposed |
+| **S5** | The deletions — six of the seven docs above, with every surviving referrer repointed or stubbed | Proposed |
+| **S6** | #415's own disposition, decided on its own evidence rather than by the rule that covers the other six | Proposed |
+
+No row is landed, so `Status:` stays `PROPOSED`. S1 must precede S2 and S4 must
+precede S5, for reasons the body gives; the rest is orderable.
+
+### Not registered as a concept
+
+`molt` gets no `docs/concepts.md` row. That registry's criterion needs both halves
+— a reader must need the term to read some *other* doc, **and** more than one doc
+must explain it — and the second fails while this is the only doc that explains it.
+Registering it early would also turn check 4 on tree-wide for a word every molt
+commit writes. If `docs/reference/docs.md` later absorbs the shed rule as
+present-tense policy, two docs will explain it and the row becomes correct then.
+
+---
+
+## The record
+
+Append-only from here. The head above is the current state; what follows is the
+argument, and any later correction is appended and linked from the head.
+
+## D1. Per project, at a milestone
+
+The unit is the project, not the document. A molt is taken when the project
+reaches a milestone: work stops, the corpus is shed whole, and work resumes.
+
+The alternative — molt each doc as it gets long — was considered and rejected on
+two grounds. The first is that the expensive act is **cross-doc**: a fact worth
+keeping usually belongs in a reference doc rather than in the design body it is
+being lifted out of, and a per-doc molt cannot move a fact from doc A into doc B
+without becoming a corpus-wide edit anyway. The second is that per-doc molting has
+no natural trigger. A doc is never obviously "long enough", and a rule with a
+threshold invites the threshold to become the target.
+
+A milestone supplies the trigger from outside the corpus, which is what keeps the
+decision honest. It also makes the shedding legible: one commit, one event, one
+before and after.
+
+## D2. There is nowhere for sheddings to go
+
+Shed prose is deleted. Not moved to an archive directory, not preserved behind a
+retrieval key in the head, not collapsed into a terminal section the head
+disclaims. Deleted.
+
+The record of the work is not what a molt destroys, and this is the load-bearing
+observation: the jobs remain in git history and in the platform's job records, so
+the *what happened* is recoverable by anyone who needs it. What a molt destroys is
+the corpus's obligation to carry the narration in the reading path.
+
+Three alternatives, and the argument is that there is no third option:
+
+- **A tracked archive** is still in the corpus that the *next* molt must molt. It
+  converts a one-time cleanup into a permanent liability, which is precisely the
+  failure the concept exists to fix. It also costs a `docs/README.md` catalogue row
+  per file, and is an orphan unless something links it.
+- **An untracked archive** is unmaintainable by construction. #415 S11's `wiki/`
+  clause is deferred permanently for exactly this reason: an untracked file is the
+  operator's to move, not a job's. Out of every gate's reach is out of every job's
+  reach.
+- **A terminal section the head disclaims** relabels reading cost without reducing
+  it. #415 already has that shape, with a rule and a `## The record` heading, and it
+  is the second-longest document in the tree. An agent told to read a design loads
+  the whole file regardless of what the heading above the second half says.
+
+One rule survives from that reasoning and is not negotiable: **a design doc's path
+never dies.** #415 S9 reduced `docs/design-docs.md` to a pointer rather than
+deleting it, because four of its inbound references sat in append-only bodies and
+in code. A molt shrinks and removes content; where a path is a contract, the path
+stays as a stub.
+
+## D3. Delete the doc, do not compact the body
+
+`docs/reference/style.md`'s doc-claim rule states outright that an append-only
+design body "cannot be rewritten, but it can be annotated". A molt that compacted
+bodies in place would need that rule excepted, and the exception would be the most
+dangerous thing in this design: every future agent would read the molt commit as
+precedent for editing bodies at will.
+
+Deleting the doc needs no such exception. Removing a file does not edit an
+append-only body; it removes the body along with its head. So the licensed
+exception shrinks from "a molt may rewrite any body" to "a molt may delete a design
+doc that meets [D5](#d5-when-a-design-doc-may-be-deleted)'s test" — a much smaller
+grant, and one a gate can check.
+
+That leaves the docs that are *not* completely implemented, whose bodies keep
+growing. This design deliberately does not solve that. S4 takes their **heads**,
+which are already mutable and need no new licence, and measurement afterwards
+decides whether body compaction is ever worth its exception. The heads are also
+where the reading cost concentrates: 440's is roughly 130 lines of chronology, and
+the head of #415 spends 113 lines narrating 18 corrections before reaching its
+current-state section.
+
+## D4. What survives, and the default is keep
+
+The unit of judgement is the passage, not the sentence, because that is the
+granularity at which this corpus accretes — the saga arrives as whole
+`### What this does not do` sections, not as stray clauses.
+
+One question sits under every class: *if a future agent never read this passage,
+what would it do wrong?* Nothing → shed. Re-litigate a question the project has
+already paid for → it survives, and that keep outranks every shed.
+
+| Class | Survives because | Example at `ef11e80` |
+| --- | --- | --- |
+| **Live constraint** | It binds a file somebody writes tomorrow | #309 §7's rule that a job type must not declare `resources.cpu` or `resources.memory` to run host jobs on macOS — buried at line 918 of an append-only body, so it exists and is unread. A molt **promotes** it into reference rather than keeping it |
+| **Rejected alternative still purchasable** | Its whole value is preventive | #309's rejection of `DOCKER_NODES` static config, which relocates a physical fact "into operator-typed config that goes silently wrong after a `nixos-rebuild`". Availability, not correctness, is the test, so nearly all rejections survive; a molt may compact one to a line, and may not drop it |
+| **Open hole** | An unpaid debt reads exactly like saga — old, names a job, narrates a failure — and is the highest-value content in the corpus | #415's head recording a gate-scope gap "left open, not closed". **Immune regardless of age** |
+| **Measurement still serving as evidence** | The rule it justifies is still live | #415's M7, that the signal "was never absent; it was never *aimed*". A spent count whose property a gate now maintains sheds, because the gate is the better witness |
+| **Fact about the world** | It is not about us | That `systemd-run --scope` expands the command line itself. The five jobs that discovered it are the saga; the behaviour is not |
+
+The asymmetry is deliberate. Four classes describe what to keep and one sentence
+describes what to shed, because a destructive operation must be biased toward
+keeping and the bias belongs in the rule rather than in a reviewer's temperament.
+
+## D5. When a design doc may be deleted
+
+Four conditions, all mechanical, so `check-molt.sh` <!-- intent --> can hold them
+rather than resting on a reviewer:
+
+1. `Status:` leads with `IMPLEMENTED` and is not `IMPLEMENTED IN PART`.
+2. Every slice row reads `**Landed** (job #N)`. Check 3 of
+   `.chug/tasks/check-doc-facts.sh` already resolves those rows against a real
+   `job/N: {type}` squash-merge commit, so this condition is free.
+3. No surviving tracked `*.md` cites it, after the same commit's repointing.
+4. Every code, config or generated citation resolves to a stub at the original
+   path.
+
+Condition 4 is where the work is, and two instances in the deletable set show why
+it cannot be waived. `321-job-groups.md` is cited from **generated** files —
+`web/src/api/types.gen.ts`, `web/src/api/wire-samples.gen.ts` and
+`web/src/api/wire-samples.json`, whose exact bytes a cargo test asserts, which is
+why `web/.prettierignore` exists — so those citations cannot be hand-edited at all
+and must be fixed at their source in `crates/`, or left pointing at a stub.
+`311-job-inputs.md` is cited from `.chug/jobs/rollback.yaml`, which is a config
+contract rather than prose.
+
+### What #415 costs, and why it is not in the first molt
+
+Design #415 satisfies all four conditions and should still not be deleted yet. It has 21
+surviving referrers, including `docs/reference/docs.md`, `docs/reference/style.md`,
+`docs/concepts.md`, `docs/overview.md`, `CLAUDE.md`, and two evaluator prompts
+under `.chug/tasks/`. More decisively, `docs/reference/docs.md` routes readers to
+it **by name** for the question "why is this rule this way", which is #415 D14's
+own split of policy from argument.
+
+So what is load-bearing in #415 is the **reasoning**, not the record of work — and
+[D2](#d2-there-is-nowhere-for-sheddings-to-go)'s defence of deletion is that the
+record survives in git and in the job records. That defence does not reach an
+argument. Deleting #415 means promoting each rule's rationale into
+`docs/reference/docs.md` beside the rule it explains, which is a larger and
+different job than deleting a finished design. S6 exists to decide it on its own
+evidence.
+
+## D6. One job, a fan-out, and a partition
+
+The molt is one job, one branch, one commit. The parallelism lives inside the work
+task: the work agent orchestrates subagents and reconciles their output itself.
+That is what makes "per project" true of the job and not merely of the campaign,
+and it removes the need for a slice-per-cluster table that would otherwise encode
+ordering the reconcile step can compute.
+
+Four phases:
+
+1. **Survey** — parallel, read-only, one subagent per doc. Each returns a
+   structured proposal: per passage, the disposition and the class licensing it,
+   and for each survivor, which reference doc should own it. No edits. This is
+   where the reading cost goes, and it parallelises perfectly because nothing
+   writes.
+2. **Reconcile** — serial, in the orchestrator. Merging the proposals makes two
+   things visible in one place that no single subagent can see: several designs
+   pushing a fact into the same reference doc, which is deduplicated centrally;
+   and two proposals asserting the same fact differently, which is a finding worth
+   more than either proposal.
+3. **Apply** — parallel, writes, **partitioned by destination file**.
+4. **Repoint and gate** — serial. Inbound-reference repointing is inherently
+   global, so the orchestrator owns it, and then runs the gates locally before
+   committing once.
+
+**The partition is the whole trick, and the alternative is worse than it looks.**
+Giving each subagent a worktree and merging them converts a *semantic*
+disagreement — two docs stating the same fact differently — into a *textual*
+conflict, which is the worst available way to discover it: the resolution is
+performed by whoever is holding the conflict markers, with none of the context that
+produced either side. Partitioning by destination file means no two agents touch a
+file and there is nothing to merge. Phase 2 can compute the partition because it
+holds every proposal.
+
+Two consequences worth writing down. A subagent must never call `submit_result` or
+`submit_eval`, because those are how a run terminates meaningfully and a child
+calling one would end the job with a partial result; only the orchestrator reports.
+And a dead subagent must be loud — a fan-out where three of forty agents die and
+the orchestrator proceeds produces a molt that silently skipped three docs, which
+is worse than one that failed.
+
+## D7. Quiescence is discipline, and it buys a watermark
+
+Nothing in the platform can express "no other job may run". At-most-one-in-flight
+is per schedule; the per-project merge queue serialises merges rather than work;
+work-attempt exclusion is per job. A project-level lease would be new domain
+state, a new invariant and a revoke path, built for a ritual that runs a handful of
+times, so this design does not ask for one. Quiescence is stated in the runbook and
+held by the operator.
+
+It earns more than tidiness, though, and this is the argument for taking it
+seriously. Because nothing else lands during a molt, **everything after the molt
+commit is ordinary-work dirt by construction** — which is what makes "how much has
+the corpus re-grown since the last molt" a well-defined question rather than a
+guess. If ordinary jobs interleaved with a molt, the watermark would mean nothing.
+
+S3's reader takes that watermark from the newest `job/N: molt` squash-merge commit,
+tree-wide: the same commit shape check 3 already resolves, so it invents no
+convention and needs nothing declared — no `last-molted:` front matter and no dates
+in prose, for #415 D7's reason. Two properties are required rather than optional.
+Rename detection must be on, because a molt *is* a doc reorganisation: without it
+`docs/spec.md` reads as a total rewrite (+2,705 / −0) where the true figure is
++243 / −71, since job #441 moved it. And the reader must be advisory, never a gate:
+accrued saga is not a defect in the commit that accrued it, which is the same
+argument that keeps `.chug/tasks/doc-staleness.sh` advisory.
+
+There is deliberately **no threshold and no "molt recommended" line**. A number
+nobody calibrated becomes either noise or a target. The reader ranks and the
+operator reads the top.
+
+## What this design does not do
+
+- It does not compact an append-only body. Only deletion of a finished design is
+  licensed, and only under D5.
+- It does not gate on a line-count or byte delta. Such a budget rewards deleting
+  the compact, load-bearing passages, since a rejected-alternatives block is a
+  dozen dense lines and a debugging chain is five hundred loose ones. The molt
+  reports its delta; nothing fails on it.
+- It does not script shedding. A regex deleting lines that match a job number
+  would produce a passing, catastrophic diff. The judgement is the product.
+- It does not touch doc comments in sources. Those are a `code` job's business,
+  and touching them turns a seconds-long gate run into a cold cargo build.
+- It does not decide #415. S6 does.
+
+## The risk this design is most likely to be defeated by
+
+An agent sheds a rejected-alternative passage because it reads as settled prose,
+and the project re-litigates a question it has already paid for.
+
+Every property of that failure is bad. It is invisible to mechanical accounting,
+because the lost sentence names no path, no constant and no link. It is invisible
+in review, because a deletion inside a diff of legitimate deletions has no
+signature. And it stays invisible for months, until someone proposes the rejected
+thing again and no argument is to hand. Worst of all, a mis-shed rejection looks
+exactly like saga: it is old, it names a job, and it discusses a decision that is
+now simply how the system works.
+
+Three mitigations, overlapping because none is sufficient alone. The shed record
+requires a **named class** per removal, so writing the wrong class down is the
+moment the error becomes visible to its author. A ratchet counts the corpus's own
+preventive vocabulary — `Rejected`, `Why not`, `does not`, `unverified`,
+`What this does not do` — and refuses a fall without a named row, which is a proxy
+but the only mechanical signal aimed at the right sentences. And the adversarial
+evaluator is pointed specifically at rejections and open holes rather than asked
+whether anything was lost, because the general question is unanswerable while the
+targeted one is not.
+
+## Related
+
+- [`docs/reference/docs.md`](../reference/docs.md) — the doc policy this design
+  proposes one exception to, and the five gates that read the corpus.
+- [`docs/reference/style.md`](../reference/style.md) — the doc-claim rule, the
+  markers, and the sentence about append-only bodies that D3 keeps intact.
+- [#415](415-knowledge-architecture.md) — the knowledge architecture, whose S2
+  sweep is the closest thing the tree has to a molt and whose S9 precedent is why a
+  path can outlive its document.

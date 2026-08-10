@@ -70,6 +70,7 @@ from being the one everyone forgets (design
 | [`docs/design/440-native-worker-daemon.md`](design/440-native-worker-daemon.md) | The natively-supervised worker daemon |
 | [`docs/design/490-agent-work-on-a-mac.md`](design/490-agent-work-on-a-mac.md) | Agent work on a Mac: finding a transcript without predicting its path, and what one host task per node buys |
 | [`docs/design/517-docker-access-for-jobs.md`](design/517-docker-access-for-jobs.md) | Docker access for jobs, accepted: what it costs, when that stops holding, and which launches get a socket |
+| [`docs/design/533-molt.md`](design/533-molt.md) | The molt: shedding the doc corpus at a milestone, what survives a deletion, and why there is nowhere for sheddings to go |
 
 ## The target factoring
 

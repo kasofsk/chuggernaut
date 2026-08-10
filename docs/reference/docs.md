@@ -277,6 +277,9 @@ doc-claim rule is where each one's meaning is stated.
 
 - [design #415](../design/415-knowledge-architecture.md) — the argument for
   every rule on this page, and the measurements behind it.
+- [design #533](../design/533-molt.md) — a **proposed** exception to the
+  append-only rule, for a project-level shedding of the corpus at a milestone.
+  Nothing on this page changes until a slice of it lands.
 - [`docs/reference/style.md`](style.md) — the blessed practices, including the
   doc-claim rule and the marker syntax.
 - [`docs/concepts.md`](../concepts.md) — the concept registry, and the criterion
