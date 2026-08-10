@@ -373,6 +373,14 @@ impl Placement {
 /// containerized.
 const XCODE_ENV_PREFIX: &str = "xcode:";
 
+/// Whether a declared `runtime.env` names a **node fact** a node advertises in
+/// `NodeCapabilities.envs` — the `xcode:` set it discovers (design #322 §3, #543
+/// D2). A `nix:` reference names a build the node realises rather than a
+/// capability it holds, so it is advertised nowhere and matched nowhere.
+pub fn env_is_node_advertised(env_ref: &str) -> bool {
+    env_ref.starts_with(XCODE_ENV_PREFIX)
+}
+
 /// Where a job type's tasks run and against which toolchain (spec §1.1, design
 /// #309 §3 option A, #373 Decision 2). A nested block, so a typo'd `mdoe: host`
 /// is a hard parse error rather than a job that silently runs somewhere else.

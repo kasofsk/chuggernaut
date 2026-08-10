@@ -8,8 +8,8 @@
 
 use crate::{
     BackendError, CONTAINER_ONLY_MODES, ContainerBackend, ContainerId, ContainerLaunchConfig,
-    ContainerStatus, InjectedFile, LaunchRequirements, LogTail, ModeWarnings, NodeLoad, NodeStatus,
-    PlacementCandidate, PlacementPolicy, RunningContainer, choose_placement,
+    ContainerStatus, InjectedFile, LaunchRequirements, LogTail, ModeWarnings, NO_ENVS, NodeLoad,
+    NodeStatus, PlacementCandidate, PlacementPolicy, RunningContainer, choose_placement,
 };
 use async_trait::async_trait;
 use bollard::Docker;
@@ -557,7 +557,7 @@ impl DockerBackend {
     async fn place(
         &self,
         pin: Option<&str>,
-        required: LaunchRequirements,
+        required: LaunchRequirements<'_>,
     ) -> Result<&Node, BackendError> {
         let mut candidates = Vec::with_capacity(self.nodes.len());
         for (i, node) in self.nodes.iter().enumerate() {
@@ -568,6 +568,7 @@ impl DockerBackend {
                 load,
                 modes: CONTAINER_ONLY_MODES,
                 resources_enforced: true,
+                envs: NO_ENVS,
             });
         }
         self.mode_warnings.observe(&candidates, required.mode);
@@ -1191,6 +1192,7 @@ mod tests {
             load: free.map(|free| NodeLoad { running: 0, free }),
             modes: CONTAINER_ONLY_MODES,
             resources_enforced: true,
+            envs: NO_ENVS,
         }
     }
 

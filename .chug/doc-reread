@@ -172,3 +172,8 @@ Doc-reread: .chug/tasks/docs-update.md
 
 Doc-reread: docs/design/529-secret-handling.md
 Doc-reread: docs/spec.md
+
+Doc-reread: docs/design/543-placement-granularity.md
+Doc-reread: docs/design/322-macos-native-runtime.md
+Doc-reread: docs/spec.md
+Doc-reread: docs/implementation-notes.md

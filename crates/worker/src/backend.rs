@@ -547,7 +547,7 @@ impl FleetBackend {
     async fn place(
         &self,
         pin: Option<&str>,
-        required: container::LaunchRequirements,
+        required: container::LaunchRequirements<'_>,
     ) -> Result<(Arc<FleetNode>, Reservation), BackendError> {
         let _guard = self.place_lock.lock().await;
         let nodes = self.snapshot();
@@ -565,6 +565,7 @@ impl FleetBackend {
                 load: *load,
                 modes: &capabilities.modes,
                 resources_enforced: capabilities.resources_enforced,
+                envs: &capabilities.envs,
             })
             .collect();
         self.mode_warnings.observe(&candidates, required.mode);

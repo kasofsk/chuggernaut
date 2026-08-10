@@ -113,8 +113,9 @@ task script** (`docs/spec.md` §3.1), because only the task's own shell can
 produce `xcodebuild -version` and `xcrun simctl runtime list` into the captured
 stdout. The discovered set is advertised as `NodeCapabilities.envs`
 (`crates/types/src/worker.rs`), additively — `WORKER_RPC_VERSION` stays at 2 —
-and **placement still filters on `modes` only**: capability-filtered placement on
-`envs` is deliberately later. This ran on a Mac for the first time in
+and **placement filters on it** since [#543](543-placement-granularity.md) S1
+(job #550): a launch declaring a node-interpreted `runtime.env` is admitted only
+by a node advertising it. This ran on a Mac for the first time in
 [#490](490-agent-work-on-a-mac.md) slice 6, whose two host tasks launched under
 `xcode:26.5` on `gumbo-air-0` and drove the resolved Xcode's `xcrun simctl`.
 
@@ -175,7 +176,7 @@ argument and its dependency.
 | **W4** | Node-side env-ref resolution: Xcode discovery, `xcode:<version>` → `DEVELOPER_DIR` | **Landed** (job #489) — boot-time discovery in `crates/worker/src/xcode.rs`, the scheme fork in `crates/worker/src/daemon.rs`, and the discovered set advertised as `NodeCapabilities.envs`. Run on a Mac since [#490](490-agent-work-on-a-mac.md) slice 6, whose two host tasks were launched under `xcode:26.5` on `gumbo-air-0` |
 | **W5** | Refresh precondition: decline a refresh while a host task runs | **Landed** (job #460) generically, as [#440](440-native-worker-daemon.md) slice 3 — §6's phase-1 mitigation, plus a swap-boundary re-check that phase never asked for |
 | **N3** | The macOS node runbook in `deploy/prod/README.md` | Proposed |
-| **P1** | `NodeCapabilities` on ping/announce + the `choose_placement` predicate | **Landed** (job #489) for this phase's `envs` field, additively; the rest arrived generically as #309 P2 — the record on `PingOk`/`WorkerAnnounce` ingested in `probe_worker` (job #483), carrying `modes`, `platform`, `resources_enforced` and `leases`, and the predicate filtering placement by `modes` (job #484). `envs` is advertised, **not** filtered on: capability-filtered placement is later, and the remainder is [#367](367-android-emulator-execution.md) A3's `features` field, still Proposed |
+| **P1** | `NodeCapabilities` on ping/announce + the `choose_placement` predicate | **Landed** (job #489) for this phase's `envs` field, additively; the rest arrived generically as #309 P2 — the record on `PingOk`/`WorkerAnnounce` ingested in `probe_worker` (job #483), carrying `modes`, `platform`, `resources_enforced` and `leases`, and the predicate filtering placement by `modes` (job #484). `envs` is filtered on since [#543](543-placement-granularity.md) S1 (job #550) — a launch declaring a node-interpreted `runtime.env` is admitted only by a node advertising it — and the remainder is [#367](367-android-emulator-execution.md) A3's `features` field, still Proposed |
 | **P2** | Per-task launchd jobs, agent work on a Mac, device leases, signing | Later, deliberately — except the **agent half**, taken up early in [#490](./490-agent-work-on-a-mac.md) because agentic simulator debugging asked for it. That design decides the transcript question §2 left as "a computed slugifier" (a backend operation resolves the file by the session id the platform itself supplies, instead), keeps one host task per node, and leaves per-task launchd jobs and device leases here |
 
 ## Corrections to the brief and to #309

@@ -1,6 +1,6 @@
 # Design #543 — Placement granularity: what a task needs, and where it says so
 
-Status: PROPOSED — nothing below is built.
+Status: IMPLEMENTED IN PART — S1 landed (job #550); S2, S3 and S4 remain.
 
 Written against the tree at `fa1c414` (2026-08-10), and reworked against it
 after review. Every claim about current behaviour was read out of the source
@@ -24,8 +24,9 @@ the argument and its dated corrections, never edited
 | Mode resolves per task | `ContainerLaunchConfig::required_mode()`, [`crates/container/src/lib.rs`](../../crates/container/src/lib.rs) | Landed (jobs #479, #507) |
 | Placement is decided per task | `choose_placement`, same file | Landed |
 | Mode and limit enforceability are matched | `requirements()` → `LaunchRequirements` | Landed (job #524) |
-| A task's *other* requirements are matched | — | **Not expressible.** A pin names a machine instead |
-| `NodeCapabilities.envs` has a reader | [`crates/types/src/worker.rs`](../../crates/types/src/worker.rs) | **No.** Advertised since job #489, read by nothing |
+| A task's declared environment is matched | `PlacementCandidate::serves_env`, same file | Landed (job #550) |
+| A task's requirements *other than* mode, limits and environment are matched | — | **Not expressible.** A pin names a machine instead |
+| `NodeCapabilities.envs` has a reader | [`crates/types/src/worker.rs`](../../crates/types/src/worker.rs) | **Yes** since job #550: placement admits a launch declaring a node-interpreted `runtime.env` only on a node advertising it |
 | `NodeCapabilities.agent_cli` / `.docker_reachable` have readers | same | **No** outside the worker that sets them |
 | `NodeCapabilities.leases` is ever populated | same | **No** — hardcoded empty, and correctly so ([#309](309-host-native-execution.md) P4 is unbuilt) |
 | A node advertises a device or named feature | `node_capabilities`, [`crates/worker/src/daemon.rs`](../../crates/worker/src/daemon.rs) | **No** — no field carries one, so S4 builds the advertisement before the matcher |
@@ -77,7 +78,7 @@ Every job type that pins today is a **proof** type — `android-proof`,
 
 | # | What | State |
 | --- | --- | --- |
-| **S1** | Match `runtime.env` against `NodeCapabilities.envs` in `choose_placement`, with a refusal naming the ref and the node's set | Proposed — no field, no epoch |
+| **S1** | Match `runtime.env` against `NodeCapabilities.envs` in `choose_placement`, with a refusal naming the ref and the node's set | **Landed** (job #550) — no field, no epoch; [the note](#note--2026-08-10--s1-landed-envs-has-a-reader-job-550) records the one decision it had to make |
 | **S2** | Drop the pin from `mac-proof` only, and assert placement is unchanged | Proposed — gated on S1 |
 | **S3** | Scope `DockerGrant::admits` to work-level launches keyed on `CHUG_PHASE` (D5), and amend #517 D3 | Proposed — independent of S1 |
 | **S4** | `placement.features` as the general form (#367 A4): the node-side advertisement first, then the matcher, with its epoch bump | Proposed — gated on S1, so one matcher serves both |
@@ -556,3 +557,29 @@ node is admitted rather than after.
    [`crates/types/src/worker.rs`](../../crates/types/src/worker.rs) — which is
    exactly how the misreading happens. S4 must add the advertisement before the
    matcher has anything to read; section 6 prices both.
+
+## Note — 2026-08-10 — S1 landed: `envs` has a reader (job #550)
+
+`choose_placement` now filters on the environment a launch declares, as section
+5 specified: `LaunchRequirements` carries the level's resolved `runtime.env`
+verbatim, `PlacementCandidate` carries the node's `NodeCapabilities.envs`, and
+`serves_env` sits in the candidate loop beside `serves(mode)` and `bounds`. The
+refusals are the two section 5 asked for — unpinned and unmeetable is
+`NoCapacity` naming the reference and every node's advertisement, pinned and
+unmeetable is a hard `Launch` error naming the reference and that node's set. No
+schema field, no epoch, no `.chug/jobs/` edit; `mac-proof` still pins, which is
+S2's to remove.
+
+**The one decision the slice had to make, and S4 inherits it.** Section 5 says a
+`nix:` reference must never be matched this way, which leaves two readings of
+"node-interpreted": everything that is not `nix:`, or the scheme set a node
+actually advertises. It is the second — `types::job_type::env_is_node_advertised`
+is `xcode:`-prefixed and nothing else — because `envs` is built from
+`xcodes.envs()` alone (section 5), so under the first reading a reference in
+some future third scheme would match against a set no node ever puts it in and
+queue forever, replacing a loud node-side `unservable_scheme` refusal with a
+silent wait. The cost is the mirror of that: a scheme added to the node's
+resolver and to `envs` without being added to this predicate is placed
+unfiltered, exactly as today. That predicate is the seam #543's "what this does
+not decide" reserves for S4 — a second source list on one matcher, never a
+second matcher.

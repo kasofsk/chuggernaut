@@ -89,6 +89,12 @@ pub struct NodeLoad {
 /// container only. The fail-closed reading, and every docker-endpoint node's.
 pub const CONTAINER_ONLY_MODES: &[RuntimeMode] = &[RuntimeMode::Container];
 
+/// The environments a node advertises when it has advertised nothing (design
+/// #309 §4): none, so a node that promised nothing serves no declared
+/// `runtime.env`. Every docker-endpoint node's, which has no wire path to
+/// advertise on.
+pub const NO_ENVS: &[String] = &[];
+
 /// A probed node for the placement decision. `load` is `None` when the node is
 /// out of service (unreachable / failed its ping), which excludes it from
 /// unpinned placement and fails a pin onto it.
@@ -104,6 +110,10 @@ pub struct PlacementCandidate<'a> {
     /// node's container runtime bounds a task's `resources.cpu`/`memory`
     /// (design #309 §7). A node advertising nothing reads as `true`.
     pub resources_enforced: bool,
+    /// `NodeCapabilities.envs` as of the same probe: the node-interpreted
+    /// `runtime.env` references this node discovered it can serve (design #322
+    /// §3). A node advertising nothing reads as [`NO_ENVS`].
+    pub envs: &'a [String],
 }
 
 impl PlacementCandidate<'_> {
@@ -113,11 +123,21 @@ impl PlacementCandidate<'_> {
         self.modes.contains(&mode)
     }
 
+    /// Whether this node advertises the environment `required` declares (design
+    /// #543 D2). A launch declaring none, or one whose reference names a build
+    /// rather than a node fact, requires nothing here and is unaffected.
+    pub fn serves_env(&self, required: LaunchRequirements<'_>) -> bool {
+        match required.node_env() {
+            Some(env) => self.envs.iter().any(|advertised| advertised == env),
+            None => true,
+        }
+    }
+
     /// Whether this node can bound whatever `required` declares (design #309
     /// §7). Enforcement is the container runtime's `HostConfig`, so a dual-mode
     /// node's advertisement covers its container launches and never the host
     /// ones it also takes.
-    pub fn bounds(&self, required: LaunchRequirements) -> bool {
+    pub fn bounds(&self, required: LaunchRequirements<'_>) -> bool {
         !required.resource_limits
             || (self.resources_enforced && required.mode == RuntimeMode::Container)
     }
@@ -128,21 +148,35 @@ impl PlacementCandidate<'_> {
 /// able to enforce. Derived in one place ([`ContainerLaunchConfig::requirements`]),
 /// so placement and the backend it places onto cannot disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LaunchRequirements {
+pub struct LaunchRequirements<'a> {
     /// The execution mode, from [`ContainerLaunchConfig::required_mode`].
     pub mode: RuntimeMode,
     /// Whether this launch carries `resources.cpu` or `resources.memory`, which
     /// only a node enforcing them **for [`Self::mode`]** may take.
     pub resource_limits: bool,
+    /// This level's resolved `runtime.env` (design #373 P2), verbatim. Only the
+    /// node-interpreted half of it is a placement input ([`Self::node_env`]).
+    pub env: Option<&'a str>,
 }
 
-impl From<RuntimeMode> for LaunchRequirements {
-    /// A launch that declares no limits, which is every job type's agent task
-    /// and the whole fleet's reading before design #309 §7.
+impl<'a> LaunchRequirements<'a> {
+    /// The environment a node must advertise to take this launch (design #543
+    /// D2), or `None` when the reference is one no node advertises — a `nix:`
+    /// build, which the node realises at launch instead.
+    pub fn node_env(&self) -> Option<&'a str> {
+        self.env
+            .filter(|env| types::job_type::env_is_node_advertised(env))
+    }
+}
+
+impl From<RuntimeMode> for LaunchRequirements<'_> {
+    /// A launch that declares no limits and no environment, which is every job
+    /// type's agent task and the whole fleet's reading before design #309 §7.
     fn from(mode: RuntimeMode) -> Self {
         Self {
             mode,
             resource_limits: false,
+            env: None,
         }
     }
 }
@@ -179,13 +213,32 @@ fn fleet_modes(candidates: &[PlacementCandidate<'_>]) -> String {
         .join("; ")
 }
 
+/// A node's advertised environment set for a refusal message, or a phrase for
+/// the empty one — a node that advertised nothing is the common reading and
+/// reads worse as an empty list.
+fn env_list(envs: &[String]) -> String {
+    if envs.is_empty() {
+        "none".to_string()
+    } else {
+        envs.join(", ")
+    }
+}
+
+fn fleet_envs(candidates: &[PlacementCandidate<'_>]) -> String {
+    candidates
+        .iter()
+        .map(|c| format!("{} advertises {}", c.name, env_list(c.envs)))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// The pinned half of [`choose_placement`]: the named node or an error, never a
 /// fallback. The two capability verdicts sit between the out-of-service check
 /// and the free-slot one, an ordering `docs/implementation-notes.md` explains.
 fn choose_placement_pinned(
     candidates: &[PlacementCandidate<'_>],
     name: &str,
-    required: LaunchRequirements,
+    required: LaunchRequirements<'_>,
 ) -> Result<usize, BackendError> {
     let Some(c) = candidates.iter().find(|c| c.name == name) else {
         let known: Vec<&str> = candidates.iter().map(|c| c.name).collect();
@@ -200,6 +253,14 @@ fn choose_placement_pinned(
              back, so this needs a config change on the node or the job type",
             mode_list(c.modes),
             required.mode.as_str()
+        ))),
+        Some(_) if !c.serves_env(required) => Err(BackendError::Launch(format!(
+            "placement pinned to node {name}, which advertises {} and not the runtime.env {:?} \
+             this launch declares (NodeCapabilities.envs, design #543 D2); a node advertises only \
+             what it resolves unambiguously, so the reference is absent there or claimed by two \
+             installs, and the node's own resolution refusal names which. A pin never falls back",
+            env_list(c.envs),
+            required.node_env().unwrap_or_default()
         ))),
         Some(_) if !c.bounds(required) => Err(BackendError::Launch(unenforceable_limits(
             name,
@@ -218,7 +279,7 @@ fn choose_placement_pinned(
 /// fleet refusing anything.
 fn choose_placement_unmet(
     candidates: &[PlacementCandidate<'_>],
-    required: LaunchRequirements,
+    required: LaunchRequirements<'_>,
 ) -> Option<BackendError> {
     let mode = required.mode;
     if candidates.is_empty() {
@@ -230,6 +291,21 @@ fn choose_placement_unmet(
              until one declares it in WORKER_MODES ({})",
             mode.as_str(),
             fleet_modes(candidates)
+        )));
+    }
+    if let Some(env) = required.node_env()
+        && !candidates
+            .iter()
+            .any(|c| c.serves(mode) && c.serves_env(required))
+    {
+        return Some(BackendError::NoCapacity(format!(
+            "no node serving {} mode advertises the runtime.env {env:?} this job type declares \
+             (NodeCapabilities.envs, design #543 D2): a node advertises only what it resolves \
+             unambiguously, so this reference is installed nowhere in the fleet or claimed by two \
+             installs on a node and withheld for it, and the launch queues until one discovers it \
+             ({})",
+            mode.as_str(),
+            fleet_envs(candidates)
         )));
     }
     if !candidates
@@ -256,7 +332,7 @@ pub fn choose_placement(
     policy: PlacementPolicy,
     candidates: &[PlacementCandidate<'_>],
     pin: Option<&str>,
-    required: LaunchRequirements,
+    required: LaunchRequirements<'_>,
 ) -> Result<usize, BackendError> {
     if let Some(name) = pin {
         return choose_placement_pinned(candidates, name, required);
@@ -266,7 +342,7 @@ pub fn choose_placement(
     }
     let mut best: Option<(&PlacementCandidate, NodeLoad)> = None;
     for c in candidates {
-        if !c.serves(required.mode) || !c.bounds(required) {
+        if !c.serves(required.mode) || !c.serves_env(required) || !c.bounds(required) {
             continue;
         }
         let Some(load) = c.load else { continue };
@@ -629,14 +705,16 @@ impl ContainerLaunchConfig {
         }
     }
 
-    /// What this launch needs of the node that takes it (design #309 §5a, §7):
-    /// its mode, and whether it carries limits that node must be able to
-    /// enforce. The one derivation, so the placement filter and the backend's
-    /// own backstop read the same launch the same way.
-    pub fn requirements(&self) -> LaunchRequirements {
+    /// What this launch needs of the node that takes it (design #309 §5a, §7,
+    /// #543 D2): its mode, whether it carries limits that node must be able to
+    /// enforce, and the environment it declares. The one derivation, so the
+    /// placement filter and the backend's own backstop read the same launch the
+    /// same way.
+    pub fn requirements(&self) -> LaunchRequirements<'_> {
         LaunchRequirements {
             mode: self.required_mode(),
             resource_limits: self.cpu_limit.is_some() || self.memory_limit.is_some(),
+            env: self.runtime_env.as_deref(),
         }
     }
 }
@@ -794,6 +872,7 @@ mod tests {
             load: Some(NodeLoad { running, free }),
             modes: CONTAINER_ONLY_MODES,
             resources_enforced: true,
+            envs: NO_ENVS,
         }
     }
 
@@ -813,11 +892,205 @@ mod tests {
 
     /// A launch that declares `resources.cpu`/`memory`, which only a node
     /// enforcing them for its mode may take (design #309 §7).
-    fn limited(mode: RuntimeMode) -> LaunchRequirements {
+    fn limited(mode: RuntimeMode) -> LaunchRequirements<'static> {
         LaunchRequirements {
             mode,
             resource_limits: true,
+            env: None,
         }
+    }
+
+    /// A launch declaring a `runtime.env`, which only a node advertising it may
+    /// take (design #543 D2).
+    fn declaring(mode: RuntimeMode, env: &str) -> LaunchRequirements<'_> {
+        LaunchRequirements {
+            env: Some(env),
+            ..mode.into()
+        }
+    }
+
+    /// `gumbo-air-0`'s advertisement (job #489): the discovered Xcode set a Mac
+    /// puts on `NodeCapabilities.envs`.
+    fn xcode_cand<'a>(name: &'a str, envs: &'a [String], index: usize) -> PlacementCandidate<'a> {
+        PlacementCandidate {
+            modes: HOST_AND_CONTAINER,
+            envs,
+            ..cand(name, 0, 1, index)
+        }
+    }
+
+    /// The design #543 D2 predicate: a launch declaring a node-interpreted
+    /// `runtime.env` is taken only by a node advertising it, even where the
+    /// policy would otherwise prefer the idler node that does not.
+    #[test]
+    fn only_a_node_advertising_the_env_takes_a_launch_declaring_it() {
+        let by = PlacementPolicy::Busyness;
+        let air = vec!["xcode:26.5".to_string()];
+        let old = vec!["xcode:16.4".to_string()];
+        let nodes = [
+            xcode_cand("mini", &old, 0),
+            PlacementCandidate {
+                load: Some(NodeLoad {
+                    running: 3,
+                    free: 1,
+                }),
+                ..xcode_cand("air", &air, 1)
+            },
+        ];
+        assert_eq!(
+            choose_placement(by, &nodes, None, declaring(RuntimeMode::Host, "xcode:26.5")).unwrap(),
+            1,
+            "the busier node wins because it is the only one advertising the environment"
+        );
+        assert_eq!(
+            choose_placement(by, &nodes, None, RuntimeMode::Host.into()).unwrap(),
+            0,
+            "and a launch declaring none is placed by load, as it always was"
+        );
+    }
+
+    /// Unpinned and unmeetable is the ordinary queued decision (design #543 D2,
+    /// following the mode precedent), and it names the reference and the fleet's
+    /// advertisement.
+    #[test]
+    fn an_env_no_node_advertises_queues_rather_than_failing() {
+        let old = vec!["xcode:16.4".to_string()];
+        let nodes = [xcode_cand("air", &old, 0)];
+        let err = choose_placement(
+            PlacementPolicy::Busyness,
+            &nodes,
+            None,
+            declaring(RuntimeMode::Host, "xcode:26.5"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, BackendError::NoCapacity(_)),
+            "a capable node may still appear: {err}"
+        );
+        let err = err.to_string();
+        assert!(
+            err.contains("\"xcode:26.5\"")
+                && err.contains("NodeCapabilities.envs")
+                && err.contains("air advertises xcode:16.4"),
+            "{err}"
+        );
+    }
+
+    /// A pin onto a node advertising something else is a hard `Launch` error, for
+    /// the reason the mode pin already is: a pin never falls back, so waiting
+    /// cannot clear it.
+    #[test]
+    fn pin_to_a_node_advertising_another_env_is_a_hard_error() {
+        let by = PlacementPolicy::Busyness;
+        let air = vec!["xcode:26.5".to_string()];
+        let nodes = [xcode_cand("air", &air, 0)];
+        let err = choose_placement(
+            by,
+            &nodes,
+            Some("air"),
+            declaring(RuntimeMode::Host, "xcode:16.4"),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, BackendError::Launch(_)),
+            "a pin never falls back: {err}"
+        );
+        let err = err.to_string();
+        assert!(
+            err.contains("placement pinned to node air")
+                && err.contains("\"xcode:16.4\"")
+                && err.contains("advertises xcode:26.5"),
+            "it names the ref and the node's set: {err}"
+        );
+        assert_eq!(
+            choose_placement(
+                by,
+                &nodes,
+                Some("air"),
+                declaring(RuntimeMode::Host, "xcode:26.5")
+            )
+            .unwrap(),
+            0,
+            "while the environment the node does advertise places as before"
+        );
+        let bare = [xcode_cand("air", NO_ENVS, 0)];
+        let err = choose_placement(
+            by,
+            &bare,
+            Some("air"),
+            declaring(RuntimeMode::Host, "xcode:26.5"),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("advertises none"),
+            "a node advertising nothing reads as a phrase, not an empty list: {err}"
+        );
+    }
+
+    /// A `nix:` reference names a build the node realises rather than a fact it
+    /// advertises (`NodeCapabilities.envs`), so it is never matched here — and a
+    /// launch declaring no environment requires nothing of a node at all.
+    #[test]
+    fn a_nix_env_and_no_env_are_both_unfiltered() {
+        let by = PlacementPolicy::Busyness;
+        let nodes = [cand("mini", 0, 2, 0)];
+        assert_eq!(
+            choose_placement(
+                by,
+                &nodes,
+                None,
+                declaring(RuntimeMode::Container, "nix:.#chug-ci")
+            )
+            .unwrap(),
+            0,
+            "a node advertising nothing still takes a nix launch, which it realises at launch"
+        );
+        assert_eq!(
+            choose_placement(
+                by,
+                &nodes,
+                Some("mini"),
+                declaring(RuntimeMode::Container, "nix:.#x")
+            )
+            .unwrap(),
+            0,
+            "pinned too"
+        );
+        assert_eq!(
+            choose_placement(by, &nodes, None, RuntimeMode::Container.into()).unwrap(),
+            0
+        );
+    }
+
+    /// The requirement is read off the launch's own resolved `runtime.env` (job
+    /// #507), so placement and the node it places onto cannot disagree about
+    /// which environment a level declares.
+    #[test]
+    fn requirements_carry_the_launchs_own_runtime_env() {
+        let mut config = ContainerLaunchConfig {
+            image: None,
+            cmd: vec!["run".into()],
+            env: HashMap::new(),
+            files: vec![],
+            cpu_limit: None,
+            memory_limit: None,
+            node: None,
+            runtime_env: Some("xcode:26.5".into()),
+        };
+        assert_eq!(
+            config.requirements(),
+            declaring(RuntimeMode::Host, "xcode:26.5")
+        );
+        assert_eq!(config.requirements().node_env(), Some("xcode:26.5"));
+        config.runtime_env = Some("nix:.#chug-ci".into());
+        assert_eq!(
+            config.requirements().node_env(),
+            None,
+            "a nix reference is no node fact, so it is no placement input"
+        );
+        config.runtime_env = None;
+        assert_eq!(config.requirements(), RuntimeMode::Host.into());
     }
 
     /// The design #309 §7 predicate: a launch declaring `resources.cpu`/`memory`
@@ -1037,6 +1310,7 @@ mod tests {
             load: None,
             modes: CONTAINER_ONLY_MODES,
             resources_enforced: true,
+            envs: NO_ENVS,
         }];
         let err = choose_placement(by, &down, Some("air"), RuntimeMode::Host.into())
             .unwrap_err()
@@ -1153,6 +1427,7 @@ mod tests {
                     load: None,
                     modes: CONTAINER_ONLY_MODES,
                     resources_enforced: true,
+                    envs: NO_ENVS,
                 },
                 cand("nuc", 1, 1, 1),
             ];
