@@ -203,8 +203,21 @@ mechanism. beacon's fastlane workflows declare two more — both **stored cloud
 service-account keys**, one of them against a Google Cloud Storage bucket, which
 is a workload-identity-federation consumer. That is the first concrete candidate
 for #313's mechanism to arrive from a real workflow rather than from argument;
-whether either downstream accepts a federated token is **unmeasured**, so it adds
-no slice and no decision. [The record](#candidate--2026-08-10-job-558-a-named-consumer-for-313s-mechanism-arriving-from-beacons-real-workflows).
+it adds no slice and no decision.
+[The record](#candidate--2026-08-10-job-558-a-named-consumer-for-313s-mechanism-arriving-from-beacons-real-workflows).
+
+**That candidate is two halves and only one of them has evidence.** For the Play
+half (`PLAY_STORE_SERVICE_ACCOUNT_KEY`, through fastlane's `supply`), an upstream
+change merged in December 2025 makes the tool route on the credential JSON's
+`type` field and so accept an external-account credential — the shape workload
+identity federation produces — with no new option. For the iOS half
+(`MATCH_SERVICE_ACCOUNT_KEY`, through `match`'s Google Cloud Storage backend),
+nothing is measured and #558's wording stands unchanged. So the Play half has a
+**named upstream mechanism and no measurement here**, the iOS half has neither,
+and §6's result is untouched either way: still no slice, still nothing on the
+lifetime axis, because a mechanism named in someone else's repository is not a
+bound this platform can assert.
+[The record](#refinement--2026-08-10-job-559-558s-candidate-splits-supply-takes-external-account-credentials-matchs-gcs-storage-is-unmeasured).
 
 ---
 
@@ -1508,3 +1521,93 @@ not S1b.
 Nothing about a running dispatcher changes at the merge. The binary on air keeps
 injecting the whole scope until it is replaced, so the enforcement date is the
 next deploy — the same sequencing S1a was built for, one step further along.
+
+## Refinement — 2026-08-10, job #559 (#558's candidate splits: `supply` takes external-account credentials, `match`'s GCS storage is unmeasured)
+
+Appended against the tree at `596c236`. It sits after job #555's S1b record and
+has nothing to do with it; what it refines is
+§[Candidate — job #558](#candidate--2026-08-10-job-558-a-named-consumer-for-313s-mechanism-arriving-from-beacons-real-workflows),
+two sections up. That section records two names as one candidate with one open
+question — *whether either downstream accepts a federated token*. One of the two
+now has an answer from upstream and the other does not, and carrying them as a
+single item would overstate the result: it would let a reader take evidence
+about Google Play as evidence about certificate storage, which is the merge of
+two different code paths into one claim.
+
+### The evidence, and it is third-party
+
+fastlane PR **#29796**, *"[supply] Fix missing_email error when using external
+account credentials"*, **merged 3 December 2025**. Read at
+`https://github.com/fastlane/fastlane/pull/29796` on 2026-08-10 — a separate
+repository, so this is a reading of someone else's source and not a fact about
+this tree, marked the way [#313](313-workload-identity-image-builds.md) marks its
+own beacon facts.
+
+What it changes: **`supply`** — the Google Play deployment tool — inspects the
+`type` field inside the credentials JSON and routes to the appropriate Google
+Auth class, so a service account and an **external account** are no longer
+conflated. There is **no new option and no new environment variable**: the
+existing credential parameter accepts external-account credentials, which is the
+shape workload identity federation produces.
+
+### The Play half: a mechanism named, and three things still to establish
+
+`PLAY_STORE_SERVICE_ACCOUNT_KEY` now has a documented path off a stored key.
+That is a change in kind from #558 — the question was open at the *tool*, and it
+is now open only at the *deployment*. Still to establish, and none of it from
+here:
+
+- **A released version carrying the commit, that beacon can pin.** A merged PR
+  and a shipped release are different claims, and which fastlane version
+  `kasofsk/beacon` pins is unverified here. The PR page's own references point at
+  a later version bump; treat that as a lead for whoever does this work, not as a
+  version this document asserts.
+- **That it works end to end against *this* platform's issuer.** #313
+  [A4](313-workload-identity-image-builds.md#a4-the-public-reachability-problem-the-crux)'s
+  crux — an STS that can fetch our JWKS — is solved by the issuer job #430 proved,
+  but nothing has yet exchanged a chuggernaut workload token for a Google
+  credential a Play upload accepts. This is #313 A3's gap in its narrowest
+  surviving form: proven for the STS by `curl`, still never for a client library.
+- **The IAM binding nobody has written.** Unchanged from #558, and still the
+  operator/beacon-side half [#313 S7](313-workload-identity-image-builds.md)
+  carries as pending.
+
+Under [D1](#decisions) that is still not a bound. Naming a mechanism is what
+licenses *proposing* one; asserting one needs it to have run.
+
+### The iOS half: untouched, and it stays recorded as unmeasured
+
+The PR touches `supply` only. `match`'s `storage_mode("google_cloud")` backend —
+the one `kasofsk/beacon:mobile/app/ios/fastlane/Matchfile` selects, consuming
+`MATCH_SERVICE_ACCOUNT_KEY` — is not in its diff, and whether that backend accepts
+an external-account credential is **unmeasured**. #558's wording for this half
+stands exactly as written, including its reason: the credential shape is resolved
+by a client library rather than by fastlane, and which library a given fastlane
+subsystem routes through is the thing nobody has read.
+
+**The distinction is not pedantic, and this is why.** The two names reach
+different downstreams through different code — a Play Developer API client whose
+auth routing this PR is about, and a Cloud Storage backend it never opens. The
+generalisation from "one Google client reads the external-account shape" to
+"every Google client does" is precisely the inference
+[#313 A3](313-workload-identity-image-builds.md) already flags as unproven; a
+document that made it here would be repeating the defect it exists to close.
+
+### What this changes about ranking, and what it does not
+
+- **§[6](#6-does-313-generalise)'s result is unchanged.** Its answer was about
+  the three untimed classes this repo actually has — declared `work.secrets`,
+  project `vars`, and `global/agents` — and none of them acquires a mechanism
+  from an Android deployment tool. The ordering of what §6 must still size is
+  unchanged, because nothing here touches any of its rows.
+- **The slice table is unchanged.** No slice moves, none is added, and the
+  lifetime axis stays empty for the reason it was always empty.
+- **What does change is which half of the candidate is worth trying first.** If
+  beacon's deploy ever becomes a chuggernaut job — the port
+  [#308](308-gha-port.md) surveys and #313 half B serves — the Play credential is
+  now the cheaper of the two to attempt, because its tool-side question is
+  answered and only the deployment-side ones remain. The `match` credential
+  should not ride along on that result; it needs its own measurement first.
+- **Neither name is declared by any chuggernaut job type**, still. `.chug/jobs/`
+  declares exactly `MINI_DEPLOY_KEY` and `DEPLOY_HEALTH_API_TOKEN`, across six
+  declarations, and this refinement adds nothing to that tree.

@@ -201,3 +201,5 @@ Doc-reread: docs/design/308-gha-port.md
 
 Doc-reread: docs/design/529-secret-handling.md
 Doc-reread: docs/spec.md
+
+Doc-reread: docs/design/529-secret-handling.md
