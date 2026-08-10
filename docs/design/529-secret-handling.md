@@ -3,7 +3,8 @@
 Status: IMPLEMENTED IN PART — S1a has landed (job #545) and is observe-only,
 and S2+M6 have landed together (job #547): the provider credential now reaches
 an agent container on an inherited descriptor rather than in its environment,
-and the kernel property that window rests on is asserted at every launch.
+and the kernel property that window rests on is asserted at every launch. M7 has
+since measured the host path (job #549) and S2 has not been extended to it.
 Everything else below is proposed.
 
 Written against the tree at `927067b` (2026-08-10). Every claim about current
@@ -35,8 +36,18 @@ CLI's memory is out of the task's reach — by measuring it from a shell the CLI
 spawned rather than inheriting the brief's word for it: it holds, and it holds
 because of a **host sysctl this platform does not set**, which is why it now
 ships a slice (M6) instead of a sentence. **M8** replaces "small and knowable"
-with two numbers for the `global/agents` scope. Both are container-mode findings;
-M7 records that the host path is unmeasured rather than implying it is covered.
+with two numbers for the `global/agents` scope. Both are container-mode findings.
+
+**M7 — the host path those two do not reach — was measured on `gumbo-air-0` and
+both verdicts carry over.** A same-uid descendant reads another process's
+environment there as it does under `/proc`, and raw memory stays out of reach:
+`task_for_pid` refused an unsigned reader. That macOS refuses it on the caller's
+code signature rather than on Yama's ancestor rule is macOS's documented gating
+and **not** what this run separated — its control went unreported, so the denial
+it measured is equally consistent with either mechanism. What the measurement
+licenses, what it does not, and the one thing it leaves open (**M9** — whether a
+task can drive an entitled system tool to do what its own code cannot) are in the
+[2026-08-10 measurement](#measured--2026-08-10-job-549-m7-the-host-paths-equivalents--env-readable-task_for_pid-denied-and-why-sample-proves-nothing).
 
 ## Current state
 
@@ -55,10 +66,11 @@ the argument and its dated corrections, never edited
 | Declared secrets, project `vars` and `global/agents` carry a TTL | — | **No.** Injected verbatim; lifetime is rotation discipline |
 | `global/agents` is narrowed to what the agent CLI needs | `inject_platform_agent_secrets`, `exec.rs` | **No.** The *whole scope* still reaches every agent launch — S1a only logs, by name, what S1b would decline |
 | A provider-credential name set exists in the tree | `PROVIDER_CREDENTIAL_NAMES`, [`crates/agent/src/lib.rs`](../../crates/agent/src/lib.rs), from `claude::CREDENTIAL_ENV_NAMES` | **Landed** (S1a). Nothing consults it as an exclusion yet |
-| The platform's provider token is out of the task's reach | `credential_delivery`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Narrowed, not closed** (S2, job #547). A *window* instead of the process's lifetime; still no boundary, exactly as D5 says |
+| The platform's provider token is out of the task's reach | `credential_delivery`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Narrowed, not closed** (S2, job #547), and **container launches only** — a host task is still env-delivered, which M7 now makes a choice rather than an unknown. A *window* instead of the process's lifetime; still no boundary, exactly as D5 says |
 | The agent CLI will take that token from a withdrawable source instead | `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, the shipped CLI | **Yes, measured** (M2, job #546) — an inherited fd, read once, leaving no file and no env entry. **In use** since S2 |
 | …and `apiKeyHelper` is the fallback if it will not | `--settings`, the same CLI | **No.** Measured: the helper's output is used as an API key and this credential is an OAuth token, rejected as `Invalid API key` |
 | A credential in the agent CLI's *memory* is out of the task's reach | Yama `ptrace_scope`, the node's kernel; `credential_ptrace_assertion`, `crates/agent/src/claude.rs` | **True today, and not by this platform's doing — now asserted rather than assumed** (M6, job #547). Every agent launch reads both properties in the container's own view and prints the verdict; it never refuses |
+| …and the same holds on a **host** node, by a mechanism the run did not separate | `task_for_pid`, macOS code-signing and entitlements | **True, measured, and asserted nowhere** (M7, job #549). Unsigned code got no task port; that this holds whatever its relation to the target is macOS's documented gating rather than M7's result, whose control went unreported. The launch-time assertion above reads `/proc` and so cannot see this property either way. Entitled system tools on the node are the open half (M9) |
 | Credential-bearing payloads are kept out of argv | `claude_invocation`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Landed**, with a test asserting it |
 | The same reasoning is applied to the env | `credential_delivery`, `crates/agent/src/claude.rs` | **For the provider credential, yes** (S2). Declared `work.secrets` and project `vars` are still env-delivered — that is S3 |
 | Injected files are deleted at teardown | `remove` / `reclaim_credentials`, [`crates/container/src/host.rs`](../../crates/container/src/host.rs); `docs/spec.md` §3.1 | **Landed**, on both backends |
@@ -109,8 +121,18 @@ that no cleanup path reaches.
   `ptrace_scope=1` denies a descendant `PTRACE_MODE_ATTACH` on an ancestor, so
   `/proc/<cli-pid>/mem` is `EACCES` to the task while `/proc/<cli-pid>/environ`
   is not. **That is a host-kernel setting, not something this platform
-  establishes**, so D3 holds exactly as far as M6 (assert it) holds, and only in
-  container mode until M7 answers the host path.
+  establishes**, so D3 holds exactly as far as M6 (assert it) holds.
+
+  **The premise also holds on a host node, and naming its mechanism separately is
+  the point** (M7). There `task_for_pid` is refused — measured, from a descendant
+  — and macOS's gating on code signing says it would be refused whichever way it
+  points, where Yama refuses a *descendant* specifically; M7's run reported no
+  control, so that second clause is documented behaviour and not its result. Two
+  mechanisms reaching the same verdict
+  can stop agreeing: a node's sysctl set to `0` flips the container half and
+  nothing about the host half, and an entitled path a task could drive (M9) would
+  flip the host half and nothing about the container half. The platform asserts
+  neither on the host path today, because M6's assertion reads `/proc`.
 
 - **D4. What credential sources the agent CLI accepts is a measurement, and the
   measurement is now taken.** §[3](#3-decision-1-what-the-measurement-says)
@@ -159,7 +181,8 @@ that no cleanup path reaches.
 | **M2** | Measure whether the agent CLI authenticates from an inherited fd (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`) with no token in the env | **Landed** (job #546) — it does, proved by a real completion; the fallback (d) does **not** take this credential. [The record](#correction--2026-08-10-job-546-m2-measured-the-fd-source-authenticates-and-apikeyhelper-will-not-take-this-credential) |
 | **S2** | Deliver the provider credential on an inherited fd — the container's own `sh -c` entrypoint reads the injected file into a pipe, unlinks it, and runs the bootstrap with the pipe's read end at fd 9 — and stop putting it in the launch env | **Landed** (job #547), container mode only. [The record](#landed--2026-08-10-job-547-s2-and-m6-the-credential-arrives-on-a-descriptor-and-the-property-it-rests-on-is-asserted) |
 | **M6** | Assert `ptrace_scope` (and the absence of `CAP_SYS_PTRACE`) at launch instead of assuming it — the host-kernel property S2's window rests on (M1d) | **Landed** (job #547) — reported at every agent launch, never enforced; the fleet-policy half stays open |
-| **M7** | Measure M1c/M1d's equivalents on the **host** node path, where there is no `/proc` and `task_for_pid` governs | Proposed — a **measurement**; until it lands, S2's window claim is container-mode only |
+| **M7** | Measure M1c/M1d's equivalents on the **host** node path, where there is no `/proc` and `task_for_pid` governs | **Measured** (job #549) — both carry over, the memory half by a mechanism the run did not separate; S2 is **not** extended to the host path here. [The record](#measured--2026-08-10-job-549-m7-the-host-paths-equivalents--env-readable-task_for_pid-denied-and-why-sample-proves-nothing) |
+| **M9** | Measure whether a task's own code can drive an **entitled** system tool on a host node (`sample`, `vmmap`, `lldb` with a session that can authorize it) to extract a credential its own `task_for_pid` cannot | Proposed — the half M7 leaves open; it bounds how much D3's window is worth on a host node |
 | **S3** | A per-level file-delivery declaration for project secrets, over the existing `InjectedFile` plumbing, using the `{NAME}_FILE` convention `.chug/tasks/deploy.sh` already anticipates | Proposed — **costs an epoch bump**, moves *reach* |
 | **S4** | Artifact redaction | Proposed — **out of scope here**; needs its own design, and D7 forbids implying it is covered |
 | **S5** | A secret-shaped-name warning when a `var` is written | Proposed — advisory, never a gate |
@@ -1023,3 +1046,170 @@ revert while agent jobs are broken".
   in-process struct that never becomes any container's environment; the provider
   owns the CLI's credential names and its descriptor variable, so the removal
   belongs there and the assertion is on `ContainerLaunchConfig.env`.
+
+## Measured — 2026-08-10, job #549 (M7: the host path's equivalents — env readable, `task_for_pid` denied, and why `sample` proves nothing)
+
+M7 asked whether M1c and M1d hold on the **host** node path, where there is no
+`/proc` and `task_for_pid` governs. **Both hold**, and the memory half is
+believed to hold for a different reason than it does in a container — believed,
+because the run measured the denial and not the mechanism behind it, and the
+distinction is the part of this section that must not be compressed into "same
+answer". Job #547 left host tasks
+on env delivery *because* this row was open
+([its scope limits](#deliberate-scope-limits) say so in as many words); what the
+answer licenses is at the end.
+
+Taken by the operator on `gumbo-air-0` — uid 501, macOS 26.5.1 — on 2026-08-10
+and quoted here; a work container has no Mac, so nothing below was re-run while
+writing it. The shape mirrors M1c/M1d's: a parent process held a marker in its
+environment and spawned a descendant — the relation a task's code stands in to
+the agent CLI — and the descendant attempted the reads. A control repeating them
+against a process the reader had forked itself was part of the run, **and its
+outcome was not reported back**; every row below is the descendant's. That is a
+real limit on what the denial can be attributed to, and it is stated again where
+the attribution is made rather than left here. The tree facts this section
+states are checkable and were checked, in
+[`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) and
+[`crates/container/src/host.rs`](../../crates/container/src/host.rs).
+
+### The reads
+
+| Read | Result |
+| --- | --- |
+| `ps -Eww -p <target>` from a descendant | **the marker is visible** |
+| `vmmap <target>` | rc 0, no marker in the output — it prints regions, not their contents |
+| `sample <target> 1` | **rc 0, a real sample produced** |
+| `lldb --batch -p <target>` | `error: attach failed: this is a non-interactive debug session, cannot get permission to debug processes` |
+| `task_for_pid()` through `ctypes`, from ordinary unsigned Python | **`KERN_FAILURE` (5), port 0** |
+| `mach_vm_read` scan for the marker | not reached — there is no task port to scan with |
+| *control* — the same reads against a process the reader forked itself | **not reported back**; every row above is the descendant's |
+
+### The environment is readable, exactly as M1c found
+
+`ps -Eww` from a descendant returns the marker. So the motivation for S2 is not
+a `/proc` artefact: on a host node an env-delivered credential is readable by
+same-uid code for the whole life of the agent process, and M3 — a process cannot
+un-publish its own environment — is not a Linux fact either. On this platform's
+host nodes today the task and the CLI **are** the same login user, so "same uid"
+is the ordinary case rather than a hypothetical; per-project users
+([#537](537-per-project-users-macos.md)) are what would change it.
+
+### Raw memory is not readable — by a mechanism this run did not separate
+
+`task_for_pid` from unsigned code returns `KERN_FAILURE` with a null port, so the
+`mach_vm_read` scan had nothing to run against. **The denial is measured. The
+mechanism behind it is not**, and the difference matters, because the verdict
+matching M1d is only interesting if the two verdicts can move independently:
+
+- **Linux denies by direction, and M1d separated that.** Yama at
+  `ptrace_scope=1` grants `PTRACE_MODE_ATTACH` only to an *ancestor*; M1d's
+  control — the same shell attaching to a child it forked itself — **succeeded**
+  while the read against the CLI failed, and that contrast is what makes
+  directionality a finding rather than a guess.
+- **macOS is expected to deny by the caller's provenance**, the task port being
+  gated on code signing and entitlement, so unsigned code would be refused
+  whichever way it points. **This run did not separate that**: it reports one
+  denial, from a descendant, which is equally consistent with Linux's mechanism.
+  Provenance is macOS's documented gating, not this run's result — and naming
+  `taskgated` as the component enforcing it is an attribution the run cannot
+  distinguish from any other entitlement check. The control M1d ran is what
+  would settle it: `task_for_pid` against a child the reader forked itself,
+  where success means direction is the discriminator here too and failure means
+  it is not.
+
+**They could diverge, which is the reason to name both.** A node whose sysctl is
+set to `0` flips the container half and says nothing about the host half; an
+entitled path a task could drive (M9, below) would flip the host half and say
+nothing about the container half. A single sentence — "memory is out of reach on
+both" — would hide two independent premises behind one verdict.
+
+### `sample` succeeding proves nothing about a task's reach
+
+This is the finding most worth recording, because an earlier reading of this same
+run concluded *"memory is readable on macOS"* from `sample`'s rc 0 alone, and it
+was wrong. `sample` is an Apple-signed binary carrying a task-port entitlement:
+its success measures **Apple's signature**, not the caller's privilege. The
+caller's privilege is the `task_for_pid` row, and that row is a denial.
+
+That is the same class of error as two already on this corpus's record —
+[#490](490-agent-work-on-a-mac.md)'s `simctl spawn` failure attributed to the
+daemon's session when the argument was the cause (corrected in job #527), and
+[#543](543-placement-granularity.md)'s correction 4, a control reported absent
+because a closed finding was inherited rather than re-measured. In each, a
+tool's outcome measured something *adjacent* to the claim and was read as the
+claim.
+
+**`lldb`'s refusal is not a kernel denial either**, and is recorded that way so a
+later reader does not cite it as one. Its message names a non-interactive debug
+session that cannot get permission — an authorization artefact of running the
+attach over an SSH session, not a statement about what the kernel would allow a
+session that could authorize. It is evidence of nothing in either direction.
+
+### What is left unmeasured — M9, and the control
+
+**The bigger one is M9.** Entitled tools are present on the node: `sample` and `vmmap` ran, and `lldb` is
+installed and refused for a reason a session might satisfy. Whether a task's own
+code can **drive one of them** to extract a credential its own `task_for_pid`
+cannot is **not settled by this run**, in either direction:
+
+- `vmmap` printed regions and not contents, which is a fact about `vmmap`'s
+  output and not about what an entitled tool can reach.
+- `sample`'s output is not reported as searched for the marker, so it is neither
+  a positive nor a negative.
+- `lldb` never attached, for the authorization reason above.
+
+M9 asks it, and it is worth asking because it bounds what D3's window is worth on
+a host node. Assuming the comfortable answer is the failure mode this whole
+document exists to avoid; assuming the alarming one would understate a measured
+denial. Neither is written here.
+
+**The smaller one is the control**, above: one `task_for_pid` against a
+self-forked child, which is what would turn "macOS denies by provenance" from
+documented behaviour into a result of this run. It changes no verdict either way
+— the denial against the CLI is measured whatever explains it — but it is the
+line between the two mechanisms this section asks a later reader to track
+separately, so whoever next has a Mac in hand should take it while they are
+there.
+
+### What it licenses for a host task, and what still blocks it
+
+Both halves of the container argument carry over — the motivation (env readable
+for the process's life) and D3's premise (the credential, once in the CLI's
+memory, out of ordinary reach). And the mechanism has somewhere to live: a host
+launch already runs its command through an `sh -c` wrapper it composes
+(`supervised_cmd`) and already materializes `InjectedFile`s into the task's own
+directory, so S2's pipe-and-unlink needs no new plumbing;
+`credential_delivery` declines the host path on `image.is_none()` and nothing
+else.
+
+**Three things still block the extension, and M7 dissolves none of them:**
+
+1. **M6's assertion is `/proc`-shaped, and on a Mac it would report the opposite
+   of this measurement.** `credential_ptrace_assertion` reads
+   `/proc/sys/kernel/yama/ptrace_scope` and `/proc/self/status`; on a host node
+   neither exists, both fall to `unknown`, and the WARNING branch prints — telling
+   an operator a task *can* read the credential out of the CLI, which M7 measures
+   it cannot. A host extension needs an assertion shaped to the property that
+   actually governs there, and M7 does not supply one: a code signature and an
+   entitlement are not a value a shell reads out of a file.
+2. **M9.** How much the window is worth on a host node is bounded by an answer
+   nobody has.
+3. **The wrapper carries a wire path.** `credential_fd_bootstrap` writes
+   `/chuggernaut/agent-credential` into the script literally, while a host
+   command resolves its `/chuggernaut` paths through `"$CHUG_HOST_CREDS"`
+   (`claude_invocation_path`, [#322](322-macos-native-runtime.md) §2's rebase,
+   which [#490](490-agent-work-on-a-mac.md)'s slice-5 record names for the `cmd`
+   surface specifically). Mechanical, and it is why "stop declining on
+   `image.is_none()`" is not the change.
+
+**And one line of the code now gives a reason that has expired.**
+`credential_delivery`'s own doc comment says it returns `None` for a host task
+"whose `/proc`-free path #529 M7 has not measured" — which this record
+falsifies. The behaviour is still right and the three blockers above are why;
+only the stated reason is stale. This job is prose-scoped and cannot rewrite it,
+so it is written down here: the code job that extends S2 to the host path
+rewrites that sentence rather than inheriting it, and a reader who finds it
+before then should read it as pointing at this section.
+
+So M7 licenses a slice and is not one. Extending S2 to the host path is future
+work carrying an assertion of its own to design, and nothing here does it.
