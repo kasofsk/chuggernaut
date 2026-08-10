@@ -148,3 +148,5 @@ Doc-reread: docs/design/533-molt.md
 Doc-reread: docs/design/311-job-inputs.md
 Doc-reread: docs/spec.md
 Doc-reread: infra/README.md
+
+Doc-reread: docs/design/440-native-worker-daemon.md

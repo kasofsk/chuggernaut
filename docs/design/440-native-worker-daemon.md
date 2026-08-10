@@ -29,6 +29,18 @@ binary the question **its own executor** asks.
 forwards. The swap still copies nothing forward; the ceiling survives because it
 is written down, which is [D7](#decisions) working as intended.
 
+**[D4](#decisions)'s refusal fired in prod on 2026-08-10, and it was wrong.**
+Job #539's deploy was refused by `gumbo-air-0` over its own `deploy` work task —
+an ordinary **container**, reported as host work — because `host_work_check`
+asked a dual-mode node's routed backend for *everything* running and applied no
+mode filter. The guarantee below is unchanged and the implementation is
+corrected in
+[the 2026-08-10 correction](#correction-2026-08-10--d4-asked-the-wrong-backend-on-a-dual-mode-node-job-540):
+the listing is classified by `container::host::names_host_task`, so a host task
+still refuses in the same words and a container task no longer does. It was a
+self-deadlock — a deploy's own work task refusing the refresh it fans out — and
+the fleet sat on `8da61424` until it was fixed.
+
 `IMPLEMENTED` is a claim about the slices and nothing more
 ([`docs/reference/docs.md`](../reference/docs.md)), and it is worth saying what it does
 not claim. Every slice is in the tree and the daemon is buildable and
@@ -42,7 +54,11 @@ host work is routable and two `mac-proof` runs have performed it
 ([#490](./490-agent-work-on-a-mac.md) slice 6). What none of that exercises is
 **this** design's guarantees: nothing has yet restarted a daemon under a live
 host task, so the drain refusal (slice 3) and the survives-a-restart contract
-(slice 2, spec §3.1) remain proven by tests and not by the fleet. The last
+(slice 2, spec §3.1) remain proven by tests and not by the fleet. Slice 3's
+refusal is the one exception, and it is not a proof: it fired on the air on
+2026-08-10 over a task that was never host work, which is what the correction
+above is about — the fleet has exercised the check's classification and found it
+broken, never the guarantee it exists to keep. The last
 slice's own half is the sharpest case of the same gap: `nix/chug-node/` declares
 the unit, **nothing in this repo's CI evaluates that module** (#372 §2.3), and
 no node has ever been given it. The slices landed as — 3 as
@@ -153,7 +169,7 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | --- | --- | --- | --- | --- |
 | 1 | `code` — `spawn_task` calls `env_clear()`; a host task's environment is exactly the dispatcher's launch env plus the two exit-status paths | `HostBackend` launch env (`crates/container/src/host.rs`) | — | **Landed** (job #442), plus a two-name floor the slice line does not mention — see [the correction](#correction-2026-08-05--slice-1-as-landed) |
 | 2 | `code` — launch each host task into a transient supervision unit; refuse to advertise `host` when the node cannot create one. Includes the macOS proof: assert a task survives `launchctl kickstart -k` of the daemon | `HostBackend::launch` / `kill` | 1 | **Landed** (job #447), and **every assertion it carries is now executed and passing**: the macOS proof PASSED on 2026-08-06 ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and on `gumbo-nuc-0` (NixOS, systemd 260 (260.2), cgroup v2) all three Linux assertions PASSED through `HostBackend` at tree `692656e` — D3's two (`a_host_task_runs_in_its_own_supervision_unit`, `a_host_task_survives_the_teardown_of_the_launching_unit`), already passing at `186beeb` and `af9f74e` ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)), and D8's escapee (`a_kill_reaches_a_setsid_escapee_through_the_scope`), for the first time, in a thirteen-of-thirteen run with no skips ([D8 in execution](#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466)) — see [the correction](#correction-2026-08-05--slice-2-as-landed), amended by job #451 for [the scope an unprivileged daemon can create](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451), by job #453 for [the bus that scope's client needs](#correction-2026-08-06--the-bus-the-client-needs-job-453), by job #455 for [a membership check that raced the manager](#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455), by job #457 for [the membership check the D8 test itself never had](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457), by job #458 for [a trace of the escapee's own](#correction-2026-08-06--the-escapees-own-trace-and-three-differences-ruled-out-job-458), by job #459 for [the one fixture variable never varied](#correction-2026-08-06--the-one-variable-four-attempts-never-changed-job-459), and by job #462 for [the client that was rewriting the task's own command](#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462) |
-| 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | **Landed** (job #460), with "live" decided against the exited-but-unremoved window and the tests placed at tier 1 for a reason the slice line does not mention — see [the correction](#correction-2026-08-06--slice-3-as-landed-job-460) |
+| 3 | `code` — the daemon declines `refresh` while any host task is live, with the task id in the reason: a precondition in `refresh` **and** a re-check in `run_refresh` after `quiesce`, beside the `drained` wait, failing the refresh at the `drain` stage | worker `refresh` op precondition and swap-boundary gate (`crates/worker/src/daemon.rs`) | 2 | **Landed** (job #460), with "live" decided against the exited-but-unremoved window and the tests placed at tier 1 for a reason the slice line does not mention — see [the correction](#correction-2026-08-06--slice-3-as-landed-job-460) — and **corrected on 2026-08-10**, when per-launch mode routing had made a dual-mode node's listing mixed and the refusal was still reading every entry as host work, refusing a deploy over its own container task: see [the correction](#correction-2026-08-10--d4-asked-the-wrong-backend-on-a-dual-mode-node-job-540) |
 | 4 | `deploy` — `chug-worker` unit + environment-file templates; `build-worker.sh` renders and installs them instead of composing `docker run`; #390's guard compares the environment file | the node run spec (`deploy/prod/build-worker.sh`) | — | **Landed** (job #469), and **no node has been converted** — the script changes, nothing was applied. Three things the slice line does not mention: the guard keeps a `docker inspect` path *for the conversion itself*, the nix toolchain-shape guard was **ported rather than deleted**, and two knobs were added the design did not name — see [the correction](#correction-2026-08-06--slice-4-as-landed-job-469) |
 | 5 | `deploy` — creds and the node-local artifacts move to a root-owned directory; `deploy/prod/README.md` §6 install step | node credential layout | 4 | **Landed** (job #472), on **Linux only** and with the migration left to the operator's hands — two things the slice line does not mention, plus a third: the node-local *artifacts* had already moved in slice 4, so what this changed is the credentials and the guard over them — see [the correction](#correction-2026-08-06--slice-5-as-landed-job-472) |
 | 6 | `deploy` — `worker-refresh.sh` swap phase: extract the binary from the built worker image, install, ask the supervisor to restart; delete the detached swapper and every mount/device carry-forward | spec §3.1 self-refresh | 4, 5 | **Landed** (job #473), and **no node has been converted**, so every un-converted node's self-refresh now REFUSES — the cost is named, not hidden. What the slice line does not mention: install is by rename (ETXTBSY, and this script truncating itself) and escalates to `sudo -n`, refusals guard against a second daemon on one node, and §3.1's host-task-across-a-unit-restart case becomes true for the first time — see [the correction](#correction-2026-08-06--slice-6-as-landed-job-473) |
@@ -3449,3 +3465,100 @@ fails against the unfixed scripts — verified by running the new suites against
 new behaviour: it diffs the docker calls a `container` and a `container, host`
 node issues against an **unset** node's, in both phases, and therefore passes
 against the unfixed scripts too — which is the point.
+
+## Correction, 2026-08-10 — D4 asked the wrong backend on a dual-mode node (job #540)
+
+[D4](#decisions) is right and the code implementing it was not. The refusal is
+supposed to fire while a **host task** is live; on a node whose `WORKER_MODES`
+names both runtimes it fired while *anything* was live, and then reported
+whatever it found as host work.
+
+### The observation
+
+Job #539's deploy, 2026-08-10, with the fleet on `8da61424` (job #507). The
+`worker-refresh:air` leg failed with `refresh not confirmed` after 0s, which
+cancelled the nuc's leg by design (one node's refusal fails the deploy before
+the rest are asked), so the fleet stayed on `8da61424`. The air's daemon log
+named the culprit:
+
+> worker refresh REFUSED — node air is running host work that would not survive
+> the daemon swap: `air/a0bb42b520c6e9ce8c9a3b37f3ebc1ebc6dc313a3ac0284c317662ce16af177e`
+> (job 539 task 1) …
+
+That task was not host work. [`.chug/jobs/deploy.yaml`](../../.chug/jobs/deploy.yaml)
+declares a top-level `image`, and per-launch mode routing ([`docs/spec.md`](../spec.md)
+§3.1 mode routing, [#309](./309-host-native-execution.md) §1) is in the deployed
+build, so the launch resolved to **container** mode. It was the case §3.1's drain
+guarantee covers unconditionally, and the id says so: a docker id is hex and can
+never wear `TASK_PREFIX`.
+
+### Why the check could not tell
+
+`host_work_check` in [`crates/worker/src/daemon.rs`](../../crates/worker/src/daemon.rs)
+asks `state.backend.list_managed_running()`. On a node serving `host`,
+`state.backend` is [`crates/worker/src/route.rs`](../../crates/worker/src/route.rs)'s
+`RoutedBackend`, whose listing is deliberately the **union** of both backends' —
+a dual-mode node's occupancy is the whole node's, which is what makes the
+node-wide capacity rule mean what it says. `host_work_refusal` then applied no
+mode filter at all, so every entry read as host work.
+
+The defect is generational rather than an oversight in either change. When slice
+3 landed (job #460) the mode was a **node** property — [the correction
+above](#correction-2026-08-06--slice-3-as-landed-job-460) quotes the
+`backend_kind(&config.modes)` flag it read — and on such a node "everything
+running" and "the host tasks" were the same set, so no filter was missing. #309
+P2's per-launch routing made a node's listing mixed, and nothing revisited the
+one place that had been entitled to conflate them.
+
+### It is a self-deadlock, and placement guarantees it
+
+A deploy fans a refresh out to every node, and the deploy's own work task has to
+run somewhere. Placed on the dual-mode node, that container task refuses the
+refresh it is itself part of; `gumbo-air-0` has one slot (host mode's capacity
+rule), so a deploy landing there can never refresh it. Nothing about that is
+intermittent — placement decides it, not timing.
+
+The second cost is to the control itself. D4 exists to protect host tasks, and a
+control that fires on everything is indistinguishable from one that fires on
+nothing the moment an operator learns to re-run through it.
+
+### The fix: classify the listing, do not reach for a second backend
+
+`host_work_refusal` filters the listing through `container::host::names_host_task`
+before deciding. That is the same classifier `RoutedBackend::owner` routes every
+op by, so the refusal's notion of "host task" cannot disagree with the routing's,
+and the two can only ever be wrong together.
+
+The alternative — a host-only accessor on the routed backend — was rejected.
+`WorkerState::backend` is an `Arc<dyn ContainerBackend>`, so reaching the host
+half means either a downcast or a second handle threaded from `local_backend`
+through `WorkerState`: a second source of truth for one backend, to answer a
+question the id already answers. Filtering also keeps `host_work_refusal` pure,
+which is what lets both refusal sites share it and be tested without a backend at
+all — [the tier-1 argument](#why-the-tests-are-at-tier-1-both-of-them) above.
+
+Everything else is deliberately untouched. Both checks still run, at accept and
+again at the swap boundary; the refusal's words, its wire shape and its `drain`
+stage are unchanged; a listing that **fails** still refuses, because "cannot
+tell" is not "nothing is running"; and a container-only node still never asks,
+its `host_mode` flag returning before the backend is reached. No drain op was
+added — [#309](./309-host-native-execution.md) §6 is explicit that none is needed
+— and no epoch, no `WORKER_RPC_VERSION` and no job-type config moved.
+
+### Verification
+
+`cargo test -p worker`, 132 tests, green. Four cases were added to
+[`crates/worker/src/daemon.rs`](../../crates/worker/src/daemon.rs), at tier 1
+where slice 3 put the rest and for the same two reasons: a container task is not
+host work and, with both live, only the host one is named; a dual-mode node
+refreshes under a container task; a dual-mode node still refuses under a host
+task, naming it and starting no build; and a node that cannot list refuses.
+
+The first three go red against the unfixed classification, verified by restoring
+it and re-running. **The fourth does not, and is a guard rather than a red** —
+the fix narrows what counts as host work and says nothing about what an
+unanswerable listing means, so that branch has to pass both before and after.
+
+What is still unproven is what was unproven before: no daemon has been restarted
+under a live **host** task on any node, so D4's guarantee remains a tier-1
+result. What the fleet has now demonstrated is only that the check fires.

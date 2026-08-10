@@ -374,22 +374,26 @@ fn refresh_skip_reason(git_url: Option<&str>, git_key: &Path) -> Option<String> 
     None
 }
 
-/// Why a refresh must not proceed: this node is serving host work that the
-/// daemon swap would kill (design #440 D4). Pure over the listing so the
-/// `refresh` precondition and the swap-boundary re-check refuse in the same
-/// words, and so the id an operator has to act on is always named.
+/// Why a refresh must not proceed: this node is serving **host** work that the
+/// daemon swap would kill (design #440 D4), picked out of a dual-mode node's
+/// whole-node listing by [`container::host::names_host_task`] — the same
+/// classifier [`crate::route::RoutedBackend`] routes every op by, so a container
+/// task, which the drain guarantee does cover, never refuses. Pure over the
+/// listing so the `refresh` precondition and the swap-boundary re-check refuse
+/// in the same words, and so the id an operator has to act on is always named.
 fn host_work_refusal(node: &str, live: &[RunningContainer]) -> Option<String> {
-    if live.is_empty() {
-        return None;
-    }
     let tasks = live
         .iter()
+        .filter(|c| container::host::names_host_task(&c.id))
         .map(|c| match (c.job, c.task) {
             (Some(job), Some(task)) => format!("{} (job {job} task {task})", c.id),
             _ => c.id.clone(),
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect::<Vec<_>>();
+    if tasks.is_empty() {
+        return None;
+    }
+    let tasks = tasks.join(", ");
     Some(format!(
         "node {node} is running host work that would not survive the daemon swap: {tasks} — a \
          host task is not a container and the drain guarantee (spec §3.1) does not cover it, so \
@@ -3194,6 +3198,23 @@ mod tests {
         }
     }
 
+    /// An ordinary container task, whose id is the docker one — hex, so it can
+    /// never wear [`container::host::TASK_PREFIX`] (job #539's `deploy` task,
+    /// which a dual-mode node refused a refresh over).
+    fn a_running_container_task() -> RunningContainer {
+        RunningContainer {
+            id: "w1/a0bb42b520c6e9ce8c9a3b37f3ebc1ebc6dc313a3ac0284c317662ce16af177e".into(),
+            project: Some("acme/chug".into()),
+            job: Some(539),
+            task: Some(1),
+        }
+    }
+
+    /// A node whose `WORKER_MODES` names both runtimes, whose backend is
+    /// therefore [`crate::route::RoutedBackend`] and whose listing is the whole
+    /// node's.
+    const DUAL_MODE: &[WorkerMode] = &[WorkerMode::Container, WorkerMode::Host];
+
     /// A directory this test alone owns, holding its stand-in refresh script and
     /// that script's handshake files.
     fn refresh_dir(name: &str) -> PathBuf {
@@ -3249,12 +3270,13 @@ mod tests {
     /// #114 skip does not fire first) and the stand-in script.
     fn refreshable_state(
         backend: Arc<dyn ContainerBackend>,
-        host_mode: bool,
+        modes: &[WorkerMode],
         dir: &Path,
         script: PathBuf,
     ) -> Arc<WorkerState> {
         let git_key = dir.join("worker_git");
         std::fs::write(&git_key, b"stub").unwrap();
+        let host_mode = serves_host(modes);
         Arc::new(WorkerState {
             node: "w1".into(),
             backend,
@@ -3269,11 +3291,7 @@ mod tests {
             nix_rooted: std::sync::Mutex::new(HashMap::new()),
             host_mode,
             capabilities: node_capabilities(
-                if host_mode {
-                    &[WorkerMode::Host]
-                } else {
-                    &[WorkerMode::Container]
-                },
+                modes,
                 &Xcodes::default(),
                 &AgentCli::default(),
                 &DockerAccess::default(),
@@ -3318,6 +3336,85 @@ mod tests {
         );
     }
 
+    /// A dual-mode node's listing is the whole node's, so the refusal has to
+    /// classify it (job #539): a container task is not host work, and when both
+    /// are live only the host one is named.
+    #[test]
+    fn only_host_tasks_are_host_work() {
+        assert_eq!(
+            host_work_refusal("w1", &[a_running_container_task()]),
+            None,
+            "an ordinary container task survives the swap (spec §3.1)"
+        );
+        let both = host_work_refusal("w1", &[a_running_container_task(), a_running_host_task()])
+            .expect("the live host task still refuses");
+        assert!(both.contains("w1/host-19f2c-0"), "{both}");
+        assert!(
+            !both.contains(&a_running_container_task().id),
+            "the container task is not reported as host work: {both}"
+        );
+    }
+
+    /// The defect job #539's deploy hit: the air runs both modes, its own
+    /// `deploy` work task is a container, and the refresh it is part of was
+    /// refused over it — a self-deadlock, since that task cannot finish before
+    /// the refresh it fans out.
+    #[tokio::test]
+    async fn a_dual_mode_node_refreshes_under_a_container_task() {
+        let dir = refresh_dir("dual-container");
+        let backend = Arc::new(test_utils::FakeBackend::new());
+        backend.set_managed_running([a_running_container_task()]);
+        let script = stub_refresh_script(&dir, false);
+        let state = refreshable_state(backend, DUAL_MODE, &dir, script);
+
+        let ok = ask_refresh(&state).await;
+        assert!(ok.accepted, "no host work is live: {ok:?}");
+        test_utils::wait::poll_default("the refresh to reach the swap", || {
+            phases_run(&dir).contains("swap").then_some(())
+        })
+        .await;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The guarantee #440 D4 bought, unweakened by the fix above: on the same
+    /// dual-mode node a live host task still refuses, and still names itself
+    /// even with a container task beside it.
+    #[tokio::test]
+    async fn a_dual_mode_node_still_refuses_under_a_host_task() {
+        let dir = refresh_dir("dual-host");
+        let backend = Arc::new(test_utils::FakeBackend::new());
+        backend.set_managed_running([a_running_container_task(), a_running_host_task()]);
+        let script = stub_refresh_script(&dir, false);
+        let state = refreshable_state(backend, DUAL_MODE, &dir, script);
+
+        let ok = ask_refresh(&state).await;
+        assert!(!ok.accepted, "a live host task must refuse: {ok:?}");
+        let reason = ok.skipped.expect("the refusal rides in the reply");
+        assert!(reason.contains("w1/host-19f2c-0"), "{reason}");
+        assert!(!reason.contains(&a_running_container_task().id), "{reason}");
+        assert_eq!(phases_run(&dir), "", "no build may start: {reason}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A node that cannot list what is running cannot tell whether a swap would
+    /// kill a host task, so it refuses — the classification above narrows what
+    /// counts as host work, never what an unanswerable listing means.
+    #[tokio::test]
+    async fn a_host_node_that_cannot_list_refuses() {
+        let dir = refresh_dir("unlistable");
+        let backend = Arc::new(test_utils::FakeBackend::new());
+        backend.fail_list_managed_running("docker unreachable");
+        let script = stub_refresh_script(&dir, false);
+        let state = refreshable_state(backend, DUAL_MODE, &dir, script);
+
+        let ok = ask_refresh(&state).await;
+        assert!(!ok.accepted, "an unanswerable listing refuses: {ok:?}");
+        let reason = ok.skipped.expect("the refusal rides in the reply");
+        assert!(reason.contains("cannot list its host tasks"), "{reason}");
+        assert_eq!(phases_run(&dir), "", "no build may start: {reason}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// The accept-time precondition (design #440 D4): a host node running a task
     /// refuses the refresh in the reply, names the task, and never starts the
     /// build.
@@ -3327,7 +3424,7 @@ mod tests {
         let backend = Arc::new(test_utils::FakeBackend::new());
         backend.set_managed_running([a_running_host_task()]);
         let script = stub_refresh_script(&dir, false);
-        let state = refreshable_state(backend, true, &dir, script);
+        let state = refreshable_state(backend, &[WorkerMode::Host], &dir, script);
 
         let ok = ask_refresh(&state).await;
         assert!(!ok.accepted, "a host node with live work must not accept");
@@ -3350,7 +3447,7 @@ mod tests {
         let dir = refresh_dir("boundary");
         let backend = Arc::new(test_utils::FakeBackend::new());
         let script = stub_refresh_script(&dir, true);
-        let state = refreshable_state(backend.clone(), true, &dir, script);
+        let state = refreshable_state(backend.clone(), &[WorkerMode::Host], &dir, script);
 
         let ok = ask_refresh(&state).await;
         assert!(ok.accepted, "an idle host node accepts: {ok:?}");
@@ -3405,7 +3502,7 @@ mod tests {
         backend.set_managed_running([a_running_host_task()]);
         backend.fail_list_managed_running("a container node must never ask this");
         let script = stub_refresh_script(&dir, false);
-        let state = refreshable_state(backend, false, &dir, script);
+        let state = refreshable_state(backend, &[WorkerMode::Container], &dir, script);
 
         assert!(ask_refresh(&state).await.accepted);
         test_utils::wait::poll_default("the refresh to reach the swap", || {
