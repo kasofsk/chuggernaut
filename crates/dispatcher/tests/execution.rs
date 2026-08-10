@@ -382,12 +382,22 @@ async fn every_global_agents_name_still_reaches_the_agent_and_no_command_contain
         .into_iter()
         .find(|c| c.cmd.iter().any(|arg| arg.contains("./ci.sh")))
         .expect("the ci evaluator ran in a container");
-    for name in ["CLAUDE_CODE_OAUTH_TOKEN", "EXTRA_MCP_TOKEN"] {
+    for name in [
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "EXTRA_MCP_TOKEN",
+        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
+    ] {
         assert!(
             !eval.env.contains_key(name),
             "a command container receives no global/agents name: {name}"
         );
     }
+    assert!(
+        eval.files
+            .iter()
+            .all(|f| f.container_path != agent::claude::CREDENTIAL_PATH),
+        "nor the credential file design #529 S2 injects for an agent launch"
+    );
     assert_invariants_of(&rig.invariants);
 }
 

@@ -18,6 +18,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use container::{ContainerBackend, ContainerLaunchConfig, InjectedFile, bootstrap_cmd};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Where the `--mcp-config` payload is injected. Kept out of argv because it
@@ -28,7 +29,64 @@ pub const MCP_CONFIG_PATH: &str = "/chuggernaut/mcp-config.json";
 /// The env names this CLI authenticates from — an OAuth token or a long-lived
 /// API key (design #529 M8). The platform reads neither itself; it forwards
 /// them, so the list is a statement about the CLI rather than about this crate.
-pub const CREDENTIAL_ENV_NAMES: &[&str] = &["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"];
+pub const CREDENTIAL_ENV_NAMES: &[&str] = &[OAUTH_TOKEN_VAR, API_KEY_VAR];
+
+/// The OAuth token this platform's `global/agents` grant actually carries, and
+/// the one design #529 S2 takes out of the launch env.
+const OAUTH_TOKEN_VAR: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// The long-lived API key the same CLI accepts, which S2 deliberately leaves on
+/// the env route: job #546 measured the OAuth token's descriptor variable and
+/// not this one's, and a guessed name authenticates nothing.
+const API_KEY_VAR: &str = "ANTHROPIC_API_KEY";
+
+/// The env name carrying the **decimal descriptor number** the CLI reads the
+/// OAuth token from — a number, never the credential (design #529 M2).
+const OAUTH_TOKEN_FD_VAR: &str = "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR";
+
+/// Set in the CLI's environment, this makes the descriptor path *persist* what
+/// it read to a well-known file no cleanup path deletes (job #546). Every
+/// descriptor-delivering launch removes it, on the composed-env route and the
+/// image-`ENV` route both; a launch still on the env route reads no descriptor.
+const REMOTE_VAR: &str = "CLAUDE_CODE_REMOTE";
+
+/// The descriptor the entrypoint hands the CLI the credential on — the number
+/// job #546 proved a real completion against.
+const CREDENTIAL_FD: u32 = 9;
+
+/// Where the provider credential is injected for descriptor delivery, mode 0600
+/// and unlinked by the entrypoint's first command (design #529 S2).
+pub const CREDENTIAL_PATH: &str = "/chuggernaut/agent-credential";
+
+/// Platform kill switch for design #529 S2: `0` reverts the launch to env
+/// delivery. A deployment whose CLI stops taking the descriptor source is then
+/// one dispatcher restart from working rather than one release.
+const CREDENTIAL_FD_SWITCH: &str = "CHUG_AGENT_CREDENTIAL_FD";
+
+/// Prefix every line the credential half of the entrypoint prints, so an
+/// operator greps one string across `stdout.log` and the live log.
+const CREDENTIAL_LOG_MARKER: &str = "chuggernaut: agent-credential:";
+
+/// Yama's node-wide scope, and the container's own capability set — the two
+/// properties design #529 D3's window rests on (M1d), read from the namespace
+/// that runs the code (docs/reference/style.md Tier 2 #7).
+const PTRACE_SCOPE_PATH: &str = "/proc/sys/kernel/yama/ptrace_scope";
+const PROC_STATUS_PATH: &str = "/proc/self/status";
+
+/// `CAP_SYS_PTRACE`'s bit in the `CapEff` mask, the capability that would let a
+/// task process bypass the scope whatever it is set to.
+const CAP_SYS_PTRACE_BIT: u32 = 19;
+
+/// Whether this dispatcher delivers the provider credential on a descriptor.
+/// On by default; [`CREDENTIAL_FD_SWITCH`] set to `0` is the operator's revert.
+fn credential_fd_enabled() -> bool {
+    !matches!(
+        std::env::var(CREDENTIAL_FD_SWITCH)
+            .as_deref()
+            .map(str::trim),
+        Ok("0")
+    )
+}
 
 pub struct ClaudeProvider {
     backend: Arc<dyn ContainerBackend>,
@@ -110,16 +168,12 @@ impl ClaudeProvider {
         }
         Invocation { command, files }
     }
-}
 
-#[async_trait]
-impl AgentProvider for ClaudeProvider {
-    async fn run(
-        &self,
-        config: AgentRunConfig,
-        on_launch: LaunchReporter,
-    ) -> Result<AgentOutput, AgentError> {
-        let invocation = Self::claude_invocation(&config);
+    /// The whole composed launch: the bootstrap command, the injected files, and
+    /// the env — with the provider credential moved out of that env onto
+    /// [`CREDENTIAL_FD`] when `fd_delivery` is on (design #529 S2).
+    fn launch_config(config: &AgentRunConfig, fd_delivery: bool) -> ContainerLaunchConfig {
+        let invocation = Self::claude_invocation(config);
 
         let mut files = vec![InjectedFile {
             container_path: PROMPT_PATH.to_string(),
@@ -133,19 +187,120 @@ impl AgentProvider for ClaudeProvider {
         let mut env = config.env.clone();
         env.insert("CLAUDE_CONFIG_DIR".into(), crate::CLAUDE_CONFIG_DIR.into());
 
-        let launch = ContainerLaunchConfig {
+        let mut cmd = bootstrap_cmd(
+            &["sh".into(), "-c".into(), invocation.command],
+            config.runtime_env.as_deref(),
+        );
+        if let Some(file) = credential_delivery(&mut env, config.image.as_deref(), fd_delivery) {
+            if let Some(script) = cmd.last_mut() {
+                let wrapped = credential_fd_bootstrap(
+                    script,
+                    &file.container_path,
+                    &credential_ptrace_assertion(PTRACE_SCOPE_PATH, PROC_STATUS_PATH),
+                );
+                *script = wrapped;
+            }
+            files.push(file);
+        }
+
+        ContainerLaunchConfig {
             image: config.image.clone(),
-            cmd: bootstrap_cmd(
-                &["sh".into(), "-c".into(), invocation.command],
-                config.runtime_env.as_deref(),
-            ),
+            cmd,
             env,
             files,
             cpu_limit: None,
             memory_limit: None,
             node: config.node.clone(),
             runtime_env: config.runtime_env.clone(),
-        };
+        }
+    }
+}
+
+/// Move the OAuth token out of `env` and into a mode-0600 file the entrypoint
+/// delivers on [`CREDENTIAL_FD`], returning that file (design #529 S2).
+///
+/// `None` — leaving env delivery exactly as it was — for a host task, whose
+/// `/proc`-free path #529 M7 has not measured, and when the launch carries no
+/// such token or an operator has thrown [`CREDENTIAL_FD_SWITCH`].
+fn credential_delivery(
+    env: &mut HashMap<String, String>,
+    image: Option<&str>,
+    fd_delivery: bool,
+) -> Option<InjectedFile> {
+    if !fd_delivery || image.is_none() {
+        return None;
+    }
+    let token = env.remove(OAUTH_TOKEN_VAR)?;
+    env.remove(REMOTE_VAR);
+    env.insert(OAUTH_TOKEN_FD_VAR.to_string(), CREDENTIAL_FD.to_string());
+    Some(InjectedFile {
+        container_path: CREDENTIAL_PATH.to_string(),
+        contents: token.into_bytes(),
+        mode: 0o600,
+        artifact: None,
+    })
+}
+
+/// Wrap `script` in the credential delivery: read the injected file into a pipe
+/// and unlink it, then run the bootstrap with that pipe's read end at
+/// [`CREDENTIAL_FD`] and stdin restored.
+///
+/// A pipe rather than the file itself, because a task process reaching
+/// `/proc/<cli-pid>/fd/9` finds a drained pipe where it would find a re-readable
+/// file — which is the whole difference between a window and a lifetime
+/// (design #529 D3, measured in job #546).
+fn credential_fd_bootstrap(script: &str, path: &str, assertion: &str) -> String {
+    format!(
+        "{assertion}; unset {REMOTE_VAR}; \
+         {{ cat {path}; rm -f {path}; }} | \
+         {{ exec {CREDENTIAL_FD}<&0 0</dev/null; {script}; }}"
+    )
+}
+
+/// Assert at launch — never assume — the two node-kernel properties design #529
+/// D3's window rests on: Yama's `ptrace_scope`, and `CAP_SYS_PTRACE` absent from
+/// the container's effective set (M6).
+///
+/// It reports and never refuses: an unsatisfied property leaves descriptor
+/// delivery no worse than the env delivery it replaces, so failing the launch
+/// would take a node out of agent work entirely while settling a fleet-policy
+/// question #529 explicitly leaves open.
+fn credential_ptrace_assertion(scope_path: &str, status_path: &str) -> String {
+    format!(
+        "chug_scope=unknown; \
+         if [ -r {scope_path} ]; then read -r chug_scope < {scope_path} || chug_scope=unknown; fi; \
+         chug_cap=unknown; \
+         if [ -r {status_path} ]; then \
+         while read -r chug_key chug_value; do \
+         if [ \"$chug_key\" = CapEff: ]; then chug_cap=$chug_value; break; fi; \
+         done < {status_path}; fi; \
+         case \"$chug_cap\" in '' | *[!0-9a-fA-F]*) chug_cap=unknown ;; esac; \
+         if [ \"$chug_cap\" = unknown ]; then chug_ptrace=unknown; \
+         elif [ $(( (0x$chug_cap >> {CAP_SYS_PTRACE_BIT}) & 1 )) -eq 1 ]; then chug_ptrace=held; \
+         else chug_ptrace=dropped; fi; \
+         chug_scoped=no; \
+         case \"$chug_scope\" in 1 | 2 | 3) chug_scoped=yes ;; esac; \
+         if [ \"$chug_ptrace\" = dropped ] && [ \"$chug_scoped\" = yes ]; then \
+         printf '%s\\n' \"{CREDENTIAL_LOG_MARKER} ok: ptrace_scope=$chug_scope \
+CAP_SYS_PTRACE=$chug_ptrace — a task process cannot read this credential out of the agent CLI\"; \
+         else \
+         printf '%s\\n' \"{CREDENTIAL_LOG_MARKER} WARNING: ptrace_scope=$chug_scope \
+CAP_SYS_PTRACE=$chug_ptrace — a task process CAN read this credential out of the agent CLI's \
+memory, so delivering it on a descriptor buys no window on this node (design #529 M6). Launching \
+anyway: env delivery was never better, and refusing would take this node out of agent work \
+entirely.\"; \
+         fi"
+    )
+}
+
+#[async_trait]
+impl AgentProvider for ClaudeProvider {
+    async fn run(
+        &self,
+        config: AgentRunConfig,
+        on_launch: LaunchReporter,
+    ) -> Result<AgentOutput, AgentError> {
+        let launch = Self::launch_config(&config, credential_fd_enabled());
         let id = self.backend.launch(launch).await?;
         on_launch.report(&id);
         let out = |exit_code| AgentOutput {
@@ -629,6 +784,330 @@ mod tests {
         );
         assert!(contents.contains("NATS USER JWT"));
         assert!(file.artifact.is_none());
+    }
+
+    /// A credential of the shape `global/agents` actually carries, and one no
+    /// launch env, argv or log line may hold after design #529 S2.
+    const TOKEN: &str = "sk-ant-oat01-NOT-A-REAL-TOKEN-8sJq2";
+
+    /// A work launch whose env carries the platform's provider credential — what
+    /// `inject_platform_agent_secrets` hands every agent run.
+    fn config_with_provider_credential() -> AgentRunConfig {
+        let mut c = config_with_creds();
+        c.env.insert(OAUTH_TOKEN_VAR.into(), TOKEN.into());
+        c
+    }
+
+    /// `CapEff` as this fleet's containers report it, and the same mask with
+    /// `CAP_SYS_PTRACE` added — the only bit the assertion reads.
+    const CAP_EFF_DROPPED: &str = "00000000a80425fb";
+    const CAP_EFF_HELD: &str = "00000000a80c25fb";
+
+    fn run_sh(script: &str) -> (String, String, bool) {
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .expect("sh runs");
+        (
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+            out.status.success(),
+        )
+    }
+
+    /// The M6 assertion's own verdict, against a faked view of the two kernel
+    /// files — it must never fail, whatever it reads.
+    fn ptrace_verdict(scope: Option<&str>, cap_eff: Option<&str>) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        let scope_path = dir.path().join("ptrace_scope");
+        let status_path = dir.path().join("status");
+        if let Some(scope) = scope {
+            std::fs::write(&scope_path, format!("{scope}\n")).unwrap();
+        }
+        if let Some(cap_eff) = cap_eff {
+            std::fs::write(
+                &status_path,
+                format!("Name:\tsh\nCapInh:\t0000000000000000\nCapEff:\t{cap_eff}\nSeccomp:\t2\n"),
+            )
+            .unwrap();
+        }
+        let (stdout, stderr, ok) = run_sh(&credential_ptrace_assertion(
+            &scope_path.display().to_string(),
+            &status_path.display().to_string(),
+        ));
+        assert!(ok, "the assertion must never fail a launch: {stderr}");
+        stdout
+    }
+
+    /// Design #529 S2: the composed launch env — the one that becomes the
+    /// container's environment, which `/proc/<pid>/environ` serves for the
+    /// process's whole life (M3) — carries the descriptor NUMBER and no
+    /// credential, and neither does argv.
+    #[test]
+    fn the_agent_launch_env_carries_no_provider_credential() {
+        let launch = ClaudeProvider::launch_config(&config_with_provider_credential(), true);
+        assert!(
+            !launch.env.contains_key(OAUTH_TOKEN_VAR),
+            "the credential name must be gone from the launch env: {:?}",
+            launch.env.keys().collect::<Vec<_>>()
+        );
+        for (name, value) in &launch.env {
+            assert!(
+                !value.contains(TOKEN),
+                "{name} carries the credential value into the env"
+            );
+        }
+        assert_eq!(
+            launch.env.get(OAUTH_TOKEN_FD_VAR).map(String::as_str),
+            Some("9"),
+            "the CLI is told which descriptor to read"
+        );
+        assert!(
+            !launch.cmd.join(" ").contains(TOKEN),
+            "argv must carry no credential either (spec §4.3)"
+        );
+    }
+
+    /// The credential rides in a mode-0600 file the entrypoint unlinks, and the
+    /// trap job #546 found — `CLAUDE_CODE_REMOTE`, which makes the descriptor
+    /// path persist what it read — is removed on both routes it could arrive by.
+    #[test]
+    fn the_credential_rides_in_a_private_file_and_the_persist_trap_is_closed() {
+        let mut config = config_with_provider_credential();
+        config.env.insert(REMOTE_VAR.into(), "1".into());
+        let launch = ClaudeProvider::launch_config(&config, true);
+        let file = launch
+            .files
+            .iter()
+            .find(|f| f.container_path == CREDENTIAL_PATH)
+            .expect("the credential is injected as a file");
+        assert_eq!(file.mode, 0o600);
+        assert_eq!(file.contents, TOKEN.as_bytes());
+        assert!(file.artifact.is_none(), "never harvested as an artifact");
+        assert!(!launch.env.contains_key(REMOTE_VAR));
+        let script = launch.cmd.last().expect("a bootstrap script");
+        assert!(
+            script.contains(&format!("unset {REMOTE_VAR}")),
+            "an image whose own ENV sets it must be covered too: {script}"
+        );
+    }
+
+    /// The seam itself, run for real under `/bin/sh`: the CLI's process finds
+    /// the credential on descriptor 9 and the injected file is already gone.
+    #[test]
+    fn the_credential_reaches_the_cli_on_an_inherited_descriptor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-credential");
+        std::fs::write(&path, TOKEN).unwrap();
+        let probe = format!(
+            "if [ -r /proc/self/fd/{CREDENTIAL_FD} ]; then exec cat /proc/self/fd/{CREDENTIAL_FD}; \
+             else exec cat <&{CREDENTIAL_FD}; fi"
+        );
+        let script =
+            credential_fd_bootstrap(&probe, &path.display().to_string(), "chug_scope=skipped");
+        let (stdout, stderr, ok) = run_sh(&script);
+        assert!(ok, "{stderr}");
+        assert_eq!(
+            stdout.trim(),
+            TOKEN,
+            "the descriptor the CLI reads must carry the credential"
+        );
+        assert!(
+            !path.exists(),
+            "the injected file is unlinked before the agent runs"
+        );
+    }
+
+    /// Design #529 D3's window rests on the source being SPENT: a second reader
+    /// of the same descriptor gets nothing, which is what a pipe buys and an
+    /// unlinked regular file — still whole behind `/proc/<pid>/fd/9` — does not.
+    #[test]
+    fn the_descriptor_is_spent_once_the_cli_has_read_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-credential");
+        std::fs::write(&path, TOKEN).unwrap();
+        let probe = format!(
+            "cat <&{CREDENTIAL_FD} > /dev/null; printf 'residue=[%s]' \"$(cat <&{CREDENTIAL_FD})\""
+        );
+        let script =
+            credential_fd_bootstrap(&probe, &path.display().to_string(), "chug_scope=skipped");
+        let (stdout, stderr, ok) = run_sh(&script);
+        assert!(ok, "{stderr}");
+        assert_eq!(stdout.trim(), "residue=[]");
+    }
+
+    /// Design #529 M6, satisfied: this fleet's measured values — Yama at 1 and
+    /// docker's default drop of `CAP_SYS_PTRACE`.
+    #[test]
+    fn the_ptrace_assertion_passes_on_a_node_that_holds_the_property() {
+        let verdict = ptrace_verdict(Some("1"), Some(CAP_EFF_DROPPED));
+        assert!(verdict.contains(CREDENTIAL_LOG_MARKER), "{verdict}");
+        assert!(verdict.contains("ok: ptrace_scope=1"), "{verdict}");
+        assert!(verdict.contains("CAP_SYS_PTRACE=dropped"), "{verdict}");
+        assert!(!verdict.contains("WARNING"), "{verdict}");
+    }
+
+    /// M6's whole point: each way the property can be absent is REPORTED rather
+    /// than assumed — and none of them refuses the launch, because a node with
+    /// `ptrace_scope=0` would otherwise take no agent work at all.
+    #[test]
+    fn the_ptrace_assertion_fires_on_every_way_the_property_can_be_absent() {
+        for (label, scope, cap_eff, expected) in [
+            (
+                "yama off",
+                Some("0"),
+                Some(CAP_EFF_DROPPED),
+                "ptrace_scope=0",
+            ),
+            (
+                "capability held",
+                Some("1"),
+                Some(CAP_EFF_HELD),
+                "CAP_SYS_PTRACE=held",
+            ),
+            ("no files at all", None, None, "ptrace_scope=unknown"),
+            (
+                "unreadable mask",
+                Some("1"),
+                Some("not-a-mask"),
+                "CAP_SYS_PTRACE=unknown",
+            ),
+        ] {
+            let verdict = ptrace_verdict(scope, cap_eff);
+            assert!(verdict.contains("WARNING"), "{label}: {verdict}");
+            assert!(verdict.contains(expected), "{label}: {verdict}");
+        }
+    }
+
+    /// The chosen not-satisfied behaviour, pinned end to end: the warning is
+    /// printed, the launch proceeds, and the credential still arrives.
+    #[test]
+    fn an_unsatisfied_node_still_launches_and_still_delivers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-credential");
+        std::fs::write(&path, TOKEN).unwrap();
+        let scope_path = dir.path().join("ptrace_scope");
+        std::fs::write(&scope_path, "0\n").unwrap();
+        let assertion = credential_ptrace_assertion(
+            &scope_path.display().to_string(),
+            &dir.path().join("absent-status").display().to_string(),
+        );
+        let script = credential_fd_bootstrap(
+            &format!("exec cat <&{CREDENTIAL_FD}"),
+            &path.display().to_string(),
+            &assertion,
+        );
+        let (stdout, stderr, ok) = run_sh(&script);
+        assert!(ok, "an unsatisfied node must still run the agent: {stderr}");
+        assert!(stdout.contains("WARNING"), "{stdout}");
+        assert!(stdout.contains(TOKEN), "the credential still arrives");
+    }
+
+    /// No secret VALUE reaches a log line: what the launch prints is the two
+    /// kernel properties and nothing the credential file holds.
+    #[test]
+    fn the_launch_time_report_names_the_properties_and_never_the_credential() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agent-credential");
+        std::fs::write(&path, TOKEN).unwrap();
+        let scope_path = dir.path().join("ptrace_scope");
+        std::fs::write(&scope_path, "1\n").unwrap();
+        let status_path = dir.path().join("status");
+        std::fs::write(&status_path, format!("CapEff:\t{CAP_EFF_DROPPED}\n")).unwrap();
+        let assertion = credential_ptrace_assertion(
+            &scope_path.display().to_string(),
+            &status_path.display().to_string(),
+        );
+        let script = credential_fd_bootstrap(
+            &format!("cat <&{CREDENTIAL_FD} > /dev/null"),
+            &path.display().to_string(),
+            &assertion,
+        );
+        let (stdout, stderr, ok) = run_sh(&script);
+        assert!(ok, "{stderr}");
+        assert!(stdout.contains(CREDENTIAL_LOG_MARKER), "{stdout}");
+        assert!(!stdout.contains(TOKEN), "the credential must not be logged");
+        assert!(!stderr.contains(TOKEN), "nor onto stderr");
+    }
+
+    /// A launch carrying no provider credential composes byte-for-byte what it
+    /// composed before S2 — so a command container, which never sees the
+    /// `global/agents` grant at all, cannot be touched by this slice.
+    #[test]
+    fn a_launch_with_no_provider_credential_is_byte_identical() {
+        let config = config_with_creds();
+        let launch = ClaudeProvider::launch_config(&config, true);
+        assert_eq!(
+            launch.cmd,
+            bootstrap_cmd(
+                &[
+                    "sh".into(),
+                    "-c".into(),
+                    ClaudeProvider::claude_invocation(&config).command
+                ],
+                None
+            )
+        );
+        assert!(!launch.env.contains_key(OAUTH_TOKEN_FD_VAR));
+        assert!(
+            launch
+                .files
+                .iter()
+                .all(|f| f.container_path != CREDENTIAL_PATH)
+        );
+    }
+
+    /// Two launches this slice deliberately leaves on the env route: a host
+    /// task, whose `/proc`-free path #529 M7 has not measured, and a deployment
+    /// where an operator has thrown the kill switch. Both keep
+    /// `CLAUDE_CODE_REMOTE`, since only a descriptor read can act on it.
+    #[test]
+    fn a_host_task_and_a_reverted_deployment_keep_env_delivery() {
+        let mut host = config_with_provider_credential();
+        host.image = None;
+        host.env.insert(REMOTE_VAR.into(), "1".into());
+        let mut reverted = config_with_provider_credential();
+        reverted.env.insert(REMOTE_VAR.into(), "1".into());
+        for launch in [
+            ClaudeProvider::launch_config(&host, true),
+            ClaudeProvider::launch_config(&reverted, false),
+        ] {
+            assert_eq!(
+                launch.env.get(OAUTH_TOKEN_VAR).map(String::as_str),
+                Some(TOKEN)
+            );
+            assert!(!launch.env.contains_key(OAUTH_TOKEN_FD_VAR));
+            assert!(
+                launch
+                    .files
+                    .iter()
+                    .all(|f| f.container_path != CREDENTIAL_PATH)
+            );
+            assert_eq!(launch.env.get(REMOTE_VAR).map(String::as_str), Some("1"));
+            assert!(
+                !launch
+                    .cmd
+                    .iter()
+                    .any(|arg| arg.contains(&format!("unset {REMOTE_VAR}"))),
+                "the descriptor wrapper belongs only to the descriptor route: {:?}",
+                launch.cmd
+            );
+        }
+    }
+
+    /// The API key stays on the env route on purpose: job #546 measured the
+    /// OAuth token's descriptor variable and not this one's, and delivering it
+    /// under a guessed name would authenticate nothing.
+    #[test]
+    fn the_unmeasured_api_key_route_is_left_alone() {
+        let mut config = config_with_creds();
+        config.env.insert(API_KEY_VAR.into(), "sk-ant-api-x".into());
+        let launch = ClaudeProvider::launch_config(&config, true);
+        assert_eq!(
+            launch.env.get(API_KEY_VAR).map(String::as_str),
+            Some("sk-ant-api-x")
+        );
     }
 
     /// Parse the injected settings payload for a profile.

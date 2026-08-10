@@ -156,3 +156,5 @@ Doc-reread: docs/design/517-docker-access-for-jobs.md
 Doc-reread: docs/design/529-secret-handling.md
 
 Doc-reread: docs/design/529-secret-handling.md
+Doc-reread: docs/design/529-secret-handling.md
+Doc-reread: docs/spec.md

@@ -1,8 +1,10 @@
 # Design #529 — Secret handling: the declarative model's edges, and the platform token's reach
 
-Status: IMPLEMENTED IN PART — S1a has landed (job #545) and is observe-only;
-everything else below is proposed, and M2 is answered so S2 is no longer gated
-on it.
+Status: IMPLEMENTED IN PART — S1a has landed (job #545) and is observe-only,
+and S2+M6 have landed together (job #547): the provider credential now reaches
+an agent container on an inherited descriptor rather than in its environment,
+and the kernel property that window rests on is asserted at every launch.
+Everything else below is proposed.
 
 Written against the tree at `927067b` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a
@@ -53,12 +55,12 @@ the argument and its dated corrections, never edited
 | Declared secrets, project `vars` and `global/agents` carry a TTL | — | **No.** Injected verbatim; lifetime is rotation discipline |
 | `global/agents` is narrowed to what the agent CLI needs | `inject_platform_agent_secrets`, `exec.rs` | **No.** The *whole scope* still reaches every agent launch — S1a only logs, by name, what S1b would decline |
 | A provider-credential name set exists in the tree | `PROVIDER_CREDENTIAL_NAMES`, [`crates/agent/src/lib.rs`](../../crates/agent/src/lib.rs), from `claude::CREDENTIAL_ENV_NAMES` | **Landed** (S1a). Nothing consults it as an exclusion yet |
-| The platform's provider token is out of the task's reach | — | **No.** Env-delivered, and the env is readable for the process's life (§[3](#3-decision-1-what-the-measurement-says)) |
-| The agent CLI will take that token from a withdrawable source instead | `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, the shipped CLI | **Yes, measured** (M2, job #546) — an inherited fd, read once, leaving no file and no env entry. Unused today |
+| The platform's provider token is out of the task's reach | `credential_delivery`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Narrowed, not closed** (S2, job #547). A *window* instead of the process's lifetime; still no boundary, exactly as D5 says |
+| The agent CLI will take that token from a withdrawable source instead | `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, the shipped CLI | **Yes, measured** (M2, job #546) — an inherited fd, read once, leaving no file and no env entry. **In use** since S2 |
 | …and `apiKeyHelper` is the fallback if it will not | `--settings`, the same CLI | **No.** Measured: the helper's output is used as an API key and this credential is an OAuth token, rejected as `Invalid API key` |
-| A credential in the agent CLI's *memory* is out of the task's reach | Yama `ptrace_scope`, the node's kernel | **True today, and not by this platform's doing.** Measured `1` in a work container (M1d); a node sysctl, unasserted — M6 |
+| A credential in the agent CLI's *memory* is out of the task's reach | Yama `ptrace_scope`, the node's kernel; `credential_ptrace_assertion`, `crates/agent/src/claude.rs` | **True today, and not by this platform's doing — now asserted rather than assumed** (M6, job #547). Every agent launch reads both properties in the container's own view and prints the verdict; it never refuses |
 | Credential-bearing payloads are kept out of argv | `claude_invocation`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Landed**, with a test asserting it |
-| The same reasoning is applied to the env | — | **No.** That asymmetry is what D3 names |
+| The same reasoning is applied to the env | `credential_delivery`, `crates/agent/src/claude.rs` | **For the provider credential, yes** (S2). Declared `work.secrets` and project `vars` are still env-delivered — that is S3 |
 | Injected files are deleted at teardown | `remove` / `reclaim_credentials`, [`crates/container/src/host.rs`](../../crates/container/src/host.rs); `docs/spec.md` §3.1 | **Landed**, on both backends |
 | Any artifact is redacted, ever | [`crates/store/src/artifacts.rs`](../../crates/store/src/artifacts.rs) | **No.** Zero redaction anywhere in the tree |
 | File delivery has plumbing | `InjectedFile`, [`crates/container/src/lib.rs`](../../crates/container/src/lib.rs) | **Landed** — used by SSH and by #313 |
@@ -155,8 +157,8 @@ that no cleanup path reaches.
 | **S1a** | Log, by name, every `global/agents` name `inject_platform_agent_secrets` would decline under S1b's set — while still injecting all of them | **Landed** (job #545) — observe-only; one release, so S1b excludes nothing a run depends on |
 | **S1b** | Narrow the injector from "every name under `global/agents`" to a platform-configured provider-credential name set, injecting nothing else | Proposed — after S1a; no schema field, no epoch, moves *reach* |
 | **M2** | Measure whether the agent CLI authenticates from an inherited fd (`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`) with no token in the env | **Landed** (job #546) — it does, proved by a real completion; the fallback (d) does **not** take this credential. [The record](#correction--2026-08-10-job-546-m2-measured-the-fd-source-authenticates-and-apikeyhelper-will-not-take-this-credential) |
-| **S2** | Deliver the provider credential on an inherited fd — the container's own `sh -c` entrypoint opens the injected file, unlinks it and execs `claude` with the fd number — and stop putting it in the launch env | Proposed — **no longer gated**; ships with M6, moves *reach*. (d) is not the fallback it was written as |
-| **M6** | Assert `ptrace_scope` (and the absence of `CAP_SYS_PTRACE`) at launch instead of assuming it — the host-kernel property S2's window rests on (M1d) | Proposed — ships **with** S2; without it S2 asserts a bound whose mechanism it never checks |
+| **S2** | Deliver the provider credential on an inherited fd — the container's own `sh -c` entrypoint reads the injected file into a pipe, unlinks it, and runs the bootstrap with the pipe's read end at fd 9 — and stop putting it in the launch env | **Landed** (job #547), container mode only. [The record](#landed--2026-08-10-job-547-s2-and-m6-the-credential-arrives-on-a-descriptor-and-the-property-it-rests-on-is-asserted) |
+| **M6** | Assert `ptrace_scope` (and the absence of `CAP_SYS_PTRACE`) at launch instead of assuming it — the host-kernel property S2's window rests on (M1d) | **Landed** (job #547) — reported at every agent launch, never enforced; the fleet-policy half stays open |
 | **M7** | Measure M1c/M1d's equivalents on the **host** node path, where there is no `/proc` and `task_for_pid` governs | Proposed — a **measurement**; until it lands, S2's window claim is container-mode only |
 | **S3** | A per-level file-delivery declaration for project secrets, over the existing `InjectedFile` plumbing, using the `{NAME}_FILE` convention `.chug/tasks/deploy.sh` already anticipates | Proposed — **costs an epoch bump**, moves *reach* |
 | **S4** | Artifact redaction | Proposed — **out of scope here**; needs its own design, and D7 forbids implying it is covered |
@@ -908,3 +910,116 @@ Stated limits, so the next reader does not over-read this:
 - **Container mode only**, like M1a–M5. M7 is untouched by this.
 - **One CLI version**, 2.1.220, and a third party's behaviour at one version is
   what M1b already warned this class of finding is.
+
+## Landed — 2026-08-10, job #547 (S2 and M6: the credential arrives on a descriptor, and the property it rests on is asserted)
+
+S2 and M6 shipped together, as §[4](#4-the-options-for-decision-1)'s ordering
+requires: without M6 the slice asserts a bound whose mechanism it never checks.
+Built on the [job #546 correction](#correction--2026-08-10-job-546-m2-measured-the-fd-source-authenticates-and-apikeyhelper-will-not-take-this-credential)
+and on the seam that correction names — the container's own `sh -c` entrypoint —
+not on a new plumbing layer.
+
+### The mechanism, and the one place it deviates from the slice's wording
+
+`ClaudeProvider::launch_config` ([`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs))
+moves `CLAUDE_CODE_OAUTH_TOKEN` out of the composed launch env into a mode-0600
+`InjectedFile` at `/chuggernaut/agent-credential`, sets
+`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR=9` (a number, never a credential), and
+wraps the bootstrap script:
+
+```sh
+<ptrace assertion>; unset CLAUDE_CODE_REMOTE; \
+{ cat /chuggernaut/agent-credential; rm -f /chuggernaut/agent-credential; } | \
+{ exec 9<&0 0</dev/null; <clone && cd && exec claude …>; }
+```
+
+**The deviation: a pipe, not the injected file opened directly.** The slice was
+written as "opens the injected file, unlinks it and execs `claude` with the fd
+number". Implemented that way it would buy nothing: an unlinked *regular* file is
+whole and re-readable behind `/proc/<cli-pid>/fd/9` for the CLI's entire life,
+which is the M1c relation and therefore exactly the lifetime the env already had.
+The pipe is what makes #546's measured residue — a reachable handle to **0
+bytes** — the thing a task actually finds. The unlink still matters, and happens
+in the same breath: it is what stops the file itself being a second copy.
+
+**The exposure window, measured rather than claimed.** Two windows, because there
+are two artefacts:
+
+| Artefact | Open from | Closed by | Readable during it by |
+| --- | --- | --- | --- |
+| the injected **file** | the backend's put-archive, which runs after container create and **before** start ([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)) | the entrypoint's first command — before the clone, before any task code exists | nothing inside the container (no process runs before the entrypoint); on the node, root and anything holding the docker socket, which [#517](517-docker-access-for-jobs.md) D1 already accepts |
+| the **pipe** | that same first command | the CLI's first read of the descriptor | the platform's own bootstrap (`sh`, `git`) — the task's own code does not exist until the CLI spawns a tool, which is after it has authenticated |
+
+So the honest statement is: **the file's window is the entrypoint's first
+command, and the pipe's window ends at the CLI's first read** — where the env's
+window was the whole task (M3). It is a window and not a boundary (D5), and the
+race §[4](#4-the-options-for-decision-1)(c) names is unchanged: a task process
+that could run before the CLI reads would drain the pipe. Nothing here measures
+how long the pipe's window is in wall-clock terms; it spans the workspace clone,
+which is seconds to minutes, and no task-controlled code runs inside it.
+
+**What else the wrapper does.** `unset CLAUDE_CODE_REMOTE` closes the trap #546
+found — the same code path writes what it read to
+`/home/claude/.claude/remote/.oauth_token` if that variable is set — on the
+image-`ENV` route as well as the composed-env route, which the env-side removal
+alone would miss.
+
+### M6: asserted, reported, and deliberately not enforced
+
+`credential_ptrace_assertion` reads `/proc/sys/kernel/yama/ptrace_scope` and
+`CapEff` from `/proc/self/status` **in the container's own view** (docs/reference/style.md
+Tier 2 #7), tests bit 19 for `CAP_SYS_PTRACE`, and prints one
+`chuggernaut: agent-credential:` line to stdout — which is the harvested
+`stdout.log` and the live log. It uses shell builtins only (`read`, `case`,
+arithmetic, `printf`), so it depends on nothing a project image might not carry,
+and a malformed mask is filtered to `unknown` rather than reaching arithmetic
+that would kill a POSIX shell outright.
+
+**It reports and never refuses, and that is a decision with a reason.** Measured
+before choosing: this job's own work container reports `ptrace_scope=1` and
+`CapEff=00000000a80425fb` (bit 19 clear), and M1d measured `1` in job #545's
+container. That is two containers, not a fleet sweep — the platform has no
+node-level probe for either value, which is itself part of why M6 exists. Three
+arguments against fail-closed, in order of weight:
+
+1. **An unsatisfied node loses nothing relative to today.** §[4](#4-the-options-for-decision-1)(c)
+   already says the slice degrades to (a) with extra steps when the sysctl is
+   `0`. Refusing the launch would therefore trade *availability* for *no security
+   gain over the status quo*.
+2. **It is self-blocking.** Every agent job on that node fails, including the job
+   that would fix the node. Command jobs — `deploy`, `rollback`, `ci` — are
+   `work.type: command` and unaffected either way, which is what keeps the
+   platform recoverable; but the repair path for a fail-closed agent fleet would
+   be an operator, not the platform.
+3. **Enforcement is a question this document explicitly leaves open** ("What this
+   does not decide"). A slice that refused would settle it by implementation.
+
+`docker_grant_refusal`'s precedent points the other way and does not transfer: it
+refuses a *grant the job declared* and cannot safely have. Here the job declared
+nothing; the platform is checking its own premise.
+
+### The kill switch, and why a slice this wide has one
+
+`CHUG_AGENT_CREDENTIAL_FD=0` in the dispatcher's environment reverts every agent
+launch to env delivery. This changes how *every* agent container on the platform
+authenticates, and the change is only exercised after a deploy — this job's own
+evaluators ran on the old dispatcher, so the slice cannot self-test. The switch
+makes the failure mode "set a variable and restart" rather than "release a
+revert while agent jobs are broken".
+
+### Deliberate scope limits
+
+- **Container mode only.** A host task (`image: None`) keeps env delivery
+  untouched: M7 has not measured the `/proc`-free path, and #529 forbids claiming
+  the window there.
+- **`ANTHROPIC_API_KEY` keeps the env route.** #546 measured the OAuth token's
+  descriptor variable; the API key's sibling was seen in the bundle but never
+  named or run, and a guessed variable name authenticates nothing.
+- **Long sessions are still an inference.** #546's runs were single-turn `-p`;
+  the platform's launch is a long `stream-json` session. The resolver caches and
+  this credential class carries no refresh token, so one read should serve — but
+  a pipe cannot be re-read, which is what the kill switch is for.
+- **The dispatcher-side `AgentRunConfig.env` still carries the token.** It is an
+  in-process struct that never becomes any container's environment; the provider
+  owns the CLI's credential names and its descriptor variable, so the removal
+  belongs there and the assertion is on `ContainerLaunchConfig.env`.
