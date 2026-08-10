@@ -773,6 +773,38 @@ mv "$ANCHOR/a.md.away" "$ANCHOR/docs/a.md"
 
 # --- A prerequisite that is missing is loud, and is not a pass ----------------
 
+# 58. A tracked registry ABSENT from the worktree is the same category as one
+#     whose table will not parse (case 40): check 4 has no input, so it refuses
+#     with a message rather than letting awk abort bare.
+#
+#     THE CONTRAST WITH CASE 46 IS THE WHOLE POINT. Untracked stands the check
+#     down and passes, because a project that catalogues or registers nothing is
+#     a project this script must stay usable in. Tracked-but-absent is a LINTER
+#     ERROR, because it says the registry exists and your worktree is mid-move —
+#     which is what a plain `mv` of it leaves, the doc-reorganisation state these
+#     checks exist to survive. A singleton the check READS is not a member of the
+#     scanned list, so it refuses where a member is skipped (case 57).
+write_registry '| `single writer` | [`docs/reference/owner.md`](reference/owner.md#tier-3--principles) | The one writer |'
+mv "$CONCEPTS/docs/concepts.md" "$CONCEPTS/concepts.md.away"
+run_concepts docs/reference/owner.md
+check "a tracked registry absent from the worktree is a LINTER ERROR" 2 "$RC" "$OUT" \
+	"docs/concepts.md is tracked but absent from the worktree"
+check "it names the check that lost its input" 2 "$RC" "$OUT" "check 4 has no input to read"
+check_absent "and awk never aborts bare" 2 "$RC" "$OUT" "can't open file"
+mv "$CONCEPTS/concepts.md.away" "$CONCEPTS/docs/concepts.md"
+
+# 59. The catalogue is the same singleton, and takes the same verdict. Case 46
+#     removed it from the index, so re-track it first: the two cases differ only
+#     in whether git still holds the path, which is exactly the distinction.
+catalogue_rows
+mv "$CATALOGUE/docs/README.md" "$CATALOGUE/README.md.away"
+run_catalogue
+check "a tracked catalogue absent from the worktree is a LINTER ERROR" 2 "$RC" "$OUT" \
+	"docs/README.md is tracked but absent from the worktree"
+check "it names check 5" 2 "$RC" "$OUT" "check 5 has no input to read"
+check_absent "and awk never aborts bare here either" 2 "$RC" "$OUT" "can't open file"
+mv "$CATALOGUE/README.md.away" "$CATALOGUE/docs/README.md"
+
 # 16. Outside a git checkout the check refuses to judge rather than falling back
 #     to the filesystem — exit 2, a LINTER ERROR, distinct from both verdicts.
 NONGIT="$WORK/nongit"

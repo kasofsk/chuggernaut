@@ -165,8 +165,9 @@
 # CI would accept, because CI runs this unconditionally.
 #
 # Exit: 0 = clean. 1 = findings, each named with its file and line. 2 = the
-# check could not run (no git, no awk, nothing tracked, an unparseable tracked
-# registry) — a LINTER ERROR, never
+# check could not run (no git, no awk, nothing tracked, a tracked registry or
+# catalogue that is unparseable or absent from the worktree) — a LINTER ERROR,
+# never
 # a verdict, because a doc-fact check that cannot run must not read as clean.
 #
 # Test: .chug/tasks/check-doc-facts.test.sh
@@ -356,6 +357,21 @@ doc_facts_present() { # <file>... -> the ones that exist, newline-separated
 	done
 }
 
+# The opposite verdict, for the opposite kind of file. `doc_facts_present` skips
+# a MEMBER of the scanned list, because a deleted doc in a diff has no content
+# and never had a claim. Checks 4 and 5 each read a SINGLETON instead — the
+# registry, the catalogue — and absent means the check has no input at all, so
+# it refuses. The header's contract already puts an unparseable tracked registry
+# here; unreadable is the same category, and either way awk's own abort is a
+# bare exit 2 that says nothing.
+doc_facts_require_present() { # <file> <what-cannot-run>
+	[ -f "$1" ] && return 0
+	doc_facts_unrunnable \
+		"$1 is tracked but absent from the worktree — $2 has no input to read." \
+		"    A plain \`mv\` of it leaves exactly this state, since the old path stays" \
+		"    tracked until the move is staged: \`git mv\` it, or restore the file."
+}
+
 # Whole-tree even in `--staged` mode: a link in a staged doc points at a heading
 # in a doc this diff never touched, so a scoped index would report it broken.
 # The subshell is load-bearing — `set --` inside it must not reach the script's
@@ -450,6 +466,7 @@ doc_facts_load_registry() {
 }
 
 if [ "$emit_paths" -eq 0 ] && grep -qxF "$concepts_registry" "$tracked_index"; then
+	doc_facts_require_present "$concepts_registry" "check 4"
 	doc_facts_load_registry
 fi
 
@@ -537,6 +554,7 @@ doc_facts_catalogue_summary() {
 }
 
 if [ "$emit_paths" -eq 0 ] && grep -qxF "$docs_catalogue" "$tracked_index"; then
+	doc_facts_require_present "$docs_catalogue" "check 5"
 	doc_facts_catalogue_gate
 fi
 
