@@ -1,6 +1,6 @@
 # Design #537 — Per-project unix users on a macOS host node
 
-Status: PROPOSED — nothing below is built, and slice 0 is a measurement.
+Status: PROPOSED — slice 0's measurements landed (jobs #557, #561); nothing else is built.
 
 Written against the tree at `4674210` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a sibling
@@ -18,8 +18,18 @@ direction §[5](#5-signing) records is retired. What that changes here, what it
 changes in [#322](322-macos-native-runtime.md), and the one thing it hands to
 [#529](529-secret-handling.md) are in
 [the 2026-08-10 correction](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it).
-M1 — the measurement that can send this design to its rejected alternative —
-is untouched and still gates every slice.
+
+**The other one is now measured, and M1 passes.** A `mode: host` task the
+**daemon's own launch path** spawned drove CoreSimulator as `chug-probe` through
+`sudo -n -u chug-probe -H`, in a device set of its own — so this design is **not**
+sent to [its rejected shared-uid alternative](#10-the-rejected-alternative-one-shared-worksalot-uid),
+and C1 is viable. M1–M8 and what each answered are in the measurement table
+below; the record, the two things the measurements *change* rather than confirm,
+and the one question they leave open are in
+[the 2026-08-10 slice-0 correction](#correction--2026-08-10-job-561-slice-0-is-measured-m1-passes-and-the-staff-primary-group-is-load-bearing-in-two-directions).
+Read that question before treating slice 0 as closed: M1 passed in a session
+inherited from the login user's **console** session, and the headless case is
+untested.
 
 ## Current state
 
@@ -37,6 +47,8 @@ the argument and its dated corrections, never edited
 | One host task at a time | `enforce_host_capacity`, `crates/worker/src/daemon.rs`, plus the running-task exclusion in `HostBackend::admit` | True |
 | The task directory is created `0700` by the daemon, and every wire path is rebased into it | `create_private_dir` and `rebase_path`, `crates/container/src/host.rs` | True |
 | `remove` deletes the recorded files, the task directory, and this task's MCP-log subtree **under the daemon's own `HOME`** | `reclaim_agent_cache` reads `HOME` out of the daemon's environment, `crates/container/src/host.rs` | True, and it breaks the moment the task's home is not the daemon's |
+| The daemon's own state on a Mac lives **under the login user's home** — `worker.env`, and `keys/worker.creds` / `keys/worker_git` beside it | the macOS branch of `deploy/prod/build-worker.sh` (`$NODE_HOME/chuggernaut-worker/…`); the launchd plist's `ENV_FILE` in `deploy/prod/install-worker-launchd.sh` | True. Measured 2026-08-10: the home is `0750` group `staff`, `worker.env` is `0644`, and a second uid whose **primary group is `staff`** reads it. The credentials at `0600` do not follow — the protection is the per-file mode, not the home |
+| A host task execs the agent CLI by **bare name off the `PATH` it inherits**, which on the air resolves under the login user's home | `AgentCli::discover_on` (`crates/worker/src/agent_cli.rs`) resolves it only to advertise the capability; the `PATH` is `AGENT_PATH`, rendered **twice** — in `deploy/prod/install-worker-launchd.sh` (hand-run) and in `deploy/prod/build-worker.sh`'s own macOS plist (what the deploy reaches a node with), both defaulting to `…:$HOME/.local/bin`, with `deploy/prod/install-worker-launchd.test.sh` asserting the two carry one `PATH` | True, and measured to work for a second uid **only** through that same `0750`+`staff` traversal — which is why D12 exists |
 | The cross-project secret boundary is **absent** on a Mac, accepted by job #526 | [#322](322-macos-native-runtime.md)'s 2026-08-09 correction | True today; this design is what replaces that decision |
 
 ## Decisions
@@ -44,49 +56,57 @@ the argument and its dated corrections, never edited
 | # | Decision | One-line rationale |
 | --- | --- | --- |
 | **D1** | **One unix user per project, `chug-{project}`, not a per-task pool.** | It maps one-to-one onto a list the node already declares and already fails closed, and it keeps within-project persistence — which [#309 §10](309-host-native-execution.md#10-trust-and-tenancy) calls the feature — while restoring the boundary between projects. |
-| **D2** | **The daemon keeps its GUI-domain agent shape and escalates per launch through a node-provisioned `sudo` binding.** A root daemon is recorded as the endpoint, with three triggers, and is not this design's first cut. | The escalation is exactly the mechanism the measurement used; a root daemon would dissolve most of the work below but rewrites the one Mac's supervision two weeks before it carries the operator's iOS work. |
+| **D2** | **The daemon keeps its GUI-domain agent shape and escalates per launch through a node-provisioned `sudo` binding.** A root daemon is recorded as the endpoint, with three triggers, and is not this design's first cut. | The escalation is exactly the mechanism the measurement used, and **M1 has now run it from the daemon's own launch path** (2026-08-10) rather than by proxy; a root daemon would dissolve most of the work below but rewrites the one Mac's supervision two weeks before it carries the operator's iOS work. |
 | **D3** | **The binding is told to the backend, never discovered by it** — a resolved `{project → uid, home}` map handed to `HostBackend::new` beside `Supervision`, `AgentCapability` and `HostTenancy`. | It is the pattern those three already establish in `crates/container/src/host.rs`: the daemon discovers node facts, the backend is told them and is testable without a node. |
 | **D4** | **`launch`, `kill` and *every delete* escalate — including the two the **daemon** performs with no task left to ask, `spawn_reaper`'s teardown repeat and `sweep_detached`'s boot sweep. The read family does not, and the daemon's own exit-code write rides the group.** | A non-root uid cannot signal or unlink another uid's work at all, so the deletes are not a preference; reads and the exit-code write are the only places a permission bit can carry it, and job/181's rule says an unreadable result is an error and never an empty one. |
 | **D5** | **No new boot gate. `WORKER_HOST_PROJECTS` becomes the roster.** The deploy refuses a listed project whose user does not resolve on the node; the daemon refuses that project's *launch* by name. | [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s do-not-advertise rule and the tenancy list would otherwise be two gates over one fact; the list already enumerates exactly the set of users that must exist. |
 | **D6** | **The user name is derived, `chug-{project}` from the slug's second component, and a derivation collision is a hard parse error.** | A silent collision between `a/beacon` and `b/beacon` would hand two projects one uid — precisely the failure this design exists to prevent — and `parse_projects` already refuses a repeated entry in the same shape. |
-| **D7** | **`WORKER_HOST_ROOT` moves out of the login user's home** to a node-wide root — `0711`, owned by the daemon's uid, **created by the operator with root** at provisioning, and traversable but not listable by every project user. | A root under `/Users/worksalot` is unreachable to another uid if that home is `0700`, and the whole task directory hangs off it; the daemon creates its root at boot and cannot create one outside its own home, so the operator has to hand it one that already exists. |
+| **D7** | **`WORKER_HOST_ROOT` moves out of the login user's home** to a node-wide root — `0711`, owned by the daemon's uid, **created by the operator with root** at provisioning, and traversable but not listable by every project user. **Necessary, and measured not sufficient** (M3): it is D12 that makes it a boundary. | The whole task directory hangs off that root, and the daemon creates its root at boot but cannot create one outside its own home, so the operator has to hand it one that already exists. The premise §[7](#7-task-directories-ownership-and-every-call-site-that-changes) argued it from — *the home is `0700`, so no project user can traverse* — is measured **false**: `/Users/worksalot` is `0750` group `staff`, and the move relocates state the project user could read anyway until D12 lands. |
 | **D8** | **Signing needs nothing from this design** (operator, 2026-08-10). Real builds are signed by **fastlane** from keys supplied as ordinary **secrets**; local work uses ad-hoc debug keys. The per-project file keychain this row used to record as the direction is **retired**, and slice 6 closes with it. | `match` installs certificates into a keychain fastlane creates and unlocks itself, and an Android upload keystore arrives inline as base64 — so nothing reads the login keychain section 1 measured absent, and a session-less task user is not disadvantaged. [The record](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it). |
 | **D9** | **Provisioning is the operator's, by runbook, and it is not symmetric.** Creation over ssh works; directory-services deletion is refused (`eDSPermissionError -14120`). Every procedure is idempotent against a stale account record. | A platform that assumed it could delete a user would be assuming an access path the operator measured as absent. |
 | **D10** | **[#534](309-host-native-execution.md#phasing)'s deferred cache namespacing is retired by construction, and so is the *placement* half of its eviction slice. The ceiling and the LRU are not.** | Per-user homes make the collision impossible rather than avoided, and they move the caches out of the operator's own home — which was the stated reason placement had to precede eviction. |
 | **D11** | **Host-mode docker stops being ambient.** [#517](517-docker-access-for-jobs.md) D1 is untouched — jobs may use docker — but the host half's default inverts from granted-for-free to unreachable-unless-granted. | That is #517 D4's own S6 arriving early: per-task users were named there as the **only** mechanism that can withhold host-mode docker, and a uid change withholds it whether or not anyone intended it to. |
+| **D12** | **A project user's primary group is not `staff`, and the agent CLI moves to a node-wide path in the same act.** One decision, two directions: §[6](#6-provisioning-and-the-two-gates-smell)'s provisioning sets `chug-{project}` as the **primary** group rather than adding it beside `staff`, and the CLI moves the way `chuggernaut-channel-host` already did ([#490](490-agent-work-on-a-mac.md) D2 — the node-local path, not D3's discovery of it). | The shared `staff` primary group is load-bearing in **opposite** directions: it is what lets a project user read `worker.env` (M3, the thing this design exists to stop) and what lets it exec `/Users/worksalot/.local/bin/claude` (M8, the thing agent host work needs). Fixing M3 alone silently breaks agent host work, so the two are one decision or neither. |
 
 ## Slices
 
 | # | Slice | Contract changed | Depends on | State |
 | --- | --- | --- | --- | --- |
-| 0 | `human` — the measurements M1–M8 below, on `gumbo-air-0`, with no platform change: M1 and M2 ride an existing `mode: host` job type's own script | none | — | Proposed |
-| 1 | `code` — resolve the per-project binding at boot and hand it to `HostBackend`; `launch` escalates; the task's `HOME` and task directory follow the task user | `HostBackend::new` signature, the host launch path (`crates/container/src/host.rs`) | 0 (M1, M2, M3) | Proposed |
+| 0 | `human` — the measurements M1–M8 below, on `gumbo-air-0`, with no platform change: M1 and M2 ride an existing `mode: host` job type's own script | none | — | **Landed** (job #561). M1–M8 were **taken by job #557** on 2026-08-10 from a `mode: host` task the daemon spawned; that job merged nothing, so this row carries the number of the job that recorded it. **M1 passes** and C1 is viable; M2 and M3 changed a decision each ([the record](#correction--2026-08-10-job-561-slice-0-is-measured-m1-passes-and-the-staff-primary-group-is-load-bearing-in-two-directions)). One question is left open and is **not** closed by this row: M1 has not been taken with no console session |
+| 1 | `code` — resolve the per-project binding at boot and hand it to `HostBackend`; `launch` escalates **and hands the composed environment over as a file, not as environment** (M2); the task's `HOME` and task directory follow the task user | `HostBackend::new` signature, the host launch path (`crates/container/src/host.rs`) | 0 (M1, M2, M3) | Proposed |
 | 2 | `code` — every delete escalates: `kill`, `remove`, **and the daemon-side pair a task's exit already runs without it** — `spawn_reaper`'s `reclaim_credentials` + `reclaim_agent_cache`, and `sweep_detached` at boot; `reclaim_agent_cache` follows the **task** user's home rather than the daemon's | `ContainerBackend::kill` / `remove` on the host backend, and the reaper's teardown repeat | 1 | Proposed |
 | 3 | `deploy` — `build-worker.sh` refuses a listed project whose user does not resolve on the node; `WORKER_HOST_ROOT` guidance and `deploy/prod/env.example` follow D7, including that the root is now an operator precondition on macOS | the node run spec | 1 | Proposed |
-| 4 | `docs` — a provisioning runbook (create the user, the group, the home, the `sudoers` line and **the `WORKER_HOST_ROOT` root itself**; verify; decommission; and the deletion asymmetry); `docs/reference/runbooks/worker-host-projects.md` §2 stops arguing single-tenancy as the boundary | runbook set | 3 | Proposed |
+| 4 | `docs` — a provisioning runbook (create the user, the group **as the user's primary group** per D12, the home, the `sudoers` line and **the `WORKER_HOST_ROOT` root itself**; verify; decommission; and the deletion asymmetry); `docs/reference/runbooks/worker-host-projects.md` §2 stops arguing single-tenancy as the boundary | runbook set | 3, 8 | Proposed |
 | 5 | `design` — amend [#322](322-macos-native-runtime.md)'s job #526 correction and [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)/§10 with what this replaces | design record | 1 | Proposed |
 | 6 | signing — formerly *deferred, once D8's operator input exists* | none | — | **Closed** (2026-08-10). D8 is answered and no platform work survives it; nothing smaller is left to do. [The record](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it) |
 | 7 | deferred — the cache ceiling and LRU eviction inherited from #534(b) | node cache policy | 1 | Deferred |
+| 8 | `deploy` — D12's other half: the agent CLI moves to a node-wide path and the daemon's rendered `PATH` follows it, so a project user outside `staff` can still exec it. **Must land before slice 4's provisioning**, or agent host work breaks the moment a project user stops being a member of `staff` | the node run spec — `AGENT_PATH` in **both** `deploy/prod/install-worker-launchd.sh` and `deploy/prod/build-worker.sh`'s macOS plist, plus the one-`PATH` assertion in `deploy/prod/install-worker-launchd.test.sh`, which pins the login user's `~/.local/bin` today | — | Proposed |
 
-**Slice 0 gates every other row**, and the ordering inside it matters: M1 is the
-only one that can fail in a way that sends this design to its rejected
-alternative.
+**Slice 0 gated every other row**, and it is the one that could have failed in a
+way that sent this design to its rejected alternative. It did not: slice 1 is
+unblocked, and slices 3 and 4 carry D12 with them. What slice 0 did **not**
+settle is M1 under no console session — recorded as an open question rather than
+as a row, because it is the same measurement asked of a state of the machine.
 
-## What must be measured first
+## What was measured first, and what it answered
 
-None of these is answerable from this workspace. Each names what it decides, so
-a failing row changes a decision rather than producing a note.
+None of these was answerable from this workspace. Each names what it decides, so
+a failing row changes a decision rather than producing a note — and two of them
+did. **All eight were taken by job #557 on `gumbo-air-0`, 2026-08-10**, from a
+`mode: host` task the daemon spawned; the record — what each answer changes, and
+the one it leaves open — is
+[below](#correction--2026-08-10-job-561-slice-0-is-measured-m1-passes-and-the-staff-primary-group-is-load-bearing-in-two-directions).
 
-| # | Measurement | Decides |
-| --- | --- | --- |
-| **M1** | A task **spawned by the daemon's own launch path** — not by ssh — drives CoreSimulator as `chug-probe`. Ride an existing `mode: host` job type: its script runs `sudo -u chug-probe -H` and reports `launchctl managername`, `simctl list devices`, `create`, `boot`, `bootstatus -b`. No platform change is needed to run it | D2. A failure here is what sends this design to the rejected shared-uid alternative |
-| **M2** | Does `sudo` succeed non-interactively from that path (no tty, `NOPASSWD`), and **does the composed environment survive it**? `sudo` resets the environment by default | Whether the task environment must be handed over as a `0600` file the wrapper sources — [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s option (c) arriving as a requirement rather than a follow-up |
-| **M3** | The mode of `/Users/worksalot` and of the daemon's own state under it: can `chug-probe` read the worker environment file, the NATS creds it names, or the login keychain? | Whether the boundary is real. If the daemon's own home is world-traversable the uid buys nothing until D7 moves that state |
-| **M4** | Are installed simulator **runtimes** shared (under `/Library`) or per-user? | The provisioning cost per project — tens of GB per user if they are per-user, and a slice of its own if so |
-| **M5** | Does a fresh uid build with Xcode without a per-user first launch — `xcodebuild -version`, then a simulator build | Whether provisioning a project user is one command or a procedure |
-| **M6** | Can one project user read another's **argv** via `ps`? | Whether any secret may ever ride argv. Assume yes until measured; it is why M2's answer must not be "pass it on the command line" |
-| **M7** | Is colima's docker socket reachable to `chug-probe`? | D11's default, and whether beacon needs an explicit grant on day one |
-| **M8** | Can `chug-probe` exec the agent CLI the daemon discovered on its own `PATH` (`/Users/worksalot/.local/bin/claude`, [#490](490-agent-work-on-a-mac.md) D3/M3)? | Whether agent host work survives the uid change, or the CLI has to move to a node-wide path the way the channel binary already did |
+| # | Measurement | Decides | Answer (job #557, 2026-08-10) |
+| --- | --- | --- | --- |
+| **M1** | A task **spawned by the daemon's own launch path** — not by ssh — drives CoreSimulator as `chug-probe`. Ride an existing `mode: host` job type: its script runs `sudo -u chug-probe -H` and reports `launchctl managername`, `simctl list devices`, `create`, `boot`, `bootstatus -b`. No platform change is needed to run it | D2. A failure here is what sends this design to the rejected shared-uid alternative | **Passes.** `sudo -n -u chug-probe -H` drove `simctl` to a device of its own; uid 501 and uid 502 each list 11 devices and share **0** UDIDs; boot reached `Finished`, and the device was deleted and verified gone. **Open, and it is M1's own**: the session was **Aqua**, inherited from the login user's console session — the headless case is untested |
+| **M2** | Does `sudo` succeed non-interactively from that path (no tty, `NOPASSWD`), and **does the composed environment survive it**? `sudo` resets the environment by default | Whether the task environment must be handed over as a `0600` file the wrapper sources — [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s option (c) arriving as a requirement rather than a follow-up | **Succeeds; the environment does not survive.** `env_reset` strips `CHUG_*` and `DEVELOPER_DIR`; `-H` sets `HOME` and `env_keep` preserves `PATH`. Option (c) is a **requirement**, not a follow-up |
+| **M3** | The mode of `/Users/worksalot` and of the daemon's own state under it: can `chug-probe` read the worker environment file, the NATS creds it names, or the login keychain? | Whether the boundary is real. If the daemon's own home is world-traversable the uid buys nothing until D7 moves that state | **The home is `0750` group `staff`, and `chug-probe`'s primary group is `staff`** — so it traverses, and reads `worker.env` (`0644`). The `0600` credentials and the login keychain (behind `Library` at `0700`) are denied. Today's protection is the per-file mode; **D7 is necessary and not sufficient**, which is D12 |
+| **M4** | Are installed simulator **runtimes** shared (under `/Library`) or per-user? | The provisioning cost per project — tens of GB per user if they are per-user, and a slice of its own if so | **Shared.** `/System/Library/AssetsV2`, ~7.9 G, `root:wheel`; only the device set is per-home. No runtime slice, and provisioning is not tens of GB per project |
+| **M5** | Does a fresh uid build with Xcode without a per-user first launch — `xcodebuild -version`, then a simulator build | Whether provisioning a project user is one command or a procedure | **No first launch and no licence prompt.** `xcodebuild -version` reports Xcode 26.5 and a compile for `arm64-apple-ios18.0-simulator` succeeds. **Caveat**: no full `xcodebuild` project build was run, and `-version` does not hit the licence gate |
+| **M6** | Can one project user read another's **argv** via `ps`? | Whether any secret may ever ride argv. Assume yes until measured; it is why M2's answer must not be "pass it on the command line" | **Yes.** `chug-probe` read `worksalot`'s full argv, including an injected marker. The assumption was correct, and it is what makes M2's file answer right rather than convenient |
+| **M7** | Is colima's docker socket reachable to `chug-probe`? | D11's default, and whether beacon needs an explicit grant on day one | **Not reachable.** The socket is `0600` owned by `worksalot`, and `docker version` from uid 502 is denied. **D11 holds**, and beacon needs an explicit node-side grant on day one |
+| **M8** | Can `chug-probe` exec the agent CLI the daemon discovered on its own `PATH` (`/Users/worksalot/.local/bin/claude`, [#490](490-agent-work-on-a-mac.md) D3/M3)? | Whether agent host work survives the uid change, or the CLI has to move to a node-wide path the way the channel binary already did | **Yes — and only via the traversal M3 wants removed.** It execs it (2.1.198, rc 0) through the same `0750`+`staff` path. Tighten the home or drop `staff` and the CLI must move; that is **D12**, and it is one decision with M3 rather than two findings |
 
 ---
 
@@ -921,3 +941,216 @@ disadvantaged relative to the login user this design moves work off.
 - **Anything about which repository the keys live in.** They are beacon's, in
   beacon's secrets, and they reach this platform only if beacon's deploy becomes
   a chuggernaut job.
+
+## Correction — 2026-08-10, job #561 (slice 0 is measured: M1 passes, and the staff primary group is load-bearing in two directions)
+
+Appended by the job **recording** slice 0. The measurements are job #557's, taken
+on `gumbo-air-0` on 2026-08-10 from a `mode: host` task the **daemon's own launch
+path** spawned — which is the whole point of M1, and the gap
+§[1](#1-the-measurement-and-the-line-under-it) drew its line at. Nothing above
+the rule is edited except the head, which is where slice 0's row, D7's amendment,
+the new D12 and the answered measurement table now live.
+
+**Provenance, and it is one hop.** Job #557's raw archive — `report.md`,
+`captures-M1-M8.txt`, `udids-501/502.txt` — is a task artifact, and a work
+container reaches neither the platform API nor another job's outputs. So the
+numbers below were transcribed from #557's work summary as it reached this job,
+not read out of the capture. **Where the capture and this section disagree, the
+capture wins** and the row is rewritten; the same rule
+[the #558 correction](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it)
+applied to its secondhand beacon facts.
+
+### M1 — it passes, and the session it passed in is the caveat
+
+`chug-probe` (uid 502, **never** console-logged-in) drove CoreSimulator under
+`sudo -n -u chug-probe -H` from the daemon-spawned task: its own device set (uid
+501 and uid 502 each list 11 devices, **0 shared UDIDs**), a boot reaching
+`Finished`, then a delete verified gone. `sudo` succeeded non-interactively with
+no tty, which is M2's other half.
+
+The design is therefore **not** sent to
+§[10](#10-the-rejected-alternative-one-shared-worksalot-uid)'s shared uid, and
+**C1 — sudo from the existing agent — is viable rather than assumed**. That
+section stays where it is: it is the record of a live alternative and the
+fallback if the open question below goes the wrong way.
+
+**One difference from §1's ssh probe, and it is the caveat rather than a detail.**
+`launchctl managername` reported **Aqua** from the daemon path, where the ssh
+probe saw `Background` — the daemon is a LaunchAgent in `gui/501`
+(`deploy/prod/install-worker-launchd.sh` bootstraps into `gui/$(id -u)`) and the
+login user is console-logged-in, so the task inherits the **daemon's** session,
+not the target uid's. `launchctl print gui/502` still returns rc 125: uid 502 has
+no GUI domain of its own, which is the property §1 measured and this run did not
+change.
+
+### M2 — the composed environment does not survive, so option (c) is a requirement
+
+`sudo`'s `env_reset` **strips** the composed environment — `CHUG_*` and
+`DEVELOPER_DIR` among it. `-H` sets `HOME`; `env_keep` preserves `PATH`. So what
+survives the escalation is the pair `floor_env` already carries from the daemon
+(`INHERITED`, `crates/container/src/host.rs`) — by coincidence rather than by
+design — and everything the launch composes **on top** of that floor is what is
+lost. That is the whole of the task's declared environment.
+
+`-E` / `--preserve-env` would recover it, at the cost of a `SETENV` grant in the
+`sudoers` rule — which widens the binding D2 keeps narrow, and would put the
+environment back in the daemon's hands rather than in a file. So the task
+environment crosses **out of band**, and a `0600` file the wrapper sources is the
+argv-safe default.
+
+**What this changes in the body:**
+§[3](#the-environment-must-not-cross-on-the-command-line)'s
+"the environment must not cross on the command line" was argued; it is now
+measured, and [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s
+option (c) is a **requirement of the escalation**, not a later question. The mode
+caveat that section already states is unchanged and still the price of C1: the
+non-root daemon cannot `chown`, so under C1 the file is `0640` `chgrp`'d to the
+project group, and only C2 makes it the `0600` this row would prefer.
+
+### M3 and M8 — one decision, in two directions
+
+Taken apart, these read as two findings. They are not, and the shared `staff`
+primary group is why.
+
+- **M3.** `/Users/worksalot` is `0750`, group `staff`, and `chug-probe`'s
+  **primary group is `staff`** — so the home is traversable and `worker.env`
+  (`0644`) is **readable** by it. `keys/worker.creds` and `keys/worker_git`
+  (`0600`) are denied, and the login keychain is blocked by `Library` at `0700`.
+  So the daemon's state is protected today by **per-file modes**, not by the home
+  mode, and the boundary D7 promises does not arrive with D7: a project user
+  needs a **non-`staff` primary group**.
+- **M8.** `chug-probe` execs `/Users/worksalot/.local/bin/claude` (2.1.198, rc 0)
+  — **only** through that same `0750`+`staff` traversal. It works because the
+  task execs the bare name off the `PATH` M2 found preserved, and
+  `AgentCli::discover_on` (`crates/worker/src/agent_cli.rs`) resolves the CLI only
+  to advertise the capability, never to hand a launch a path.
+
+Tighten the home to `0700` **or** drop the project user from `staff` — both of
+which M3 recommends — and the agent CLI stops being executable. That is **D12**,
+recorded as one decision: the CLI moves to a node-wide path the way
+`CHANNEL_PATH_HOST` (`crates/container/src/lib.rs`) already did for the channel
+binary ([#490](490-agent-work-on-a-mac.md) **D2** — its node-provisioned path;
+D3 is the other half, the daemon *discovering* a CLI on its own `PATH`, and it is
+what M8 above measures), in the same act that gives the project user a group of
+its own.
+
+**Two places in the body this corrects:**
+
+- §[6](#6-provisioning-and-the-two-gates-smell)'s provisioning creates the group
+  `chug-{project}` without saying it must be the user's **primary** group. On
+  macOS the default primary group is `staff`, so provisioning as written leaves
+  every project user reading `worker.env`. The list of root-requiring acts — four,
+  since the #558 correction removed the keychain — keeps its count; item 2 gains
+  the word *primary*, and slice 4's runbook is what writes it.
+- §[7](#7-task-directories-ownership-and-every-call-site-that-changes) argues D7
+  from a conditional — *if `/Users/worksalot` is `0700` (M3), no project user can
+  traverse to a task directory at all*. The premise is **false as measured**: the
+  home is `0750` and the project user is in `staff`, so today it traverses. D7's
+  conclusion survives, for a different reason than the one written there: the
+  root must move because D12 is about to remove that traversal, not because it is
+  already absent.
+
+**And a sequencing consequence, which is why D12 is a slice and not a note.** A
+design that fixes M3 without moving the CLI breaks agent host work silently — the
+node keeps advertising the capability its boot-time discovery found on the
+*daemon's* `PATH`, and the failure surfaces inside a task as a missing binary.
+Slice 8 lands the move; slice 4's provisioning depends on it. **Its work list is
+two files and a suite, not one file**: `AGENT_PATH` is rendered independently by
+`deploy/prod/install-worker-launchd.sh` and by `deploy/prod/build-worker.sh`'s
+own macOS plist — the second is the one the deploy actually reaches `gumbo-air-0`
+with — and `deploy/prod/install-worker-launchd.test.sh` asserts the pair carries
+one `PATH` that resolves the CLI, so it moves with them. Editing only the
+hand-run installer would fail that suite and change nothing on the node.
+
+### M4, M5, M6, M7 — confirmations, and one caveat worth carrying
+
+- **M4 — runtimes are shared.** `/System/Library/AssetsV2`, ~7.9 G, `root:wheel`;
+  only the device set is per-home. §[4](#4-what-the-uid-restores-and-what-stays-shared)
+  guessed `/Library` and the answer is its system sibling, which is the same
+  conclusion: provisioning a project is **not** tens of GB, and the runtime slice
+  M4 could have created does not exist.
+- **M5 — a fresh uid builds.** `xcodebuild -version` reports Xcode 26.5 and a
+  compile for `arm64-apple-ios18.0-simulator` succeeds, with no per-user first
+  launch and no licence prompt. **The caveat travels with the answer**: a full
+  `xcodebuild` **project** build was not run, and `-version` does not hit the
+  licence gate. So "provisioning is one command" is measured for the toolchain's
+  reach and not for a real build.
+- **M6 — argv is readable across users.** `chug-probe` read `worksalot`'s full
+  argv, injected marker and all. The design's assumption was right, and this is
+  what makes M2's file answer *correct* rather than merely convenient: the
+  obvious repair for a stripped environment is `sudo -u X env VAR=… cmd`, and it
+  would publish every injected secret to the process table.
+- **M7 — the docker socket is not reachable.** Colima's socket is `0600` owned by
+  `worksalot`; `docker version` from uid 502 is denied. **D11 holds as measured**:
+  host-mode docker inverts from granted-for-free to unreachable-unless-granted,
+  and beacon needs an explicit node-side grant on day one, in
+  `docs/reference/runbooks/worker-docker-grant.md`'s shape. #517 D2's rule is
+  untouched — node-side, never a job-type field.
+
+### What it changes in this document
+
+- **The head, which is where slice 0's result belongs.** The `Status:` line, slice
+  0's row (`**Landed**`, carrying job #561's number because job #557 merged
+  nothing), D2's rationale, D7 — *necessary and measured not sufficient* — the new
+  **D12**, the new **slice 8**, two rows of the current-state table, and the
+  measurement table, which now carries an answer per row.
+- **"[What this does not decide](#what-this-does-not-decide)"'s M8 bullet is
+  answered**, and only that one. Agent host work survives the uid change
+  *conditionally*, and the fix it anticipated — the CLI moving to a node-wide path
+  — is D12 and slice 8 rather than a slice of its own to be decided later. The
+  first bullet, *whether the daemon should become root*, is untouched in substance
+  and closer in practice: the open question below can fire C2's first trigger.
+- **Nothing in §§2, 5, 8, 9 or 10 moves.** M7 confirms §8 rather than changing it,
+  M4 confirms §4's guess, and §10 stays recorded as the fallback it always was —
+  though the open question below is **not** what would revive it.
+
+### The open question, and it is the one that decides the design
+
+**M1 passed in an Aqua session inherited from the login user's console session.**
+The daemon path with **no console session** — a headless reboot, before anyone
+logs in — is **untested**, and M1 is the row every other slice rests on. Neither
+measurement has yet asked the question in its hard form: §1's ssh probe had no
+GUI domain *of the target uid's* but ran on a console-logged-in machine, and
+job #557's run inherited that console session outright.
+
+**How it would be taken.** Reboot `gumbo-air-0` with no auto-login, leave it at
+the login window, release the same `mode: host` job, and re-run the probe:
+`launchctl managername`, `simctl list devices`, `create`, `boot`,
+`bootstatus -b`, delete. Same script, one machine state changed. It needs an
+operator at the node, which is why it is not a row in slice 0.
+
+**Check the premise in the same visit, because it may make the question moot
+under D2's shape.** `deploy/prod/install-worker-launchd.sh` writes the plist to
+`$HOME/Library/LaunchAgents` and bootstraps it into `gui/$(id -u)` — a GUI-domain
+agent, which is loaded by a graphical login. If that domain does not exist before
+someone logs in, the daemon is not running either, and there is no launch path to
+ask the question of: the node comes back **dead rather than half-working**, which
+is the loud failure and not the silent one. That is reasoning from where the
+plist lives, **not** a measurement, and it is worth one `launchctl print gui/501`
+at the login window before the probe — the answer decides which of the two
+outcomes below is the real one.
+
+**What a failure would mean, plainly.** If the daemon *does* run headless and the
+simulators do not, a build node that reboots unattended comes back serving host
+tasks and unable to drive CoreSimulator until a human logs in at the console — an
+outage invisible from the platform, because every layer above the launch looks
+healthy. The repairs are the two already recorded and both need root: C3
+(`launchctl asuser <uid>`), which places the command in the target uid's own
+per-user domain, or C2, the root daemon. So a failure here does not revive
+§[10](#10-the-rejected-alternative-one-shared-worksalot-uid) — a shared uid
+inherits the same absent session — it moves **C2 from recorded to scheduled**,
+which is the first of the three triggers §3 already names. If instead the daemon
+does not run at all without a login, this design is not what is exposed: that is
+a property of D2's LaunchAgent shape, it predates every slice here, and it is
+[#440](440-native-worker-daemon.md) D2's to own. Until one of the two is
+measured, treat unattended reboot as unproven on this node.
+
+### Still unmeasured, and named so it is not read as settled
+
+- **A full `xcodebuild` project build** as a project user (M5's caveat, above).
+- **Directory-services deletion** of a project user, which
+  §[1](#1-the-measurement-and-the-line-under-it) and D9 already carry as refused
+  (`eDSPermissionError -14120`); nothing here re-tested it.
+- **Anything about a second project actually running.** `chug-probe` is a probe
+  user, not `chug-beacon`: no project's work has been run under a project user,
+  and slice 1 is what makes that possible.
