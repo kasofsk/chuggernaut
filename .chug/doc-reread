@@ -203,3 +203,7 @@ Doc-reread: docs/design/529-secret-handling.md
 Doc-reread: docs/spec.md
 
 Doc-reread: docs/design/529-secret-handling.md
+
+Doc-reread: deploy/prod/README.md
+Doc-reread: docs/reference/runbooks/chug-node-adoption.md
+Doc-reread: docs/reference/runbooks/worker-host-projects.md

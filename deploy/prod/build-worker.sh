@@ -19,9 +19,49 @@
 # No-ops cleanly when WORKER_SSH is unset (single-node deploys).
 # Called from update.sh after the env is loaded; runnable by hand:
 #   WORKER_SSH=worksalot@gumbo-nuc-0 deploy/prod/build-worker.sh
+#   WORKER_SSH=worksalot@gumbo-nuc-0 deploy/prod/build-worker.sh --report
 set -eu
 
+# ── --report: the drift the guard at the bottom cannot see ───────────────────
+# That guard reports ONE direction — the composition dropping something the live
+# daemon runs — and its remedy is to perform the rebuild, so the only way to
+# learn about a difference is to make the change. The direction that bit prod on
+# 2026-08-10 is the other one: chuggernaut.env DECLARES a variable the node's
+# live environment does not have. Job #525 made WORKER_HOST_PROJECTS fail-closed
+# and job #552 delivered that enforcement to gumbo-air-0 over the worker RPC,
+# while `WORKER_HOST_PROJECTS_air` only ever existed in chuggernaut.env on the
+# Mini — this script no-ops on every prod deploy, WORKER_SSH being unset for both
+# nodes — so the air booted with an empty tenancy, refused every host launch, and
+# job #557 failed with no output. Enforcement travels on every deploy;
+# configuration travels only when an operator runs this script from a machine
+# that can ssh the node. --report is what makes the gap between them visible.
+#
+# It is the SAME composition, not a second copy of it: everything below composes
+# $SPEC_ENV out of the environment exactly as a real run does, and the report
+# compares that against what the node is running. What --report skips is every
+# ACT — no image build, no native compile, no directory provisioned, nothing
+# installed, nothing restarted — because a check an operator hesitates to run
+# against a healthy fleet is a check nobody runs. It names variables and NEVER
+# prints a value: the spec carries credential paths, one of them the node's NATS
+# creds file, and a report is a thing people paste.
+REPORT_ONLY=""
+case "${1:-}" in
+  '') ;;
+  --report) REPORT_ONLY=1 ;;
+  *)
+    echo "build-worker: unknown argument '$1' — the only one is --report, which compares \$CHUG_WORKER_NODE's live run spec against the one this environment declares and changes nothing" >&2
+    exit 2
+    ;;
+esac
+
 if [ -z "${WORKER_SSH:-}" ]; then
+  # A no-op is the right answer for a deploy and the WRONG one for a report:
+  # WORKER_SSH is unset on the Mini precisely because it cannot reach a tagged
+  # node, so exiting 0 there would read as "no drift" on a node nobody looked at.
+  if [ -n "$REPORT_ONLY" ]; then
+    echo "build-worker: --report needs WORKER_SSH and it is unset, so NOTHING WAS COMPARED — read this as a node unlooked-at, never as a clean one. The report reads the node over ssh, and the Mini cannot ssh a tagged worker (Tailscale blocks tagged→tagged, deploy/prod/README.md §6), which is exactly why WORKER_SSH is unset there; run it from a machine that can reach the node, with that node's chuggernaut.env sourced." >&2
+    exit 2
+  fi
   echo "build-worker: WORKER_SSH unset — no worker node; skipping"
   exit 0
 fi
@@ -33,6 +73,11 @@ SHA="$(git rev-parse HEAD)"
 # because the per-node declaration layer keys off it, and everything the run
 # spec is composed from must be resolved before the first thing reads it.
 NODE="${CHUG_WORKER_NODE:-nuc}"
+
+if [ -n "$REPORT_ONLY" ]; then
+  echo "build-worker: --report: READ-ONLY run-spec drift report for $NODE on $WORKER_SSH. Nothing is built, installed, provisioned or restarted, and the live daemon is untouched whatever this finds."
+  echo "build-worker: --report reads the node OVER SSH, so it can only speak for a node this machine can reach — the Mini cannot ssh a tagged worker (Tailscale blocks tagged→tagged, deploy/prod/README.md §6). A node it cannot read is reported as unread and exits non-zero; it is never reported as clean."
+fi
 
 # ── the DECLARED run spec (ticket #390) ──────────────────────────────────────
 # A fleet has more than one node and their paths differ (a colima node's cache
@@ -110,7 +155,7 @@ esac
 case ",$(printf '%s' "$MODES" | tr -d '[:space:]')," in
   *,host,*) SERVES_HOST=1 ;;
 esac
-if [ -z "$SERVES_CONTAINER" ]; then
+if [ -z "$SERVES_CONTAINER" ] && [ -z "$REPORT_ONLY" ]; then
   echo "build-worker: WORKER_MODES='$MODES' names no container runtime, so $NODE serves host launches only (design #309 §1) — this deploy skips the docker socket check, the agent images and the INJECTED channel binary, and the daemon it installs never opens a docker endpoint. Its own host chuggernaut-channel is still installed, at its own path (design #490 D2)"
 fi
 
@@ -317,7 +362,8 @@ if [ -z "$DOCKER_ENDPOINT" ] && [ "$NODE_OS" = Darwin ] && [ -n "$SERVES_CONTAIN
   DOCKER_ENDPOINT="$(ssh "$WORKER_SSH" "docker context inspect --format '{{.Endpoints.docker.Host}}' 2> /dev/null || true" < /dev/null | tr -d '[:space:]')"
   if [ -n "$DOCKER_ENDPOINT" ]; then
     DOCKER_ENDPOINT_DERIVED=1
-    echo "build-worker: WORKER_DOCKER_ENDPOINT derived from $WORKER_SSH's own docker context: $DOCKER_ENDPOINT"
+    [ -n "$REPORT_ONLY" ] ||
+      echo "build-worker: WORKER_DOCKER_ENDPOINT derived from $WORKER_SSH's own docker context: $DOCKER_ENDPOINT"
   fi
 fi
 if [ -n "$DOCKER_ENDPOINT" ]; then
@@ -418,13 +464,15 @@ fi" < /dev/null)"
       exit 1
       ;;
   esac
-  echo "build-worker: credential directory $KEYS_DIR on $WORKER_SSH is root-owned at 0700 and holds worker.creds (design #440 D5)"
+  [ -n "$REPORT_ONLY" ] ||
+    echo "build-worker: credential directory $KEYS_DIR on $WORKER_SSH is root-owned at 0700 and holds worker.creds (design #440 D5)"
 else
   if ! ssh "$WORKER_SSH" "[ -r '$KEYS_DIR/worker.creds' ]" < /dev/null; then
     echo "build-worker: '$KEYS_DIR/worker.creds' is not readable on $WORKER_SSH — a native daemon reads its NATS credential off the node (there is no /data/keys mount any more), so it would fail to connect and the supervisor would restart it into the same failure; REFUSING (live daemon untouched). Mint it with 'chuggernaut admin worker-creds --node $NODE' and install it there (deploy/prod/README.md §6), or point WORKER_KEYS_DIR_$NODE at the directory that holds it." >&2
     exit 1
   fi
-  echo "build-worker: NOTE: $NODE runs the daemon as the LOGIN USER in their GUI domain, so design #440 D5's root-owned 0700 boundary does not port to macOS — $KEYS_DIR stays in that user's home and cross-task secret isolation there remains given up (#322 §7)"
+  [ -n "$REPORT_ONLY" ] ||
+    echo "build-worker: NOTE: $NODE runs the daemon as the LOGIN USER in their GUI domain, so design #440 D5's root-owned 0700 boundary does not port to macOS — $KEYS_DIR stays in that user's home and cross-task secret isolation there remains given up (#322 §7)"
 fi
 
 # ── which of the three images this node actually needs ───────────────────────
@@ -446,7 +494,9 @@ fi
 # --label chug.git.sha=<sha> stamps the requested SHA INTO the image so we can
 # positively prove, below, that the image the daemon will run was built from the
 # commit we asked for — an exit code alone is not trustworthy here.
-if [ -n "$WORKER_IMAGE" ]; then
+if [ -n "$REPORT_ONLY" ]; then
+  :
+elif [ -n "$WORKER_IMAGE" ]; then
   git archive --format=tar HEAD > "$CTX"
   [ -s "$CTX" ] || { echo "build-worker: empty build context for worker image — aborting" >&2; exit 1; }
   ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/worker:$TAG \
@@ -469,7 +519,9 @@ else
 fi
 
 # Agent images the job types run in, native on the node.
-if [ -n "$SERVES_CONTAINER" ]; then
+if [ -n "$REPORT_ONLY" ]; then
+  :
+elif [ -n "$SERVES_CONTAINER" ]; then
   git archive --format=tar HEAD:deploy/dev > "$CTX"
   [ -s "$CTX" ] || { echo "build-worker: empty build context for agent image — aborting" >&2; exit 1; }
   ssh "$WORKER_SSH" "$BK docker build -q -t chuggernaut/agent:$TAG -f Dockerfile.agent -" < "$CTX"
@@ -516,7 +568,7 @@ fi
 # `serves_container` and `serves_host` between them covering every legal
 # WORKER_MODES, the list is unconditional again.
 NATIVE_BINS="--bin chuggernaut --bin chuggernaut-channel"
-if [ "$NODE_OS" = Darwin ]; then
+if [ "$NODE_OS" = Darwin ] && [ -z "$REPORT_ONLY" ]; then
   git archive --format=tar HEAD > "$CTX"
   [ -s "$CTX" ] || { echo "build-worker: empty build context for the native daemon build — aborting" >&2; exit 1; }
   echo "build-worker: compiling the daemon natively on $WORKER_SSH ($NODE_CARGO, into $BUILD_DIR) — the worker image is Linux and this node is not (design #440 D6, corrected 2026-08-07)"
@@ -611,11 +663,15 @@ fi
 # moves out in the same change that lands the module — never alongside it.
 if [ -n "${WORKER_CACHE_DIR:-}" ]; then
   spec_line WORKER_CACHE_DIR "$WORKER_CACHE_DIR"
-  if ! ssh "$WORKER_SSH" "mkdir -p '$WORKER_CACHE_DIR' 2>/dev/null || sudo -n mkdir -p '$WORKER_CACHE_DIR'" < /dev/null; then
-    echo "build-worker: cannot provision WORKER_CACHE_DIR '$WORKER_CACHE_DIR' on $WORKER_SSH (tried mkdir -p, then sudo -n mkdir -p) — a native daemon cannot create it either and would REFUSE TO START, and a containerized one starts and then fails EVERY launch with 'bind source path does not exist'; REFUSING daemon restart (live daemon untouched). Create it by hand on the node, or unset WORKER_CACHE_DIR to run without caching." >&2
-    exit 1
+  # --report provisions nothing: creating a directory is a consequence, and a
+  # report with consequences is one an operator thinks twice about running.
+  if [ -z "$REPORT_ONLY" ]; then
+    if ! ssh "$WORKER_SSH" "mkdir -p '$WORKER_CACHE_DIR' 2>/dev/null || sudo -n mkdir -p '$WORKER_CACHE_DIR'" < /dev/null; then
+      echo "build-worker: cannot provision WORKER_CACHE_DIR '$WORKER_CACHE_DIR' on $WORKER_SSH (tried mkdir -p, then sudo -n mkdir -p) — a native daemon cannot create it either and would REFUSE TO START, and a containerized one starts and then fails EVERY launch with 'bind source path does not exist'; REFUSING daemon restart (live daemon untouched). Create it by hand on the node, or unset WORKER_CACHE_DIR to run without caching." >&2
+      exit 1
+    fi
+    echo "build-worker: host cache dir $WORKER_CACHE_DIR present on $WORKER_SSH"
   fi
-  echo "build-worker: host cache dir $WORKER_CACHE_DIR present on $WORKER_SSH"
 fi
 # Disk pre-flight knobs (deploy #248, worker-refresh.sh): the refresh refuses a
 # build that cannot fit a new image generation, sized by a conservative constant.
@@ -859,7 +915,8 @@ if [ -n "$MODES" ]; then
       esac
       HOST_PROJECTS_SEEN="$HOST_PROJECTS_SEEN,$_slug"
     done
-    echo "build-worker: WORKER_HOST_PROJECTS='$HOST_PROJECTS' — $NODE runs HOST work for those projects and refuses every other one at launch (design #309 §10). A project's own code persists across its own tasks here, which is the feature single-tenancy buys"
+    [ -n "$REPORT_ONLY" ] ||
+      echo "build-worker: WORKER_HOST_PROJECTS='$HOST_PROJECTS' — $NODE runs HOST work for those projects and refuses every other one at launch (design #309 §10). A project's own code persists across its own tasks here, which is the feature single-tenancy buys"
     # The host root, asked of the NODE rather than assumed. `HostBackend::new`
     # creates it at construction and `local_backend` constructs it at daemon
     # boot, so a root the daemon's user cannot create is not a degraded node —
@@ -896,7 +953,7 @@ if [ -n "$MODES" ]; then
       HOST_ROOT_WHO="as the login user or via \`sudo -n\`, and the unit this script writes runs the daemon as root"
       HOST_ROOT_FIX="Grant the login user passwordless sudo on this node, or create the root by hand (\`sudo mkdir -p $HOST_ROOT_EFF\`), or declare WORKER_HOST_ROOT_$NODE=<a path root can write> in deploy/prod/chuggernaut.env ON THE MINI — this script forwards it into $ENV_FILE. Do not point it into the login user's home: that user is in the \`docker\` group, and a host task's credential tree is what design #440 D5 keeps out of its reach."
     fi
-    if ! ssh "$WORKER_SSH" "$HOST_ROOT_PROBE" < /dev/null; then
+    if [ -z "$REPORT_ONLY" ] && ! ssh "$WORKER_SSH" "$HOST_ROOT_PROBE" < /dev/null; then
       echo "build-worker: WORKER_MODES='$MODES' names host, but $WORKER_SSH cannot create or write '$HOST_ROOT_EFF' $HOST_ROOT_WHO — the daemon creates that root while constructing its host backend at boot (crates/container/src/host.rs \`HostBackend::new\`), so it would fail to start and the supervisor would loop the failure; REFUSING daemon restart (live daemon untouched). $HOST_ROOT_FIX" >&2
       exit 1
     fi
@@ -1051,7 +1108,7 @@ if [ -n "$DOCKER_GRANT_SOCKET" ]; then
       echo "build-worker: WORKER_DOCKER_SOCKET names '$DOCKER_GRANT_SOCKET' and that is not a socket on $WORKER_SSH — the daemon refuses to BOOT when the path is absent from its own view (crates/worker/src/daemon.rs \`docker_grant_refusal\`) and the supervisor loops that refusal until the node leaves the fleet, and a path that exists but is not a socket is worse: the node boots and every granted launch is handed a bind no docker client can dial; REFUSING (live daemon untouched). Read the node's real socket off it with 'ssh $WORKER_SSH docker context inspect --format \"{{.Endpoints.docker.Host}}\"' (on a mac colima answers ~/.colima/default/docker.sock) and declare WORKER_DOCKER_SOCKET_$NODE=<that path, no unix:// prefix> in deploy/prod/chuggernaut.env ON THE MINI, or drop it to grant nothing. This run leaves $NODE's daemon natively supervised, so the view checked here is the daemon's own (design #440 D2); a daemon still running as a container needs the socket mounted into chug-worker itself (docs/reference/runbooks/worker-docker-grant.md)." >&2
       exit 1
     fi
-  else
+  elif [ -z "$REPORT_ONLY" ]; then
     echo "build-worker: WARNING: WORKER_DOCKER_SOCKET is declared on $NODE, which names no container runtime — the grant is read only where a container launch is composed, so this node binds the socket into nothing (design #517 D3). Host tasks reach docker by the uid they run as, which no chug setting grants or withholds (#517 D4)" >&2
   fi
   spec_line WORKER_DOCKER_SOCKET "$DOCKER_GRANT_SOCKET"
@@ -1103,14 +1160,14 @@ if [ -n "$DOCKER_GRANTS" ]; then
     esac
     GRANTS_SEEN="$GRANTS_SEEN,$_entry"
   done
-  if [ -z "$DOCKER_GRANT_SOCKET" ]; then
+  if [ -z "$DOCKER_GRANT_SOCKET" ] && [ -z "$REPORT_ONLY" ]; then
     echo "build-worker: WARNING: WORKER_DOCKER_GRANTS='$DOCKER_GRANTS' grants the docker socket on $NODE, but WORKER_DOCKER_SOCKET is unset — the daemon reads the allow-list only through a declared socket (crates/worker/src/daemon.rs \`docker_grant\`), so these launches receive NOTHING and fail at the docker command instead. Declare WORKER_DOCKER_SOCKET_$NODE, or drop the allow-list" >&2
   fi
   spec_line WORKER_DOCKER_GRANTS "$DOCKER_GRANTS"
-  if [ -n "$DOCKER_GRANT_SOCKET" ]; then
+  if [ -n "$DOCKER_GRANT_SOCKET" ] && [ -z "$REPORT_ONLY" ]; then
     echo "build-worker: WORKER_DOCKER_GRANTS='$DOCKER_GRANTS' — each of those (project, job type) launches on $NODE gets '$DOCKER_GRANT_SOCKET' bound writable at /var/run/docker.sock and therefore NODE ROOT for its duration, accepted rather than mitigated (design #517 D1). Renaming a job type silently REVOKES its grant; every other launch is unaffected"
   fi
-elif [ -n "$DOCKER_GRANT_SOCKET" ]; then
+elif [ -n "$DOCKER_GRANT_SOCKET" ] && [ -z "$REPORT_ONLY" ]; then
   echo "build-worker: WARNING: WORKER_DOCKER_SOCKET='$DOCKER_GRANT_SOCKET' is declared on $NODE and WORKER_DOCKER_GRANTS is empty — the socket is bound into NO launch (design #517 D3: empty grants nobody), which is the daemon's own warning at boot. Granting it to a workload is the second act" >&2
 fi
 # Per-task nix GC roots (design #373 P1, daemon side in crates/worker/src/nix.rs).
@@ -1174,7 +1231,7 @@ if [ -n "$GCROOTS" ]; then
   NIX_PROFILES_DIR="${WORKER_NIX_PROFILES_DIR:-/nix/var/nix/profiles}"
   NIX_SOCKET="${WORKER_NIX_DAEMON_SOCKET:-/nix/var/nix/daemon-socket/socket}"
   NIX_STORE_DIR="${WORKER_NIX_STORE_DIR:-/nix/store}"
-  if ! ssh "$WORKER_SSH" "mkdir -p '$GCROOTS' 2>/dev/null || sudo -n mkdir -p '$GCROOTS'" < /dev/null; then
+  if [ -z "$REPORT_ONLY" ] && ! ssh "$WORKER_SSH" "mkdir -p '$GCROOTS' 2>/dev/null || sudo -n mkdir -p '$GCROOTS'" < /dev/null; then
     echo "build-worker: cannot provision WORKER_NIX_GCROOTS_DIR '$GCROOTS' on $WORKER_SSH (tried mkdir -p, then sudo -n mkdir -p) — the daemon refuses to start without it and the supervisor would loop that refusal, taking the node out of the fleet; REFUSING daemon restart (live daemon untouched). Create it by hand on the node, or unset WORKER_NIX_GCROOTS_DIR to run without per-task GC roots." >&2
     exit 1
   fi
@@ -1221,7 +1278,8 @@ if [ -n "$GCROOTS" ]; then
     if [ -n "${WORKER_NIX_FLAKE_CLIENT:-}" ]; then
       spec_line WORKER_NIX_FLAKE_CLIENT "$WORKER_NIX_FLAKE_CLIENT"
     fi
-    echo "build-worker: WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS' — these projects' OWN flakes will be evaluated in the node's daemon process, beside docker.sock and the node's credentials (design #373 3b); the node must stay single-tenant and their toolchains must already be in '$NIX_STORE_DIR' (the realise is capped at 45s)"
+    [ -n "$REPORT_ONLY" ] ||
+      echo "build-worker: WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS' — these projects' OWN flakes will be evaluated in the node's daemon process, beside docker.sock and the node's credentials (design #373 3b); the node must stay single-tenant and their toolchains must already be in '$NIX_STORE_DIR' (the realise is capped at 45s)"
   fi
   # The toolchain path's SHAPE, ported rather than deleted. Design #440 §5 reads
   # this guard as a mount constraint and it is only half one: the "direct symlink
@@ -1244,7 +1302,8 @@ if [ -n "$GCROOTS" ]; then
       exit 1
     fi
   fi
-  echo "build-worker: per-task nix GC roots on — roots dir $GCROOTS present on $WORKER_SSH"
+  [ -n "$REPORT_ONLY" ] ||
+    echo "build-worker: per-task nix GC roots on — roots dir $GCROOTS present on $WORKER_SSH"
 elif [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
   # A grant the daemon can never act on is worse than no grant: the operator
   # believes those projects' toolchains are served, and every launch declaring
@@ -1252,6 +1311,123 @@ elif [ -n "${WORKER_NIX_PROJECTS:-}" ]; then
   echo "build-worker: WORKER_NIX_PROJECTS='$WORKER_NIX_PROJECTS' grants project-declared toolchains, but WORKER_NIX_GCROOTS_DIR is unset — a realised environment with no GC root is collectable mid-task, so the daemon realises nothing and refuses every launch declaring runtime.env; REFUSING (live daemon untouched). Set WORKER_NIX_GCROOTS_DIR, or unset WORKER_NIX_PROJECTS." >&2
   exit 1
 fi
+# ── reading the node's LIVE run spec (shared by --report and the drift guard) ─
+# One reader, because there is one question: what is this node actually running.
+# Tri-state by return code rather than by output, for the reason the guard below
+# spells out at length — "the file is absent" and "the file is there and I could
+# not read it" produce the same empty output, and collapsing them is how a check
+# degrades to a pass. 0: $SPEC holds the live spec and $LIVE_FROM says which side
+# it came from. 1: nothing answered — a node with no worker at all, or, for
+# --report, a node this machine cannot ssh. 2: the file is there and unreadable.
+LIVE_FROM=""
+LIVE_CONTAINER=""
+build_worker_run_spec_live() {
+  # stdin from /dev/null: these ssh calls read nothing, and update.sh runs this
+  # whole script over an ssh session whose stdin it must not swallow.
+  ssh "$WORKER_SSH" "if [ -e '$ENV_FILE' ]; then
+  cat '$ENV_FILE' 2>/dev/null || sudo -n cat '$ENV_FILE' 2>/dev/null || echo CHUG_SPEC_UNREADABLE
+else
+  echo CHUG_SPEC_ABSENT
+fi" > "$SPEC" 2>/dev/null < /dev/null || true
+  if grep -qxF CHUG_SPEC_UNREADABLE "$SPEC"; then
+    return 2
+  fi
+  LIVE_FROM="the environment file $ENV_FILE"
+  if grep -qxF CHUG_SPEC_ABSENT "$SPEC" || [ ! -s "$SPEC" ]; then
+    ssh "$WORKER_SSH" \
+      "docker inspect chug-worker --format '{{range .Config.Env}}{{println .}}{{end}}'" \
+      > "$SPEC" 2>/dev/null < /dev/null || true
+    LIVE_FROM="the live chug-worker CONTAINER"
+    LIVE_CONTAINER=1
+  fi
+  [ -s "$SPEC" ] || return 1
+  return 0
+}
+
+# ── --report: both directions, names only, nothing performed ─────────────────
+# The composition above is finished, so this is the last thing a report run does:
+# compare $SPEC_ENV — what this environment declares for $NODE — against what the
+# node is running, and say so both ways round.
+#
+# DECLARED-BUT-ABSENT is the direction nothing else can see, because the guard
+# below fixes it by writing the new spec and therefore only ever reports it as
+# part of performing the rebuild. It is judged over every declared key, since all
+# of them are this script's own. THE NODE'S EXTRAS are judged over WORKER_* only,
+# exactly as the drop guard is: on a node still running the container the live
+# side is a whole container environment, and PATH and HOSTNAME are not run-spec
+# drift.
+#
+# Variables are NAMED and values are never printed, on either side. The spec
+# carries credential paths — NATS_CREDS names the node's NATS creds file — and a
+# report exists to be run casually and pasted somewhere.
+build_worker_run_spec_report() {
+  build_worker_run_spec_live
+  _rc=$?
+  if [ "$_rc" = 2 ]; then
+    echo "build-worker: --report READ NOTHING: '$ENV_FILE' exists on $WORKER_SSH and neither the login user nor \`sudo -n\` can read it, so no comparison was made — this is not a clean node, it is an unread one. Make it readable (\`sudo chmod 0644 $ENV_FILE\` — it carries no secret, only the PATH of the credential), or grant the login user passwordless sudo there." >&2
+    return 2
+  fi
+  if [ "$_rc" != 0 ]; then
+    echo "build-worker: --report READ NOTHING: $WORKER_SSH answered with no run spec at all — no '$ENV_FILE' and no chug-worker container. Either $NODE has never been deployed, or THIS MACHINE CANNOT REACH IT over ssh (the Mini cannot: Tailscale blocks tagged→tagged, deploy/prod/README.md §6). Read this as unread, never as clean." >&2
+    return 2
+  fi
+  _from="$LIVE_FROM"
+  [ -z "$LIVE_CONTAINER" ] || _from="$LIVE_FROM (nobody has converted $NODE to a native daemon)"
+  echo "build-worker: --report: $NODE's live run spec, read from $_from, against what this environment declares"
+  _live_keys="$(sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p' "$SPEC")"
+  _declared_keys="$(printf '%s' "$SPEC_ENV" | sed -n 's/^\([A-Za-z_][A-Za-z0-9_]*\)=.*/\1/p')"
+  _absent=""
+  for _key in $_declared_keys; do
+    case "
+$_live_keys
+" in
+      *"
+$_key
+"*) ;;
+      *) _absent="$_absent $_key" ;;
+    esac
+  done
+  _extra=""
+  for _key in $_live_keys; do
+    case "$_key" in
+      WORKER_*) ;;
+      *) continue ;;
+    esac
+    case "
+$_declared_keys
+" in
+      *"
+$_key
+"*) ;;
+      *) _extra="$_extra $_key" ;;
+    esac
+  done
+  if [ -n "$_absent" ]; then
+    # The fail-closed knob gets its own sentence when it is the one missing,
+    # because that failure looks like a healthy node from every other angle.
+    _fail_closed=""
+    case "$_absent " in
+      *" WORKER_HOST_PROJECTS "*) _fail_closed=" WORKER_HOST_PROJECTS is FAIL-CLOSED at the daemon (design #309 §10): a node without it boots, advertises its slot and refuses every host launch it is handed, which is the 2026-08-10 breakage exactly." ;;
+    esac
+    echo "build-worker: --report: DRIFT on $NODE — declared here and ABSENT from the node's live environment:$_absent.$_fail_closed The node is not running what this environment says it runs, and no deploy will fix it: this script no-ops wherever WORKER_SSH is unset (the Mini), so a green deploy is not evidence that a node received its declarations. Re-run this WITHOUT --report, from a machine that can ssh $NODE, to apply them." >&2
+  fi
+  if [ -n "$_extra" ]; then
+    echo "build-worker: --report: DRIFT on $NODE — running on the node and NOT declared here:$_extra. Recreating the daemon DROPS each of them (that is the direction this script's own guard refuses on), so declare them in deploy/prod/chuggernaut.env — per node as <VAR>_$NODE (deploy/prod/README.md §6) — or accept the drop deliberately with WORKER_SPEC_DROP_OK=1 on the run that removes them." >&2
+  fi
+  [ -z "$_absent" ] && [ -z "$_extra" ] || return 1
+  echo "build-worker: --report: no run-spec drift on $NODE — every variable this environment declares is present in the node's live environment, and the node carries no WORKER_* this environment does not declare. Values were not compared and are never printed"
+  return 0
+}
+if [ -n "$REPORT_ONLY" ]; then
+  # Called in a tested context on purpose: `set -e` is suspended for a function
+  # whose status is being read, and the report's own reader RETURNS non-zero to
+  # say "unread" rather than exiting — bare, that would kill the script before
+  # the line explaining what it could not read.
+  REPORT_RC=0
+  build_worker_run_spec_report || REPORT_RC=$?
+  exit "$REPORT_RC"
+fi
+
 # ── what gets installed, and WHO EXECUTES IT (design #440 D2, D6) ────────────
 # Three artifacts, and the platform question each one answers is not "which
 # machine staged this" but "which kernel execs it". THE DAEMON RUNS ON THE NODE,
@@ -1653,29 +1829,19 @@ fi
 # label and capacity guards above — removing a setting on purpose is a real
 # thing to want, so WORKER_SPEC_DROP_OK=1 is the way to say so out loud.
 build_worker_run_spec_drift() {
-  # stdin from /dev/null: these ssh calls read nothing, and update.sh runs this
-  # whole script over an ssh session whose stdin it must not swallow.
-  ssh "$WORKER_SSH" "if [ -e '$ENV_FILE' ]; then
-  cat '$ENV_FILE' 2>/dev/null || sudo -n cat '$ENV_FILE' 2>/dev/null || echo CHUG_SPEC_UNREADABLE
-else
-  echo CHUG_SPEC_ABSENT
-fi" > "$SPEC" 2>/dev/null < /dev/null || true
-  if grep -qxF CHUG_SPEC_UNREADABLE "$SPEC"; then
+  build_worker_run_spec_live
+  _rc=$?
+  if [ "$_rc" = 2 ]; then
     echo "build-worker: '$ENV_FILE' exists on $WORKER_SSH but neither the login user nor \`sudo -n\` can read it — the run-spec drift guard (#390, design #440 D7) compares the live daemon's environment against the one composed here, and it cannot see the live side; a guard that cannot read the declaration is not a guard that passes. REFUSING daemon restart (live daemon untouched). Make it readable (\`sudo chmod 0644 $ENV_FILE\` — it carries no secret, only the PATH of the credential), or grant the login user passwordless sudo on this node." >&2
     return 1
   fi
-  _live_from="the environment file $ENV_FILE"
-  if grep -qxF CHUG_SPEC_ABSENT "$SPEC" || [ ! -s "$SPEC" ]; then
-    ssh "$WORKER_SSH" \
-      "docker inspect chug-worker --format '{{range .Config.Env}}{{println .}}{{end}}'" \
-      > "$SPEC" 2>/dev/null < /dev/null || true
-    _live_from="the live chug-worker CONTAINER (this run converts $NODE to a native daemon)"
-  fi
-  if [ ! -s "$SPEC" ]; then
+  if [ "$_rc" != 0 ]; then
     echo "build-worker: no live worker on $WORKER_SSH to compare against — this run declares $NODE's whole run spec"
     return 0
   fi
-  echo "build-worker: run-spec drift checked against $_live_from"
+  _from="$LIVE_FROM"
+  [ -z "$LIVE_CONTAINER" ] || _from="$LIVE_FROM (this run converts $NODE to a native daemon)"
+  echo "build-worker: run-spec drift checked against $_from"
   _dropped=""
   while IFS= read -r _line; do
     case "$_line" in

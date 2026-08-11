@@ -3042,4 +3042,151 @@ dual_added="$(sed -n 's/^> //p' "$WORK/surface-dual-diff.txt")"
   || fail "a dual-mode node's only extra docker call is staging its host channel binary (#490 D2); got: $dual_added"
 echo "ok: a container-only node is byte-identical to an unset node, and a dual-mode one adds only its host channel binary"
 
+# ── Case R: --report, the READ-ONLY drift report (both directions) ────────────
+# The direction the guard above cannot see is the one that broke prod on
+# 2026-08-10: chuggernaut.env DECLARED WORKER_HOST_PROJECTS_air and the node's
+# live environment never got it, because build-worker.sh no-ops on every deploy
+# (WORKER_SSH is unset for both prod nodes) — so the air booted fail-closed and
+# refused every host launch. The guard's own remedy is to perform the rebuild,
+# which is exactly what an operator who does not know there is drift will not do.
+#
+# Every value below carries a `sentinel` marker, so one assertion covers the
+# whole report: a run spec value must never appear in it, on either side. The
+# spec names the node's NATS creds file, and a report is a thing people paste.
+REPORT_ENV_SET="WORKER_SSH=worksalot@nuc
+WORKER_NATS_URL=nats://sentinelnats:4222
+CHUG_WORKER_NODE=nuc
+WORKER_KEYS_DIR=/etc/chuggernaut/sentinelkeys
+WORKER_GIT_KEY=/etc/chuggernaut/sentinelkeys/sentinelkey
+WORKER_CACHE_DIR=/var/cache/sentinelcache
+WORKER_REFRESH_GIT_URL=ssh://git@sentinelhost:2222/acme/chug.git
+WORKER_RUST_LOG=info,sentinelcrate=warn
+WORKER_MODES=container,host
+WORKER_SLOTS=1
+WORKER_SLOTS_MAX=1
+WORKER_HOST_ROOT=/var/lib/sentinelroot
+WORKER_HOST_PROJECTS=acme/sentinelproject
+WORKER_DOCKER_SOCKET=/run/sentinelsock/docker.sock
+WORKER_DOCKER_GRANTS=acme/sentinelproject:sentineltype
+WORKER_NIX_GCROOTS_DIR=/nix/var/nix/gcroots/sentinelroots
+WORKER_NIX_PROJECTS=acme/sentinelproject"
+# One declaration, read by both the real run that produces the golden live spec
+# and the --report runs compared against it — hand-listing it twice is how the
+# two drift apart, which is the bug this whole file is about.
+report_run() {
+  _out="$1"
+  shift
+  set +e
+  # shellcheck disable=SC2086
+  env PATH="$BIN:$PATH" $REPORT_ENV_SET "$@" sh "$SUT" ${REPORT_ARGS:-} > "$_out" 2>&1
+  REPORT_RC=$?
+  set -e
+}
+
+# The live spec a node running exactly this declaration would hold: composed by
+# a REAL run of the script, so the case cannot go stale as the run spec grows.
+: > "$LOG"
+REPORT_ARGS="" report_run "$WORK/report-seed.out"
+[ "$REPORT_RC" -eq 0 ] || fail "the seed run must succeed so its env file is the live spec to compare against"
+REPORT_LIVE="$(env_file)"
+[ -n "$REPORT_LIVE" ] || fail "the seed run must have composed an environment file"
+case "$REPORT_LIVE" in
+  *WORKER_HOST_PROJECTS*) ;;
+  *) fail "the seed spec must carry WORKER_HOST_PROJECTS — it is the case that broke prod" ;;
+esac
+
+# ── Case R1: a node whose live environment matches ⇒ no drift, exit 0 ─────────
+: > "$LOG"
+REPORT_ARGS="--report" report_run "$WORK/report-clean.out" FAKE_LIVE_ENV_FILE="$REPORT_LIVE"
+[ "$REPORT_RC" -eq 0 ] || fail "a node running what this environment declares must report no drift (got rc=$REPORT_RC)"
+grep -qF "no run-spec drift on nuc" "$WORK/report-clean.out" \
+  || fail "a clean node must say so plainly"
+# It must say where it has to be run from, or the first person to try it on the
+# Mini reads a connection failure as a clean node.
+grep -qF "the Mini cannot ssh a tagged worker" "$WORK/report-clean.out" \
+  || fail "the report must say it needs a machine that can ssh the node, and that the Mini cannot"
+echo "ok: --report on a node whose live environment matches the declaration reports no drift"
+
+# ── Case R2: no value from the run spec appears in the report ─────────────────
+if grep -qi sentinel "$WORK/report-clean.out"; then
+  fail "the report must name variables and print NO value: $(grep -i sentinel "$WORK/report-clean.out" | head -n 1)"
+fi
+echo "ok: --report prints no run-spec value, on either side of the comparison"
+
+# ── Case R3: the report builds nothing, installs nothing, restarts nothing ────
+not_started "--report must never restart the daemon"
+for forbidden in "docker build" "docker create" "build --release --locked" \
+  "chug_put" "CHUG_WORKER_ENV" "systemctl daemon-reload" "launchctl bootstrap" \
+  "docker image prune" "mkdir -p '"; do
+  if grep -qF -- "$forbidden" "$LOG"; then
+    fail "--report performed '$forbidden' — it must build nothing, install nothing, provision nothing and restart nothing"
+  fi
+done
+echo "ok: --report performs no build, install, provisioning or restart"
+
+# ── Case R4: declared here and ABSENT from the node — the 2026-08-10 case ─────
+# WORKER_HOST_PROJECTS specifically: job #525 made it fail-closed, job #552
+# delivered that enforcement over the worker RPC, and the declaration itself
+# never left the Mini. The node boots, advertises its slot and refuses every host
+# launch — diagnosed from the daemon log, reported by nothing.
+: > "$LOG"
+REPORT_ARGS="--report" report_run "$WORK/report-absent.out" \
+  FAKE_LIVE_ENV_FILE="$(printf '%s\n' "$REPORT_LIVE" | grep -v '^WORKER_HOST_PROJECTS=')"
+[ "$REPORT_RC" -ne 0 ] || fail "a declared variable the node does not have must exit non-zero (got rc=0)"
+grep -qF "ABSENT from the node's live environment: WORKER_HOST_PROJECTS" "$WORK/report-absent.out" \
+  || fail "the report must name the declared variable the node is missing"
+grep -qF "no run-spec drift" "$WORK/report-absent.out" && fail "drift must not also report clean"
+grep -qi sentinel "$WORK/report-absent.out" && fail "the report must print no value"
+not_started "--report must never restart the daemon, drift or not"
+echo "ok: --report names a variable declared here and absent from the node, and exits non-zero"
+
+# ── Case R5: on the node and no longer declared — the drop guard's direction ──
+# Visible now WITHOUT performing the restart the guard refuses at.
+: > "$LOG"
+REPORT_ARGS="--report" report_run "$WORK/report-extra.out" \
+  FAKE_LIVE_ENV_FILE="$REPORT_LIVE
+WORKER_REFRESH_SCRIPT='/usr/local/lib/chuggernaut/worker-refresh.sh'"
+[ "$REPORT_RC" -ne 0 ] || fail "a live setting nothing declares must exit non-zero (got rc=0)"
+grep -qF "NOT declared here: WORKER_REFRESH_SCRIPT" "$WORK/report-extra.out" \
+  || fail "the report must name the live variable this environment does not declare"
+grep -qi sentinel "$WORK/report-extra.out" && fail "the report must print no value"
+not_started "--report must never restart the daemon, drift or not"
+echo "ok: --report names a variable the node runs and nothing declares, without a restart"
+
+# ── Case R6: a node it could not read is UNREAD, never clean ──────────────────
+# The whole value of the report is that it can be run on a hunch, so the way it
+# fails matters more than usual: an ssh that answers nothing must not print the
+# same thing as a node with no drift.
+: > "$LOG"
+REPORT_ARGS="--report" report_run "$WORK/report-unread.out"
+[ "$REPORT_RC" -ne 0 ] || fail "a node that answered with no run spec must exit non-zero (got rc=0)"
+grep -qF "READ NOTHING" "$WORK/report-unread.out" || fail "an unread node must say so"
+grep -qF "no run-spec drift" "$WORK/report-unread.out" && fail "an unread node must never read as clean"
+
+# And the same trap one step earlier: on the Mini WORKER_SSH is unset, which is a
+# deliberate no-op for a deploy and would be a silent "clean" for a report.
+set +e
+env PATH="$BIN:$PATH" WORKER_NATS_URL=nats://sentinelnats:4222 CHUG_WORKER_NODE=nuc \
+  sh "$SUT" --report > "$WORK/report-nossh.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "--report with WORKER_SSH unset must exit non-zero, not no-op cleanly"
+grep -qF "NOTHING WAS COMPARED" "$WORK/report-nossh.out" \
+  || fail "--report with no WORKER_SSH must say nothing was compared"
+grep -qF "the Mini cannot ssh a tagged worker" "$WORK/report-nossh.out" \
+  || fail "--report with no WORKER_SSH must name the Mini, which is where it will be tried first"
+echo "ok: --report reports an unreadable or unreachable node as unread, never as clean"
+
+# ── Case R7: an unknown argument refuses rather than deploying ────────────────
+# A typo'd flag must not fall through to a full deploy of the node.
+: > "$LOG"
+set +e
+env PATH="$BIN:$PATH" WORKER_SSH=worksalot@nuc WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc sh "$SUT" --repot > "$WORK/report-typo.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "an unknown argument must refuse (got rc=0)"
+not_started "an unknown argument must not deploy the node"
+echo "ok: an unknown argument refuses instead of deploying"
+
 echo "ALL PASS"

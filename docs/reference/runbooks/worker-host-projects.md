@@ -109,6 +109,26 @@ proceeds.
 
 ## 4. Verifying
 
+Start with the cheap one, from the same machine §3's command runs on. It reads
+the node and changes nothing, and it exits non-zero when what the node is running
+differs from what `chuggernaut.env` declares — in **either** direction, naming
+the variables and printing no values:
+
+```sh
+set -a; . /tmp/chug.env; set +a          # the copy fetched from the Mini
+WORKER_SSH=op@gumbo-air-0 CHUG_WORKER_NODE=air \
+  deploy/prod/build-worker.sh --report
+```
+
+`declared here and ABSENT from the node's live environment: WORKER_HOST_PROJECTS`
+is the 2026-08-10 breakage exactly: the air had the fail-closed *enforcement*,
+delivered with the daemon binary on a routine deploy, and had never been given
+the *declaration*, which only a deploy from a machine that can ssh it can carry.
+It refused every host launch, and job #557 failed with no output. **A green
+deploy is not evidence that a node received its declarations.**
+
+Then the node's own account of it:
+
 ```sh
 # the daemon came up and says whose host work it serves
 ssh op@gumbo-air-0 log show --predicate 'process == "chuggernaut"' --last 5m \
@@ -151,3 +171,4 @@ advertising the mode.
 | a host job fails naming `<no JOB_PROJECT>` | the launch carried no project stamp at all, which no dispatcher-composed launch does | read the daemon's log around the launch — this is a bug, not a config error |
 | the daemon logs the empty-tenancy warning but the node still serves jobs | those are its **container** launches, which the list never binds | nothing to do unless you meant the node to serve host work |
 | a host job runs for a project you did not list | the node is running an older daemon that predates this enforcement | re-deploy the node; `WORKER_HOST_PROJECTS` is enforced by the daemon, so an old binary ignores it |
+| every host launch is refused although `chuggernaut.env` names the project | the declaration never reached the node: it is written on the Mini, and the Mini cannot ssh a tagged worker, so `build-worker.sh` no-ops there on every deploy | `build-worker.sh --report` from a machine that can reach the node names it (§4); the same command without `--report` applies it |

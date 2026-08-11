@@ -1013,6 +1013,28 @@ the mac-side path never appears at all.
   case, distinct from one that is not there, and it **refuses** rather than
   reading as a fresh node: a guard blind to the declaration is not a guard that
   passes.
+- That guard only ever fires **as part of performing the rebuild**, and it
+  reports one direction. `build-worker.sh --report` is the other one, read-only:
+  it composes exactly the same run spec from `chuggernaut.env`, compares it with
+  what the node is running, and **names every variable that differs in either
+  direction** — declared here and absent from the node, or on the node and no
+  longer declared. It builds nothing, installs nothing, provisions nothing and
+  restarts nothing, so it is safe to run on a hunch against a healthy fleet; it
+  **exits non-zero** when there is drift, so it can be scripted or run from a
+  laptop cron. It prints **variable names only, never a value** — the spec names
+  the node's NATS creds file — and it therefore compares **presence, not
+  values**; a value that changed on both sides is what the deploy's own guard
+  reports as it applies it. Like every other use of this script it must run
+  from a machine that can ssh the node, so **the Mini cannot run it**; a node it
+  cannot read is reported as *unread* and exits non-zero, never as clean.
+
+  ```sh
+  scp gumbo-mini-0:chuggernaut/deploy/prod/chuggernaut.env /tmp/chug.env
+  set -a; . /tmp/chug.env; set +a
+  WORKER_SSH=worksalot@dev-air.tail20c474.ts.net CHUG_WORKER_NODE=air \
+    deploy/prod/build-worker.sh --report
+  ```
+
 - On the no-ssh path nothing can push this file to a node, so each refresh
   **reports the node's own spec** on stdout, which the daemon relays into the
   deploy's task output (`worker-refresh: run spec on air (build): …`, plus a
@@ -1026,6 +1048,18 @@ operator laptop). Nothing scheduled ever re-applies `chuggernaut.env` to a prod
 node. The declaration is what a human recreates a node *from*, and the refresh's
 report is how they see what a node is running *meanwhile*. Fixing the routing is
 its own job.
+
+**A green deploy is not evidence that a node received its declarations**, and on
+2026-08-10 that cost a job. The *control* and its *configuration* travel by
+different paths: enforcement ships with the binary on every deploy, while
+`chuggernaut.env` reaches a node only when an operator runs `build-worker.sh`
+from a machine that can ssh it. Job #525 made `WORKER_HOST_PROJECTS` fail-closed
+and job #552 delivered that enforcement to `gumbo-air-0` over the worker RPC —
+but `WORKER_HOST_PROJECTS_air` had only ever existed in `chuggernaut.env` here on
+the Mini, where `build-worker.sh` no-ops. The air came up with an empty tenancy,
+refused **every** host launch, and job #557 failed with no output; it was
+diagnosed from the daemon log, because nothing reported it. Before concluding a
+node is configured, ask it: `build-worker.sh --report` above is the whole check.
 
 The laptop that *can* reach a node does not have `chuggernaut.env` — it lives on
 the Mini. Fetch it before rebuilding one, so the node is recreated from the

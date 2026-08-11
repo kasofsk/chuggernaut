@@ -456,6 +456,12 @@ refuses the conversion without the second
 ([`worker-host-projects.md`](worker-host-projects.md) is the procedure). No
 node in the fleet declares either today.
 
+**"Re-run the deploy" means from a machine that can ssh the node** — writing the
+two variables on the Mini changes nothing by itself, because `build-worker.sh`
+no-ops wherever `WORKER_SSH` is unset, which is both prod nodes
+([`deploy/prod/README.md`](../../../deploy/prod/README.md) §6). Ask the node
+before you conclude it is configured (§8).
+
 ---
 
 ## 5. The one coupled edit: delete your own `label!=` filter
@@ -538,6 +544,32 @@ for and `build` is where it arrives.
 ---
 
 ## 8. Verifying the switch took
+
+### The run spec the node actually has (either platform)
+
+The switch is only half of what a node runs on. The other half is
+`deploy/prod/chuggernaut.env` on the Mini, and **it reaches a node only when an <!-- runtime -->
+operator runs `build-worker.sh` from a machine that can ssh it** — a deploy from
+the Mini no-ops, because `WORKER_SSH` is unset for every tagged node. So a green
+deploy is not evidence a node received its declarations: on 2026-08-10
+`gumbo-air-0` ran fail-closed `WORKER_HOST_PROJECTS` enforcement it *had* been
+given against a tenancy it *had not*, refused every host launch, and job #557
+failed with no output.
+
+Ask the node, from a machine that can reach it. It builds, installs and restarts
+nothing, and exits non-zero on any difference:
+
+```sh
+scp gumbo-mini-0:chuggernaut/deploy/prod/chuggernaut.env /tmp/chug.env
+set -a; . /tmp/chug.env; set +a
+WORKER_SSH=worksalot@dev-air.tail20c474.ts.net CHUG_WORKER_NODE=air \
+  deploy/prod/build-worker.sh --report
+```
+
+It names variables in both directions and prints no values (the spec names the
+node's NATS creds file), so it compares **presence, not values**. `declared here
+and ABSENT from the node's live environment` is the direction the deploy's own
+drift guard cannot see; the fix is the same command **without** `--report`.
 
 ### NixOS
 
@@ -634,6 +666,7 @@ unverified — including the `chug.node` block you just added.
 | `chug-worker.service` loops on `Restart=always`, journal says it cannot load the environment file | the unit is declared and the deploy has not run yet, or the two halves name different files | run `build-worker.sh` against the node, or point `daemon.environmentFile` and `WORKER_ENV_FILE_<node>` at one path (§4a) |
 | `build-worker: … has no usable systemd unit directory at '/etc/systemd/system'` | NixOS: the deploy has nowhere to write its own copy of the unit | declare the unit (§4a) and set `WORKER_UNIT_DIR_<node>=/run/systemd/system` — the whole conversion is [`worker-native-daemon-nixos.md`](worker-native-daemon-nixos.md) |
 | the switch "worked" but nothing changed (darwin) | the two profile pointers disagree | §8 |
+| a host node refuses every host launch it is handed, or a knob you declared has no effect | the declaration never left the Mini — `build-worker.sh` no-ops wherever `WORKER_SSH` is unset, so `chuggernaut.env` reaches a node only when an operator deploys it from a machine that can ssh it | `build-worker.sh --report` from such a machine names what is missing (§8); the same command without `--report` applies it |
 | running jobs died during a switch | that switch restarted dockerd without live-restore active — the adopting switch, or a reboot | drain next time ([`worker-capacity.md`](worker-capacity.md) §4.1) |
 
 ---
