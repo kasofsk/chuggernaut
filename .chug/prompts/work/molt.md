@@ -136,18 +136,43 @@ waiver. `.chug/tasks/check-molt.sh` cross-checks its coverage against your diff.
    push. `.githooks/pre-commit` runs the fast doc gates as an advisory pass — act
    on what it prints.
 2. Narrate with `update_status` at least four times — once per phase.
-3. Call `submit_result` with:
-   - `summary`: a short markdown report (this becomes the merge commit body).
-     Open with **one plain markdown-free sentence** stating the outcome, then
-     `###` sections — `### What changed`, `### What was shed, by class`,
-     `### How verified`, `### Notes`. Omit an empty section. Include the counts:
-     docs surveyed, subagents dispatched and returned, passages shed per class,
-     designs deleted, referrers repointed, stubs left.
+3. Call `submit_result`. **Write the `summary` for the human approver**, not as a
+   changelog. It is the last stage of this job (`.chug/tasks/approve-molt.md`),
+   and your write-up is the only thing standing between a shedding of thousands
+   of lines and a person deciding in minutes whether the project will miss any of
+   it. Everything mechanical has already been checked by the time they read it,
+   so spend the space on what they alone can judge.
+
+   Open with **one plain markdown-free sentence** stating the outcome, then
+   `###` sections. Four carry the review and none may be omitted:
+
+   - **`### The close calls`** — put it first, because it is the reviewable part.
+     Every passage you weighed and nearly kept, which way it went, and why. A
+     summary of only the obvious deletions is hiding exactly the decisions worth
+     reviewing, and a reviewer is entitled to fail it for that. **If you shed
+     anything that argued *against* doing something, it goes here by default** —
+     that is the class #533 names as this job's most likely defeat.
+   - **`### What was shed, by class`** — counts per named class, with
+     `.chug/molt-ledger` as the itemisation.
+   - **`### What was promoted, and where`** — each fact lifted out of a deleted
+     doc and the reference doc that now owns it, so the approver can open that doc
+     and confirm it arrived. A repointed citation aimed at a doc that never
+     received the fact resolves cleanly and lies.
+   - **`### What I deliberately kept`** — anything the brief might have led a
+     reader to expect gone. Silence here reads as an oversight.
+
+   Then `### What changed`, `### How verified` and `### Notes` as usual, and the
+   counts: docs surveyed, subagents dispatched and returned, designs deleted,
+   referrers repointed, stubs left.
+
+   **This is the one job type where a long summary is right.** Brevity elsewhere
+   serves a reader who can go and look; here the summary *is* the review surface.
    - `structured`: `{ "files_changed": [...], "subagents_dispatched": N,
      "subagents_returned": N, "shed_by_class": {...}, "notes": "..." }`.
 4. Exit 0.
 
-Two evaluators read your output adversarially: `check-molt.sh` balances the
-books, and `.chug/tasks/review-molt-loss.md` fans out readers instructed to name
-a fact the base stated that your HEAD does not. Neither can be satisfied by a
-tidy diff — expect to be asked *which class licensed this*.
+Three evaluators read your output, and none can be satisfied by a tidy diff.
+`check-molt.sh` balances the books. `.chug/tasks/review-molt-loss.md` fans out
+readers instructed to name a fact the base stated that your HEAD does not. Then a
+**human** approves or sends it back — expect to be asked *which class licensed
+this*, and to have your close calls read more carefully than your deletions.

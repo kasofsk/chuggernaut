@@ -95,7 +95,7 @@ than a deferral — see [what 415 costs](#what-415-costs-and-why-it-is-not-in-th
 | --- | --- | --- |
 | **S1** | Per-type `tools:` grant so a job type may declare `Task`/`Workflow`, epoch-gated as `workload_identities:` is | **Landed** (job #535) |
 | **S1b** | The **deploy** carrying `TOOLS_SCHEMA_EPOCH` to the running dispatcher, because a config declaring the new epoch cannot merge until a dispatcher carrying it runs (spec §14.3) | **Landed** — the dispatcher runs `fa1c414`, reporting `schema_epoch: 6` |
-| **S2** | The machinery: `.chug/jobs/molt.yaml`, its work prompt and evaluators, and `.chug/tasks/check-molt.sh` with a `.test.sh` sibling | **Landed** (job #548) |
+| **S2** | The machinery: `.chug/jobs/molt.yaml`, its work prompt and evaluators, and `.chug/tasks/check-molt.sh` with a `.test.sh` sibling. A **human** approves at stage 3 — see [the correction](#correction-2026-08-10--the-molt-ends-in-a-human-not-in-an-adversary-job-562) | **Landed** (job #548) |
 | **S3** | `.chug/tasks/molt-debt.sh` <!-- intent --> — the git-derived reader that says how much shell has re-grown since the last molt. Read [the 2026-08-10 correction](#correction-2026-08-10--s3s-rename-detection-requirement-was-misdiagnosed-job-544) before implementing it: the body's stated requirement is the wrong one | Proposed |
 | **S4** | The first molt's cheap half: the reference tier and `CLAUDE.md`, where narrating a change is *already* out of policy, and the 24 design **heads**, which are already mutable | Proposed |
 | **S5** | The deletions — six of the seven docs above, with every surviving referrer repointed or stubbed | Proposed |
@@ -454,3 +454,43 @@ reading that paragraph itself argues for. Editing it would break append-only in
 order to introduce an error. That this correction's own first draft tripped the
 stale-constant gate on that very sentence is the argument in miniature: a number
 restated outside the body that dated it goes wrong on its own.
+
+## Correction, 2026-08-10 — the molt ends in a human, not in an adversary (job #562)
+
+D6 gave the molt three evaluators and stopped there: the accounting gate, the
+reviewer of aim, and the loss adversary. That stack is complete in the sense that
+every *mechanical* objection is spent by the end of it, and incomplete in the
+sense that matters, which this design's own risk section already states without
+drawing the conclusion.
+
+The failure a molt is most likely to be defeated by is a shed **rejected
+alternative whose alternative is still purchasable**. Every property of it
+defeats the stack above. It names no path, no constant and no link, so
+`check-molt.sh` cannot see it — that gate balances books, and this loss balances.
+It has no signature in a diff of legitimate deletions, so a reviewer of aim reads
+past it. And the loss adversary can only refute what it thought to look for,
+which is the general limit of an adversary aimed at a corpus rather than at a
+claim: it is strong on facts that were *stated* and weak on arguments that were
+*settled*.
+
+What is left is a question no evaluator here holds: **will this project miss
+this?** That is not a fact about the tree, so no gate can resolve it, and it is
+not a property of the diff, so no reader of the diff can either. It is knowledge
+of what the project is about to do next, and only a person has it. So `molt`
+takes a `type: human` evaluator at **stage 3** — last, so the person is asked for
+judgement rather than for something a script would have caught — and is the only
+shipped job type that ends in an approval a person gives.
+
+The consequence for the work agent is larger than the yaml line. A human deciding
+in minutes about a shedding of thousands of lines reads one artifact, so the
+summary stops being a changelog and becomes **the review surface**: close calls
+first, promotions named with their destination so the approver can confirm the
+fact arrived, and anything deliberately kept said out loud. A summary listing
+only the obvious deletions hides precisely the decisions worth reviewing, and
+`.chug/tasks/approve-molt.md` says a reviewer may fail it for that alone. This is
+the one job type where a long summary is correct, because brevity elsewhere
+serves a reader who can go and look, and here the summary *is* the looking.
+
+This does not weaken the three machine stages, and it must not be read as
+licensing them to relax. It puts a person where the argument always said the
+residual risk was.

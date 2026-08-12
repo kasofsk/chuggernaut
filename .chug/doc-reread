@@ -209,3 +209,11 @@ Doc-reread: docs/reference/runbooks/chug-node-adoption.md
 Doc-reread: docs/reference/runbooks/worker-host-projects.md
 
 Doc-reread: docs/design/537-per-project-users-macos.md
+
+Doc-reread: docs/spec.md
+Doc-reread: docs/reference/docs.md
+Doc-reread: docs/design/533-molt.md
+Doc-reread: CLAUDE.md
+Doc-reread: .chug/prompts/work/molt.md
+Doc-reread: .chug/tasks/review-molt.md
+Doc-reread: .chug/tasks/review-molt-loss.md

@@ -261,7 +261,11 @@ the absence of a workflow file.
   generated citers nothing else scans, since check-doc-facts reads `*.md` only);
   and a **stub is exempt** from the vanished-row check, because a stub drops its
   slice table by definition. Judgement stays with two agent evaluators, the
-  stage-2 one instructed to **refute**. It is the only type that may delete a
+  stage-2 one instructed to **refute**, and then with a **human at stage 3** —
+  the only job type here that ends in a person's approval, because the failure it
+  most likely dies of (a shed rejected alternative) names no path, constant or
+  link and has no signature in a diff. The work agent's summary is written *for*
+  that reader, close calls first. It is the only type that may delete a
   design doc, and only one whose `Status:` leads with `IMPLEMENTED` and is not
   `IMPLEMENTED IN PART` — which is why the licence is a *deletion* and
   append-only needs no exception at all. **No molt has run yet.**

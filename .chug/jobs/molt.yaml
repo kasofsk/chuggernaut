@@ -6,7 +6,8 @@
 # That inversion is why this is a job type and not a large `docs` job. The five
 # gates in docs/reference/docs.md are all built to catch a doc saying something
 # WRONG; shedding produces docs that say something LESS, which none of them can
-# see. So the type carries its own accounting gate and its own loss adversary:
+# see. So the type carries its own accounting gate, its own loss adversary, and
+# — alone among job types here — a HUMAN who says yes before it merges:
 #   stage 0 — .chug/tasks/review-molt.md, the ordinary agent reviewer, and
 #             .chug/tasks/check-molt.sh, the mechanical accounting (a landed
 #             slice row that vanished, a surviving doc whose last inbound
@@ -17,8 +18,19 @@
 #   stage 1 — the shared doc lint, alongside the appended `ci` default.
 #   stage 2 — .chug/tasks/review-molt-loss.md, an ORCHESTRATING adversary that
 #             fans out one reader per changed doc and is instructed to refute.
-#             Last, because it is the most expensive and the least likely to be
-#             the thing wrong on a first attempt.
+#             After the cheap gates, because it is the most expensive and the
+#             least likely to be the thing wrong on a first attempt.
+#   stage 3 — .chug/tasks/approve-molt.md, a HUMAN. Last on purpose: by the time
+#             it appears in the operator inbox every mechanical objection is
+#             already spent, so the person is asked for judgement rather than
+#             for something a script would have caught. The reason this type
+#             alone has one is #533's own risk section — the worst failure here
+#             is shedding a rejected alternative that reads as settled prose,
+#             which names no path, constant or link, has no signature in a diff
+#             of legitimate deletions, and stays invisible until someone
+#             re-proposes the rejected thing with no argument to hand. No gate
+#             can see that, and an adversary can only refute what it thought to
+#             look for. Removing true sentences is a decision a person owns.
 #
 # THE PREREQUISITE IS A DEPLOY, NOT A MERGE. min_dispatcher is the `tools:`
 # grant's epoch (TOOLS_SCHEMA_EPOCH, design #533 S1). A dispatcher below it
@@ -66,6 +78,12 @@ eval:
     # Fans out one reader per changed doc, then a small panel per candidate
     # finding. No Workflow: the shape is a flat fan-out, not a pipeline.
     tools: [Task]
+  # No container, so no image/model/secrets here — the dispatcher parks a Human
+  # task in the operator inbox and waits (spec §1.1, §3.3).
+  - name: approve-molt
+    type: human
+    prompt: .chug/tasks/approve-molt.md
+    stage: 3
 resources:
   # Sized for a fan-out of in-process subagents, which are network-bound rather
   # than CPU-bound — the cap is memory and the CLI's own Task limit, not cores.

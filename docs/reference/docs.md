@@ -260,7 +260,13 @@ Three things about that table are decisions rather than accidents:
   a gate that failed a diff for removing a true sentence would fail every molt.
   So `check-molt.sh` asks accounting instead, and the judgement — was the
   shedding well-aimed, and did a load-bearing fact die — belongs to two agent
-  evaluators, one of which is instructed to refute rather than approve. A gate
+  evaluators, one of which is instructed to refute rather than approve, and then
+  to a **human**: `molt` is the only job type here that ends in an approval a
+  person gives. That is not ceremony. The failure this most likely dies of is a
+  shed rejected alternative, which names no path, constant or link, has no
+  signature in a diff of legitimate deletions, and surfaces only months later
+  when someone re-proposes the rejected thing with no argument to hand — so the
+  last reader is the one who knows what the project is about to do next. A gate
   that cannot run is worse here than anywhere else, so an unresolvable base exits
   as a linter error: "nothing lost" and "never looked" must not print the same.
 - **The fatal ones are all mechanical.** A gate that errors in the pre-stage of
