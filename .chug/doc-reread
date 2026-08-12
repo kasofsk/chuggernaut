@@ -234,3 +234,9 @@ Doc-reread: docs/design/322-macos-native-runtime.md
 Doc-reread: docs/reference/runbooks/worker-host-projects.md
 Doc-reread: docs/README.md
 Doc-reread: docs/design/537-per-project-users-macos.md
+
+Doc-reread: docs/design/533-molt.md
+Doc-reread: docs/reference/docs.md
+Doc-reread: CLAUDE.md
+Doc-reread: .chug/prompts/work/molt.md
+Doc-reread: .chug/tasks/review-molt.md

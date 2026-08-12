@@ -94,7 +94,7 @@ the absence of a workflow file.
   the comment lint, `.chug/tasks/check-shell-quoting.sh`, the shell-quoting gate,
   `.chug/tasks/check-doc-facts.sh`, the doc-fact gate,
   `.chug/tasks/doc-staleness.sh`, the staleness ledger, and
-  since #385 **the repo's 27 `*.test.sh` shell suites**.
+  since #385 **the repo's 28 `*.test.sh` shell suites**.
   Any clone fails the gate.
 - **A quote inside the word of a `${VAR:-word}` expansion is a gate, because
   CI's shell and production's disagree about it.** bash parses quotes inside
@@ -269,6 +269,17 @@ the absence of a workflow file.
   design doc, and only one whose `Status:` leads with `IMPLEMENTED` and is not
   `IMPLEMENTED IN PART` — which is why the licence is a *deletion* and
   append-only needs no exception at all. **No molt has run yet.**
+  `.chug/tasks/molt-debt.sh` (#533 S3) answers the other half — *is it time* — and
+  is wired to **nothing**: no job runs it, because "the corpus has re-grown" is a
+  judgement about a milestone, not a defect in any commit. It ranks docs by growth
+  since the newest `job/N: molt` commit tree-wide, marks the designs that became
+  deletable, and carries **no threshold** on purpose. With no molt in history it
+  measures every doc from nothing and says `never`. Two git traps are baked into
+  it and both are load-bearing: **a pathspec suppresses rename detection**, so
+  `git diff -M --numstat A..B -- <doc>` reports a moved doc as a total rewrite
+  (`-M` does not save it — rename detection is already the default), and
+  `git log --follow --numstat` **summed** double-counts a line touched in more
+  than one commit, so it is never the end-to-end figure.
 - **The fast half of that gate also runs at the commit.** `.githooks/pre-commit`
   formats staged Rust/web files with `rustfmt`/`prettier` and re-stages them,
   then runs the comment lint (`--staged` mode), the registry check, the

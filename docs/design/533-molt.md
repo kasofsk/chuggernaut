@@ -1,7 +1,7 @@
 # Design #533 — The molt: shedding the doc corpus at a milestone
 
 Status: IMPLEMENTED IN PART — the machinery is built and no molt has run yet.
-S1, S1b and S2 are landed; S3–S6 remain, and the slice table says where each stands.
+S1–S3 are landed; S4–S6 are the first molt itself, and the slice table says where each stands.
 
 Written against the tree at `ef11e80` (2026-08-09). Every number here was read out
 of that commit and the command is given so a reader can re-run it rather than
@@ -28,7 +28,8 @@ a rule.
 
 ### Why the existing gates cannot cover it
 
-The five gates in `docs/reference/docs.md` are all built to catch a doc saying
+The five *gates* in `docs/reference/docs.md` — the rows that fail a job, as
+against the readers that only report — are all built to catch a doc saying
 something **wrong**. Shedding produces docs that say something **less**. Nothing
 in the tree can tell compaction from amputation, which is why a molt needs its own
 verification and its own job type rather than being a large `docs` job.
@@ -96,13 +97,23 @@ than a deferral — see [what 415 costs](#what-415-costs-and-why-it-is-not-in-th
 | **S1** | Per-type `tools:` grant so a job type may declare `Task`/`Workflow`, epoch-gated as `workload_identities:` is | **Landed** (job #535) |
 | **S1b** | The **deploy** carrying `TOOLS_SCHEMA_EPOCH` to the running dispatcher, because a config declaring the new epoch cannot merge until a dispatcher carrying it runs (spec §14.3) | **Landed** — the dispatcher runs `fa1c414`, reporting `schema_epoch: 6` |
 | **S2** | The machinery: `.chug/jobs/molt.yaml`, its work prompt and evaluators, and `.chug/tasks/check-molt.sh` with a `.test.sh` sibling. A **human** approves at stage 3 — see [the correction](#correction-2026-08-10--the-molt-ends-in-a-human-not-in-an-adversary-job-562) | **Landed** (job #548) |
-| **S3** | `.chug/tasks/molt-debt.sh` <!-- intent --> — the git-derived reader that says how much shell has re-grown since the last molt. Read [the 2026-08-10 correction](#correction-2026-08-10--s3s-rename-detection-requirement-was-misdiagnosed-job-544) before implementing it: the body's stated requirement is the wrong one | Proposed |
+| **S3** | `.chug/tasks/molt-debt.sh` — the git-derived reader that says how much shell has re-grown since the last molt. D7's stated requirement for it was wrong; [the 2026-08-10 correction](#correction-2026-08-10--s3s-rename-detection-requirement-was-misdiagnosed-job-544) is what it was built to | **Landed** (job #573) |
 | **S4** | The first molt's cheap half: the reference tier and `CLAUDE.md`, where narrating a change is *already* out of policy, and the 24 design **heads**, which are already mutable | Proposed |
 | **S5** | The deletions — six of the seven docs above, with every surviving referrer repointed or stubbed | Proposed |
 | **S6** | #415's own disposition, decided on its own evidence rather than by the rule that covers the other six | Proposed |
 
-S1, S1b and S2 are landed, so `Status:` is `IMPLEMENTED IN PART`: **the molt can
-now be run, and has not been.** S3–S6 remain, and S4 is the first actual molt.
+S1 through S3 are landed, so `Status:` is `IMPLEMENTED IN PART`: **the molt can
+now be run, and has not been.** S4–S6 are the molt itself, and S4 is the first one.
+
+S3's **column set was S3's own choice** — D7 fixed the watermark, the advisory
+stance and the absence of a threshold, and nothing else. The reader emits net
+growth, the watermark it measured from, commits, new saga sections and new
+job-number mentions, plus a `[COMPLETE — deletable]` marker on any design whose
+`Status:` satisfies D5 part 1. That marker is the milestone signal and the input to
+S5; the other three parts of the eligibility test stay `check-molt.sh`'s, because
+only that gate sees a diff. With no molt commit in history the reader measures every
+doc from nothing and labels it `never`, which is the honest answer and is how S4's
+ordering gets picked.
 
 S1b was S2's real prerequisite rather than S1 — the capability being in the tree is
 not the same as a dispatcher that parses it. Its cell carries no `(job #N)` because

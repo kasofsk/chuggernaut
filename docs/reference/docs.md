@@ -240,9 +240,9 @@ because its own `job/N` commit cannot exist yet when the commit is gated.
 
 ## What checks this, and what only reports it
 
-Six gates read the docs. Five of them fail a job, and knowing which is which is
-the difference between a rework cycle and a warning you can read at your
-leisure.
+Seven scripts read the docs. Five of them fail a job, and knowing which is which
+is the difference between a rework cycle and a warning you can read at your
+leisure. The last row is not a gate at all — no job runs it.
 
 | Gate | Runs | Judges | Verdict |
 | --- | --- | --- | --- |
@@ -252,9 +252,17 @@ leisure.
 | `.chug/tasks/review-docs-updated.md` | evaluation of every `code` and `web` job | cross-doc state claims, behavioural claims about symbols the diff touched, a design slice landed without its head updated | **error** — an agent evaluator, so it reads and never runs |
 | `.chug/tasks/check-molt.sh` | stage 0 of `molt` jobs | the accounting of a shedding: a vanished landed-slice claim, a doc that lost its last referrer, a deletion that was not eligible, a deleted path still cited from a non-doc file with no stub, a shed with no ledger line | **error** for that one job type |
 | `.chug/tasks/doc-staleness.sh` | every job, and the pre-commit hook | whether a file a doc names has moved since the doc did, and whether anything under `docs/` is named by nothing | **advisory** — *suspect*, not wrong |
+| `.chug/tasks/molt-debt.sh` | **nothing** — an operator runs it by hand | how much each doc has re-grown since the last molt, ranked, and which designs became deletable | **advisory** — a reading list, and no threshold |
 
-Three things about that table are decisions rather than accidents:
+Five things about that table are decisions rather than accidents:
 
+- **The debt reader is wired to nothing on purpose.** It answers "is it time to
+  molt", which is a judgement about a milestone rather than a defect in any
+  commit, so there is nobody for it to fail. It carries **no threshold and no
+  "molt recommended" line** for the same reason `doc-staleness.sh` stays
+  advisory: a number nobody calibrated becomes either noise or a target. It ranks
+  and an operator reads the top. Before the first molt it reports every doc as
+  `never` molted, measured from nothing, which is the honest answer.
 - **No gate can ask whether a molt lost something.** Every other row catches a doc
   saying something *wrong*; shedding produces docs that say something *less*, and
   a gate that failed a diff for removing a true sentence would fail every molt.

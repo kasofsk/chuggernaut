@@ -293,7 +293,7 @@ reachable from a cargo test.
 ## The shell suites: `*.test.sh`
 
 Every gate script, hook and deploy script is pinned by a `*.test.sh` beside it —
-27 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
+28 of them (`git ls-files '*.test.sh' | wc -l`), driving the real script inside
 a throwaway repo against stubbed
 `cargo`, `npm`, `docker`, `nats-server`, `curl`, `ssh`, `flutter`, `adb` and
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
@@ -351,6 +351,19 @@ these suites cover.
   where the first draft went wrong — on `main` the merge-base with `BASE_BRANCH`
   is HEAD itself, so the diff is empty, every deletion check goes quiet, and five
   cases passed while proving nothing.
+  `molt-debt.test.sh` (design #533 S3, job #573) adds ~0.7s and exists for **one
+  case: a doc that moved.** The reader's whole correctness risk is that a pathspec
+  suppresses rename detection, and that failure is silent and *plausible* — it
+  reports a large number where a large number is expected, with exit 0. So the
+  rename fixture `git mv`s a 100-line doc that grew by 10 and asserts the figure
+  is **10** and that **110 is absent**; asserting the exit code would pass the bug.
+  The same row carries the doc's path *at the point*, which is what the reader
+  looks the point-side blob up under, so the trap costs three columns rather than
+  one: the fixture's doc already holds a `## Correction` and a `#999` before the
+  molt, and its `+SAGA`/`+JOBREFS` are asserted to be **0 0** and forbidden to be
+  `1 1` — absent read as never-existed. Measured both ways on 2026-08-12 by
+  reintroducing the per-doc pathspec: exactly those **four** assertions fail, 21
+  of 25 still pass, and nothing else moves.
   The total is checked **between** suites, not after the loop — otherwise the
   real ceiling would be suite-count × per-suite cap — and the failure names the
   suites it therefore never ran. The per-suite cap is applied with `timeout`,
