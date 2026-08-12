@@ -50,6 +50,45 @@ fn local_docker_endpoint() -> String {
     "unix:///var/run/docker.sock".into()
 }
 
+/// The daemon config `worker_fleet` spawns node `w1` with, pointed at the test
+/// broker and the local Docker endpoint.
+fn worker_fleet_config(
+    server: &NatsTestServer,
+    channel_binary: std::path::PathBuf,
+) -> WorkerConfig {
+    WorkerConfig {
+        node: "w1".into(),
+        slots: 4,
+        slots_max: 8,
+        modes: vec![WorkerMode::Container],
+        nats_url: server.url().to_string(),
+        nats_creds: None,
+        docker_endpoint: local_docker_endpoint(),
+        channel_binary,
+        cache_dir: None,
+        host_root: std::env::temp_dir().join("chug-host-root-test"),
+        host_projects: Vec::new(),
+        host_users: false,
+        kvm_device: None,
+        kvm_projects: vec![],
+        docker_socket: None,
+        docker_grants: Vec::new(),
+        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
+        flutter_dir: None,
+        jdk_dir: None,
+        nix_gcroots_dir: None,
+        nix_projects: Vec::new(),
+        nix_flake_client: "/nix/var/nix/profiles/system/sw/bin/nix".into(),
+        nix_client: NIX_CLIENT_DEFAULT.into(),
+        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
+        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
+        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
+        refresh_script: None,
+        refresh_git_url: None,
+        refresh_git_key: "/data/keys/worker_git".into(),
+    }
+}
+
 /// Spawn an in-process worker daemon on node `w1` (local Docker) and a fleet
 /// backend routed to it over NATS, or `None` to skip (no Docker).
 async fn worker_fleet(
@@ -71,36 +110,7 @@ async fn worker_fleet(
     let artifact = dir.join("chuggernaut-channel");
     std::fs::write(&artifact, b"x").unwrap();
 
-    let config = WorkerConfig {
-        node: "w1".into(),
-        slots: 4,
-        slots_max: 8,
-        modes: vec![WorkerMode::Container],
-        nats_url: server.url().to_string(),
-        nats_creds: None,
-        docker_endpoint: local_docker_endpoint(),
-        channel_binary: artifact,
-        cache_dir: None,
-        host_root: std::env::temp_dir().join("chug-host-root-test"),
-        host_projects: Vec::new(),
-        kvm_device: None,
-        kvm_projects: vec![],
-        docker_socket: None,
-        docker_grants: Vec::new(),
-        android_sdk_dir: ANDROID_SDK_DIR_DEFAULT.into(),
-        flutter_dir: None,
-        jdk_dir: None,
-        nix_gcroots_dir: None,
-        nix_projects: Vec::new(),
-        nix_flake_client: "/nix/var/nix/profiles/system/sw/bin/nix".into(),
-        nix_client: NIX_CLIENT_DEFAULT.into(),
-        nix_daemon_socket: NIX_DAEMON_SOCKET_DEFAULT.into(),
-        nix_store_dir: NIX_STORE_DIR_DEFAULT.into(),
-        nix_realise_timeout_secs: NIX_REALISE_TIMEOUT_SECS_DEFAULT,
-        refresh_script: None,
-        refresh_git_url: None,
-        refresh_git_key: "/data/keys/worker_git".into(),
-    };
+    let config = worker_fleet_config(server, artifact);
     let daemon = tokio::spawn(async move {
         if let Err(e) = worker::run(config).await {
             eprintln!("daemon exited: {e}");

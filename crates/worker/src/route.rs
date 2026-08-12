@@ -168,14 +168,16 @@ mod tests {
         assert_eq!(container.launches().len(), 1);
     }
 
-    /// #309 §10 binds the node's HOST work and nothing else: on a mixed-mode
-    /// node whose tenancy names nobody, a container launch for any project runs
-    /// exactly as it did — it is routed by its image and never reaches the host
-    /// backend that holds the list.
-    #[tokio::test]
-    async fn the_host_tenancy_leaves_container_launches_alone() {
+    /// A mixed-mode node over a **real** host backend, so what a container
+    /// launch is measured against is the node-side policy that actually holds
+    /// the list rather than a fake that holds none.
+    fn routed_over_host(
+        name: &str,
+        tenancy: container::host::HostTenancy,
+        users: container::host::HostUsers,
+    ) -> (std::path::PathBuf, Arc<FakeBackend>, RoutedBackend) {
         let root = std::env::temp_dir().join(format!(
-            "chug-route-tenancy-{}-{:x}",
+            "chug-route-{name}-{}-{:x}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -188,11 +190,26 @@ mod tests {
                 root.join("tasks"),
                 container::host::Supervision::ProcessGroup,
                 container::host::AgentCapability::new(None, root.join("channel")),
-                container::host::HostTenancy::default(),
+                tenancy,
+                users,
             )
             .unwrap(),
         );
         let routed = RoutedBackend::new(container.clone(), host);
+        (root, container, routed)
+    }
+
+    /// #309 §10 binds the node's HOST work and nothing else: on a mixed-mode
+    /// node whose tenancy names nobody, a container launch for any project runs
+    /// exactly as it did — it is routed by its image and never reaches the host
+    /// backend that holds the list.
+    #[tokio::test]
+    async fn the_host_tenancy_leaves_container_launches_alone() {
+        let (root, container, routed) = routed_over_host(
+            "tenancy",
+            container::host::HostTenancy::default(),
+            container::host::HostUsers::default(),
+        );
 
         let mut with_image = launch_of(Some("img:latest"));
         with_image
@@ -209,6 +226,42 @@ mod tests {
         assert!(
             matches!(err, BackendError::Launch(_)),
             "the same project's HOST launch is refused hard: {err}"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Design #537 binds the node's HOST work and nothing else: a container
+    /// launch on a node that binds every project to a unix user of its own
+    /// reaches the container backend **byte-identical**, because the binding
+    /// lives in a backend its image routes it away from.
+    #[tokio::test]
+    async fn a_per_project_user_leaves_container_launches_byte_identical() {
+        let (root, container, routed) = routed_over_host(
+            "users",
+            container::host::HostTenancy::new(vec!["acme/beacon".into()]),
+            crate::host_users::resolve("w1", true, &["acme/beacon".to_string()]),
+        );
+
+        let mut with_image = launch_of(Some("img:latest"));
+        with_image
+            .env
+            .insert("JOB_PROJECT".into(), "acme/beacon".into());
+        routed.launch(with_image.clone()).await.unwrap();
+        let seen = &container.launches()[0];
+        assert_eq!(seen.image, with_image.image);
+        assert_eq!(seen.cmd, with_image.cmd);
+        assert_eq!(seen.env, with_image.env);
+        assert_eq!(seen.files.len(), with_image.files.len());
+
+        let mut host_launch = launch_of(None);
+        host_launch
+            .env
+            .insert("JOB_PROJECT".into(), "acme/beacon".into());
+        let err = routed.launch(host_launch).await.unwrap_err();
+        assert!(
+            matches!(err, BackendError::Launch(_)),
+            "and the same project's HOST launch is refused while chug-beacon does not resolve \
+             here: {err}"
         );
         std::fs::remove_dir_all(&root).ok();
     }

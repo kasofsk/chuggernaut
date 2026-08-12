@@ -45,6 +45,21 @@
 //! undeclared one admits nobody, and it binds host launches only — the same
 //! node's container launches never reach this backend at all.
 //!
+//! A node may bind each project it serves to a **unix user of its own**
+//! ([`HostUsers`], design #537 D1/D3): the daemon resolves `chug-{project}` at
+//! boot and tells the backend, and a bound launch escalates to that user with
+//! `sudo -n -u {user} -H` (D2/C1, the shape #537 M1 measured working from this
+//! very launch path). Nothing is bound until a node declares one, so an
+//! undeclared node's launch is byte-identical to the launch it made before this
+//! existed; a project the node **declares** and cannot resolve is a hard
+//! [`BackendError::Launch`], never a fall back to the daemon's own uid, because
+//! falling back would silently restore the shared uid the binding replaces.
+//! `sudo` resets the environment (#537 M2), so a bound launch hands its composed
+//! environment over as a **file the wrapper sources** rather than on the command
+//! line — argv is readable across users (#537 M6), and the file is named
+//! relative to the task directory the wrapper already runs in so no path to it
+//! rides argv either.
+//!
 //! Each task is launched into its own **supervision unit** ([`Supervision`],
 //! design #440 D3) rather than the daemon's, so the restart that swaps the
 //! daemon leaves in-flight work running (spec §3.1). Which systemd manager that
@@ -225,6 +240,47 @@ const EXIT_VAR: &str = "CHUG_HOST_EXIT";
 /// rebased surface, so the task's own shell does it (design #322 §2, as
 /// [`crate::WORKSPACE_VAR`] does for the clone destination).
 pub const CREDS_VAR: &str = "CHUG_HOST_CREDS";
+
+/// How a bound launch becomes the project's own user (design #537 D2/C1), and
+/// the shape #537 M1 measured driving CoreSimulator from this launch path.
+/// `-n` because a daemon has no tty to answer a prompt on, `-H` because the
+/// task's `$HOME` is the task user's.
+const SUDO: &str = "sudo";
+
+/// Where a bound launch's composed environment is handed over, since `sudo`'s
+/// `env_reset` strips it (#537 M2) and `-E` would need a `SETENV` grant that
+/// widens the binding.
+const TASK_ENV_FILE: &str = "task.env";
+
+/// How the wrapper names that file: **relative** to the task directory it
+/// already runs in, so neither a secret nor the path to one rides argv, which
+/// every user on the node can read (#537 M6).
+const TASK_ENV_REL: &str = "./task.env";
+
+/// The environment file's mode. It is written **through the escalation**, so it
+/// is the task user's own file rather than the group-shared `0640` a
+/// non-root daemon would otherwise be stuck with (#537 §3).
+const TASK_ENV_MODE: u32 = 0o600;
+
+/// What the wrapper exits with when it cannot read that file, distinct from
+/// every status a task's own command produces.
+const TASK_ENV_UNREADABLE: i32 = 125;
+
+/// A bound task directory's mode: private to the daemon and the project's own
+/// user, and unreachable to every other project on the node (#537 §7). It is
+/// group-shared rather than `0700`-owned-by-the-task because a non-root daemon
+/// cannot `chown`, and the daemon still writes `meta.json` and reads the task's
+/// results.
+const TASK_DIR_MODE_BOUND: u32 = 0o770;
+
+/// The umask a bound task runs under, so what it creates inside its own
+/// directory stays readable to the daemon that has to harvest it and to nobody
+/// else (#537 §7).
+const TASK_UMASK_BOUND: &str = "007";
+
+/// How a file is written as another user: the contents cross on **stdin** and
+/// never on argv (#537 M6), and the mode is applied before the caller returns.
+const WRITE_AS_SCRIPT: &str = "umask 077; cat > \"$1\" && chmod \"$2\" \"$1\"";
 
 /// The only two variables a host task takes from the daemon, and it takes them
 /// **by name** (design #440 D8). `PATH` because a host node's toolchain is
@@ -503,6 +559,72 @@ pub fn supervised_launch(supervision: Supervision, unit: &str, cmd: Vec<String>)
     }
 }
 
+/// The argv that enters the project's own user, ahead of whatever it is given
+/// (design #537 D2). `--` is what keeps a command beginning with a dash from
+/// being read as one of `sudo`'s own options.
+fn sudo_args(user: &TaskUser) -> Vec<String> {
+    vec![
+        "-n".to_string(),
+        "-u".to_string(),
+        user.name.clone(),
+        "-H".to_string(),
+        "--".to_string(),
+    ]
+}
+
+/// One command under the node's binding for this launch: the escalation in
+/// front of it when the project has a user, and **the command itself,
+/// unchanged**, when it has none.
+fn escalated(user: Option<&TaskUser>, cmd: Vec<String>) -> Vec<String> {
+    let Some(user) = user else {
+        return cmd;
+    };
+    let mut argv = vec![SUDO.to_string()];
+    argv.extend(sudo_args(user));
+    argv.extend(cmd);
+    argv
+}
+
+/// Write one file as the task user, through the same escalation the launch
+/// itself takes, so it is the task's own file at `mode` rather than the
+/// daemon's — which is what a non-root daemon cannot reach with `chown`
+/// (design #537 §3). The contents cross on stdin — only the path and the mode
+/// are argv, and neither is a secret — and the child's own exit status is read
+/// before the write's, because a refused escalation closes the pipe and would
+/// otherwise report the grant that is missing as `Broken pipe`.
+fn write_as(user: &TaskUser, path: &Path, mode: u32, contents: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    let mut child = std::process::Command::new(SUDO)
+        .args(sudo_args(user))
+        .args(["/bin/sh", "-c", WRITE_AS_SCRIPT, "sh"])
+        .arg(path)
+        .arg(format!("{mode:o}"))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("{SUDO} is unusable on this node: {e}"))?;
+    let written = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{SUDO} took no stdin"))?
+        .write_all(contents);
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("{SUDO}: {e}"))?;
+    if out.status.success() {
+        return written.map_err(|e| format!("writing {} as {}: {e}", path.display(), user.name));
+    }
+    Err(format!(
+        "{SUDO} -n -u {} could not write {}: {} — a node that binds a project to a unix user has \
+         to grant its daemon NOPASSWD execution as exactly that user (design #537 C1), and this \
+         launch is refused rather than run without the file it hands its environment over in",
+        user.name,
+        path.display(),
+        first_line(&out.stderr)
+    ))
+}
+
 /// The first line of a tool's stderr, so a failure reaches a log line without
 /// carrying a paragraph into it.
 fn first_line(bytes: &[u8]) -> String {
@@ -529,8 +651,9 @@ pub struct TaskMeta {
     pub project: Option<String>,
     pub job: Option<u64>,
     pub task: Option<u64>,
-    /// Absolute paths this launch materialized, so `remove` reclaims exactly
-    /// what it wrote and nothing beside it. Since #322 W2 every one of them is
+    /// Absolute paths this launch materialized — every injected file, and a
+    /// bound launch's environment file (design #537) — so `remove` reclaims
+    /// exactly what it wrote and nothing beside it. Since #322 W2 every one of them is
     /// inside the task directory, because the wire-path mapping is total.
     pub files: Vec<String>,
     /// The transient scope this task runs in (#440 D3), `None` on a node whose
@@ -600,6 +723,86 @@ impl HostTenancy {
     }
 }
 
+/// One project's own unix user on this node (design #537 D1), as the daemon
+/// resolved it out of the node's passwd database.
+///
+/// The home is the user's own, not the daemon's, which is what makes a task's
+/// `$HOME` follow the uid it runs as; the gid is that user's **primary** group
+/// (D12), and it is what the task directory is shared through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskUser {
+    pub name: String,
+    pub uid: u32,
+    pub gid: u32,
+    pub home: PathBuf,
+}
+
+/// What a node declared for one project (design #537 D5): a user it resolved,
+/// or one it could not.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProjectUser {
+    /// Resolved here, and every launch of this project escalates to it.
+    Bound(TaskUser),
+    /// Declared and unresolvable on this node, carrying the name that was
+    /// expected and why the lookup failed.
+    Unresolved { user: String, reason: String },
+}
+
+/// The node's `{project → unix user}` binding (design #537 D3), told to the
+/// backend as [`HostTenancy`] is: the daemon resolves node facts, this backend
+/// is handed them and is testable without a node.
+///
+/// **Empty is the whole of today's fleet** — a node that declares no binding
+/// runs its host tasks exactly as it did before this existed, as the daemon's
+/// own uid.
+#[derive(Debug, Clone, Default)]
+pub struct HostUsers {
+    bound: BTreeMap<String, ProjectUser>,
+}
+
+impl HostUsers {
+    /// The bindings a node declared, keyed by `owner/project` exactly as
+    /// [`HostTenancy`] names them.
+    pub fn new(bound: BTreeMap<String, ProjectUser>) -> Self {
+        Self { bound }
+    }
+
+    /// Whether this node binds anybody at all, which is what lets the daemon
+    /// say at boot that its host tasks still run as its own uid.
+    pub fn is_empty(&self) -> bool {
+        self.bound.is_empty()
+    }
+
+    /// The user a launch carrying this env escalates to, or `None` when the
+    /// node declared no binding for its project — matched on `JOB_PROJECT`, the
+    /// stamp [`HostTenancy::admits`] already reads.
+    pub fn binding(&self, env: &HashMap<String, String>) -> Option<&TaskUser> {
+        match self.bound.get(env.get("JOB_PROJECT")?)? {
+            ProjectUser::Bound(user) => Some(user),
+            ProjectUser::Unresolved { .. } => None,
+        }
+    }
+
+    /// Why a declared project may not launch here, naming the project, the user
+    /// and the node. A binding the node declared and cannot resolve refuses the
+    /// launch rather than running it as the daemon — the fall back would look
+    /// like success while restoring the shared uid design #537 exists to remove.
+    pub fn refusal(&self, node: &str, env: &HashMap<String, String>) -> Option<String> {
+        let project = env.get("JOB_PROJECT")?;
+        let ProjectUser::Unresolved { user, reason } = self.bound.get(project)? else {
+            return None;
+        };
+        Some(format!(
+            "host node {node} runs {project}'s host work as its own unix user {user} (design #537 \
+             D1, WORKER_HOST_USERS), and {user} does not resolve here: {reason} — refused rather \
+             than run as the daemon's own uid, which would silently restore the shared uid this \
+             binding exists to remove. Provisioning the user is the operator's, by root on {node} \
+             (#537 D9); docs/reference/runbooks/worker-host-projects.md is the procedure, and \
+             container launches on {node} are unaffected"
+        ))
+    }
+}
+
 /// Host-process execution on one node (design #309 P0). Serves the launches
 /// that carry no image and refuses the rest, so a node offering both runtimes
 /// routes to it per launch ([`names_host_task`]).
@@ -616,6 +819,9 @@ pub struct HostBackend {
     /// Whose host work this node runs (design #309 §10), assembled by the
     /// daemon from `WORKER_HOST_PROJECTS`.
     tenancy: HostTenancy,
+    /// Which unix user each of those projects runs as (design #537 D3),
+    /// resolved by the daemon at boot. Empty runs every task as the daemon.
+    users: HostUsers,
     /// Serializes the whole of [`ContainerBackend::launch`], so the
     /// one-task-per-node check and the task directory it publishes cannot race
     /// a second concurrent launch on the daemon's op semaphore.
@@ -637,6 +843,7 @@ impl HostBackend {
         supervision: Supervision,
         agent: AgentCapability,
         tenancy: HostTenancy,
+        users: HostUsers,
     ) -> Result<Self, BackendError> {
         let root = root.into();
         std::fs::create_dir_all(&root)
@@ -648,6 +855,7 @@ impl HostBackend {
             supervision,
             agent,
             tenancy,
+            users,
             launching: tokio::sync::Mutex::new(()),
             live: Arc::new(Mutex::new(HashSet::new())),
             counter: AtomicU64::new(0),
@@ -723,6 +931,9 @@ impl HostBackend {
             )));
         }
         if let Some(reason) = self.tenancy.refusal(&self.node, &config.env) {
+            return Err(BackendError::Launch(reason));
+        }
+        if let Some(reason) = self.users.refusal(&self.node, &config.env) {
             return Err(BackendError::Launch(reason));
         }
         if config.cpu_limit.is_some() || config.memory_limit.is_some() {
@@ -999,6 +1210,39 @@ fn create_private_dir(path: &Path) -> std::io::Result<()> {
         .create(path)
 }
 
+/// A task directory under the node's binding for this launch: private to the
+/// daemon when there is none, and shared with the project's own user — and with
+/// nobody else on the node — when there is (design #537 §7). Created `0700`
+/// first, so it is never wider than its final mode for an instant.
+fn create_task_dir(path: &Path, user: Option<&TaskUser>) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    create_private_dir(path)?;
+    let Some(user) = user else {
+        return Ok(());
+    };
+    std::os::unix::fs::chown(path, None, Some(user.gid))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(TASK_DIR_MODE_BOUND))
+}
+
+/// Every level from the task directory down to `path` under that same binding,
+/// one [`create_task_dir`] at a time. [`create_private_dir`]'s own recursion
+/// applies its mode to every component it creates, so a nested injected path
+/// like `/chuggernaut/cloud/{identity}/token` would otherwise leave `cloud/`
+/// `0700` and daemon-owned — a level the task user cannot traverse to reach its
+/// own credential.
+fn create_task_dirs(dir: &Path, path: &Path, user: Option<&TaskUser>) -> std::io::Result<()> {
+    let rest = path
+        .strip_prefix(dir)
+        .map_err(|e| std::io::Error::other(format!("{}: {e}", path.display())))?;
+    let mut current = dir.to_path_buf();
+    create_task_dir(&current, user)?;
+    for component in rest.components() {
+        current.push(component);
+        create_task_dir(&current, user)?;
+    }
+    Ok(())
+}
+
 /// Whether a `{node}/{task}` id names a host task rather than a container
 /// (design #309 §1). The routing question a dual-mode node asks of every id it
 /// is handed after the launch that minted it.
@@ -1073,6 +1317,7 @@ fn process_start_time(pid: i32) -> Option<String> {
 fn supervised_cmd(
     cmd: &[String],
     borrowed: &BTreeMap<String, OsString>,
+    bound: bool,
 ) -> Result<Vec<String>, BackendError> {
     if cmd.is_empty() {
         return Err(BackendError::Launch(
@@ -1080,11 +1325,12 @@ fn supervised_cmd(
         ));
     }
     let shed = shed_borrowed(borrowed);
+    let handover = take_over_env(bound);
     let mut wrapped = vec![
         "sh".to_string(),
         "-c".to_string(),
         format!(
-            "{shed}\"$@\"; s=$?; find \"${CREDS_VAR}\" -mindepth 1 -maxdepth 1 \
+            "{handover}{shed}\"$@\"; s=$?; find \"${CREDS_VAR}\" -mindepth 1 -maxdepth 1 \
              ! -name {AGENT_STATE_DIR} -exec rm -rf {{}} + 2>/dev/null; \
              printf %s \"$s\" > \"${EXIT_TMP_VAR}\" \
              && mv \"${EXIT_TMP_VAR}\" \"${EXIT_VAR}\"; exit $s"
@@ -1093,6 +1339,75 @@ fn supervised_cmd(
     ];
     wrapped.extend(cmd.iter().cloned());
     Ok(wrapped)
+}
+
+/// What a bound task's wrapper does before anything else: take the umask its
+/// own directory is shared under, and read the environment `sudo` stripped out
+/// of the file it was handed (design #537 M2). An unreadable file is
+/// [`TASK_ENV_UNREADABLE`] rather than a task running with no environment at
+/// all — tested **before** the source, because `.` is a special built-in a
+/// POSIX shell exits on rather than a command whose failure a `||` could catch
+/// — and the whole prefix is empty for a launch the node binds no user for.
+fn take_over_env(bound: bool) -> String {
+    if !bound {
+        return String::new();
+    }
+    format!(
+        "umask {TASK_UMASK_BOUND}; [ -r {TASK_ENV_REL} ] || exit {TASK_ENV_UNREADABLE}; \
+         . {TASK_ENV_REL}; "
+    )
+}
+
+/// One task environment as a file `sh` can source: every name exported, every
+/// value single-quoted with the embedded quotes escaped, so a value holding a
+/// newline, a `$` or a quote reaches the task exactly as composed.
+fn env_file_body(env: &BTreeMap<String, OsString>) -> Result<String, String> {
+    let mut body = String::new();
+    for (name, value) in env {
+        if !is_env_name(name) {
+            return Err(format!(
+                "{name:?} is not a name a shell can export, and a bound host launch hands its \
+                 environment over as a file the task sources (design #537 M2) — refused rather \
+                 than dropped silently"
+            ));
+        }
+        let value = value.to_str().ok_or_else(|| {
+            format!("{name} holds a value that is not UTF-8, which no sourced file can carry")
+        })?;
+        body.push_str(&format!(
+            "export {name}='{}'\n",
+            value.replace('\'', "'\\''")
+        ));
+    }
+    Ok(body)
+}
+
+/// Whether a name is one a shell assigns to rather than one it refuses, which
+/// is what makes [`env_file_body`]'s output sourceable at all.
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Hand this task's composed environment over as a file it alone owns, and
+/// answer with the path so the launch records it exactly as it records every
+/// other file it materialized. `None` for an unbound launch, which carries its
+/// environment the way it always did.
+fn hand_over_env(
+    dir: &Path,
+    env: &BTreeMap<String, OsString>,
+    user: Option<&TaskUser>,
+) -> Result<Option<String>, BackendError> {
+    let Some(user) = user else {
+        return Ok(None);
+    };
+    let body = env_file_body(env).map_err(BackendError::Launch)?;
+    let path = dir.join(TASK_ENV_FILE);
+    write_as(user, &path, TASK_ENV_MODE, body.as_bytes()).map_err(BackendError::Launch)?;
+    Ok(Some(path.display().to_string()))
 }
 
 /// The floor's values as the daemon holds them, read **by name** so no other
@@ -1200,6 +1515,22 @@ fn launch_env(
     env
 }
 
+/// What the process the daemon actually spawns is given. An **unbound** launch
+/// is the task's own environment, exactly as it always was; a bound one is the
+/// floor and the client's bus variables only, because `sudo` would strip the
+/// rest anyway (#537 M2) and a secret in the escalating process's `environ` is
+/// one more place it can be read from.
+fn spawn_env(
+    task: &BTreeMap<String, OsString>,
+    borrowed: &BTreeMap<String, OsString>,
+    user: Option<&TaskUser>,
+) -> BTreeMap<String, OsString> {
+    match user {
+        None => launch_env(task, borrowed),
+        Some(_) => launch_env(&floor_env(&daemon_floor()), borrowed),
+    }
+}
+
 /// The `unset` a task's wrapper opens with, so a variable the client borrowed to
 /// find its bus does not survive into the task (#309 §10). Empty for every
 /// launch that borrowed nothing.
@@ -1219,10 +1550,14 @@ fn task_env(
     daemon: &HashMap<String, String>,
     launch: &HashMap<String, String>,
     dir: &Path,
+    user: Option<&TaskUser>,
 ) -> Result<BTreeMap<String, OsString>, String> {
     let mut env = floor_env(daemon);
     for (name, value) in rebase_env(dir, launch)? {
         env.insert(name, OsString::from(value));
+    }
+    if let Some(user) = user {
+        env.insert(HOME_VAR.to_string(), user.home.clone().into_os_string());
     }
     env.insert(
         crate::WORKSPACE_VAR.to_string(),
@@ -1262,15 +1597,25 @@ fn write_exit_code(dir: &Path, code: i32) -> std::io::Result<()> {
 }
 
 /// Materialize one injected file at its **rebased** path (design #322 §2's
-/// second surface), so `/chuggernaut/ssh/id` lands in the 0700 task directory
-/// rather than at a machine-global path. Every directory it creates is 0700,
-/// and [`ContainerBackend::remove`] reclaims each path this returns.
-fn materialize(dir: &Path, file: &InjectedFile) -> Result<String, BackendError> {
+/// second surface), so `/chuggernaut/ssh/id` lands in the task directory rather
+/// than at a machine-global path. A bound launch's file is written **as the
+/// task user**, so a `0600` key is the task's own and its mode still means
+/// something (design #537 §3), and [`ContainerBackend::remove`] reclaims each
+/// path this returns.
+fn materialize(
+    dir: &Path,
+    file: &InjectedFile,
+    user: Option<&TaskUser>,
+) -> Result<String, BackendError> {
     let path = rebase_path(dir, &file.container_path)
         .map_err(|e| BackendError::Launch(format!("injected file {}: {e}", file.container_path)))?;
     if let Some(parent) = path.parent() {
-        create_private_dir(parent)
+        create_task_dirs(dir, parent, user)
             .map_err(|e| BackendError::Launch(format!("{}: {e}", parent.display())))?;
+    }
+    if let Some(user) = user {
+        write_as(user, &path, file.mode, &file.contents).map_err(BackendError::Launch)?;
+        return Ok(path.display().to_string());
     }
     std::fs::write(&path, &file.contents)
         .map_err(|e| BackendError::Launch(format!("{}: {e}", path.display())))?;
@@ -1288,10 +1633,11 @@ fn spawn_task(
     config: &ContainerLaunchConfig,
     supervision: Supervision,
     unit: &str,
+    user: Option<&TaskUser>,
 ) -> Result<(std::process::Child, TaskMeta), BackendError> {
     let mut files = Vec::with_capacity(config.files.len());
     for file in &config.files {
-        files.push(materialize(dir, file)?);
+        files.push(materialize(dir, file, user)?);
     }
     let log = std::fs::File::create(dir.join(OUTPUT_LOG))
         .map_err(|e| BackendError::Launch(format!("{OUTPUT_LOG}: {e}")))?;
@@ -1299,16 +1645,24 @@ fn spawn_task(
         .try_clone()
         .map_err(|e| BackendError::Launch(format!("{OUTPUT_LOG}: {e}")))?;
 
-    let env = task_env(&daemon_floor(), &config.env, dir).map_err(BackendError::Launch)?;
+    let env = task_env(&daemon_floor(), &config.env, dir, user).map_err(BackendError::Launch)?;
     let borrowed = borrowed_bus(supervision, &daemon_bus(), &env);
-    let wrapped = supervised_launch(supervision, unit, supervised_cmd(&config.cmd, &borrowed)?);
+    files.extend(hand_over_env(dir, &env, user)?);
+    let wrapped = supervised_launch(
+        supervision,
+        unit,
+        escalated(
+            user,
+            supervised_cmd(&config.cmd, &borrowed, user.is_some())?,
+        ),
+    );
     use std::os::unix::process::CommandExt;
     let mut command = std::process::Command::new(&wrapped[0]);
     command
         .args(&wrapped[1..])
         .current_dir(dir)
         .env_clear()
-        .envs(launch_env(&env, &borrowed))
+        .envs(spawn_env(&env, &borrowed, user))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::from(log))
         .stderr(std::process::Stdio::from(errors))
@@ -1626,16 +1980,17 @@ impl ContainerBackend for HostBackend {
             self.counter.fetch_add(1, Ordering::Relaxed)
         );
         let dir = self.root.join(&task);
+        let user = self.users.binding(&config.env);
         for private in [
             dir.clone(),
             dir.join(WORKSPACE_DIR),
             dir.join(CHUGGERNAUT_DIR),
         ] {
-            create_private_dir(&private)
+            create_task_dir(&private, user)
                 .map_err(|e| BackendError::Launch(format!("{}: {e}", private.display())))?;
         }
 
-        let (child, meta) = spawn_task(&dir, &config, self.supervision, &unit_name(&task))?;
+        let (child, meta) = spawn_task(&dir, &config, self.supervision, &unit_name(&task), user)?;
         let encoded = serde_json::to_vec(&meta)
             .map_err(|e| BackendError::Launch(format!("{META_JSON}: {e}")))?;
         std::fs::write(dir.join(META_JSON), encoded)
@@ -1944,19 +2299,264 @@ mod tests {
         assert_eq!(proc_stat_start_time("1234 (sh) S 1 2"), None);
     }
 
+    /// A user this test can actually `chown` to and name, which is the running
+    /// one: the escalation itself needs a node design #537 D9 provisioned, and
+    /// what is asserted here is every composition around it.
+    fn test_user(home: &Path) -> TaskUser {
+        // SAFETY: `getuid` and `getgid` take no arguments, cannot fail and return plain integers.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        TaskUser {
+            name: "chug-537".to_string(),
+            uid,
+            gid,
+            home: home.to_path_buf(),
+        }
+    }
+
+    /// A launch's own temp directory, removed by the caller.
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "chug-host-{name}-{}-{:x}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos())
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The escalation is exactly the shape #537 M1 measured driving
+    /// CoreSimulator from this launch path — and a node that binds nobody
+    /// composes the **same argv it always did**, which is what makes this land
+    /// inert on every node today.
+    #[test]
+    fn a_bound_launch_escalates_and_an_unbound_one_is_unchanged() {
+        let cmd = vec!["sh".to_string(), "-c".to_string(), "true".to_string()];
+        assert_eq!(
+            escalated(None, cmd.clone()),
+            cmd,
+            "an unbound launch is byte-identical"
+        );
+        let user = test_user(Path::new("/Users/chug-537"));
+        assert_eq!(
+            escalated(Some(&user), cmd.clone()),
+            vec![
+                "sudo".to_string(),
+                "-n".to_string(),
+                "-u".to_string(),
+                "chug-537".to_string(),
+                "-H".to_string(),
+                "--".to_string(),
+                "sh".to_string(),
+                "-c".to_string(),
+                "true".to_string(),
+            ],
+            "-n because a daemon has no tty, -H because HOME follows the uid"
+        );
+        assert_eq!(
+            supervised_launch(
+                Supervision::Scope(ScopeManager::System),
+                "chug-task-host-1-0.scope",
+                escalated(Some(&user), cmd.clone()),
+            )[0],
+            SYSTEMD_RUN,
+            "the scope holds the escalation, not the other way round"
+        );
+    }
+
+    /// The composed environment crosses in a **file the wrapper sources**
+    /// (#537 M2), and nothing about it — not a value, not the path to it —
+    /// rides argv, which every user on the node can read (#537 M6).
+    #[test]
+    fn the_task_environment_crosses_in_a_file_and_never_in_argv() {
+        let dir = test_dir("envfile");
+        let hostile = "s3cret 'quoted' \\ $HOME\nsecond line";
+        std::fs::create_dir_all(dir.join(CHUGGERNAUT_DIR)).unwrap();
+        let env = BTreeMap::from([
+            ("CHUG_SECRET".to_string(), OsString::from(hostile)),
+            ("SEEN".to_string(), dir.join("seen").into_os_string()),
+            (
+                CREDS_VAR.to_string(),
+                dir.join(CHUGGERNAUT_DIR).into_os_string(),
+            ),
+            (
+                EXIT_TMP_VAR.to_string(),
+                dir.join(EXIT_CODE_TMP).into_os_string(),
+            ),
+            (EXIT_VAR.to_string(), dir.join(EXIT_CODE).into_os_string()),
+        ]);
+        std::fs::write(dir.join(TASK_ENV_FILE), env_file_body(&env).unwrap()).unwrap();
+
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf %s \"$CHUG_SECRET\" > \"$SEEN\"".to_string(),
+        ];
+        let wrapped = supervised_cmd(&cmd, &BTreeMap::new(), true).unwrap();
+        assert!(wrapped[2].contains(TASK_ENV_REL), "{}", wrapped[2]);
+        for arg in &wrapped {
+            assert!(
+                !arg.contains(hostile),
+                "a value must never ride argv: {arg}"
+            );
+            assert!(
+                !arg.contains(&dir.join(TASK_ENV_FILE).display().to_string()),
+                "not even the path to the file (#537 M6): {arg}"
+            );
+        }
+        let status = std::process::Command::new(&wrapped[0])
+            .args(&wrapped[1..])
+            .current_dir(&dir)
+            .env_clear()
+            .status()
+            .unwrap();
+        assert!(status.success(), "the wrapper sources what it was handed");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("seen")).unwrap(),
+            hostile,
+            "every value survives the file exactly as composed"
+        );
+        assert_eq!(
+            read_exit_code(&dir),
+            Some(0),
+            "and the wrapper's own paths come from the same file"
+        );
+        assert!(
+            env_file_body(&BTreeMap::from([(
+                "not a name".to_string(),
+                OsString::from("x")
+            )]))
+            .is_err(),
+            "a name no shell can export is refused rather than dropped"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A bound task's `$HOME` is the task user's and its directory is the
+    /// project group's — reachable to the daemon that has to harvest it and to
+    /// no other project on the node (#537 §7).
+    #[test]
+    fn home_and_the_task_directory_follow_the_task_user() {
+        let dir = test_dir("bound-dir");
+        let user = test_user(&dir.join("home"));
+        let task = dir.join("host-1-0");
+        create_task_dir(&task, None).unwrap();
+        assert_eq!(
+            mode_of(&task),
+            0o700,
+            "an unbound task directory is private"
+        );
+
+        let bound = dir.join("host-2-0");
+        create_task_dir(&bound, Some(&user)).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(mode_of(&bound), TASK_DIR_MODE_BOUND);
+        assert_eq!(std::fs::metadata(&bound).unwrap().gid(), user.gid);
+
+        let env = task_env(&daemon_floor(), &HashMap::new(), &bound, Some(&user)).unwrap();
+        assert_eq!(
+            env[HOME_VAR],
+            user.home.clone().into_os_string(),
+            "a task's HOME must stop being the daemon's (#537 §7)"
+        );
+        assert_eq!(
+            task_env(&daemon_floor(), &HashMap::new(), &bound, None)
+                .unwrap()
+                .get(HOME_VAR),
+            floor_env(&daemon_floor()).get(HOME_VAR),
+            "and an unbound task's is exactly the daemon's, as it always was"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Every level a bound launch creates is the project group's, not only the
+    /// one an injected file's parent names: a nested credential path like
+    /// `/chuggernaut/cloud/{identity}/token` is unreachable to the task user
+    /// the moment a single intermediate directory stays `0700` and the
+    /// daemon's.
+    #[test]
+    fn a_nested_injected_path_binds_every_level_it_creates() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = test_dir("bound-nested");
+        let user = test_user(&dir.join("home"));
+        let task = dir.join("host-3-0");
+        let nested = task.join(CHUGGERNAUT_DIR).join("cloud").join("identity");
+        create_task_dirs(&task, &nested, Some(&user)).unwrap();
+
+        let mut level = task.clone();
+        assert_eq!(mode_of(&level), TASK_DIR_MODE_BOUND);
+        for component in nested.strip_prefix(&task).unwrap().components() {
+            level.push(component);
+            assert_eq!(
+                mode_of(&level),
+                TASK_DIR_MODE_BOUND,
+                "{} is a level the task user cannot traverse",
+                level.display()
+            );
+            assert_eq!(std::fs::metadata(&level).unwrap().gid(), user.gid);
+        }
+
+        let unbound = dir.join("host-4-0");
+        let leaf = unbound.join(CHUGGERNAUT_DIR).join("cloud");
+        create_task_dirs(&unbound, &leaf, None).unwrap();
+        assert_eq!(
+            mode_of(&leaf),
+            0o700,
+            "and an unbound launch's tree is private exactly as it always was"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A bound task whose environment file it cannot read exits
+    /// [`TASK_ENV_UNREADABLE`] rather than running with no environment at all.
+    /// The guard is a **test** ahead of the source rather than a `||` after it,
+    /// because `.` is a special built-in a POSIX shell exits on before any
+    /// branch of the `||` could run.
+    #[test]
+    fn an_unreadable_environment_file_stops_the_wrapper() {
+        let dir = test_dir("envfile-missing");
+        let cmd = vec!["sh".to_string(), "-c".to_string(), "exit 0".to_string()];
+        let wrapped = supervised_cmd(&cmd, &BTreeMap::new(), true).unwrap();
+        let status = std::process::Command::new(&wrapped[0])
+            .args(&wrapped[1..])
+            .current_dir(&dir)
+            .env_clear()
+            .status()
+            .unwrap();
+        assert_eq!(
+            status.code(),
+            Some(TASK_ENV_UNREADABLE),
+            "a task.env the wrapper cannot read must stop the task, on every POSIX shell"
+        );
+        assert_eq!(
+            read_exit_code(&dir),
+            None,
+            "and no command ran to record an exit code"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A path's permission bits, so a bound directory's group mode is asserted
+    /// rather than assumed.
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
     /// The task's own wrapper records the exit status, so a daemon swap under a
     /// running task (spec §3.1 drain guarantee) does not lose it.
     #[test]
     fn the_task_records_its_own_exit_status() {
         let cmd = vec!["sh".to_string(), "-c".to_string(), "exit 7".to_string()];
-        let wrapped = supervised_cmd(&cmd, &BTreeMap::new()).unwrap();
+        let wrapped = supervised_cmd(&cmd, &BTreeMap::new(), false).unwrap();
         assert_eq!(wrapped[0], "sh");
         assert_eq!(wrapped[3], "sh", "$0 is consumed before the real argv");
         assert_eq!(&wrapped[4..], &cmd[..]);
         assert!(wrapped[2].contains(EXIT_VAR), "{}", wrapped[2]);
         assert!(wrapped[2].contains("exit $s"), "{}", wrapped[2]);
         assert!(
-            supervised_cmd(&[], &BTreeMap::new()).is_err(),
+            supervised_cmd(&[], &BTreeMap::new(), false).is_err(),
             "an empty command is refused"
         );
 
@@ -2439,7 +3039,7 @@ mod tests {
             ("JOB_ID".to_string(), "440".to_string()),
             ("NATS_CREDS".to_string(), "the dispatcher's".to_string()),
         ]);
-        let env = task_env(&daemon_env(), &launch, dir).unwrap();
+        let env = task_env(&daemon_env(), &launch, dir, None).unwrap();
 
         assert_eq!(
             env.keys().map(String::as_str).collect::<Vec<_>>(),
@@ -2496,12 +3096,12 @@ mod tests {
 
         assert_eq!(
             task_path(),
-            task_env(&daemon_floor(), &HashMap::new(), dir).unwrap()[PATH_VAR],
+            task_env(&daemon_floor(), &HashMap::new(), dir, None).unwrap()[PATH_VAR],
             "a tool staged for a task is resolved through the PATH a launch composes, so a floor \
              that stopped carrying the daemon's would break the staging guard and not only the task"
         );
 
-        let bare = task_env(&HashMap::new(), &HashMap::new(), dir).unwrap();
+        let bare = task_env(&HashMap::new(), &HashMap::new(), dir, None).unwrap();
         assert_eq!(bare["PATH"], PATH_FALLBACK);
         assert!(
             !bare.contains_key("HOME"),
@@ -2515,7 +3115,7 @@ mod tests {
 
         let declared = HashMap::from([("PATH".to_string(), "/nix/store/x/bin".to_string())]);
         assert_eq!(
-            task_env(&daemon_env(), &declared, dir).unwrap()["PATH"],
+            task_env(&daemon_env(), &declared, dir, None).unwrap()["PATH"],
             "/nix/store/x/bin",
             "a declared PATH wins over the floor, as a container env wins over its image's"
         );
@@ -2860,7 +3460,7 @@ mod tests {
                 OsString::from("unix:path=/run/user/1000/bus"),
             ),
         ]);
-        let task = task_env(&daemon_env(), &HashMap::new(), dir).unwrap();
+        let task = task_env(&daemon_env(), &HashMap::new(), dir, None).unwrap();
         for name in BUS_VARS {
             assert!(
                 !task.contains_key(name),
@@ -2909,6 +3509,7 @@ mod tests {
             &daemon_env(),
             &HashMap::from([(RUNTIME_DIR_VAR.to_string(), "the dispatcher's".to_string())]),
             dir,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2939,7 +3540,7 @@ mod tests {
             ),
         ]);
         let launch = HashMap::from([("JOB_ID".to_string(), "455".to_string())]);
-        let task = task_env(&daemon_env(), &launch, dir).unwrap();
+        let task = task_env(&daemon_env(), &launch, dir, None).unwrap();
         let borrowed = borrowed_bus(Supervision::Scope(ScopeManager::User), &bus, &task);
         let client = launch_env(&task, &borrowed);
 
@@ -2976,14 +3577,14 @@ mod tests {
             "-c".to_string(),
             format!("printenv > {}", seen.display()),
         ];
-        let wrapped = supervised_cmd(&cmd, &borrowed).unwrap();
+        let wrapped = supervised_cmd(&cmd, &borrowed, false).unwrap();
         assert!(
             wrapped[2].starts_with(&format!("unset {RUNTIME_DIR_VAR}; ")),
             "{}",
             wrapped[2]
         );
         assert!(
-            !supervised_cmd(&cmd, &BTreeMap::new()).unwrap()[2].contains("unset"),
+            !supervised_cmd(&cmd, &BTreeMap::new(), false).unwrap()[2].contains("unset"),
             "a launch that borrowed nothing sheds nothing"
         );
 
@@ -3092,6 +3693,7 @@ mod tests {
             Supervision::ProcessGroup,
             AgentCapability::new(None, crate::CHANNEL_PATH_HOST),
             HostTenancy::default(),
+            HostUsers::default(),
         )
         .unwrap();
         assert!(!leftover.exists(), "a detached tree is reclaimed at boot");
@@ -3114,6 +3716,7 @@ mod tests {
             Supervision::ProcessGroup,
             AgentCapability::new(None, crate::CHANNEL_PATH_HOST),
             HostTenancy::default(),
+            HostUsers::default(),
         )
         .unwrap();
         assert_eq!(

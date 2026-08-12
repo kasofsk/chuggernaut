@@ -1,6 +1,6 @@
 # Design #537 — Per-project unix users on a macOS host node
 
-Status: PROPOSED — slice 0's measurements landed (jobs #557, #561) and slice 8 moved the agent CLI to a node-wide path (job #571); no platform slice is built.
+Status: IMPLEMENTED IN PART — slice 0's measurements landed (jobs #557, #561), slice 8 moved the agent CLI to a node-wide path (job #571), and slice 1's launch path landed (job #563). It is **inert until a node declares a binding**: `WORKER_HOST_USERS` is off everywhere, the deploy does not forward it yet (slice 3), and no node has the users (slice 4).
 
 Written against the tree at `4674210` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a sibling
@@ -40,12 +40,12 @@ the argument and its dated corrections, never edited
 
 | Fact | Where | State |
 | --- | --- | --- |
-| A host task runs as the **daemon's own uid** — the login user on a Mac. Nothing in the launch path names a uid at all | `spawn_task` in `crates/container/src/host.rs`: `env_clear`, `envs`, `process_group(0)`, `spawn` | True, and it is what this design changes |
+| A host task runs as the **daemon's own uid** — the login user on a Mac — on every node in the fleet | `spawn_task` in `crates/container/src/host.rs`, whose escalation is reached only through a `HostUsers` binding, and no node declares one | True today. The launch path names a uid since job #563: `WORKER_HOST_USERS` on a host node resolves `chug-{project}` per listed project and `launch` escalates to it with `sudo -n -u … -H` |
 | The macOS daemon is a `launchd` **agent in the login user's GUI domain** | `deploy/prod/install-worker-launchd.sh` bootstraps into `gui/$(id -u)` | True |
-| A host task inherits exactly `PATH` and `HOME` from the daemon | `INHERITED` / `floor_env`, `crates/container/src/host.rs` | True, so a task's `$HOME` **is** the login user's home |
+| A host task inherits exactly `PATH` and `HOME` from the daemon | `INHERITED` / `floor_env`, `crates/container/src/host.rs` | True unbound, so a task's `$HOME` **is** the login user's home. A bound task's `HOME` is its own user's, taken from that user's passwd entry and re-exported through the environment file (job #563) |
 | A host node is single-tenant, enforced at the node and fail-closed | `HostTenancy` read in `HostBackend::admit`, `crates/container/src/host.rs`; parsed in `crates/worker/src/config.rs` | True. The list already accepts **several** projects — nothing in the parse or the admit forbids two |
 | One host task at a time | `enforce_host_capacity`, `crates/worker/src/daemon.rs`, plus the running-task exclusion in `HostBackend::admit` | True |
-| The task directory is created `0700` by the daemon, and every wire path is rebased into it | `create_private_dir` and `rebase_path`, `crates/container/src/host.rs` | True |
+| The task directory is created `0700` by the daemon, and every wire path is rebased into it | `create_task_dir` and `rebase_path`, `crates/container/src/host.rs` | True unbound. A bound task's directory is `0770` with the project user's own group, which is §7's scheme: the daemon still writes `meta.json` and reads the results, and no other project can reach it (job #563) |
 | `remove` deletes the recorded files, the task directory, and this task's MCP-log subtree **under the daemon's own `HOME`** | `reclaim_agent_cache` reads `HOME` out of the daemon's environment, `crates/container/src/host.rs` | True, and it breaks the moment the task's home is not the daemon's |
 | The daemon's own state on a Mac lives **under the login user's home** — `worker.env`, and `keys/worker.creds` / `keys/worker_git` beside it | the macOS branch of `deploy/prod/build-worker.sh` (`$NODE_HOME/chuggernaut-worker/…`); the launchd plist's `ENV_FILE` in `deploy/prod/install-worker-launchd.sh` | True. Measured 2026-08-10: the home is `0750` group `staff`, `worker.env` is `0644`, and a second uid whose **primary group is `staff`** reads it. The credentials at `0600` do not follow — the protection is the per-file mode, not the home |
 | A host task execs the agent CLI by **bare name off the `PATH` it inherits**, and that `PATH`'s CLI directory is now **node-wide** | `AgentCli::discover_on` (`crates/worker/src/agent_cli.rs`) resolves it only to advertise the capability; the `PATH` is `AGENT_PATH`, rendered **twice** — in `deploy/prod/install-worker-launchd.sh` (hand-run) and in `deploy/prod/build-worker.sh`'s own macOS plist (what the deploy reaches a node with), both now defaulting to `…:/usr/local/lib/chuggernaut/bin`, with `deploy/prod/install-worker-launchd.test.sh` comparing the two defaults whole | True since slice 8 (job #571). It used to be `…:$HOME/.local/bin`, which a second uid reached **only** through the `0750`+`staff` traversal D12 removes. **The platform half only**: placing the CLI at that path is the operator's, and it must happen before a project user leaves `staff` |
@@ -59,7 +59,7 @@ the argument and its dated corrections, never edited
 | **D2** | **The daemon keeps its GUI-domain agent shape and escalates per launch through a node-provisioned `sudo` binding.** A root daemon is recorded as the endpoint, with three triggers, and is not this design's first cut. | The escalation is exactly the mechanism the measurement used, and **M1 has now run it from the daemon's own launch path** (2026-08-10) rather than by proxy; a root daemon would dissolve most of the work below but rewrites the one Mac's supervision two weeks before it carries the operator's iOS work. |
 | **D3** | **The binding is told to the backend, never discovered by it** — a resolved `{project → uid, home}` map handed to `HostBackend::new` beside `Supervision`, `AgentCapability` and `HostTenancy`. | It is the pattern those three already establish in `crates/container/src/host.rs`: the daemon discovers node facts, the backend is told them and is testable without a node. |
 | **D4** | **`launch`, `kill` and *every delete* escalate — including the two the **daemon** performs with no task left to ask, `spawn_reaper`'s teardown repeat and `sweep_detached`'s boot sweep. The read family does not, and the daemon's own exit-code write rides the group.** | A non-root uid cannot signal or unlink another uid's work at all, so the deletes are not a preference; reads and the exit-code write are the only places a permission bit can carry it, and job/181's rule says an unreadable result is an error and never an empty one. |
-| **D5** | **No new boot gate. `WORKER_HOST_PROJECTS` becomes the roster.** The deploy refuses a listed project whose user does not resolve on the node; the daemon refuses that project's *launch* by name. | [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s do-not-advertise rule and the tenancy list would otherwise be two gates over one fact; the list already enumerates exactly the set of users that must exist. |
+| **D5** | **No new boot gate, and no second roster: `WORKER_HOST_PROJECTS` is the roster.** The deploy refuses a listed project whose user does not resolve on the node; the daemon refuses that project's *launch* by name. What job #563 added beside it is an **on/off declaration**, `WORKER_HOST_USERS`, in `WORKER_KVM`'s shape — the roster is unchanged, and off is what makes the slice inert on a fleet with no users provisioned ([the record](#correction--2026-08-12-job-563-slice-1-lands-and-the-file-modes-c1-was-argued-to-be-stuck-with-are-not-the-ones-it-got)). | [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s do-not-advertise rule and the tenancy list would otherwise be two gates over one fact; the list already enumerates exactly the set of users that must exist. |
 | **D6** | **The user name is derived, `chug-{project}` from the slug's second component, and a derivation collision is a hard parse error.** | A silent collision between `a/beacon` and `b/beacon` would hand two projects one uid — precisely the failure this design exists to prevent — and `parse_projects` already refuses a repeated entry in the same shape. |
 | **D7** | **`WORKER_HOST_ROOT` moves out of the login user's home** to a node-wide root — `0711`, owned by the daemon's uid, **created by the operator with root** at provisioning, and traversable but not listable by every project user. **Necessary, and measured not sufficient** (M3): it is D12 that makes it a boundary. | The whole task directory hangs off that root, and the daemon creates its root at boot but cannot create one outside its own home, so the operator has to hand it one that already exists. The premise §[7](#7-task-directories-ownership-and-every-call-site-that-changes) argued it from — *the home is `0700`, so no project user can traverse* — is measured **false**: `/Users/worksalot` is `0750` group `staff`, and the move relocates state the project user could read anyway until D12 lands. |
 | **D8** | **Signing needs nothing from this design** (operator, 2026-08-10). Real builds are signed by **fastlane** from keys supplied as ordinary **secrets**; local work uses ad-hoc debug keys. The per-project file keychain this row used to record as the direction is **retired**, and slice 6 closes with it. | `match` installs certificates into a keychain fastlane creates and unlocks itself, and an Android upload keystore arrives inline as base64 — so nothing reads the login keychain section 1 measured absent, and a session-less task user is not disadvantaged. [The record](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it). |
@@ -73,7 +73,7 @@ the argument and its dated corrections, never edited
 | # | Slice | Contract changed | Depends on | State |
 | --- | --- | --- | --- | --- |
 | 0 | `human` — the measurements M1–M8 below, on `gumbo-air-0`, with no platform change: M1 and M2 ride an existing `mode: host` job type's own script | none | — | **Landed** (job #561). M1–M8 were **taken by job #557** on 2026-08-10 from a `mode: host` task the daemon spawned; that job merged nothing, so this row carries the number of the job that recorded it. **M1 passes** and C1 is viable; M2 and M3 changed a decision each ([the record](#correction--2026-08-10-job-561-slice-0-is-measured-m1-passes-and-the-staff-primary-group-is-load-bearing-in-two-directions)). One question is left open and is **not** closed by this row: M1 has not been taken with no console session |
-| 1 | `code` — resolve the per-project binding at boot and hand it to `HostBackend`; `launch` escalates **and hands the composed environment over as a file, not as environment** (M2); the task's `HOME` and task directory follow the task user | `HostBackend::new` signature, the host launch path (`crates/container/src/host.rs`) | 0 (M1, M2, M3) | Proposed |
+| 1 | `code` — resolve the per-project binding at boot and hand it to `HostBackend`; `launch` escalates **and hands the composed environment over as a file, not as environment** (M2); the task's `HOME` and task directory follow the task user | `HostBackend::new` signature, the host launch path (`crates/container/src/host.rs`) | 0 (M1, M2, M3) | **Landed** (job #563). `WORKER_HOST_USERS` is the node's declaration and D5's roster stays `WORKER_HOST_PROJECTS`; the environment file is the task user's own `0600` because the injected files are written **through** the escalation, which §3 assumed C1 could not reach ([the record](#correction--2026-08-12-job-563-slice-1-lands-and-the-file-modes-c1-was-argued-to-be-stuck-with-are-not-the-ones-it-got)). Inert until a node declares a binding |
 | 2 | `code` — every delete escalates: `kill`, `remove`, **and the daemon-side pair a task's exit already runs without it** — `spawn_reaper`'s `reclaim_credentials` + `reclaim_agent_cache`, and `sweep_detached` at boot; `reclaim_agent_cache` follows the **task** user's home rather than the daemon's | `ContainerBackend::kill` / `remove` on the host backend, and the reaper's teardown repeat | 1 | Proposed |
 | 3 | `deploy` — `build-worker.sh` refuses a listed project whose user does not resolve on the node; `WORKER_HOST_ROOT` guidance and `deploy/prod/env.example` follow D7, including that the root is now an operator precondition on macOS | the node run spec | 1 | Proposed |
 | 4 | `docs` — a provisioning runbook (create the user, the group **as the user's primary group** per D12, the home, the `sudoers` line and **the `WORKER_HOST_ROOT` root itself**; verify; decommission; and the deletion asymmetry); `docs/reference/runbooks/worker-host-projects.md` §2 stops arguing single-tenancy as the boundary | runbook set | 3, 8 | Proposed |
@@ -1212,3 +1212,80 @@ rather than grepping the deploy for a substring, which is possible only because
 neither default carries a home path any more and the two are one string.
 `deploy/prod/build-worker.test.sh` case 2s asserts the same pair on the plist the
 deploy actually renders. Both were red against the unfixed tree.
+
+## Correction — 2026-08-12, job #563 (slice 1 lands, and the file modes C1 was argued to be stuck with are not the ones it got)
+
+Appended by the job that **implemented** slice 1. It changes nothing about the
+decisions: C1 is the mechanism, the environment crosses in a file, the binding is
+told to the backend. What it corrects is two places where the body predicted a
+cost the code did not have to pay, and one place where it under-specified how a
+node says yes.
+
+### The declaration, which the body left implicit
+
+D5 collapsed §8's provisioning gate into `WORKER_HOST_PROJECTS` and said nothing
+about how a node turns the binding *on*. Read literally that makes every listed
+project's launch refuse the moment this code ships — the whole fleet, before any
+user exists anywhere — which is the outcome D5's own boot-refusal argument is
+against.
+
+So the slice added an on/off declaration beside the roster rather than a second
+roster: **`WORKER_HOST_USERS`**, parsed in `WORKER_KVM`'s exact shape (`1`/`0`,
+anything else a hard config error). Off — every node today — resolves nothing,
+binds nobody, and composes byte-identical launches. On, the daemon derives
+`chug-{project}` for each project the roster already names (D6, unchanged),
+resolves each through `getpwnam_r` in its own view, and hands
+`HostBackend::new` the result. **The fail-closed half is unchanged and is what
+the roster now means**: a project the node declared and could not resolve refuses
+its launches by name, and the derivation collision D6 asks for is a hard config
+error at parse — but only when the declaration is on, because with it off two
+same-named projects already share the daemon's uid and nothing here changes that.
+
+### The modes: `0640` was the price of C1, and it turned out not to be
+
+§[3](#the-environment-must-not-cross-on-the-command-line) and
+[the M2 correction](#m2--the-composed-environment-does-not-survive-so-option-c-is-a-requirement)
+both concluded that under C1 the environment file is `0640` `chgrp`'d to the
+project group, because *"a `0600` file is owned by whoever wrote it, and under C1
+the writer is the non-root daemon, which cannot `chown` it to the task user"*.
+The premise is true and the conclusion does not follow: the daemon cannot
+`chown`, but it **can write as the task user through the same escalation the
+launch takes** — `sudo -n -u {user} -H sh -c 'umask 077; cat > "$1" && chmod
+"$2" "$1"'`, contents on **stdin** so nothing sensitive rides argv (M6), the path
+and the mode on argv because neither is a secret.
+
+So the environment file is `0600` **owned by the task user**, which the body
+records as available only under C2. The same move fixes something neither
+section noticed: an injected `0600` ssh key written by the daemon would be
+unreadable to the task that has to use it, and one widened to `0640` is a key
+OpenSSH refuses outright. Every injected file is materialized through the
+escalation instead, so a bound launch's credentials keep their declared modes and
+their declared owner.
+
+**What did not change is the directory.** §7's `0770` group-shared task
+directory stands exactly as argued: the daemon has to write `meta.json` and read
+the task's results, so the directory cannot be `0700`-owned-by-the-task without
+C2. `HOME` is the bound user's own, out of its passwd entry, and the wrapper
+takes `umask 007` so what the task creates inside stays readable to the daemon
+that harvests it and to no other project.
+
+The mode applies to **every** level the launch creates under that directory, not
+only the one an injected file's parent names. Rust's `DirBuilder::recursive`
+applies its mode to each component it creates, so binding the leaf alone would
+leave `chuggernaut/cloud/` `0700` and daemon-owned while
+`chuggernaut/cloud/{identity}/` was `0770` — a level the task user cannot
+traverse, which makes a nested credential (`auth::workload`'s token and ADC
+documents) unwritable at launch and unreadable if it were written. The
+one-level paths that motivated §7 hid it: `chuggernaut/` is pre-created bound
+before any file is materialized.
+
+### What the slice does not do, so the row is not read as more than it is
+
+It **takes effect at the next deploy and does nothing until a node declares a
+binding.** No node sets `WORKER_HOST_USERS`, `deploy/prod/build-worker.sh` does
+not forward it (slice 3), no node has the users or the `sudoers` line (slice 4),
+and the `sudo` path has never run from this code — M1 measured the mechanism from
+a `mode: host` job's own script, not from `spawn_task`. Teardown is untouched:
+`kill`, `remove` and the daemon's own post-exit deletes still run as the daemon,
+which is slice 2, and the environment file is recorded in the launch's
+`meta.json` `files` so slice 2 reclaims it rather than re-deriving its path.

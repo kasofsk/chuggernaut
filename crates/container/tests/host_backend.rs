@@ -45,11 +45,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use container::host::{
-    AGENT_CONFIG_VAR, AgentCapability, HOST_ROOT_DEFAULT, HostBackend, HostTenancy, ScopeManager,
-    Supervision,
+    AGENT_CONFIG_VAR, AgentCapability, HOST_ROOT_DEFAULT, HostBackend, HostTenancy, HostUsers,
+    ProjectUser, ScopeManager, Supervision,
 };
 use container::{ContainerBackend, ContainerLaunchConfig, ContainerStatus, InjectedFile};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A root this test alone owns, removed by the caller.
 fn temp_root(name: &str) -> std::path::PathBuf {
@@ -72,6 +72,7 @@ fn backend(root: &std::path::Path) -> HostBackend {
         Supervision::ProcessGroup,
         capability(root),
         tenancy(),
+        HostUsers::default(),
     )
     .unwrap()
 }
@@ -405,6 +406,7 @@ async fn an_agent_shaped_launch_is_refused_by_missing_capability() {
             runnable(&root, "chuggernaut-channel-host"),
         ),
         tenancy(),
+        HostUsers::default(),
     )
     .unwrap();
     let err = no_cli.launch(agent_env(cfg("true"))).await.unwrap_err();
@@ -420,6 +422,7 @@ async fn an_agent_shaped_launch_is_refused_by_missing_capability() {
         Supervision::ProcessGroup,
         AgentCapability::new(None, root.join("absent-channel")),
         tenancy(),
+        HostUsers::default(),
     )
     .unwrap();
     let err = no_channel.launch(agent_env(cfg("true"))).await.unwrap_err();
@@ -451,6 +454,7 @@ async fn host_work_runs_only_for_the_projects_the_node_declares() {
         Supervision::ProcessGroup,
         capability(&root),
         HostTenancy::new(vec!["acme/chug".into(), "acme/api".into()]),
+        HostUsers::default(),
     )
     .unwrap();
 
@@ -481,6 +485,79 @@ async fn host_work_runs_only_for_the_projects_the_node_declares() {
     assert!(
         backend.launch(unstamped).await.is_err(),
         "a launch carrying no JOB_PROJECT is admitted by nothing"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// Design #537 D5's fail-closed half: a project the node **declares** a unix
+/// user for and cannot resolve refuses the launch by name, because running it
+/// as the daemon's own uid would look like success while restoring exactly the
+/// shared uid the binding exists to remove.
+#[tokio::test]
+async fn a_declared_project_whose_user_does_not_resolve_refuses_rather_than_falling_back() {
+    let root = temp_root("users-unresolvable");
+    let backend = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        Supervision::ProcessGroup,
+        capability(&root),
+        tenancy(),
+        HostUsers::new(BTreeMap::from([(
+            "acme/chug".to_string(),
+            ProjectUser::Unresolved {
+                user: "chug-chug".to_string(),
+                reason: "this node has no unix user chug-chug".to_string(),
+            },
+        )])),
+    )
+    .unwrap();
+
+    let err = backend.launch(cfg("true")).await.unwrap_err();
+    assert!(
+        matches!(err, container::BackendError::Launch(_)),
+        "an unresolvable binding is refused hard, never queued as capacity: {err}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("acme/chug") && text.contains("chug-chug") && text.contains("w1"),
+        "the refusal names the project, the user and the node: {text}"
+    );
+    assert!(
+        backend.list_managed_running().await.unwrap().is_empty()
+            && backend.list_managed_exited().await.unwrap().is_empty(),
+        "and it refuses before spawning anything as the daemon"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A node that binds nobody — which is every node until an operator declares
+/// one — launches exactly as it did before design #537: no escalation, no
+/// environment file, and a task directory private to the daemon.
+#[tokio::test]
+async fn an_unbound_launch_is_what_it_always_was() {
+    let root = temp_root("users-unbound");
+    let backend = backend(&root);
+    let id = backend
+        .launch(cfg("printf %s \"$JOB_ID\" > \"$CHUG_WORKSPACE/seen\""))
+        .await
+        .unwrap();
+    assert_eq!(settle(&backend, &id).await, 0);
+
+    let dir = task_dir(&root, &id);
+    assert_eq!(mode_of(&dir), 0o700, "the task directory stays private");
+    assert!(
+        !dir.join("task.env").exists(),
+        "an unbound launch hands nothing over as a file"
+    );
+    assert_eq!(
+        meta_of(&root, &id)["files"].as_array().unwrap().len(),
+        0,
+        "and records no file it did not materialize"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("workspace").join("seen")).unwrap(),
+        "309",
+        "the composed environment still reaches the task as environment"
     );
     std::fs::remove_dir_all(&root).unwrap();
 }
@@ -553,6 +630,7 @@ async fn an_undeclared_tenancy_admits_nobody() {
         Supervision::ProcessGroup,
         capability(&root),
         HostTenancy::default(),
+        HostUsers::default(),
     )
     .unwrap();
 
@@ -1267,6 +1345,7 @@ async fn a_host_task_runs_in_its_own_supervision_unit() {
         supervision,
         capability(&root),
         tenancy(),
+        HostUsers::default(),
     )
     .unwrap();
 
@@ -1330,6 +1409,7 @@ async fn a_scoped_task_is_handed_the_dollars_its_command_was_written_with() {
         supervision,
         capability(&root),
         tenancy(),
+        HostUsers::default(),
     )
     .unwrap();
 
@@ -1413,6 +1493,7 @@ async fn a_setsid_escapee_is_staged_under_a_scope_as_well() {
         supervision,
         capability(&root),
         tenancy(),
+        HostUsers::default(),
     )
     .unwrap();
     let pidfile = root.join("escapee.pid");
@@ -1532,6 +1613,7 @@ async fn a_kill_reaches_a_setsid_escapee_through_the_scope() {
         supervision,
         capability(&root),
         tenancy(),
+        HostUsers::default(),
     )
     .unwrap();
 

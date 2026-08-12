@@ -754,8 +754,10 @@ async fn host_backend(
         host_channel = %container::CHANNEL_PATH_HOST,
         agent_cli = ?agent_cli.path(),
         host_projects = ?config.host_projects,
+        host_users = config.host_users,
         "host execution enabled — launches carrying no image run as host processes here, for the \
-         projects WORKER_HOST_PROJECTS names and no other (design #309 §10)"
+         projects WORKER_HOST_PROJECTS names and no other (design #309 §10), as this daemon's own \
+         uid unless WORKER_HOST_USERS binds each of them to a user of its own (design #537 D1)"
     );
     Ok(Arc::new(container::host::HostBackend::new(
         config.node.clone(),
@@ -763,6 +765,7 @@ async fn host_backend(
         supervision,
         agent_capability(&config.node, agent_cli, container::CHANNEL_PATH_HOST),
         tenancy,
+        crate::host_users::resolve(&config.node, config.host_users, &config.host_projects),
     )?))
 }
 

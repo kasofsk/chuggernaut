@@ -220,3 +220,5 @@ Doc-reread: .chug/tasks/review-molt-loss.md
 Doc-reread: docs/spec.md
 Doc-reread: docs/reference/modules.md
 Doc-reread: docs/design/529-secret-handling.md
+
+Doc-reread: docs/design/537-per-project-users-macos.md

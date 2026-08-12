@@ -15,6 +15,7 @@ pub mod capacity;
 pub mod config;
 pub mod daemon;
 pub mod docker_access;
+pub mod host_users;
 pub mod nix;
 pub mod route;
 pub mod xcode;

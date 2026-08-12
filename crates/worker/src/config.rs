@@ -53,6 +53,13 @@ pub struct WorkerConfig {
     /// `host` at all and declaring whose work it is for are two separate acts;
     /// a container launch on the same node is untouched by it.
     pub host_projects: Vec<String>,
+    /// Whether this node runs each of those projects' host work as a **unix
+    /// user of its own** (`WORKER_HOST_USERS`, design #537 D1/D5), derived
+    /// `chug-{project}` from the roster above rather than declared a second
+    /// time. Off ⇒ every host task runs as the daemon's own uid, exactly as it
+    /// did before #537; on ⇒ a listed project whose user this node cannot
+    /// resolve has its launches refused rather than run as the daemon.
+    pub host_users: bool,
     /// The KVM device this node passes through (`WORKER_KVM`); `None` (unset) ⇒
     /// no passthrough at all. A node property provisioned exactly as
     /// [`Self::cache_dir`] is — worker-side, never on the wire or the launch
@@ -206,6 +213,7 @@ impl WorkerConfig {
         let slots_max = parse_slots_max(std::env::var("WORKER_SLOTS_MAX").ok(), node_cpu_count())?;
         let modes = parse_modes(std::env::var("WORKER_MODES").ok())?;
         let nix = NixEnv::from_env()?;
+        let host = HostEnv::from_env()?;
         Ok(Self {
             node,
             slots,
@@ -222,10 +230,8 @@ impl WorkerConfig {
                 }),
             cache_dir: parse_cache_dir(std::env::var("WORKER_CACHE_DIR").ok()),
             host_root: parse_host_root(std::env::var("WORKER_HOST_ROOT").ok())?,
-            host_projects: parse_projects(
-                "WORKER_HOST_PROJECTS",
-                std::env::var("WORKER_HOST_PROJECTS").ok(),
-            )?,
+            host_projects: host.projects,
+            host_users: host.users,
             kvm_device: parse_kvm_device(std::env::var("WORKER_KVM").ok())?,
             kvm_projects: parse_projects(
                 "WORKER_KVM_PROJECTS",
@@ -252,6 +258,70 @@ impl WorkerConfig {
                 .unwrap_or_else(|| PathBuf::from("/data/keys/worker_git")),
         })
     }
+}
+
+/// The node's host tenancy and its per-project users, parsed as one group
+/// (design #537 D5): the roster and the binding over it are one fact, and the
+/// derivation collision below can only be judged with both in hand.
+struct HostEnv {
+    projects: Vec<String>,
+    users: bool,
+}
+
+impl HostEnv {
+    fn from_env() -> Result<Self, ConfigError> {
+        let projects = parse_projects(
+            "WORKER_HOST_PROJECTS",
+            std::env::var("WORKER_HOST_PROJECTS").ok(),
+        )?;
+        let users = parse_host_users(std::env::var("WORKER_HOST_USERS").ok())?;
+        enforce_user_derivation(users, &projects)?;
+        Ok(Self { projects, users })
+    }
+}
+
+/// Parse `WORKER_HOST_USERS` into whether this node runs each listed project's
+/// host work as its own unix user (design #537 D5), in [`parse_kvm_device`]'s
+/// shape. Absent, empty, `0`, `false` or `off` ⇒ off; `1`, `true` or `on` ⇒ on;
+/// anything else is a hard config error, because a boundary must never be
+/// silently absent.
+fn parse_host_users(raw: Option<String>) -> Result<bool, ConfigError> {
+    let Some(raw) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(false);
+    };
+    match raw.as_str() {
+        "0" | "false" | "off" => Ok(false),
+        "1" | "true" | "on" => Ok(true),
+        other => Err(ConfigError(format!(
+            "WORKER_HOST_USERS must be 1/0, got {other:?}"
+        ))),
+    }
+}
+
+/// Refuse a roster whose derived user names collide (design #537 D6): two
+/// projects of different owners sharing a name derive one `chug-{name}`, which
+/// would hand them a single uid — the exact failure the binding exists to
+/// prevent, so it is a hard parse error the way a repeated entry already is.
+fn enforce_user_derivation(users: bool, projects: &[String]) -> Result<(), ConfigError> {
+    if !users {
+        return Ok(());
+    }
+    let mut seen: Vec<(String, &String)> = Vec::new();
+    for project in projects {
+        let Some(user) = crate::host_users::derived_user(project) else {
+            continue;
+        };
+        if let Some((_, first)) = seen.iter().find(|(name, _)| *name == user) {
+            return Err(ConfigError(format!(
+                "WORKER_HOST_USERS is on and WORKER_HOST_PROJECTS lists {first:?} and {project:?}, \
+                 which both derive the unix user {user:?} — one uid for two projects is what the \
+                 binding exists to prevent (design #537 D6), so this node refuses to boot rather \
+                 than serve either"
+            )));
+        }
+        seen.push((user, project));
+    }
+    Ok(())
 }
 
 /// The node's nix settings, parsed as one group (design #373): they are one
@@ -1183,6 +1253,62 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("more than once"), "{err}");
+    }
+
+    /// `WORKER_HOST_USERS` (design #537 D5): unset is off, which is every node
+    /// today and runs host tasks as the daemon's own uid; anything that is
+    /// neither on nor off is refused, because a boundary must never be silently
+    /// absent.
+    #[test]
+    fn host_users_are_off_until_a_node_declares_them() {
+        for off in [
+            None,
+            Some(String::new()),
+            Some("0".into()),
+            Some("off".into()),
+        ] {
+            assert!(!parse_host_users(off.clone()).unwrap(), "{off:?}");
+        }
+        for on in [
+            Some("1".to_string()),
+            Some("true".into()),
+            Some("on".into()),
+        ] {
+            assert!(parse_host_users(on.clone()).unwrap(), "{on:?}");
+        }
+        let err = parse_host_users(Some("yes".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("WORKER_HOST_USERS"), "{err}");
+    }
+
+    /// D6's derivation collision: two projects of different owners sharing a
+    /// name derive one `chug-{name}`, which would hand them a single uid — the
+    /// failure the binding exists to prevent, so it is a hard parse error the
+    /// way a repeated entry already is.
+    #[test]
+    fn a_derivation_collision_refuses_the_boot_rather_than_sharing_a_uid() {
+        let colliding = vec!["a/beacon".to_string(), "b/beacon".to_string()];
+        assert!(
+            enforce_user_derivation(false, &colliding).is_ok(),
+            "a node that binds nobody already shares one uid, and nothing here changes it"
+        );
+        let err = enforce_user_derivation(true, &colliding)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("a/beacon") && err.contains("b/beacon"),
+            "{err}"
+        );
+        assert!(err.contains("chug-beacon"), "{err}");
+        assert!(
+            enforce_user_derivation(
+                true,
+                &["acme/beacon".to_string(), "acme/chuggernaut".to_string()]
+            )
+            .is_ok(),
+            "two distinct names derive two users"
+        );
     }
 
     /// `WORKER_MODES` (design #322 W1): unset is container-only — today's
