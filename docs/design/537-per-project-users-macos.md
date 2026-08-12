@@ -1,6 +1,6 @@
 # Design #537 — Per-project unix users on a macOS host node
 
-Status: IMPLEMENTED IN PART — slice 0's measurements landed (jobs #557, #561), slice 8 moved the agent CLI to a node-wide path (job #571), slice 1's launch path landed (job #563), slice 2's teardown path landed (job #565), and slice 5 amended the siblings it supersedes (job #567). It is **inert until a node declares a binding**: `WORKER_HOST_USERS` is off everywhere, the deploy does not forward it yet (slice 3), and no node has the users (slice 4).
+Status: IMPLEMENTED IN PART — slice 0's measurements landed (jobs #557, #561), slice 8 moved the agent CLI to a node-wide path (job #571), slice 1's launch path landed (job #563), slice 2's teardown path landed (job #565), slice 5 amended the siblings it supersedes (job #567), and slice 3's deploy gate landed (job #566). It is **inert until a node declares a binding**: `WORKER_HOST_USERS` is off everywhere and no node has the users (slice 4). The deploy now forwards the declaration and **refuses** a node whose roster names a project it has no unix user for.
 
 Written against the tree at `4674210` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a sibling
@@ -76,7 +76,7 @@ the argument and its dated corrections, never edited
 | 0 | `human` — the measurements M1–M8 below, on `gumbo-air-0`, with no platform change: M1 and M2 ride an existing `mode: host` job type's own script | none | — | **Landed** (job #561). M1–M8 were **taken by job #557** on 2026-08-10 from a `mode: host` task the daemon spawned; that job merged nothing, so this row carries the number of the job that recorded it. **M1 passes** and C1 is viable; M2 and M3 changed a decision each ([the record](#correction--2026-08-10-job-561-slice-0-is-measured-m1-passes-and-the-staff-primary-group-is-load-bearing-in-two-directions)). One question is left open and is **not** closed by this row: M1 has not been taken with no console session |
 | 1 | `code` — resolve the per-project binding at boot and hand it to `HostBackend`; `launch` escalates **and hands the composed environment over as a file, not as environment** (M2); the task's `HOME` and task directory follow the task user | `HostBackend::new` signature, the host launch path (`crates/container/src/host.rs`) | 0 (M1, M2, M3) | **Landed** (job #563). `WORKER_HOST_USERS` is the node's declaration and D5's roster stays `WORKER_HOST_PROJECTS`; the environment file is the task user's own `0600` because the injected files are written **through** the escalation, which §3 assumed C1 could not reach ([the record](#correction--2026-08-12-job-563-slice-1-lands-and-the-file-modes-c1-was-argued-to-be-stuck-with-are-not-the-ones-it-got)). Inert until a node declares a binding |
 | 2 | `code` — every delete escalates: `kill`, `remove`, **and the daemon-side pair a task's exit already runs without it** — `spawn_reaper`'s `reclaim_credentials` + `reclaim_agent_cache`, and `sweep_detached` at boot; `reclaim_agent_cache` follows the **task** user's home rather than the daemon's | `ContainerBackend::kill` / `remove` on the host backend, and the reaper's teardown repeat | 1 | **Landed** (job #565). One escalation shape for all of them, resolved out of each tree's own `meta.json` where no launch is left to ask; the escalation deletes and the daemon's own delete is the verdict, so a leak names both the path and the escalation ([the record](#correction--2026-08-12-job-565-slice-2-lands-and-the-listing-is-a-delete-too)). Inert until a node declares a binding |
-| 3 | `deploy` — `build-worker.sh` refuses a listed project whose user does not resolve on the node; `WORKER_HOST_ROOT` guidance and `deploy/prod/env.example` follow D7, including that the root is now an operator precondition on macOS | the node run spec | 1 | Proposed |
+| 3 | `deploy` — `build-worker.sh` refuses a listed project whose user does not resolve on the node; `WORKER_HOST_ROOT` guidance and `deploy/prod/env.example` follow D7, including that the root is now an operator precondition on macOS | the node run spec | 1 | **Landed** (job #566). `WORKER_HOST_USERS` is forwarded in `WORKER_KVM`'s shape, and when it is on **one read-only ssh** asks the node exactly what `lookup` asks — so a listed project with no user refuses the deploy by name, an unanswered node refuses as *unchecked*, and a resolved user with no home directory warns. The same probe feeds job #560's `--report` as a **count**, because a slug is a value ([the record](#correction--2026-08-12-job-566-slice-3-lands-and-the-deploy-asks-the-node-what-the-daemon-asks-itself)) |
 | 4 | `docs` — a provisioning runbook (create the user, the group **as the user's primary group** per D12, the home, the `sudoers` line and **the `WORKER_HOST_ROOT` root itself**; verify; decommission; and the deletion asymmetry); `docs/reference/runbooks/worker-host-projects.md` §2 stops arguing single-tenancy as the boundary | runbook set | 3, 8 | Proposed |
 | 5 | `design` — amend [#322](322-macos-native-runtime.md)'s job #526 correction and [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)/§10 with what this replaces | design record | 1 | **Landed** (job #567). Both siblings carry the supersession and both say it is a supersession **in design**: of #526's three bounds one is replaced, one moves its enforcement site to slice 2 — which that amendment recorded as unlanded and which has since landed — and one is untouched; §8's option (c) is recorded as a requirement and §10's list as the roster ([the record](#correction--2026-08-12-job-567-slice-5-the-siblings-carry-the-supersession-and-one-composition-claim-does-not-survive-the-landed-code)) |
 | 6 | signing — formerly *deferred, once D8's operator input exists* | none | — | **Closed** (2026-08-10). D8 is answered and no platform work survives it; nothing smaller is left to do. [The record](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it) |
@@ -1475,3 +1475,83 @@ authority on what has landed**, and it is what a reader chasing either sentence
 arrives at. Nothing else in those amendments turns on the ordering — what they
 each argue about the uid boundary is unaffected, because slice 2 landing is what
 they said the boundary needed.
+
+## Correction — 2026-08-12, job #566 (slice 3 lands, and the deploy asks the node what the daemon asks itself)
+
+Appended by the job that **implemented** slice 3. It changes no decision: D5's
+one roster and two judges, D6's derivation and D7's node-wide root are all as
+written. What it records is where the deploy's half of D5 ended up, and two
+things the body left for whoever built it.
+
+### The declaration is forwarded, so the gate can exist at all
+
+[Job #563's own record](#correction--2026-08-12-job-563-slice-1-lands-and-the-file-modes-c1-was-argued-to-be-stuck-with-are-not-the-ones-it-got)
+closes on the line that `deploy/prod/build-worker.sh` does not forward
+`WORKER_HOST_USERS`, so a value in `chuggernaut.env` reached no node and one
+added to a node by hand was overwritten by the next deploy. It is forwarded now,
+in `WORKER_KVM`'s shape and beside the roster it is a declaration *over*: `1`/`0`
+trimmed, per-node overridable, **unset stays unset**, and a value
+`parse_host_users` would refuse is refused here rather than by a replacement
+daemon `KeepAlive` then loops out of the fleet. `enforce_user_derivation`'s
+collision is refused on the same ground and under the same condition — only when
+the declaration is on, because off the two projects already share the daemon's
+uid.
+
+### What the deploy asks, and what it deliberately does not
+
+**Exactly what `lookup` asks** (`crates/worker/src/host_users.rs`): the account
+resolves, and its passwd home is an absolute path. A deploy that refused
+something the daemon accepts would be the disagreement every guard in that script
+exists to avoid, so the *third* question — a home directory that is not there on
+disk — is a **warning**. `getpwnam_r` answers regardless, so the daemon binds the
+project and the work fails inside the task instead; D9 makes that shape ordinary
+rather than exotic, because a decommissioned account leaves its directory-services
+record behind and only its home can be removed over ssh.
+
+The two questions `lookup` *does* refuse on get **two refusals**, not one list.
+An account that does not resolve has to be created; an account that resolves with
+a passwd home that is not absolute is already there, and it is the home field
+that has to change. Merging them would have named the wrong fact and prescribed
+an act the operator had already performed — so each is refused in its own
+sentence, with its own fix, and the deploy stops on either.
+
+It does not ask about the `sudoers` line, and that is a scope decision rather
+than an oversight: the launch's `sudo -n -u {user} -H` fails without it just as
+surely, but the rule's shape is slice 4's to write, and a probe pinning one now
+would pin it before the runbook chooses it. It creates nothing — no user, no
+home, no root — for D9's reason.
+
+**The answer is tri-state**, in the shape `build_worker_run_spec_live` already
+uses: an ssh that fails and a node whose users all resolve both print nothing, so
+the probe ends with a sentinel and a missing one is *unchecked*, refused, and
+never a pass.
+
+### The report was reused rather than re-derived, and it costs a name
+
+Job #560's `--report` already compares this environment's declaration against the
+node, so the same probe feeds it rather than growing a second comparison — and a
+node whose host work cannot run never reads clean. It costs the finding its
+names: a project slug is a **value** of `WORKER_HOST_PROJECTS`, the report prints
+no value on either side, so it says *how many* of the roster's projects have no
+user and sends the reader to a run without `--report`.
+
+### D7 arrives as guidance, and the probe needed no change
+
+The root becoming an operator precondition is entirely a documentation act on the
+deploy side, which is the property that makes the move safe: `create_dir_all`
+against a root that already exists returns success without touching it, so
+`HostBackend::new`'s boot path and the deploy's own `mkdir -p`-then-`[ -w ]`
+probe both no-op on an operator-created `0711` root. What changed is what the
+refusal *says* on a mac with the binding on, `deploy/prod/env.example`,
+`deploy/prod/README.md`, and `HostBackend::new`'s own doc comment — which
+[§7](#7-task-directories-ownership-and-every-call-site-that-changes) predicted
+would stop being true and now says so. One thing the body did not ask for and the
+deploy now does: a bound node whose root is still **inside** the login user's home
+is warned rather than refused, because M3 measured that it works — through the
+`0750`-and-`staff` traversal D12 removes — so refusing it would refuse a node
+that runs. That warning is a **deploy-time** sentence and `--report` does not
+carry it: `WORKER_HOST_ROOT` is a run-spec variable, the report names variables
+and prints no value, and a placement warning that cannot show the placement is
+not worth a line. It is the same rule the user finding obeys one paragraph up,
+applied to the one advisory in that block that would otherwise have printed a
+path.

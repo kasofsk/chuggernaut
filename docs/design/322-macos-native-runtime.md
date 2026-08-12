@@ -88,9 +88,12 @@ in any session, so nothing here says iOS release builds work.
 **That tenancy decision is now superseded in design, and in design only.**
 [#537](537-per-project-users-macos.md) replaces the login user with one unix user
 per project, `chug-{project}`, reached by `sudo` from the same GUI-domain daemon;
-its slice 1 has landed (job #563) and is **inert** — no node declares
-`WORKER_HOST_USERS`, the deploy does not forward it, and no node has the users.
-So what the node does today is still what the 2026-08-09 correction records.
+its slices 1, 2 and 3 have landed (jobs #563, #565, #566) and all three are
+**inert** — no node declares `WORKER_HOST_USERS` and no node has the users; the
+deploy forwards the declaration and refuses a node whose roster names a project
+it has no unix user for, which changes what is checked before a restart and not
+what any node runs. So what the node does today is still what the 2026-08-09
+correction records.
 Which of that correction's three bounds survives, which is replaced, and what is
 deliberately not yet achieved — the `staff` primary group, and the headless M1 the
 operator deferred — is

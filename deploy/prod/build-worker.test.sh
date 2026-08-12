@@ -110,6 +110,14 @@ EOF
 #   * the nix preconditions (`[ -d '/nix/store' ] …`) and the toolchain-shape
 #     probe (`readlink -f …`) succeed unless $FAIL_NIX_PRECHECK /
 #     $FAIL_SDK_PRECHECK is set;
+#   * the PER-PROJECT USER probe (`… CHUG_HOST_USERS_READ`, design #537 D5),
+#     which answers in the three shapes `lookup` distinguishes: `no-user` for
+#     each name in $FAKE_HOST_USERS_MISSING (the account does not resolve),
+#     `no-home` for each in $FAKE_HOST_USERS_REL_HOME (it resolves and its
+#     passwd home is not an absolute path) and `no-home-dir` for each in
+#     $FAKE_HOST_USERS_NO_HOME (an absolute home that is not there on disk).
+#     It answers NOTHING under $FAKE_HOST_USERS_UNREAD — not even the sentinel —
+#     which is the node that must read as unchecked rather than provisioned;
 #   * the DOCKER GRANT socket probe (`[ -S '/run/chug/docker.sock' ]`, design
 #     #517 S5) succeeds unless $FAIL_GRANT_SOCKET is set. It is answered on the
 #     grant cases' own path rather than on $FAIL_DOCKER_SOCKET's, because the
@@ -147,6 +155,13 @@ case "\$*" in
   *"sudo -n mkdir -p '"*"sudo -n test -w '"*)
     [ -z "\${FAIL_HOST_ROOT_SUDO:-}" ] || exit 1 ;;
   *"&& [ -w '"*)   [ -z "\${FAIL_HOST_ROOT:-}" ] || exit 1 ;;
+  *CHUG_HOST_USERS_READ*)
+    [ -z "\${FAKE_HOST_USERS_UNREAD:-}" ] || exit 1
+    for _u in \${FAKE_HOST_USERS_MISSING:-}; do printf 'no-user %s\n' "\$_u"; done
+    for _u in \${FAKE_HOST_USERS_REL_HOME:-}; do printf 'no-home %s\n' "\$_u"; done
+    for _u in \${FAKE_HOST_USERS_NO_HOME:-}; do printf 'no-home-dir %s\n' "\$_u"; done
+    echo CHUG_HOST_USERS_READ
+    ;;
   *"mkdir -p '"*)  [ -z "\${FAIL_MKDIR:-}" ] || exit 1 ;;
   *"own=%s mode=%s"*)
     if [ -n "\${FAKE_KEYS_ABSENT:-}" ]; then
@@ -2898,6 +2913,284 @@ grep -qF "names no host runtime" "$WORK/host-tenancy-container.out" \
 started || fail "a tenancy on a container-only node must not refuse the deploy"
 echo "ok: a node naming no host mode is byte-identical, and a stray tenancy only warns"
 
+# ── Case 8a5: the per-project users the roster implies RESOLVE ⇒ deploy runs ──
+# Design #537 D5: WORKER_HOST_PROJECTS is the roster and WORKER_HOST_USERS is the
+# on/off declaration over it, so the users that must exist are derived from the
+# list rather than declared a second time. A node whose users are all there is a
+# node that deploys: the declaration reaches the env file, the derived names are
+# what was asked of the node, and nothing is refused.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS="acme/beacon, acme/api" \
+  WORKER_HOST_USERS=1 \
+  WORKER_HOST_ROOT=/usr/local/lib/chuggernaut/host-tasks \
+  sh "$SUT" > "$WORK/host-users-ok.out" 2>&1
+
+case "$(env_file)" in
+  *"WORKER_HOST_USERS='1'"*) ;;
+  *) fail "the binding declaration must reach the environment file (design #537 slice 3)" ;;
+esac
+grep_log "chug-beacon"
+grep_log "chug-api"
+grep -qF "resolves all of them" "$WORK/host-users-ok.out" \
+  || fail "a node whose users all resolve must say so"
+started || fail "a host node whose per-project users resolve must proceed to the daemon restart"
+echo "ok: WORKER_HOST_USERS reaches the env file and the derived users are asked of the node"
+
+# ── Case 8a6: a listed project with NO user on the node REFUSES ───────────────
+# The guard this slice exists for, and the 2026-08-10 shape exactly: the daemon's
+# own half is deliberately quiet (a boot refusal would brick the node under
+# KeepAlive), so it warns at boot and refuses that project's LAUNCH by name —
+# visible only in the daemon log, on a node that boots and advertises its slot.
+# The deploy is where an operator is already standing.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS="acme/beacon, acme/api" \
+  WORKER_HOST_USERS=1 \
+  WORKER_HOST_ROOT=/usr/local/lib/chuggernaut/host-tasks \
+  FAKE_HOST_USERS_MISSING=chug-api \
+  sh "$SUT" > "$WORK/host-users-missing.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a listed project with no unix user on the node must fail the deploy (got rc=0)"
+grep -F "has no unix user for:" "$WORK/host-users-missing.out" > "$WORK/host-users-refusal.txt" \
+  || fail "the refusal must name what the node is missing"
+grep -qF "acme/api (unix user chug-api)" "$WORK/host-users-refusal.txt" \
+  || fail "the refusal must name the project AND the user it expected"
+grep -qF "acme/beacon" "$WORK/host-users-refusal.txt" \
+  && fail "the refusal must name only the project whose user is missing"
+grep -qF "for air," "$WORK/host-users-refusal.txt" || fail "the refusal must name the node"
+grep -qF "REFUSING daemon restart (live daemon untouched)" "$WORK/host-users-missing.out" \
+  || fail "the refusal must use this script's established shape"
+grep -qF "WORKER_HOST_USERS_air=0" "$WORK/host-users-missing.out" \
+  || fail "the refusal must give the fix, per node"
+not_started "a node missing a project's unix user must not reach the daemon restart (live daemon untouched)"
+if grep -qF -- "mkdir -p '/usr/local/lib/chuggernaut/host-tasks'" "$LOG"; then
+  fail "the user guard must refuse BEFORE the host root is provisioned"
+fi
+if grep -qF "passwd home is NOT AN ABSOLUTE PATH" "$WORK/host-users-missing.out"; then
+  fail "an account that does not exist has no passwd home to be wrong — the two classes must not be merged"
+fi
+echo "ok: a listed project whose unix user does not resolve refuses, naming project, user, node and fix"
+
+# ── Case 8a6b: an account that RESOLVES with a home `lookup` refuses ───────────
+# The other half of what `lookup` (crates/worker/src/host_users.rs) asks, and its
+# own refusal: the account is there, so naming it as a missing user would print
+# the wrong fact and prescribe an act the operator has already performed. It is a
+# refusal all the same — the daemon marks that project unresolvable and refuses
+# every host launch of it by name, exactly as it does for an absent account.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS="acme/beacon, acme/api" \
+  WORKER_HOST_USERS=1 \
+  WORKER_HOST_ROOT=/usr/local/lib/chuggernaut/host-tasks \
+  FAKE_HOST_USERS_REL_HOME=chug-api \
+  sh "$SUT" > "$WORK/host-users-relhome.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a project whose user has a home lookup refuses must fail the deploy (got rc=0)"
+grep -F "passwd home is NOT AN ABSOLUTE PATH" "$WORK/host-users-relhome.out" > "$WORK/host-users-relhome-refusal.txt" \
+  || fail "the refusal must name the fact that is wrong: the home field, not the account"
+grep -qF "acme/api (unix user chug-api)" "$WORK/host-users-relhome-refusal.txt" \
+  || fail "the refusal must name the project AND the user whose home is wrong"
+grep -qF "acme/beacon" "$WORK/host-users-relhome-refusal.txt" \
+  && fail "the refusal must name only the project whose user's home is wrong"
+grep -qF "has no unix user for:" "$WORK/host-users-relhome.out" \
+  && fail "the account resolves — it must not be reported as a missing user"
+grep -qF "Create each user ON THE NODE with root" "$WORK/host-users-relhome.out" \
+  && fail "the refusal must not prescribe creating an account that is already there"
+grep -qF "REFUSING daemon restart (live daemon untouched)" "$WORK/host-users-relhome.out" \
+  || fail "the refusal must use this script's established shape"
+grep -qF "absolute path with root on the node" "$WORK/host-users-relhome.out" \
+  || fail "the refusal must give the fix the operator actually has"
+not_started "a node whose project user has a home lookup refuses must not reach the daemon restart"
+echo "ok: an account that resolves with a home \`lookup\` refuses is refused on its own terms"
+
+# ── Case 8a7: a node that declares NO binding is BYTE-IDENTICAL ───────────────
+# The property this slice must not spend: WORKER_HOST_USERS is off everywhere in
+# the fleet, so an undeclared node must produce the run spec it produced before
+# design #537 and must not be asked a single question about unix users.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=worksalot@nuc \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=nuc \
+  sh "$SUT"
+
+[ "$(env_file)" = "$EXPECTED_ENV" ] || fail "a node declaring no binding must produce the run spec it produced before design #537.
+  expected: $EXPECTED_ENV
+  got:      $(env_file)"
+if grep -qF "WORKER_HOST_USERS" "$LOG"; then
+  fail "nothing about the binding may reach a node that declares neither knob"
+fi
+
+# And a host node with the binding OFF is asked nothing either: the users need
+# not exist, because every task still runs as the daemon's own uid.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS=acme/beacon \
+  WORKER_HOST_ROOT=/Users/op/chuggernaut-worker/host-tasks \
+  FAKE_HOST_USERS_MISSING=chug-beacon \
+  sh "$SUT" > "$WORK/host-users-off.out" 2>&1
+started || fail "a host node with the binding off must deploy however few users the node has"
+if grep -qF "CHUG_HOST_USERS_READ" "$LOG"; then
+  fail "a node with the binding off must not be asked about unix users at all"
+fi
+echo "ok: a node declaring no binding is byte-identical, and one with it off is never asked"
+
+# ── Case 8a8: the values the DAEMON refuses at parse are refused here ─────────
+# Both are hard config errors in crates/worker/src/config.rs, so passing either
+# through installs a daemon the supervisor loops out of the fleet: an
+# unparseable declaration (`parse_host_users`) and a derivation collision — two
+# projects of different owners with one name, which would hand them a single uid
+# (`enforce_user_derivation`, design #537 D6).
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS=acme/beacon \
+  WORKER_HOST_USERS=yes \
+  sh "$SUT" > "$WORK/host-users-bad.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a WORKER_HOST_USERS the daemon cannot parse must fail the deploy (got rc=0)"
+grep -qF "neither 1 nor 0" "$WORK/host-users-bad.out" || fail "the refusal must name the shape it wanted"
+not_started "an unparseable binding must not reach the daemon restart (live daemon untouched)"
+
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS="a/beacon, b/beacon" \
+  WORKER_HOST_USERS=1 \
+  sh "$SUT" > "$WORK/host-users-collide.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "two projects deriving one unix user must fail the deploy (got rc=0)"
+grep -qF "chug-beacon" "$WORK/host-users-collide.out" || fail "the collision refusal must name the derived user"
+not_started "a derivation collision must not reach the daemon restart (live daemon untouched)"
+
+# The same collision with the binding OFF is not a collision at all: both
+# projects already share the daemon's uid, and the daemon accepts the roster.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS="a/beacon, b/beacon" \
+  WORKER_HOST_ROOT=/Users/op/chuggernaut-worker/host-tasks \
+  sh "$SUT" > "$WORK/host-users-collide-off.out" 2>&1
+started || fail "a derivation collision must not refuse a node whose binding is off"
+echo "ok: an unparseable binding and a derivation collision both refuse before the restart"
+
+# ── Case 8a9: a node that did not ANSWER is unchecked, never provisioned ──────
+# The tri-state the run-spec read already has: an ssh that fails and a node whose
+# users all resolve both print nothing, so the probe carries a sentinel and its
+# absence is a refusal rather than a pass.
+: > "$LOG"
+set +e
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS=acme/beacon \
+  WORKER_HOST_USERS=1 \
+  WORKER_HOST_ROOT=/usr/local/lib/chuggernaut/host-tasks \
+  FAKE_HOST_USERS_UNREAD=1 \
+  sh "$SUT" > "$WORK/host-users-unread.out" 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail "a node that answered nothing must fail the deploy (got rc=0)"
+grep -qF "nothing was checked" "$WORK/host-users-unread.out" \
+  || fail "an unanswered probe must say nothing was checked, not that the node is provisioned"
+not_started "an unread node must not reach the daemon restart (live daemon untouched)"
+echo "ok: a node that did not answer the user probe refuses rather than reading as provisioned"
+
+# ── Case 8a10: D7 — a root inside the login user's home WARNS when bound ──────
+# The whole task tree hangs off WORKER_HOST_ROOT, and with per-project users it
+# has to be a node-wide root the operator creates with root (design #537 D7). A
+# root under the login user's home still works — through the 0750-and-staff
+# traversal D12 removes — so this is a warning and not a refusal.
+: > "$LOG"
+PATH="$BIN:$PATH" \
+  WORKER_SSH=op@air \
+  WORKER_NATS_URL=nats://10.0.0.1:4222 \
+  CHUG_WORKER_NODE=air \
+  FAKE_NODE_OS=Darwin \
+  FAKE_NODE_HOME=/Users/op \
+  WORKER_MODES=host \
+  WORKER_SLOTS=1 \
+  WORKER_SLOTS_MAX=1 \
+  WORKER_HOST_PROJECTS=acme/beacon \
+  WORKER_HOST_USERS=1 \
+  WORKER_HOST_ROOT=/Users/op/chuggernaut-worker/host-tasks \
+  sh "$SUT" > "$WORK/host-root-in-home.out" 2>&1
+grep -qF "design #537 D7 moves the root out of that home" "$WORK/host-root-in-home.out" \
+  || fail "a bound node whose host root is inside the login user's home must be warned"
+started || fail "D7's placement is a warning, not a refusal"
+if grep -qF "moves the root out of that home" "$WORK/host-users-ok.out"; then
+  fail "a node-wide host root must not be warned about"
+fi
+echo "ok: with the binding on, a host root inside the login user's home warns and deploys"
+
 # ── Case 8b: a host-only LINUX node still builds the worker image ─────────────
 # #440 D6 holds on Linux: that image is the only place the node's daemon binary
 # comes from, so the image is not optional there however few runtimes the node
@@ -3193,6 +3486,61 @@ grep -qF "NOTHING WAS COMPARED" "$WORK/report-nossh.out" \
 grep -qF "the Mini cannot ssh a tagged worker" "$WORK/report-nossh.out" \
   || fail "--report with no WORKER_SSH must name the Mini, which is where it will be tried first"
 echo "ok: --report reports an unreadable or unreachable node as unread, never as clean"
+
+# ── Case R8: the report carries the user finding, as a COUNT and no name ──────
+# Design #537 D5's declaration is judged against a node fact rather than against
+# the live run spec, so it rides the report that already exists instead of a
+# second comparison. The same rule binds it: a project slug is a VALUE of
+# WORKER_HOST_PROJECTS, so the report counts and never names.
+: > "$LOG"
+REPORT_ARGS="--report" report_run "$WORK/report-users.out" \
+  WORKER_HOST_USERS=1 FAKE_HOST_USERS_MISSING=chug-sentinelproject \
+  FAKE_LIVE_ENV_FILE="$REPORT_LIVE
+WORKER_HOST_USERS='1'"
+[ "$REPORT_RC" -ne 0 ] || fail "a node with no unix user for a listed project must exit non-zero (got rc=0)"
+grep -qF "have no unix user on the node" "$WORK/report-users.out" \
+  || fail "the report must say the node has no user for a project the roster names"
+grep -qF "no run-spec drift" "$WORK/report-users.out" \
+  && fail "a node that cannot serve its host work must never also read as clean"
+grep -qi sentinel "$WORK/report-users.out" \
+  && fail "the report must count the projects and print no value: $(grep -i sentinel "$WORK/report-users.out" | head -n 1)"
+not_started "--report must never restart the daemon, finding or not"
+echo "ok: --report reports a listed project the node has no unix user for, by count"
+
+# The other half of the same probe is counted too, and as a DIFFERENT sentence:
+# an account that resolves with a passwd home `lookup` refuses is not a missing
+# one, and a report that said so would send the operator to create an account
+# that is already there.
+: > "$LOG"
+REPORT_ARGS="--report" report_run "$WORK/report-users-relhome.out" \
+  WORKER_HOST_USERS=1 FAKE_HOST_USERS_REL_HOME=chug-sentinelproject \
+  FAKE_LIVE_ENV_FILE="$REPORT_LIVE
+WORKER_HOST_USERS='1'"
+[ "$REPORT_RC" -ne 0 ] || fail "a node whose project user has a home lookup refuses must exit non-zero (got rc=0)"
+grep -qF "passwd home is not an absolute path" "$WORK/report-users-relhome.out" \
+  || fail "the report must say the home field is what lookup refuses"
+grep -qF "have no unix user on the node" "$WORK/report-users-relhome.out" \
+  && fail "the account resolves — the report must not count it as a missing user"
+grep -qi sentinel "$WORK/report-users-relhome.out" \
+  && fail "the report must count the projects and print no value: $(grep -i sentinel "$WORK/report-users-relhome.out" | head -n 1)"
+echo "ok: --report counts a user whose passwd home lookup refuses as its own finding"
+
+# ── Case R9: D7's placement warning is a DEPLOY sentence, not a report line ────
+# It is the one advisory in the host block that could reach the report, and it
+# names WORKER_HOST_ROOT's VALUE — which the report never prints, on either side.
+# Case 8a10 owns the other half: the same node warns on a real run.
+: > "$LOG"
+REPORT_ARGS="--report" report_run "$WORK/report-d7.out" \
+  FAKE_NODE_OS=Darwin FAKE_NODE_HOME=/Users/op \
+  WORKER_HOST_USERS=1 WORKER_HOST_ROOT=/Users/op/sentinelroot \
+  FAKE_LIVE_ENV_FILE="$REPORT_LIVE
+WORKER_HOST_USERS='1'"
+grep -qF "moves the root out of that home" "$WORK/report-d7.out" \
+  && fail "D7's placement warning must not be printed by --report"
+grep -qi sentinel "$WORK/report-d7.out" \
+  && fail "the report must print no run-spec value: $(grep -i sentinel "$WORK/report-d7.out" | head -n 1)"
+not_started "--report must never restart the daemon, warning or not"
+echo "ok: --report carries no D7 placement warning and no host-root value"
 
 # ── Case R7: an unknown argument refuses rather than deploying ────────────────
 # A typo'd flag must not fall through to a full deploy of the node.

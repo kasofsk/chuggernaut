@@ -728,6 +728,14 @@ fi
 # default is unwritable there and `HostBackend::new` — which creates the root at
 # CONSTRUCTION, at daemon boot — fails the boot outright. The refusal that
 # catches that lives with the WORKER_MODES guard below, where `host` is known.
+#
+# WITH WORKER_HOST_USERS ON THE ROOT STOPS BEING WORKER-OWNED NODE STATE (design
+# #537 D7): every project user has to traverse it to reach its own task
+# directory and none may list it, so it is 0711, owned by the daemon's uid, and
+# node-wide — outside the login user's home, which on a mac is a path that user
+# cannot create. It becomes an OPERATOR PRECONDITION, created with root at
+# provisioning; the daemon's create_dir_all then finds it and no-ops, which is
+# what makes the move safe without a boot-path change.
 if [ -n "${WORKER_HOST_ROOT:-}" ]; then
   spec_line WORKER_HOST_ROOT "$WORKER_HOST_ROOT"
 fi
@@ -757,6 +765,38 @@ if [ -n "$HOST_PROJECTS" ]; then
     echo "build-worker: WARNING: WORKER_HOST_PROJECTS is declared on $NODE, which names no host runtime — the tenancy is read only where a HOST launch is admitted, so it decides nothing here (design #309 §10). Container launches are never matched against it" >&2
   fi
   spec_line WORKER_HOST_PROJECTS "$HOST_PROJECTS"
+fi
+# WHICH UNIX USER each of those projects runs as (`WORKER_HOST_USERS`, design
+# #537 D1/D5). WORKER_KVM's shape exactly — 1/0, trimmed, unset stays UNSET, and
+# a value crates/worker/src/config.rs `parse_host_users` refuses is refused HERE
+# rather than by a replacement daemon the supervisor then loops out of the fleet.
+#
+# It is an ON/OFF declaration OVER the roster above and never a second one: on,
+# the daemon derives chug-{project} from each listed slug, resolves it in its own
+# view at boot and escalates every launch of that project into it; off — every
+# node in the fleet today — every host task keeps running as the daemon's own uid
+# and the spec is byte-identical to what it was before design #537.
+#
+# Turning it on has NODE-SIDE preconditions no environment file can supply (the
+# users, their groups, the sudoers line — all root, all the operator's, design
+# #537 D9), so the guard that refuses a listed project this node has no user for
+# lives with the WORKER_MODES block below, where `host` is known and the node can
+# be asked.
+HOST_USERS_ON=""
+HOST_USERS_FINDING=""
+HOST_USERS="${WORKER_HOST_USERS:-}"
+HOST_USERS="${HOST_USERS#"${HOST_USERS%%[![:space:]]*}"}"
+HOST_USERS="${HOST_USERS%"${HOST_USERS##*[![:space:]]}"}"
+if [ -n "$HOST_USERS" ]; then
+  case "$HOST_USERS" in
+    0 | false | off) ;;
+    1 | true | on) HOST_USERS_ON=1 ;;
+    *)
+      echo "build-worker: WORKER_HOST_USERS='$HOST_USERS' is neither 1 nor 0 — the daemon refuses it as a hard config error (crates/worker/src/config.rs \`parse_host_users\`, design #537 D5) and the supervisor would loop that refusal; REFUSING (live daemon untouched)" >&2
+      exit 1
+      ;;
+  esac
+  spec_line WORKER_HOST_USERS "$HOST_USERS"
 fi
 # ── the docker engine the daemon dials: only the LINE is composed here ──────
 # The value was resolved and both its refusals answered far above, beside the
@@ -892,6 +932,8 @@ if [ -n "$MODES" ]; then
       exit 1
     fi
     HOST_PROJECTS_SEEN=""
+    HOST_USERS_DERIVED=""
+    HOST_USERS_PAIRS=""
     _rest="$HOST_PROJECTS,"
     while [ -n "$_rest" ]; do
       _slug="${_rest%%,*}"
@@ -914,9 +956,143 @@ if [ -n "$MODES" ]; then
           ;;
       esac
       HOST_PROJECTS_SEEN="$HOST_PROJECTS_SEEN,$_slug"
+      # The user this project's host tasks run as once the binding is on, derived
+      # from the slug's second component exactly as `derived_user`
+      # (crates/worker/src/host_users.rs) derives it, so the deploy and the daemon
+      # cannot disagree about which account has to exist (design #537 D6).
+      #
+      # A DERIVATION COLLISION is refused for the reason a repeated entry is: two
+      # projects of different owners sharing a name derive one uid, which is the
+      # failure the binding exists to prevent, and `enforce_user_derivation`
+      # refuses to boot on it. Off, the two already share the daemon's uid and
+      # nothing here changes that, so the refusal follows the declaration.
+      _user="chug-${_slug#*/}"
+      case "$HOST_USERS_DERIVED " in
+        *" $_user "*)
+          if [ -n "$HOST_USERS_ON" ]; then
+            echo "build-worker: WORKER_HOST_USERS is on and WORKER_HOST_PROJECTS lists two projects of different owners named '${_slug#*/}', which both derive the unix user '$_user' — one uid for two projects is exactly what the binding exists to prevent, so the daemon refuses to boot (crates/worker/src/config.rs \`enforce_user_derivation\`, design #537 D6) and the supervisor would loop that refusal; REFUSING daemon restart (live daemon untouched). Give one of them a node of its own, or set WORKER_HOST_USERS_$NODE=0 in deploy/prod/chuggernaut.env ON THE MINI to keep both on the daemon's own uid." >&2
+            exit 1
+          fi
+          ;;
+      esac
+      HOST_USERS_DERIVED="$HOST_USERS_DERIVED $_user"
+      HOST_USERS_PAIRS="$HOST_USERS_PAIRS $_slug=$_user"
     done
     [ -n "$REPORT_ONLY" ] ||
       echo "build-worker: WORKER_HOST_PROJECTS='$HOST_PROJECTS' — $NODE runs HOST work for those projects and refuses every other one at launch (design #309 §10). A project's own code persists across its own tasks here, which is the feature single-tenancy buys"
+    # ── the unix users that roster now implies, asked of the NODE (#537 D5) ────
+    # D5 collapses design #309 §8's "do not advertise host unless the user pool is
+    # provisioned" into the list that is already there: the projects a node serves
+    # ARE the users that must exist, so there is one declaration and two places
+    # that judge it. The DAEMON's half is deliberately quiet — a boot refusal
+    # would brick the node under KeepAlive the moment a project is listed before
+    # its user exists, so it warns at boot and refuses that project's LAUNCH by
+    # name. This is the loud half, and it is the one an operator sees while
+    # standing at the node.
+    #
+    # The fleet learned the cost of the quiet half on 2026-08-10: job #525's
+    # fail-closed WORKER_HOST_PROJECTS reached gumbo-air-0 over the worker RPC
+    # while the declaration never did, and the node refused every host launch with
+    # the failure visible only in its daemon log. Same class of misconfiguration,
+    # and the deploy is where it becomes a sentence rather than an investigation.
+    #
+    # ONE ssh, and it READS ONLY — no user is created, no home, no sudoers line;
+    # all three are root-requiring acts this script cannot perform over ssh and
+    # must not half-perform (design #537 D9's asymmetry: creation over ssh works,
+    # deletion of the directory-services record does not). It asks exactly what
+    # `lookup` (crates/worker/src/host_users.rs) asks — the account resolves, and
+    # its passwd home is an absolute path — because a deploy that refused what the
+    # daemon accepts is the same disagreement every guard here exists to avoid.
+    # A home that is absent ON DISK is a WARNING and not a refusal for that
+    # reason: `getpwnam_r` answers, so the daemon binds it, and the work then
+    # fails inside the task — which is worth a sentence and is not a lie the
+    # daemon would refuse.
+    #
+    # The two halves `lookup` refuses are refused SEPARATELY, because they are
+    # different facts with different fixes: an account that does not resolve is
+    # one the operator must create, while an account that resolves with a passwd
+    # home that is not absolute is already there and it is the home FIELD that
+    # has to change. Naming the second as the first would prescribe an act the
+    # operator has already performed.
+    #
+    # The answer is TRI-STATE, in the shape the run-spec read already uses: an
+    # ssh that fails and a node whose users all resolve both print nothing, so the
+    # probe ends with a sentinel and a missing sentinel is UNCHECKED rather than
+    # provisioned.
+    if [ -n "$HOST_USERS_ON" ]; then
+      HOST_USERS_PROBE="for _u in$HOST_USERS_DERIVED; do
+  if ! id -u \"\$_u\" > /dev/null 2>&1; then printf 'no-user %s\n' \"\$_u\"; continue; fi
+  eval \"_h=~\$_u\"
+  case \"\$_h\" in
+    /*) [ -d \"\$_h\" ] || printf 'no-home-dir %s\n' \"\$_u\" ;;
+    *) printf 'no-home %s\n' \"\$_u\" ;;
+  esac
+done
+printf 'CHUG_HOST_USERS_READ\n'"
+      HOST_USERS_ANSWER="$(ssh "$WORKER_SSH" "$HOST_USERS_PROBE" < /dev/null || true)"
+      HOST_USERS_BAD=""
+      HOST_USERS_NOHOME=""
+      HOST_USERS_STALE=""
+      case "$HOST_USERS_ANSWER" in
+        *CHUG_HOST_USERS_READ*)
+          HOST_USERS_BAD="$(printf '%s\n' "$HOST_USERS_ANSWER" | sed -n 's/^no-user //p' | tr '\n' ' ')"
+          HOST_USERS_NOHOME="$(printf '%s\n' "$HOST_USERS_ANSWER" | sed -n 's/^no-home //p' | tr '\n' ' ')"
+          HOST_USERS_STALE="$(printf '%s\n' "$HOST_USERS_ANSWER" | sed -n 's/^no-home-dir //p' | tr '\n' ' ')"
+          ;;
+        *)
+          if [ -n "$REPORT_ONLY" ]; then
+            HOST_USERS_FINDING="WORKER_HOST_USERS is on for $NODE and $WORKER_SSH did not answer when asked which of the unix users its roster implies exist — NOTHING WAS CHECKED, which is not the same as a provisioned node"
+          else
+            echo "build-worker: WORKER_HOST_USERS is on for $NODE, but $WORKER_SSH did not answer when asked which of the unix users its roster implies exist — nothing was checked, and an unchecked node is not a provisioned one; REFUSING daemon restart (live daemon untouched). Re-run once the node answers over ssh, or set WORKER_HOST_USERS_$NODE=0 in deploy/prod/chuggernaut.env ON THE MINI to keep every host task on the daemon's own uid." >&2
+            exit 1
+          fi
+          ;;
+      esac
+      # Named as `project (unix user)` pairs from the list built above, because
+      # the operator's act is per PROJECT and the account they must create is per
+      # USER — naming one without the other leaves the reader deriving D6 by hand.
+      HOST_USERS_NAMED=""
+      HOST_USERS_NAMED_NOHOME=""
+      for _pair in $HOST_USERS_PAIRS; do
+        case " $HOST_USERS_BAD" in
+          *" ${_pair#*=} "*) HOST_USERS_NAMED="$HOST_USERS_NAMED ${_pair%=*} (unix user ${_pair#*=});" ;;
+        esac
+        case " $HOST_USERS_NOHOME" in
+          *" ${_pair#*=} "*) HOST_USERS_NAMED_NOHOME="$HOST_USERS_NAMED_NOHOME ${_pair%=*} (unix user ${_pair#*=});" ;;
+        esac
+      done
+      if [ -n "$REPORT_ONLY" ]; then
+        # Counts, never names: a project slug is a VALUE of WORKER_HOST_PROJECTS
+        # and the report prints no value on either side.
+        if [ -n "$HOST_USERS_BAD" ]; then
+          HOST_USERS_FINDING="WORKER_HOST_USERS is on for $NODE and $(printf '%s' "$HOST_USERS_BAD" | wc -w | tr -d '[:space:]') of the $(printf '%s' "$HOST_USERS_PAIRS" | wc -w | tr -d '[:space:]') projects WORKER_HOST_PROJECTS names have no unix user on the node — every host launch of those projects is refused by name at the daemon (design #537 D5). They are not named here for the reason no value is; re-run WITHOUT --report to be told which, or read the daemon's own boot warning on the node"
+        fi
+        if [ -n "$HOST_USERS_NOHOME" ]; then
+          HOST_USERS_FINDING="$HOST_USERS_FINDING${HOST_USERS_FINDING:+. }WORKER_HOST_USERS is on for $NODE and $(printf '%s' "$HOST_USERS_NOHOME" | wc -w | tr -d '[:space:]') of its projects resolve to a unix user whose passwd home is not an absolute path — \`lookup\` (crates/worker/src/host_users.rs) refuses that account, so the daemon marks the project unresolvable and refuses every host launch of it by name (design #537 D5)"
+        fi
+        if [ -n "$HOST_USERS_STALE" ]; then
+          HOST_USERS_FINDING="$HOST_USERS_FINDING${HOST_USERS_FINDING:+. }WORKER_HOST_USERS is on for $NODE and $(printf '%s' "$HOST_USERS_STALE" | wc -w | tr -d '[:space:]') of its projects resolve to a unix user whose home directory is not there — a decommissioned account leaves its record behind (design #537 D9), so those launches bind a HOME that does not exist"
+        fi
+      else
+        if [ -n "$HOST_USERS_STALE" ]; then
+          echo "build-worker: WARNING: on $NODE these unix users resolve but their home directories are not there:$HOST_USERS_STALE— a decommissioned project leaves its account RECORD behind (design #537 D9), so the daemon binds the project and its task then runs with a HOME that does not exist. Recreate each home with root on the node, or drop the project from WORKER_HOST_PROJECTS_$NODE" >&2
+        fi
+        if [ -n "$HOST_USERS_NAMED" ]; then
+          echo "build-worker: WORKER_HOST_USERS is on for $NODE, but $WORKER_SSH has no unix user for:$HOST_USERS_NAMED the daemon REFUSES every host launch of such a project BY NAME rather than falling back to its own uid (design #537 D5, crates/worker/src/host_users.rs), so this node would boot, advertise its slot and fail every one of those launches; REFUSING daemon restart (live daemon untouched). Create each user ON THE NODE with root — a home of its own, a group of the same name as its PRIMARY group (design #537 D12), and a sudoers line granting the login user NOPASSWD execution as exactly that user (design #537 D9) — or set WORKER_HOST_USERS_$NODE=0 in deploy/prod/chuggernaut.env ON THE MINI to keep every host task on the daemon's own uid until the node is provisioned." >&2
+        fi
+        # The other half of what `lookup` asks, and its own sentence: these
+        # accounts EXIST, so telling the operator to create them would prescribe
+        # an act already performed. It is a refusal all the same — the daemon
+        # marks the project unresolvable and refuses its launches either way.
+        if [ -n "$HOST_USERS_NAMED_NOHOME" ]; then
+          echo "build-worker: WORKER_HOST_USERS is on for $NODE, and on $WORKER_SSH these projects resolve to a unix user whose passwd home is NOT AN ABSOLUTE PATH:$HOST_USERS_NAMED_NOHOME the account is there, so nothing needs creating — but \`lookup\` (crates/worker/src/host_users.rs) refuses it and the daemon marks the project unresolvable, refusing every host launch of it by name (design #537 D5), because a task's HOME follows the user it runs as; REFUSING daemon restart (live daemon untouched). Point each account's home at an absolute path with root on the node, or set WORKER_HOST_USERS_$NODE=0 in deploy/prod/chuggernaut.env ON THE MINI to keep every host task on the daemon's own uid until the node is provisioned." >&2
+        fi
+        if [ -n "$HOST_USERS_NAMED" ] || [ -n "$HOST_USERS_NAMED_NOHOME" ]; then
+          exit 1
+        fi
+        echo "build-worker: WORKER_HOST_USERS=1 — every host launch on $NODE escalates into its own project's unix user, and this node resolves all of them:$HOST_USERS_DERIVED"
+      fi
+    fi
     # The host root, asked of the NODE rather than assumed. `HostBackend::new`
     # creates it at construction and `local_backend` constructs it at daemon
     # boot, so a root the daemon's user cannot create is not a degraded node —
@@ -948,6 +1124,28 @@ if [ -n "$MODES" ]; then
       HOST_ROOT_PROBE="mkdir -p '$HOST_ROOT_EFF' 2> /dev/null && [ -w '$HOST_ROOT_EFF' ]"
       HOST_ROOT_WHO="as the login user, which is the user launchd runs the agent as"
       HOST_ROOT_FIX="Declare WORKER_HOST_ROOT_$NODE=<a path this user owns> in deploy/prod/chuggernaut.env ON THE MINI — this script forwards it into $ENV_FILE. On a mac the default is under root-owned /var/lib and \`sudo\` wants a password a non-interactive deploy cannot give, so a host-mode mac has to declare one (design #322 W2)."
+      # D7: with per-project users the root is an OPERATOR PRECONDITION on a mac,
+      # not worker-owned node state. Every project user has to traverse to its own
+      # task directory and none may list the root, so it is 0711 owned by the
+      # daemon's login user and OUTSIDE that user's home — which is a path that
+      # user cannot create, so `HostBackend::new`'s create_dir_all can only find
+      # one already there. The probe is unchanged and does not need to change: an
+      # existing root passes it untouched.
+      #
+      # The placement warning is a DEPLOY-TIME sentence, gated out of --report
+      # like every other advisory here: WORKER_HOST_ROOT is a run-spec variable
+      # and the report names variables without ever printing a value, which this
+      # message could not do and still be worth reading.
+      if [ -n "$HOST_USERS_ON" ]; then
+        HOST_ROOT_FIX="$HOST_ROOT_FIX With WORKER_HOST_USERS on it is more than that: create the root WITH ROOT before the deploy — 0711, owned by the login user launchd runs the agent as, at a NODE-WIDE path outside that user's home (design #537 D7) — because the whole task tree hangs off it, every project user must traverse it, and the login user cannot create a path outside its own home. The daemon's create_dir_all then finds it and no-ops."
+        if [ -z "$REPORT_ONLY" ]; then
+          case "$HOST_ROOT_EFF" in
+            "$NODE_HOME"/*)
+              echo "build-worker: WARNING: WORKER_HOST_ROOT='$HOST_ROOT_EFF' is inside the login user's home ('$NODE_HOME') on $NODE while WORKER_HOST_USERS is on — design #537 D7 moves the root out of that home, and a project user reaches it there only through the 0750-and-staff traversal D12 removes, alongside the daemon's own worker.env. Declare a node-wide root and create it with root; nothing is refused here, because the traversal works until the group change lands" >&2
+              ;;
+          esac
+        fi
+      fi
     else
       HOST_ROOT_PROBE="{ mkdir -p '$HOST_ROOT_EFF' 2> /dev/null || sudo -n mkdir -p '$HOST_ROOT_EFF'; } && { [ -w '$HOST_ROOT_EFF' ] || sudo -n test -w '$HOST_ROOT_EFF'; }"
       HOST_ROOT_WHO="as the login user or via \`sudo -n\`, and the unit this script writes runs the daemon as root"
@@ -1414,7 +1612,16 @@ $_key
   if [ -n "$_extra" ]; then
     echo "build-worker: --report: DRIFT on $NODE — running on the node and NOT declared here:$_extra. Recreating the daemon DROPS each of them (that is the direction this script's own guard refuses on), so declare them in deploy/prod/chuggernaut.env — per node as <VAR>_$NODE (deploy/prod/README.md §6) — or accept the drop deliberately with WORKER_SPEC_DROP_OK=1 on the run that removes them." >&2
   fi
-  [ -z "$_absent" ] && [ -z "$_extra" ] || return 1
+  # The third finding is not run-spec drift at all: it is the declaration this
+  # environment makes against a fact of the NODE, composed by the host block
+  # above out of the same read-only probe the deploy refuses on (design #537 D5).
+  # It rides here rather than growing a second comparison, and it is counted with
+  # the other two so a node the report cannot serve host work on never reads
+  # clean.
+  if [ -n "$HOST_USERS_FINDING" ]; then
+    echo "build-worker: --report: $HOST_USERS_FINDING" >&2
+  fi
+  [ -z "$_absent" ] && [ -z "$_extra" ] && [ -z "$HOST_USERS_FINDING" ] || return 1
   echo "build-worker: --report: no run-spec drift on $NODE — every variable this environment declares is present in the node's live environment, and the node carries no WORKER_* this environment does not declare. Values were not compared and are never printed"
   return 0
 }

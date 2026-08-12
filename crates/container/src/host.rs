@@ -1001,8 +1001,9 @@ pub struct HostBackend {
 
 impl HostBackend {
     /// The node's host backend, rooted at `root`, into which every wire path a
-    /// launch names is rebased. The root is created if absent — it is
-    /// worker-owned node state, not an operator precondition.
+    /// launch names is rebased. The root is created if absent, but a node
+    /// binding per-project users needs one outside the daemon's own home that
+    /// only the operator can create (design #537 D7).
     pub fn new(
         node: impl Into<String>,
         root: impl Into<PathBuf>,

@@ -834,10 +834,11 @@ Two consequences worth knowing before you convert one:
   "needs no docker at all" is a **Darwin** property; a host-only Linux node
   still needs a docker to build and extract from.
 
-The host guard set gained one in job #525: `WORKER_SLOTS=1` and
-`WORKER_SLOTS_MAX=1` node-wide (#309 §2 option (iii)), a creatable
-`WORKER_HOST_ROOT`, the supervision probe, and a non-empty
-`WORKER_HOST_PROJECTS` (the knob list below). Converting a node is an operator
+The host guard set gained one in job #525 and another in #566: `WORKER_SLOTS=1`
+and `WORKER_SLOTS_MAX=1` node-wide (#309 §2 option (iii)), a creatable
+`WORKER_HOST_ROOT`, the supervision probe, a non-empty `WORKER_HOST_PROJECTS`,
+and — when `WORKER_HOST_USERS` is on — a unix user on the node for every project
+that roster names (the knob list below). Converting a node is an operator
 step and now declares **two** things — `WORKER_MODES_<node>=host` **and**
 `WORKER_HOST_PROJECTS_<node>=<owner>/<project>` in `chuggernaut.env` — because
 the deploy refuses the conversion without the second
@@ -1195,6 +1196,24 @@ Notes:
   the daemon in that state boots, advertises its slot and then refuses every host
   launch, which is worse than a stopped deploy. `gumbo-air-0` serves host work
   and declares none today, so its next deploy is a real cutover.
+- **`WORKER_HOST_USERS` says whether each of those projects runs as a unix user
+  of its own** (design [#537](../../docs/design/537-per-project-users-macos.md)
+  D1/D5, off everywhere today). `1`/`0` in `WORKER_KVM`'s shape, forwarded per
+  node, unset stays unset: off, every host task runs as the daemon's own uid and
+  a second project on the node reads the first's credentials; on, the daemon
+  derives `chug-{project}` from each slug the roster above already names — never
+  a second roster — and every launch of that project escalates into it. The
+  users, their groups and the `sudoers` line are root-only acts on the node and
+  stay the operator's (D9). So `build-worker.sh` **asks the node**, over the ssh
+  it already has, whether each derived user resolves there: a listed project with
+  no user **refuses the deploy** naming the project, the user and the fix, live
+  daemon untouched; an account that resolves with a passwd home that is not
+  absolute refuses in a sentence of its own, because the account is there and it
+  is the home field that has to change; a node that does not answer is refused as
+  *unchecked*, never passed as provisioned; a user whose home directory is gone —
+  the shape a decommissioned account leaves — warns, because the daemon binds it
+  anyway. `build-worker.sh --report` carries the same findings as counts, naming
+  no project for the reason it prints no value.
 - **A host node's task root is `WORKER_HOST_ROOT`, and a mac has to declare
   one** (design [#322](../../docs/design/322-macos-native-runtime.md) W2). The
   daemon defaults it to `/var/lib/chuggernaut/host-tasks` and creates it while
@@ -1211,7 +1230,14 @@ Notes:
   answer. The two refusals name different remedies for that reason — a Linux one
   never sends the root daemon's credential tree into the home of the user that
   is in the `docker` group. Every wire path a task names — `/workspace`,
-  `/chuggernaut` — is rebased under that root, one directory per task.
+  `/chuggernaut` — is rebased under that root, one directory per task. **With
+  `WORKER_HOST_USERS` on it is no longer worker-owned state**: the tree hangs off
+  it and every project user has to traverse it, so it becomes a node-wide `0711`
+  root outside the login user's home, created by the operator with root and found
+  already there by the daemon (design
+  [#537](../../docs/design/537-per-project-users-macos.md) D7). A bound node
+  whose root is still inside that home is warned and not refused — it works until
+  D12's group change lands.
 - **Per-task nix GC roots are the same shape of per-node opt-in** (spec §3.1,
   [the runbook §7](../../docs/reference/runbooks/worker-kvm.md)). `WORKER_NIX_GCROOTS_DIR`
   turns them on; `build-worker.sh` provisions the directory and checks the node
