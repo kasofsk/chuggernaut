@@ -1,6 +1,6 @@
 # Design #537 — Per-project unix users on a macOS host node
 
-Status: IMPLEMENTED IN PART — slice 0's measurements landed (jobs #557, #561), slice 8 moved the agent CLI to a node-wide path (job #571), and slice 1's launch path landed (job #563). It is **inert until a node declares a binding**: `WORKER_HOST_USERS` is off everywhere, the deploy does not forward it yet (slice 3), and no node has the users (slice 4).
+Status: IMPLEMENTED IN PART — slice 0's measurements landed (jobs #557, #561), slice 8 moved the agent CLI to a node-wide path (job #571), slice 1's launch path landed (job #563), and slice 5 amended the siblings it supersedes (job #567). It is **inert until a node declares a binding**: `WORKER_HOST_USERS` is off everywhere, the deploy does not forward it yet (slice 3), and no node has the users (slice 4).
 
 Written against the tree at `4674210` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a sibling
@@ -77,7 +77,7 @@ the argument and its dated corrections, never edited
 | 2 | `code` — every delete escalates: `kill`, `remove`, **and the daemon-side pair a task's exit already runs without it** — `spawn_reaper`'s `reclaim_credentials` + `reclaim_agent_cache`, and `sweep_detached` at boot; `reclaim_agent_cache` follows the **task** user's home rather than the daemon's | `ContainerBackend::kill` / `remove` on the host backend, and the reaper's teardown repeat | 1 | Proposed |
 | 3 | `deploy` — `build-worker.sh` refuses a listed project whose user does not resolve on the node; `WORKER_HOST_ROOT` guidance and `deploy/prod/env.example` follow D7, including that the root is now an operator precondition on macOS | the node run spec | 1 | Proposed |
 | 4 | `docs` — a provisioning runbook (create the user, the group **as the user's primary group** per D12, the home, the `sudoers` line and **the `WORKER_HOST_ROOT` root itself**; verify; decommission; and the deletion asymmetry); `docs/reference/runbooks/worker-host-projects.md` §2 stops arguing single-tenancy as the boundary | runbook set | 3, 8 | Proposed |
-| 5 | `design` — amend [#322](322-macos-native-runtime.md)'s job #526 correction and [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)/§10 with what this replaces | design record | 1 | Proposed |
+| 5 | `design` — amend [#322](322-macos-native-runtime.md)'s job #526 correction and [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)/§10 with what this replaces | design record | 1 | **Landed** (job #567). Both siblings carry the supersession and both say it is a supersession **in design**: of #526's three bounds one is replaced, one moves its enforcement site to a slice that has not landed, and one is untouched; §8's option (c) is recorded as a requirement and §10's list as the roster ([the record](#correction--2026-08-12-job-567-slice-5-the-siblings-carry-the-supersession-and-one-composition-claim-does-not-survive-the-landed-code)) |
 | 6 | signing — formerly *deferred, once D8's operator input exists* | none | — | **Closed** (2026-08-10). D8 is answered and no platform work survives it; nothing smaller is left to do. [The record](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it) |
 | 7 | deferred — the cache ceiling and LRU eviction inherited from #534(b) | node cache policy | 1 | Deferred |
 | 8 | `deploy` — D12's other half: the agent CLI moves to a node-wide path and the daemon's rendered `PATH` follows it, so a project user outside `staff` can still exec it. **Must land before slice 4's provisioning**, or agent host work breaks the moment a project user stops being a member of `staff` | the node run spec — `AGENT_PATH` in **both** `deploy/prod/install-worker-launchd.sh` and `deploy/prod/build-worker.sh`'s macOS plist, plus the one-`PATH` assertion in `deploy/prod/install-worker-launchd.test.sh`, which pinned the login user's `~/.local/bin` | — | **Landed** (job #571). Both renderings tail at `/usr/local/lib/chuggernaut/bin` and neither carries a home directory, so the defaults are one string and the suite compares them whole. **The operator must place the CLI there before a project user is taken out of `staff`** ([the record](#correction--2026-08-12-job-571-slice-8-the-agent-cli-is-node-wide-and-the-move-is-an-ordering-not-just-a-path)) |
@@ -1289,3 +1289,83 @@ a `mode: host` job's own script, not from `spawn_task`. Teardown is untouched:
 `kill`, `remove` and the daemon's own post-exit deletes still run as the daemon,
 which is slice 2, and the environment file is recorded in the launch's
 `meta.json` `files` so slice 2 reclaims it rather than re-deriving its path.
+
+## Correction — 2026-08-12, job #567 (slice 5: the siblings carry the supersession, and one composition claim does not survive the landed code)
+
+Appended by the job that **wrote** slice 5. It decides nothing new: the work was
+to make two sibling documents say what this design replaces, and the one thing
+worth appending here is what writing them turned up.
+
+**What was written where.**
+[#322's 2026-08-12 amendment](322-macos-native-runtime.md#amendment--2026-08-12-job-567-per-project-users-supersede-this-decision-in-design-which-of-the-three-bounds-survives-and-what-is-not-yet-achieved)
+takes its job #526 correction bound by bound; the
+[#309 amendment](309-host-native-execution.md#amendment--2026-08-12-job-567-8s-pool-is-the-wrong-granularity-for-macos-its-option-c-is-a-requirement-there-and-10s-list-becomes-the-roster)
+takes §8 clause by clause and then says what §10's list is for. Neither section
+is reworded — both documents are append-only below their heads — and both heads
+gained a pointer instead.
+
+**The answer to "which of #526's three bounds survives", stated once here so it
+is not only in the sibling.** *Single-tenancy* is **replaced** as a security
+control and **kept** as the roster of users that must exist, keeping §10's
+hostile-flake job that no uid touches. *Exit-time deletion* **survives** with its
+task-side half unchanged and its daemon-side half moved into slice 2, which has
+not landed. *Short credential TTLs* are **untouched**, and the forwarded-secret
+open item is narrowed in readership and unchanged in lifetime. **None of the
+three becomes unnecessary** — bounds 2 and 3 are exactly the ones that hold
+*within* a project user, which is the residue §[2](#2-per-project-not-per-task)
+already priced.
+
+### One claim in this document does not survive its own implementation
+
+§[3](#the-environment-must-not-cross-on-the-command-line) closes with *"It
+composes exactly as [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)
+predicted: the secrets stop riding `environ` into the shell that spawns the
+task's own children, while still reaching the task itself."* **As landed, they do
+not stop.** `env_file_body` emits `export NAME='…'` and `take_over_env` has the
+wrapper source that file before `exec` (`crates/container/src/host.rs`), so the
+composed environment is in the task shell's own `environ` and every child
+inherits it exactly as before.
+
+What the file **does** deliver is the property the escalation actually needs: the
+environment survives `sudo`'s `env_reset` (M2) without crossing on argv (M6), and
+it does so at `0600` owned by the task user. §8's option (c) is therefore a
+**requirement of the escalation** — which is what slice 5 was asked to record —
+and *not* the child-process hardening §8 filed it under. Getting that second half
+would need the consumer-side change §8 priced as "every consumer must change";
+**no slice here proposes it**, and this correction is not a proposal either.
+Nothing about C1, D2 or the file's mode changes.
+
+### What the amendments deliberately do not claim
+
+- **That the boundary is achieved.** Both say, in the present tense, that slice 1
+  is inert on every node and that what bounds a host task today is what #526
+  recorded. Slice 4 additionally waits on slice 8's landed path being **used**:
+  the operator must place the agent CLI at `/usr/local/lib/chuggernaut/bin`
+  before any project user leaves `staff` (D12), or agent host work breaks at the
+  moment the group changes.
+- **That M1 is finished.** The headless case is carried into #322 as an operator
+  **deferral** dated 2026-08-10, with the method (reboot with no auto-login,
+  `launchctl print gui/501` at the login window, then the same `mode: host`
+  probe) and the cost of a failure (a node that reboots unattended serves host
+  tasks it cannot drive CoreSimulator from, healthy at every layer above the
+  launch) — not as an oversight, and not as a reason
+  §[10](#10-the-rejected-alternative-one-shared-worksalot-uid) revives.
+- **Anything about [#517](517-docker-access-for-jobs.md) D1, the docker
+  escalation, or [#529](529-secret-handling.md)'s decisions.** D11's inversion is
+  restated in both siblings as a consequence of the uid and never as a new rule.
+
+### What is left of "[What this makes wrong elsewhere](#what-this-makes-wrong-elsewhere)"
+
+Of that list's six bullets, this slice discharges three and a half: the job #526
+correction in [#322](322-macos-native-runtime.md), that document's §5
+recommendation of a *dedicated task user with a login session* (superseded in
+both halves — per project, and no session),
+[#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host), and §10's
+half of the fourth bullet. **Still owed:**
+`docs/reference/runbooks/worker-host-projects.md` §2, which is slice 4's;
+[#490](490-agent-work-on-a-mac.md)'s M5 fork, whose two reasons the list already
+separates and which no slice here has been asked to amend; and
+[#517](517-docker-access-for-jobs.md)'s host-mode table, whose *default: granted,
+for free* row stops being true only on a node that binds users — so it is
+correct until slice 4 lands, and amending it now would be the error this design
+keeps warning about.

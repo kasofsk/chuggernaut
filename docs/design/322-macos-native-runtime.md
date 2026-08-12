@@ -85,6 +85,17 @@ build needs, are corrected in
 what does *not* change is that the node still has zero valid signing identities
 in any session, so nothing here says iOS release builds work.
 
+**That tenancy decision is now superseded in design, and in design only.**
+[#537](537-per-project-users-macos.md) replaces the login user with one unix user
+per project, `chug-{project}`, reached by `sudo` from the same GUI-domain daemon;
+its slice 1 has landed (job #563) and is **inert** — no node declares
+`WORKER_HOST_USERS`, the deploy does not forward it, and no node has the users.
+So what the node does today is still what the 2026-08-09 correction records.
+Which of that correction's three bounds survives, which is replaced, and what is
+deliberately not yet achieved — the `staff` primary group, and the headless M1 the
+operator deferred — is
+[the 2026-08-12 amendment](#amendment--2026-08-12-job-567-per-project-users-supersede-this-decision-in-design-which-of-the-three-bounds-survives-and-what-is-not-yet-achieved).
+
 **The `/workspace` rebase has landed (job #485), and three and a half of the
 other phases were satisfied generically by somebody else.** W2's remaining half
 is what job #485 did: `bootstrap_cmd` clones into `${CHUG_WORKSPACE:-/workspace}`
@@ -1545,3 +1556,145 @@ which is where it decides something.
   evidence about a keychain nothing needs.
 - **W3, the `simctl`-scoped teardown, the retention sweep and N1/N3**, none of
   which this touches.
+
+## Amendment — 2026-08-12, job #567 (per-project users supersede this decision in design: which of the three bounds survives, and what is not yet achieved)
+
+Appended by slice 5 of [#537](537-per-project-users-macos.md). **It changes no
+decision here.** The 2026-08-09 correction stands as the record of what the node
+does — and, the part a reader must not skip, as the record of what **every** node
+still does. #537's slice 1 landed (job #563) and is **inert**:
+`WORKER_HOST_USERS` is off everywhere, `deploy/prod/build-worker.sh` does not
+forward it (#537 slice 3), and no node has the users or the `sudoers` line (#537
+slice 4). So this is a supersession **in design**, dated, and not a change of
+state on `gumbo-air-0`.
+
+**What expired is the premise, not the decision.** Job #526 declined the
+dedicated user because §[5](#5-ios-specifics)'s three collisions left macOS no
+equivalent of `systemd-run --uid=`. Their state today:
+
+- **Collision 1 — CoreSimulator is a per-user-session service.** Falsified. A uid
+  that has never logged in at the console drove `simctl` in a device set of its
+  own, first over ssh ([#537 §1](537-per-project-users-macos.md#1-the-measurement-and-the-line-under-it))
+  and then from the **daemon's own launch path** (#537 M1, job #557, 2026-08-10)
+  — uid 501 and uid 502 listing 11 devices each and sharing **0** UDIDs.
+- **Collision 2 — an unlocked signing keychain is a session property.** Retired by
+  [the 2026-08-10 correction](#correction--2026-08-10-job-558-the-missing-login-keychain-is-no-longer-a-bound-signing-does-not-use-it):
+  the signing path this platform serves does not read a login keychain.
+- **Collision 3 — `launchctl asuser` and a per-user launchd domain both need a
+  session.** **Stands, exactly as written.** #537 does not contradict it; it
+  routes around it, keeping the daemon in the login user's GUI domain and
+  escalating per launch with `sudo -n -u {user} -H`
+  ([#537 §3](537-per-project-users-macos.md#3-how-the-daemon-spawns-a-task-as-another-uid)'s
+  C1). `asuser` is recorded there as the repair for a specific failure, not as
+  the mechanism.
+
+So §[5](#5-ios-specifics)'s recommendation — *one dedicated task user with a
+login session, and the node declared single-tenant* — is superseded in **both**
+halves rather than taken in one: the user is per **project** rather than per
+task, and it needs **no session at all**.
+
+### The three bounds this correction leaned on, each said precisely
+
+**1. Single-tenancy — replaced as a bound, kept as a roster.** This correction
+made it the primary one; #537 D1/D5 withdraw it in that role rather than
+supplement it. A node serving two projects is not single-tenant, and what
+enforces the cross-project boundary instead is uid separation plus the absence of
+a `sudoers` rule for the project users. `WORKER_HOST_PROJECTS` and `HostTenancy`
+(`crates/container/src/host.rs`) continue to decide *which* projects a node
+serves — which is now the list of users that must exist on it. Two things a
+reader of this correction must carry forward:
+
+- **The gap it named is not closed.** "Single-tenancy bounds which *projects*
+  share the uid; it does not bound tasks of the same project sharing it" is as
+  true after #537 as before. Two tasks of `beacon` still share `chug-beacon`.
+  The residue is narrowed in reach and unchanged in kind
+  ([#537 §2](537-per-project-users-macos.md#2-per-project-not-per-task)).
+- **It keeps its other job.** [#309 §10](309-host-native-execution.md#10-trust-and-tenancy)'s
+  tenancy argument is about a hostile or compromised project, which no uid
+  bounds; that half is untouched. Nor does anything here raise the slot count —
+  `enforce_host_capacity` (`crates/worker/src/daemon.rs`) still pins a
+  host-capable node to one slot, so the two projects now **serialize** on it.
+
+**2. Exit-time deletion — survives, moves its enforcement site, and improves in
+reach.** The task-side half is unchanged: `supervised_cmd` wraps the launch so
+the task's own shell empties the mapped credential tree, and it runs as the
+task's own uid whatever that uid is. **The daemon-side half breaks under a uid
+boundary and is #537's slice 2, still Proposed** — `kill`, `remove`,
+`reclaim_credentials`, `reclaim_agent_cache` and the boot sweep in
+`crates/container/src/host.rs` all still run as the daemon, and a non-root uid
+cannot signal or unlink another uid's work. On a node that binds users before
+slice 2 lands, those failures are loud in `remove` and **silent** in the reaper.
+What this correction says the bound never covers — everything outside the task
+directory — is unchanged as a statement and better in reach: those leftovers land
+under `/Users/chug-{project}` rather than in the home the daemon and the operator
+share.
+
+**3. Short credential TTLs — untouched, and the open item stays open.** The split
+recorded here holds verbatim after #537: what the platform mints is TTL-bounded,
+and what it forwards — declared `work.secrets`, evaluator `secrets`, project
+`vars`, the reserved `global/agents` credentials — carries no TTL.
+`crates/dispatcher/src/exec.rs` and `crates/auth/src/nats.rs` are unchanged by
+anything in #537. What changes is *who* can read a forwarded secret out of a
+running process: one project's uid and root, rather than every process of the
+login user. Lifetime is [#529](529-secret-handling.md)'s, and this amendment
+reopens none of its decisions.
+
+**None of the three becomes unnecessary**, which is worth saying because
+"the boundary is restored" invites dropping whichever bound was standing in for
+it. Only bound 1 stops being a security control, and it is retained as the roster
+that makes the replacement work at all; bounds 2 and 3 are the ones that hold
+*within* a project user, which is exactly the residue per-project users do not
+remove.
+
+### The mutual lean with #517 decouples, and #517 D1 is not reopened
+
+This correction records that its acceptance and [#517](517-docker-access-for-jobs.md)
+D1's "lean on each other" — the task reaches docker because the login user owns
+the socket, and the task *is* the login user. Per-project users break the second
+half mechanically. #537 M7 measured it rather than assuming it: colima's socket
+is `0600` owned by `worksalot`, and `docker version` from uid 502 is denied. So
+on a bound node the **host** half of #517's default inverts from granted-for-free
+to unreachable-unless-granted (#537 D11), and a project that needs the socket
+takes an explicit node-side grant in
+[`docs/reference/runbooks/worker-docker-grant.md`](../reference/runbooks/worker-docker-grant.md)'s
+shape. **#517 D1 is untouched** — jobs may use docker and the escalation to node
+root is still accepted — as is D2's rule that a grant is node-side and never a
+job-type field. What changed is what a uid may open, not what the platform
+permits.
+
+### What must not be read as achieved
+
+- **The boundary is designed, not in force.** Repeated because the rest of this
+  section is written in the present tense: no node declares `WORKER_HOST_USERS`,
+  the deploy does not forward it, no project user exists on any node, and the
+  `sudo` path has never run from `spawn_task`. Until #537's slices 2, 3 and 4
+  land, what bounds this node is what this correction says bounds it.
+- **The `staff` primary group is load-bearing in two directions, and removing it
+  is not this slice's.** #537 M3 measured `/Users/worksalot` at `0750` group
+  `staff` with a fresh user's default primary group also `staff` — so a project
+  user traverses the daemon's home and reads `worker.env` (`0644`), which is the
+  exposure this design exists to remove. M8 measured that the **same** traversal
+  is how a project user execs the agent CLI. #537 D12 is one decision covering
+  both: its CLI half landed (#537 slice 8, job #571 — a node-wide
+  `/usr/local/lib/chuggernaut/bin` on the rendered `PATH`), its group half is
+  slice 4's, and **the operator must place the CLI at that path before any
+  project user is taken out of `staff`**. A node with the uid and without both
+  halves has the boundary on paper only.
+- **M1 has not been taken with no console session, and that is a deliberate
+  operator deferral (2026-08-10), not an oversight.** M1 passed in an **Aqua**
+  session inherited from the login user's console session; the headless case —
+  a reboot before anyone logs in — is untested. The method is one visit to the
+  node: reboot `gumbo-air-0` with no auto-login, run `launchctl print gui/501` at
+  the login window to learn whether the GUI-domain agent is even loaded, then
+  release the same `mode: host` probe and repeat `managername`, `simctl list`,
+  `create`, `boot`, `bootstatus -b`, delete. **What a failure would cost:** if the
+  daemon runs headless and the simulators do not, a node that reboots unattended
+  comes back serving host tasks it cannot drive CoreSimulator from — an outage
+  invisible above the launch, because every layer reports healthy. Both repairs
+  need root (#537's C3, `launchctl asuser`, or C2, the root daemon), so a failure
+  does **not** revive
+  [#537 §10](537-per-project-users-macos.md#10-the-rejected-alternative-one-shared-worksalot-uid)'s
+  shared uid — a shared uid inherits the same absent session. If instead the
+  daemon does not run at all without a login, that is
+  [#440](440-native-worker-daemon.md) D2's LaunchAgent shape and predates every
+  slice of #537.

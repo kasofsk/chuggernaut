@@ -139,7 +139,13 @@ bounds a host task's cpu or memory on any platform, so a host job type must
 declare neither, and the platform now says so at placement instead of at nothing.
 The rest of P3 — per-task users ([§8](#8-secrets-on-a-shared-host)), transient
 scopes as a *limits* mechanism ([§7](#7-resource-limits)) — and everything from
-P4 on is unstarted. [#440](440-native-worker-daemon.md) is the design for the
+P4 on is unstarted, with one qualification: **macOS took §8's boundary at a
+different granularity**. [#537](537-per-project-users-macos.md) puts one unix
+user per **project** on a host node, escalated to with `sudo` rather than
+`systemd-run --uid=`, and its launch path landed in job #563 — **inert**, since
+no node declares `WORKER_HOST_USERS`. §8's slot-sized pool is unweakened for
+Linux and still has no node to land on; what §8 and §10 should now be read as is
+[the 2026-08-12 amendment](#amendment--2026-08-12-job-567-8s-pool-is-the-wrong-granularity-for-macos-its-option-c-is-a-requirement-there-and-10s-list-becomes-the-roster). [#440](440-native-worker-daemon.md) is the design for the
 native-supervision prerequisite P0 named and left unowned. **P5 is unbuilt as
 code and re-scoped as plan**: its GC-root and warm-set thirds were settled
 elsewhere, and what is left of its declared caches now names one live slice —
@@ -156,7 +162,7 @@ is the same work sliced by contract, not a second plan.
 | **P0** | Backend polymorphism + a `HostBackend` on one node, routed by `placement.node`, `slots: 1` | **Landed** (job #434) — see [the 2026-08-05 correction](#correction-2026-08-05--1-already-shipped-p0-landed) |
 | **P1** | The `runtime:` selector, the epoch bump, the `min_dispatcher` requirement, the validate rule | **Landed** (job #401) for the block and the epoch, driven by #373; **Landed** (job #478) for the host row's field rules and the refusal deletion, on the same epoch; **Landed** (job #479) for §1's per-launch routing and the `WORKER_RPC_VERSION` bump it needed; **Landed** (job #507) for the launch half of [Coexistence](#coexistence-on-a-mixed-fleet)'s precedence rule — `JobType::level_image` / `level_runtime_env` resolve a launch from the **level** it is for, so a host job type's container evaluator inherits no `runtime.env` |
 | **P2** | `NodeCapabilities` on ping + announce; capability-aware `choose_placement` | **Landed** (job #483) for slice 5 — the record on both transports, additive, ingested in `probe_worker` with ping authoritative and docker-endpoint nodes synthesized; **Landed** (job #484) for slice 6 — `choose_placement` takes the required mode, excludes the nodes that do not serve it, and answers "no node advertises it" differently from "every capable node is full". P2 is complete: host work is routable |
-| **P3** | Per-task users; `resources_enforced`; transient scopes | **Partly landed** (job #524) — `resources_enforced` is consumed: `choose_placement` treats a launch declaring `resources.cpu`/`memory` as requiring enforcement **for its resolved mode**, and `HostBackend::admit` refuses one that reaches a node anyway ([the 2026-08-09 note](#note-2026-08-09--7s-predicate-and-backstop-landed-job-524)). Per-task users ([§8](#8-secrets-on-a-shared-host)) and transient scopes for *limits* ([§7](#7-resource-limits)) stay Proposed |
+| **P3** | Per-task users; `resources_enforced`; transient scopes | **Partly landed** (job #524) — `resources_enforced` is consumed: `choose_placement` treats a launch declaring `resources.cpu`/`memory` as requiring enforcement **for its resolved mode**, and `HostBackend::admit` refuses one that reaches a node anyway ([the 2026-08-09 note](#note-2026-08-09--7s-predicate-and-backstop-landed-job-524)). Per-task users ([§8](#8-secrets-on-a-shared-host)) and transient scopes for *limits* ([§7](#7-resource-limits)) stay Proposed — on macOS the boundary is being taken per **project** instead, by [#537](537-per-project-users-macos.md), whose launch path landed inert in job #563 |
 | **P4** | Device leases | Proposed — only when a host node must run a second, non-device-bound task concurrently |
 | **P5** | Declared caches + GC roots + warm set | **Split** (job #534), and two thirds of the row have moved: GC roots shipped under [#373](373-project-toolchains.md) P1 (job #384) and the daemon warm set was withdrawn by #373 C4. What remains — declared caches — is three parts with three urgencies: **placement + eviction is the live gap** (unbuilt, and unblocked: it is node config), **namespacing is deferred** behind #525's single-tenancy, and **the declaration site is deferred** with its intended answer recorded, §9's flake attribute having no macOS carrier ([the 2026-08-10 correction](#correction--2026-08-10-job-534-9s-p5-splits-the-caches-already-work-so-the-live-gap-is-placement-and-eviction)) |
 
@@ -2123,3 +2129,128 @@ as is stated here instead:
 - **#373's [C2](373-project-toolchains.md#c2-309-9s-mechanism-is-not-host-mode-only)**
   cites P5's "Independent of P2–P4" only to extend that independence to the
   environment mechanism, which this split does not touch.
+
+## Amendment — 2026-08-12, job #567 (§8's pool is the wrong granularity for macOS, its option (c) is a requirement there, and §10's list becomes the roster)
+
+Appended by slice 5 of [#537](537-per-project-users-macos.md). **Neither section
+is reworded and neither is wrong for Linux** — §8's option (b) and §10's tenancy
+argument stand exactly as written there, and there is still no Linux host node:
+[`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) remains the only
+job type declaring `mode: host`. What follows is what macOS took instead, why the
+difference is granularity rather than mechanism, and what §10's list is for once
+a real uid boundary exists under it.
+
+**What macOS took, and it is measured rather than argued.** One user per
+**project** — `chug-{project}`, derived from the `owner/project` slug's second
+component — for each project the node's roster already names, escalated to per
+launch with `sudo -n -u {user} -H` in front of the command the daemon already
+wraps (`escalated`, `crates/container/src/host.rs`), from the daemon's existing
+GUI-domain LaunchAgent rather than from a domain of the task's own. It landed in
+job #563 behind an on/off declaration, `WORKER_HOST_USERS`, and is **off on every
+node**.
+
+### §8, clause by clause
+
+| Clause | After [#537](537-per-project-users-macos.md), macOS only |
+| --- | --- |
+| "(b) per-task unix user (recommended)" — a **fixed pool** `chug-task-0 … chug-task-{slots-1}` that "maps one-to-one onto slots" | **Right mechanism, wrong granularity here.** `enforce_host_capacity` (`crates/worker/src/daemon.rs`) pins a host-capable node to one slot, so a slot-sized pool is a pool of **one** and separates a task only from its own predecessor. macOS takes one user per project: it maps onto `WORKER_HOST_PROJECTS`, which the node already declares and already fails closed on, and it keeps the within-project persistence [§10](#10-trust-and-tenancy) calls the feature |
+| The mechanism, "`systemd-run --uid=` (or `su`/`launchd` equivalent)" | The equivalent is **`sudo -n -u {user} -H`**, measured succeeding non-interactively with no tty (#537 M2). The `launchd` half of that parenthesis is **not** available: `launchctl asuser` and a per-user launchd domain both need a session a provisioned user does not have, which #322 §5's third collision says and #537 does not contradict |
+| "the task dir is 0700-owned by that user" | **Out of reach under a non-root daemon.** The daemon still writes `meta.json` into that directory and reads the task's results, and it cannot `chown`, so the directory is `0770` with the project's group (#537 §7). `0700`-owned-by-the-task arrives only with #537's C2, a root daemon, which is recorded with triggers and not scheduled |
+| "then `/proc/<pid>/environ` requires root" | True in kind on macOS, and it needed a second answer this clause does not give: **argv is cross-readable between uids** (#537 M6, measured), so a stripped environment must not be repaired on the command line |
+| "(c) file-based injection at 0600 … note it as a follow-up, not a substitute" | **A requirement of the escalation, and only half of what §8 wanted it for.** Below |
+| "the daemon does not advertise `host` in its `modes` unless the user pool is provisioned" | **Collapsed into the roster rather than added beside it** (#537 D5). The roster is `WORKER_HOST_PROJECTS`; `WORKER_HOST_USERS` says whether the node binds at all; `deploy/prod/build-worker.sh` refuses a listed project whose user does not resolve; a launch for an unresolvable project is a hard `BackendError::Launch` naming it; and **boot warns rather than refusing**, because a boot refusal would brick a `KeepAlive` daemon the moment an operator listed a project before creating its user. §8's rule survives in substance — an unprovisioned project runs no host work — with one gate instead of two |
+| "the caches in [9](#9-environment-and-state) must be per-user or group-shared" | **Per-user by construction.** Per-project homes retire the namespacing half of the [2026-08-10 correction](#correction--2026-08-10-job-534-9s-p5-splits-the-caches-already-work-so-the-live-gap-is-placement-and-eviction)'s (a) (#537 D10), and dissolve (b)'s objection that the caches sit in a home the platform does not own. The **ceiling and the LRU are not retired** and are #537's slice 7 |
+| The residual-risk paragraph | **Kept, and one clause gains a condition.** Root still reads everything; a task still reads its own secrets. "`remove` scrubbing the task dir is part of the boundary" now requires the daemon to escalate to do it at all — #537's slice 2, **not landed**: `kill`, `remove` and the post-exit reclaims in `crates/container/src/host.rs` still run as the daemon |
+
+### (c) is a requirement, and only half of what §8 wanted it for arrived
+
+§8 files file-based injection as a follow-up whose value is keeping secrets out of
+`environ` for the task's **own** child processes. Two measurements make the file
+**mandatory**, for a different reason than the one §8 gives: `sudo`'s `env_reset`
+strips the composed environment (#537 M2 — `CHUG_*` and `DEVELOPER_DIR` among it;
+`-H` sets `HOME`, `env_keep` preserves `PATH`), and argv is readable across uids
+(#537 M6), which rules out the obvious repair `sudo -u X env VAR=… cmd`. So under
+an escalation the environment crosses out of band or it does not cross at all.
+
+Two things about the landed shape that §8's text does not predict, both read out
+of `crates/container/src/host.rs` rather than inferred:
+
+- **The mode is better than the clause and better than #537 itself predicted.**
+  `hand_over_env` writes the file **through the same escalation** with the
+  contents on stdin and only the path and the mode on argv, so it is `0600`
+  **owned by the task user**, not the `0640` group-shared file #537 §3 argued a
+  non-root daemon was stuck with. Every injected file is materialized the same
+  way, which is what keeps an injected ssh key at the mode OpenSSH demands
+  ([#537's job #563 record](537-per-project-users-macos.md#correction--2026-08-12-job-563-slice-1-lands-and-the-file-modes-c1-was-argued-to-be-stuck-with-are-not-the-ones-it-got)).
+- **(c)'s stated benefit did not arrive.** `env_file_body` emits
+  `export NAME='…'` and the wrapper sources that file before `exec`
+  (`take_over_env`), so the values are in the task process's own `environ` and
+  every child it spawns inherits them exactly as before. The file answers the
+  **cross-uid** question; it does not answer the child-process one. §8's own
+  pricing of (c) — "it requires every consumer to change" — is why: nothing here
+  takes that consumer-side change, and no slice of #537 proposes it. Read (c),
+  after this, as *composing with (b) for delivery, not yet for exposure*.
+
+### §10 — what the tenancy list is now for
+
+[§10's list](#are-host-nodes-single-tenant) was written as policy layered over a
+per-task user boundary, and the [2026-08-09 amendment](#amendment--2026-08-09-job-526-8s-recommendation-is-unavailable-on-macos-and-10s-tenancy-list-is-now-the-only-bound)
+recorded that with §8 unavailable on macOS it had become "the whole of it". With
+a real uid boundary under it, it is doing three things, and only the third is new:
+
+1. **The bound it always was.** §10's argument is about contamination and blast
+   radius, not about accidental cross-reading, and per-project uids move none of
+   it: root reads everything, the immutable shared tree is root-owned and
+   additive (`/Applications/Xcode.app`, `/opt/homebrew` and the node's own
+   `/usr/local/lib/chuggernaut` are the macOS analogue of the store §10's table
+   names), the process table is shared, and a uid is not a resource limit
+   ([#490](490-agent-work-on-a-mac.md) D7). "Nothing short of a VM per task"
+   stands.
+2. **The layering §10 described, restored — per project, and only when declared.**
+   The inner boundary that handles *accidental* cross-reading exists again on
+   macOS, at project granularity rather than task granularity, and only on a node
+   that binds users. Two tasks of one project are inside it, not across it.
+3. **The roster, which is new and changes what an operator does with the list.**
+   The projects a node lists are the users that must exist on it (#537 D5/D6), and
+   a derivation collision between two same-named projects is a hard config error
+   rather than two projects quietly sharing a uid.
+
+**§10's closing sentence is what chose per-project over per-task.** *"Accepted
+within a single-tenant host node: a project's own code persists across its own
+tasks. That is the feature."* #537 D1 keeps that verbatim and inverts its scope:
+persistence stays **inside** a project and is removed **between** projects, where
+a per-task pool would have discarded the feature §10 names in order to bound the
+case §10 says a uid does not bound anyway.
+
+**And the subsection's wording should now be read as the tenancy list, not as a
+one-project rule.** "Single-tenant by policy" as a *security control* is what
+[#537](537-per-project-users-macos.md) withdraws; "the `owner/project` slugs a
+node will run host work for,
+enforced at `HostBackend::admit`" — which is what the subsection's own
+enforcement paragraph describes — is what survives.
+[`docs/reference/runbooks/worker-host-projects.md`](../reference/runbooks/worker-host-projects.md)
+§2 still argues the older reading, and correcting it is #537's slice 4, not this
+amendment; until it lands the two disagree and this section is the current one.
+
+**§10's docker row is unchanged as analysis and its rule was already inverted.**
+The [2026-08-09 amendment](#amendment--2026-08-09-job-517-the-docker-socket-rule-inverts)
+replaced "host tasks do not get the docker socket" with
+[#517](517-docker-access-for-jobs.md) D1's acceptance. Per-project users make the
+host half unreachable-unless-granted again **by mechanism** — #537 M7 measured
+colima's socket at `0600` owned by the login user and denied to a second uid — and
+that is not a re-inversion of the rule: #517 D1 stands, D2's node-side-grant rule
+stands, and what changed is what the task's uid may open.
+
+### What this amendment does not do
+
+- **It changes nothing for Linux.** §8's per-task pool with `systemd-run --uid=`
+  is unweakened and P3's row for it stays Proposed; no Linux host node exists for
+  it to land on.
+- **It does not claim the boundary is in force.** #537 slice 1 is inert on every
+  node, its slices 2–4 are Proposed, and until they land what bounds a host task
+  is what [#322's 2026-08-09 correction](322-macos-native-runtime.md#correction--2026-08-09-job-526-host-tasks-run-as-the-login-user-the-secret-boundary-is-absent-and-what-bounds-it-is-thinner-than-5-says)
+  says bounds it.
+- **It reopens neither [#517](517-docker-access-for-jobs.md) D1 nor
+  [#529](529-secret-handling.md)'s decisions.** The forwarded-secret lifetime
+  question §8's residual risk gestures at is #529's, and #537 narrows who can read
+  such a secret without shortening its life.
