@@ -60,6 +60,20 @@
 //! relative to the task directory the wrapper already runs in so no path to it
 //! rides argv either.
 //!
+//! **Every delete and every signal takes that same escalation** (#537 D4), the
+//! two the daemon performs with no task left to ask included: `spawn_reaper`'s
+//! credential and MCP-log reclaims, and the boot sweep of what a crashed
+//! `remove` detached, which resolve the user out of each tree's own `meta.json`
+//! because the daemon that launched it may be gone. A task user's process group
+//! is `EPERM` to the daemon and its files refuse the daemon's descent, so
+//! neither is a preference; the read family and the exit-code write ride the
+//! task directory's group instead. The escalation deletes and **the daemon's own
+//! delete is the verdict**, because unlinking a task tree is still the daemon's
+//! — a leak names both the path and the escalation that could not reach it,
+//! never a silence. [`reclaim_agent_cache`] follows the **task** user's home:
+//! under a binding the CLI writes into that home, and sweeping the daemon's
+//! would reclaim nothing while reporting success.
+//!
 //! Each task is launched into its own **supervision unit** ([`Supervision`],
 //! design #440 D3) rather than the daemon's, so the restart that swaps the
 //! daemon leaves in-flight work running (spec §3.1). Which systemd manager that
@@ -78,7 +92,7 @@ use crate::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -102,10 +116,10 @@ const CHUGGERNAUT_DIR: &str = "chuggernaut";
 /// already have.
 pub const AGENT_STATE_DIR: &str = "claude";
 
-/// The agent CLI's own MCP-log cache, relative to the daemon user's home
-/// (design #490 D6, second amendment). One subtree per workspace, keyed by a
-/// slug of that workspace's **resolved** realpath, which is why a teardown lists
-/// this directory instead of computing a name.
+/// The agent CLI's own MCP-log cache, relative to the home of the user the task
+/// **ran as** (design #490 D6, second amendment; #537 D4). One subtree per
+/// workspace, keyed by a slug of that workspace's **resolved** realpath, which
+/// is why a teardown lists this directory instead of computing a name.
 const AGENT_CACHE_REL: &str = "Library/Caches/claude-cli-nodejs";
 
 /// How many cache-root entries one sweep examines, the bound
@@ -281,6 +295,28 @@ const TASK_UMASK_BOUND: &str = "007";
 /// How a file is written as another user: the contents cross on **stdin** and
 /// never on argv (#537 M6), and the mode is applied before the caller returns.
 const WRITE_AS_SCRIPT: &str = "umask 077; cat > \"$1\" && chmod \"$2\" \"$1\"";
+
+/// The shell every escalation that is not the task's own command crosses in:
+/// `sudo` needs an executable, and `rm`, `kill` and `find` are all reached
+/// through one.
+const SH: &str = "/bin/sh";
+
+/// How a teardown deletes what the task user owns (design #537 D4). It empties
+/// the tree; unlinking the entry itself can still be the daemon's, because the
+/// directory holding a task tree is the daemon's, so the caller's own delete is
+/// the verdict.
+const REMOVE_AS_SCRIPT: &str = "rm -rf -- \"$1\"";
+
+/// How a teardown signals a process group of another user's processes, which
+/// the daemon's own `kill(2)` cannot reach at all (design #537 D4): `EPERM` is a
+/// silent failure to kill. Measured on `dash` and `bash`, which is what
+/// `/bin/sh` is on the gate host and on the Mac.
+const SIGNAL_AS_SCRIPT: &str = "kill -s \"$1\" -- \"-$2\"";
+
+/// How a teardown lists a directory only the task user can read — its own home
+/// (design #537 §7). NUL-separated, so a name holding a newline is still one
+/// entry.
+const LIST_AS_SCRIPT: &str = "find \"$1\" -mindepth 1 -maxdepth 1 -print0";
 
 /// The only two variables a host task takes from the daemon, and it takes them
 /// **by name** (design #440 D8). `PATH` because a host node's toolchain is
@@ -585,44 +621,167 @@ fn escalated(user: Option<&TaskUser>, cmd: Vec<String>) -> Vec<String> {
     argv
 }
 
-/// Write one file as the task user, through the same escalation the launch
-/// itself takes, so it is the task's own file at `mode` rather than the
-/// daemon's — which is what a non-root daemon cannot reach with `chown`
-/// (design #537 §3). The contents cross on stdin — only the path and the mode
-/// are argv, and neither is a secret — and the child's own exit status is read
-/// before the write's, because a refused escalation closes the pipe and would
-/// otherwise report the grant that is missing as `Broken pipe`.
-fn write_as(user: &TaskUser, path: &Path, mode: u32, contents: &[u8]) -> Result<(), String> {
+/// One script and its arguments under this launch's binding, composed through
+/// the same [`escalated`] the launch itself takes so there is one escalation
+/// shape in this file. `OsString`, so a path that is not UTF-8 still crosses.
+fn escalated_script(user: &TaskUser, script: &str, args: &[&OsStr]) -> Vec<OsString> {
+    let mut argv: Vec<OsString> = escalated(
+        Some(user),
+        vec![
+            SH.to_string(),
+            "-c".to_string(),
+            script.to_string(),
+            "sh".to_string(),
+        ],
+    )
+    .into_iter()
+    .map(OsString::from)
+    .collect();
+    argv.extend(args.iter().map(|arg| arg.to_os_string()));
+    argv
+}
+
+/// Run one script as the task user, through the same escalation the launch
+/// itself takes, and answer with its stdout. Only what is not a secret rides
+/// argv — a path, a mode, a signal name, a process group (#537 M6) — and
+/// `stdin` is where contents cross when there are any.
+fn run_as(
+    user: &TaskUser,
+    script: &str,
+    args: &[&OsStr],
+    stdin: Option<&[u8]>,
+) -> Result<Vec<u8>, String> {
     use std::io::Write;
-    let mut child = std::process::Command::new(SUDO)
-        .args(sudo_args(user))
-        .args(["/bin/sh", "-c", WRITE_AS_SCRIPT, "sh"])
-        .arg(path)
-        .arg(format!("{mode:o}"))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
+    let argv = escalated_script(user, script, args);
+    let mut child = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(match stdin {
+            Some(_) => std::process::Stdio::piped(),
+            None => std::process::Stdio::null(),
+        })
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| format!("{SUDO} is unusable on this node: {e}"))?;
-    let written = child
-        .stdin
-        .take()
-        .ok_or_else(|| format!("{SUDO} took no stdin"))?
-        .write_all(contents);
+    let written = stdin.map(|contents| {
+        child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("{SUDO} took no stdin"))
+            .and_then(|mut pipe| pipe.write_all(contents).map_err(|e| e.to_string()))
+    });
     let out = child
         .wait_with_output()
         .map_err(|e| format!("{SUDO}: {e}"))?;
-    if out.status.success() {
-        return written.map_err(|e| format!("writing {} as {}: {e}", path.display(), user.name));
+    if !out.status.success() {
+        return Err(format!(
+            "{SUDO} -n -u {} was refused: {}",
+            user.name,
+            first_line(&out.stderr)
+        ));
     }
-    Err(format!(
-        "{SUDO} -n -u {} could not write {}: {} — a node that binds a project to a unix user has \
-         to grant its daemon NOPASSWD execution as exactly that user (design #537 C1), and this \
-         launch is refused rather than run without the file it hands its environment over in",
-        user.name,
-        path.display(),
-        first_line(&out.stderr)
-    ))
+    match written {
+        Some(Err(e)) => Err(e),
+        _ => Ok(out.stdout),
+    }
+}
+
+/// Write one file as the task user, so it is the task's own file at `mode`
+/// rather than the daemon's — which is what a non-root daemon cannot reach with
+/// `chown` (design #537 §3).
+fn write_as(user: &TaskUser, path: &Path, mode: u32, contents: &[u8]) -> Result<(), String> {
+    let mode = OsString::from(format!("{mode:o}"));
+    run_as(
+        user,
+        WRITE_AS_SCRIPT,
+        &[path.as_os_str(), mode.as_os_str()],
+        Some(contents),
+    )
+    .map(|_| ())
+    .map_err(|e| {
+        format!(
+            "could not write {} as {}: {e} — a node that binds a project to a unix user has to \
+             grant its daemon NOPASSWD execution as exactly that user (design #537 C1), and this \
+             launch is refused rather than run without the file it hands its environment over in",
+            path.display(),
+            user.name,
+        )
+    })
+}
+
+/// Delete `path` and everything under it, as the user that owns what is under
+/// it when the node binds one (design #537 D4): a task's own subdirectory at a
+/// tighter umask refuses the daemon's recursive delete, and a whole task tree is
+/// the task user's by construction.
+///
+/// The escalation empties it and the **daemon's own delete is the verdict**,
+/// because the entry itself lives in a directory only the daemon can write; a
+/// refusal is carried into that verdict rather than swallowed, so a leak names
+/// both what could not be deleted and the escalation that could not do it.
+fn remove_all_as(user: Option<&TaskUser>, path: &Path) -> std::io::Result<()> {
+    let refused = match user {
+        Some(user) => match run_as(user, REMOVE_AS_SCRIPT, &[path.as_os_str()], None) {
+            Ok(_) => return Ok(()),
+            Err(refused) => Some(refused),
+        },
+        None => None,
+    };
+    let leaked = |e: std::io::Error| match &refused {
+        Some(refused) => std::io::Error::other(format!("{e} (as its own user: {refused})")),
+        None => e,
+    };
+    let is_dir = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta.is_dir(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(leaked(e)),
+    };
+    let deleted = if is_dir {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    };
+    match deleted {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(leaked(e)),
+    }
+}
+
+/// The immediate children of `root`, listed as the user that owns them when the
+/// node binds one: a task user's own home is unreadable to the daemon (design
+/// #537 §7), and a sweep that cannot list reclaims nothing while reporting
+/// success. An escalation this node cannot run falls back to the daemon's own
+/// read, which is exactly what it saw before a binding existed.
+fn list_children_as(
+    user: Option<&TaskUser>,
+    root: &Path,
+    max: usize,
+) -> std::io::Result<Vec<PathBuf>> {
+    if let Some(user) = user {
+        match run_as(user, LIST_AS_SCRIPT, &[root.as_os_str()], None) {
+            Ok(listed) => return Ok(nul_separated(&listed).take(max).collect()),
+            Err(e) => tracing::debug!(
+                root = %root.display(),
+                "listing as {} failed — falling back to the daemon's own read: {e}",
+                user.name
+            ),
+        }
+    }
+    Ok(std::fs::read_dir(root)?
+        .take(max)
+        .flatten()
+        .map(|entry| entry.path())
+        .collect())
+}
+
+/// The paths a NUL-separated listing carries, which is the one separator no
+/// name can hold.
+fn nul_separated(listed: &[u8]) -> impl Iterator<Item = PathBuf> + '_ {
+    use std::os::unix::ffi::OsStrExt;
+    listed
+        .split(|byte| *byte == 0)
+        .filter(|name| !name.is_empty())
+        .map(|name| PathBuf::from(OsStr::from_bytes(name)))
 }
 
 /// The first line of a tool's stderr, so a failure reaches a log line without
@@ -777,7 +936,14 @@ impl HostUsers {
     /// node declared no binding for its project — matched on `JOB_PROJECT`, the
     /// stamp [`HostTenancy::admits`] already reads.
     pub fn binding(&self, env: &HashMap<String, String>) -> Option<&TaskUser> {
-        match self.bound.get(env.get("JOB_PROJECT")?)? {
+        self.for_project(env.get("JOB_PROJECT").map(String::as_str))
+    }
+
+    /// The user a project's task ran as, for the teardowns that have no launch
+    /// env left to ask (design #537 D4) — `meta.json` records the project, and
+    /// this is what turns it back into the uid that owns the task's files.
+    pub fn for_project(&self, project: Option<&str>) -> Option<&TaskUser> {
+        match self.bound.get(project?)? {
             ProjectUser::Bound(user) => Some(user),
             ProjectUser::Unresolved { .. } => None,
         }
@@ -848,7 +1014,7 @@ impl HostBackend {
         let root = root.into();
         std::fs::create_dir_all(&root)
             .map_err(|e| BackendError::Unavailable(format!("host root {}: {e}", root.display())))?;
-        sweep_detached(&root);
+        sweep_detached(&root, &users);
         Ok(Self {
             node: node.into(),
             root,
@@ -1708,25 +1874,36 @@ fn detached_path(dir: &Path) -> PathBuf {
 /// Detach the task tree with an atomic rename, then delete it. Deleting in
 /// place races the task's own reaper still writing `exit_code` — every writer
 /// addresses the old path, so the rename is what makes the delete race-free.
-fn detach_and_remove(dir: &Path) -> std::io::Result<()> {
+fn detach_and_remove(dir: &Path, users: &HostUsers) -> std::io::Result<()> {
     match std::fs::rename(dir, detached_path(dir)) {
         Ok(()) => (),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return std::fs::remove_dir_all(dir),
+        Err(_) => return remove_all_as(tree_user(dir, users), dir),
     }
-    sweep_detached_in(dir.parent().unwrap_or(dir))
+    sweep_detached_in(dir.parent().unwrap_or(dir), users)
+}
+
+/// The user a task tree's own files belong to, resolved through the node's
+/// binding (design #537 D4). The tree's `meta.json` is what names its project
+/// after the task is gone — and after the daemon that launched it was replaced.
+fn tree_user<'a>(dir: &Path, users: &'a HostUsers) -> Option<&'a TaskUser> {
+    users.for_project(read_meta(dir)?.project.as_deref())
 }
 
 /// Delete every tree a `remove` detached but did not finish deleting. A crash
 /// in that window is the one way a host node leaks a task tree, and nothing
 /// else on the node reclaims it (#309 §2(c)).
-fn sweep_detached(root: &Path) {
-    if let Err(e) = sweep_detached_in(root) {
+fn sweep_detached(root: &Path, users: &HostUsers) {
+    if let Err(e) = sweep_detached_in(root, users) {
         tracing::error!(root = %root.display(), "host root: a detached task tree is unreclaimable: {e}");
     }
 }
 
-fn sweep_detached_in(root: &Path) -> std::io::Result<()> {
+/// A detached tree is a **whole task tree**, task-user-owned by construction, so
+/// this boot sweep crosses the binding every time it has anything to do (design
+/// #537 D4) — through each tree's own recorded project, since the daemon that
+/// launched it may be gone.
+fn sweep_detached_in(root: &Path, users: &HostUsers) -> std::io::Result<()> {
     let mut failure = None;
     for entry in std::fs::read_dir(root)?.flatten() {
         if !entry
@@ -1736,8 +1913,9 @@ fn sweep_detached_in(root: &Path) -> std::io::Result<()> {
         {
             continue;
         }
-        if let Err(e) = std::fs::remove_dir_all(entry.path()) {
-            failure.get_or_insert(e);
+        let tree = entry.path();
+        if let Err(e) = remove_all_as(tree_user(&tree, users), &tree) {
+            failure.get_or_insert(std::io::Error::other(format!("{}: {e}", tree.display())));
         }
     }
     failure.map_or(Ok(()), Err)
@@ -1748,7 +1926,7 @@ fn sweep_detached_in(root: &Path) -> std::io::Result<()> {
 /// [`AGENT_STATE_DIR`] exactly as that wrapper does. The daemon repeating the
 /// teardown at the terminal state covers a wrapper killed before it got there,
 /// and `remove` reclaims the spared leaf with the rest of the task directory.
-fn reclaim_credentials(dir: &Path) -> std::io::Result<()> {
+fn reclaim_credentials(dir: &Path, user: Option<&TaskUser>) -> std::io::Result<()> {
     let creds = dir.join(CHUGGERNAUT_DIR);
     let entries = match std::fs::read_dir(&creds) {
         Ok(entries) => entries,
@@ -1757,18 +1935,12 @@ fn reclaim_credentials(dir: &Path) -> std::io::Result<()> {
     };
     let mut failure = None;
     for entry in entries.flatten() {
-        if entry.file_name() == std::ffi::OsStr::new(AGENT_STATE_DIR) {
+        if entry.file_name() == OsStr::new(AGENT_STATE_DIR) {
             continue;
         }
-        let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
         let path = entry.path();
-        let result = if is_dir {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        if let Err(e) = result {
-            failure.get_or_insert(e);
+        if let Err(e) = remove_all_as(user, &path) {
+            failure.get_or_insert(std::io::Error::other(format!("{}: {e}", path.display())));
         }
     }
     failure.map_or(Ok(()), Err)
@@ -1797,28 +1969,25 @@ enum AgentCacheSweep {
 /// survives any character-mapping slugifier verbatim (design #490 D6, second
 /// amendment). Listing rather than computing the CLI's key is what makes a miss
 /// leak disk instead of deleting a subtree keyed to something else.
-fn sweep_agent_cache(cache_root: &Path, task: &str) -> AgentCacheSweep {
+fn sweep_agent_cache(cache_root: &Path, task: &str, user: Option<&TaskUser>) -> AgentCacheSweep {
     if !task.starts_with(TASK_PREFIX) || !is_task_id(task) {
         return AgentCacheSweep::Unkeyed;
     }
-    let entries = match std::fs::read_dir(cache_root) {
+    let entries = match list_children_as(user, cache_root, AGENT_CACHE_ENTRIES_MAX) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return AgentCacheSweep::Absent,
         Err(e) => return AgentCacheSweep::Unreadable(e.to_string()),
     };
     let (mut examined, mut removed, mut failed) = (0, 0, 0);
-    for entry in entries.take(AGENT_CACHE_ENTRIES_MAX).flatten() {
+    for path in entries {
         examined += 1;
-        if !entry.file_name().to_string_lossy().contains(task) {
+        let matched = path
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().contains(task));
+        if !matched {
             continue;
         }
-        let path = entry.path();
-        let result = if entry.file_type().is_ok_and(|t| t.is_dir()) {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        match result {
+        match remove_all_as(user, &path) {
             Ok(()) => removed += 1,
             Err(e) => {
                 failed += 1;
@@ -1841,25 +2010,39 @@ fn sweep_agent_cache(cache_root: &Path, task: &str) -> AgentCacheSweep {
     }
 }
 
+/// Where the agent CLI left this task's MCP logs: under the home of the user
+/// the task **ran as** (design #537 D4), which is the project's own when the
+/// node binds one and the daemon's when it does not.
+///
+/// Sweeping the daemon's home under a binding would examine a cache the CLI
+/// never wrote to, reclaim nothing, and report success — the silence #490 D6
+/// exists to prevent.
+fn agent_cache_root(user: Option<&TaskUser>) -> Option<PathBuf> {
+    let home = match user {
+        Some(user) => user.home.clone().into_os_string(),
+        None => std::env::var_os(HOME_VAR)?,
+    };
+    (!home.is_empty()).then(|| PathBuf::from(home).join(AGENT_CACHE_REL))
+}
+
 /// Reclaim the agent CLI's own MCP-log subtree for this task, beside the
 /// credential tree the same teardown empties (design #490 D6, second
 /// amendment). It is held to `crates/worker/src/nix.rs`'s reaper charter — it
 /// leaks disk rather than ever failing a job — so it returns nothing a caller
 /// could fail on.
-fn reclaim_agent_cache(dir: &Path) {
+fn reclaim_agent_cache(dir: &Path, user: Option<&TaskUser>) {
     let Some(task) = dir.file_name().and_then(|n| n.to_str()) else {
         return;
     };
-    let Some(home) = std::env::var_os(HOME_VAR).filter(|home| !home.is_empty()) else {
+    let Some(root) = agent_cache_root(user) else {
         tracing::debug!(
             task,
-            "host task MCP log sweep skipped: the daemon has no {HOME_VAR}"
+            "host task MCP log sweep skipped: no {HOME_VAR} to resolve the cache against"
         );
         return;
     };
-    let root = PathBuf::from(home).join(AGENT_CACHE_REL);
     let cache = root.display().to_string();
-    match sweep_agent_cache(&root, task) {
+    match sweep_agent_cache(&root, task, user) {
         AgentCacheSweep::Unkeyed => tracing::warn!(
             task,
             "host task MCP log sweep refused a task name this backend did not mint"
@@ -1950,6 +2133,49 @@ async fn signal_unit(manager: ScopeManager, unit: &str, signal: &str) {
     }
 }
 
+/// Signal a task's process group as the user whose processes it holds (design
+/// #537 D4): the daemon's own `kill(2)` at another user's group is `EPERM`,
+/// which is a silent failure to kill and worse than a loud one.
+///
+/// The daemon's own signal stays the fallback, so an unbound node signals
+/// exactly as it always did and a node whose escalation is refused still tries
+/// rather than giving up quietly.
+fn signal_group_as(user: Option<&TaskUser>, pgid: i32, sig: i32) {
+    if pgid <= 0 {
+        tracing::error!(pgid, "host kill: refusing to signal a non-positive group");
+        return;
+    }
+    if let Some((user, name)) = user.zip(signal_name(sig)) {
+        let group = pgid.to_string();
+        match run_as(
+            user,
+            SIGNAL_AS_SCRIPT,
+            &[OsStr::new(name), OsStr::new(&group)],
+            None,
+        ) {
+            Ok(_) => return,
+            Err(e) => tracing::error!(
+                pgid,
+                sig,
+                "host kill: {} could not signal its own process group: {e}",
+                user.name
+            ),
+        }
+    }
+    signal_group(pgid, sig);
+}
+
+/// The name `kill` takes for the two signals a teardown sends, and `None` for
+/// any other — negative space, so a third signal falls back to the daemon's own
+/// `kill(2)` rather than crossing the escalation misspelled.
+fn signal_name(sig: i32) -> Option<&'static str> {
+    match sig {
+        libc::SIGTERM => Some("TERM"),
+        libc::SIGKILL => Some("KILL"),
+        _ => None,
+    }
+}
+
 /// Signal a process group, negating the pgid exactly as
 /// `daemon::kill_process_group` does. A zero or negative pgid is refused rather
 /// than sent — `kill(0, …)` would reach the daemon's own group.
@@ -1998,7 +2224,7 @@ impl ContainerBackend for HostBackend {
         if let Ok(mut live) = self.live.lock() {
             live.insert(task.clone());
         }
-        spawn_reaper(child, dir, task.clone(), self.live.clone());
+        spawn_reaper(child, dir, task.clone(), self.live.clone(), user.cloned());
         Ok(self.id_of(&task))
     }
 
@@ -2024,8 +2250,9 @@ impl ContainerBackend for HostBackend {
             return Ok(());
         }
         let manager = meta.scope.unwrap_or(ScopeManager::System);
-        tracing::warn!(node = %self.node, id = %id, pgid = meta.pgid, unit = ?meta.unit, scope = ?manager, "host kill: SIGTERM to the process group and the scope");
-        signal_group(meta.pgid, libc::SIGTERM);
+        let user = self.users.for_project(meta.project.as_deref()).cloned();
+        tracing::warn!(node = %self.node, id = %id, pgid = meta.pgid, unit = ?meta.unit, scope = ?manager, user = ?user.as_ref().map(|u| &u.name), "host kill: SIGTERM to the process group and the scope");
+        signal_group_as(user.as_ref(), meta.pgid, libc::SIGTERM);
         if let Some(unit) = meta.unit.as_deref() {
             signal_unit(manager, unit, "SIGTERM").await;
         }
@@ -2036,7 +2263,7 @@ impl ContainerBackend for HostBackend {
             tokio::time::sleep(KILL_GRACE).await;
             if read_exit_code(&dir).is_none() {
                 tracing::warn!(pgid, "host kill: group ignored SIGTERM — SIGKILL");
-                signal_group(pgid, libc::SIGKILL);
+                signal_group_as(user.as_ref(), pgid, libc::SIGKILL);
                 if let Some(unit) = unit.as_deref() {
                     signal_unit(manager, unit, "SIGKILL").await;
                 }
@@ -2138,14 +2365,17 @@ impl ContainerBackend for HostBackend {
         if !dir.exists() {
             return Ok(());
         }
-        reclaim_agent_cache(&dir);
         let meta = read_meta(&dir);
+        let user = self
+            .users
+            .for_project(meta.as_ref().and_then(|m| m.project.as_deref()));
+        reclaim_agent_cache(&dir, user);
         let mut failed: Vec<String> = Vec::new();
         for path in meta.iter().flat_map(|m| m.files.iter()) {
-            failed.extend(reclaim_failure(std::fs::remove_file(path), path));
+            failed.extend(reclaim_failure(remove_all_as(user, Path::new(path)), path));
         }
         failed.extend(reclaim_failure(
-            detach_and_remove(&dir),
+            detach_and_remove(&dir, &self.users),
             &dir.display().to_string(),
         ));
         if failed.is_empty() {
@@ -2213,13 +2443,14 @@ fn spawn_reaper(
     dir: PathBuf,
     task: String,
     live: Arc<Mutex<HashSet<String>>>,
+    user: Option<TaskUser>,
 ) {
     tokio::task::spawn_blocking(move || {
         let status = child.wait();
-        if let Err(e) = reclaim_credentials(&dir) {
+        if let Err(e) = reclaim_credentials(&dir, user.as_ref()) {
             tracing::error!(task = %task, "host task credential tree is unreclaimable: {e}");
         }
-        reclaim_agent_cache(&dir);
+        reclaim_agent_cache(&dir, user.as_ref());
         if dir.is_dir() && read_exit_code(&dir).is_none() {
             let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
             if let Err(e) = write_exit_code(&dir, code) {
@@ -2508,6 +2739,224 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Every teardown crosses the binding through the **same** escalation the
+    /// launch takes (design #537 D4), and a signal no escalation is composed
+    /// for is negative space rather than a mistyped argument.
+    #[test]
+    fn every_teardown_escalates_through_the_launchs_own_shape() {
+        let user = test_user(Path::new("/Users/chug-537"));
+        let tree = Path::new("/var/lib/chuggernaut/host-tasks/host-1-0");
+        let prefix = ["sudo", "-n", "-u", "chug-537", "-H", "--", SH, "-c"];
+        for (script, args) in [
+            (REMOVE_AS_SCRIPT, vec![tree.to_string_lossy().to_string()]),
+            (LIST_AS_SCRIPT, vec![tree.to_string_lossy().to_string()]),
+            (SIGNAL_AS_SCRIPT, vec!["TERM".to_string(), "-1".to_string()]),
+        ] {
+            let mut expected: Vec<OsString> = prefix.iter().map(OsString::from).collect();
+            expected.push(OsString::from(script));
+            expected.push(OsString::from("sh"));
+            expected.extend(args.iter().map(OsString::from));
+            let argv: Vec<&OsStr> = args.iter().map(|a| OsStr::new(a.as_str())).collect();
+            assert_eq!(
+                escalated_script(&user, script, &argv),
+                expected,
+                "a teardown enters the project's own user exactly as a launch does"
+            );
+        }
+        assert_eq!(signal_name(libc::SIGTERM), Some("TERM"));
+        assert_eq!(signal_name(libc::SIGKILL), Some("KILL"));
+        assert_eq!(
+            signal_name(libc::SIGHUP),
+            None,
+            "a signal this teardown never sends falls back rather than crossing misspelled"
+        );
+    }
+
+    /// The three scripts a teardown escalates, asserted against the shell that
+    /// will run them: `kill`'s `--` before a negated process group is the one
+    /// that would go silently wrong, and `/bin/sh` is `dash` on the gate host
+    /// and `bash` on the Mac.
+    #[test]
+    fn the_escalated_teardown_scripts_do_what_they_claim_on_this_shell() {
+        let dir = test_dir("teardown-scripts");
+        let tree = dir.join("tree");
+        std::fs::create_dir_all(tree.join("nested")).unwrap();
+        std::fs::write(tree.join("nested").join("big"), b"target/").unwrap();
+        assert!(
+            sh_script(REMOVE_AS_SCRIPT, &[tree.as_os_str()])
+                .status
+                .success()
+        );
+        assert!(!tree.exists(), "the delete reaches a nested tree");
+        assert!(
+            sh_script(REMOVE_AS_SCRIPT, &[tree.as_os_str()])
+                .status
+                .success(),
+            "and deleting what is already gone is not a failure"
+        );
+
+        let listed = sh_script(LIST_AS_SCRIPT, &[dir.as_os_str()]);
+        assert!(listed.status.success());
+        assert!(
+            nul_separated(&listed.stdout).next().is_none(),
+            "an empty directory lists nothing"
+        );
+        let odd = dir.join("a name\nwith a newline");
+        std::fs::write(&odd, b"x").unwrap();
+        let listed = sh_script(LIST_AS_SCRIPT, &[dir.as_os_str()]);
+        assert_eq!(
+            nul_separated(&listed.stdout).collect::<Vec<_>>(),
+            vec![odd.clone()],
+            "NUL is the one separator a name cannot hold"
+        );
+
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        let mut child = std::process::Command::new(SH)
+            .args(["-c", "exec sleep 30"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pgid = i32::try_from(child.id()).unwrap().to_string();
+        let signalled = sh_script(SIGNAL_AS_SCRIPT, &[OsStr::new("TERM"), OsStr::new(&pgid)]);
+        assert!(
+            signalled.status.success(),
+            "kill -s TERM -- -pgid: {}",
+            String::from_utf8_lossy(&signalled.stderr)
+        );
+        assert_eq!(
+            child.wait().unwrap().signal(),
+            Some(libc::SIGTERM),
+            "the whole group takes the signal, not the leader alone"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// One escalated script run **without** the escalation, which is what a
+    /// machine with no design #537 D9 binding can assert about it.
+    fn sh_script(script: &str, args: &[&OsStr]) -> std::process::Output {
+        std::process::Command::new(SH)
+            .args(["-c", script, "sh"])
+            .args(args)
+            .output()
+            .unwrap()
+    }
+
+    /// The agent CLI's MCP-log cache follows the **task** user's home (design
+    /// #537 D4): under a binding the CLI writes into that user's home, so a
+    /// sweep of the daemon's would examine nothing, reclaim nothing and report
+    /// success — the silence #490 D6 exists to prevent.
+    #[test]
+    fn the_mcp_log_sweep_follows_the_task_users_home_and_not_the_daemons() {
+        let dir = test_dir("mcp-home");
+        let home = dir.join("Users").join("chug-537");
+        let user = test_user(&home);
+        assert_eq!(
+            agent_cache_root(Some(&user)),
+            Some(home.join(AGENT_CACHE_REL)),
+            "the cache hangs off the home the task ran with"
+        );
+        assert_ne!(
+            agent_cache_root(Some(&user)),
+            agent_cache_root(None),
+            "which is never the daemon's own"
+        );
+
+        let task = format!("{TASK_PREFIX}1f2e-3");
+        let cache = home.join(AGENT_CACHE_REL);
+        let key = format!("-tmp-{task}-workspace");
+        std::fs::create_dir_all(cache.join(&key).join("mcp-logs-chuggernaut-channel")).unwrap();
+        let other = "-Users-runner-actions-runner--work-beacon";
+        std::fs::create_dir_all(cache.join(other)).unwrap();
+
+        reclaim_agent_cache(&dir.join(&task), Some(&user));
+        assert!(
+            !cache.join(&key).exists(),
+            "this task's subtree is reclaimed out of the task user's home"
+        );
+        assert!(
+            cache.join(other).is_dir(),
+            "and a subtree keyed to another tool outlives this task"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A teardown that cannot delete **names what it leaked**, and names the
+    /// escalation that could not do it — a quiet teardown fills the disk anyway
+    /// and nobody learns (design #537 §7).
+    #[test]
+    fn a_teardown_that_cannot_delete_names_what_it_leaked() {
+        let dir = test_dir("teardown-leak");
+        let file = dir.join("not-a-directory");
+        std::fs::write(&file, b"x").unwrap();
+        let unreachable = file.join("under-a-file");
+        let user = test_user(&dir);
+
+        let named = unreachable.display().to_string();
+        let bound =
+            reclaim_failure(remove_all_as(Some(&user), &unreachable), &named).expect("a leak");
+        assert!(
+            bound.contains(&named),
+            "the failure names the path: {bound}"
+        );
+        assert!(
+            bound.contains("as its own user"),
+            "and the escalation that could not delete it: {bound}"
+        );
+        let unbound = reclaim_failure(remove_all_as(None, &unreachable), &named).expect("a leak");
+        assert!(
+            unbound.contains(&named) && !unbound.contains("as its own user"),
+            "an unbound node reports exactly what it always did: {unbound}"
+        );
+        assert!(
+            remove_all_as(Some(&user), &dir.join("never-existed")).is_ok()
+                && remove_all_as(None, &dir.join("never-existed")).is_ok(),
+            "and deleting what is already gone stays idempotent"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A tree the boot sweep finds is a **whole task tree**, task-user-owned by
+    /// construction, so it crosses the binding every time it has anything to do
+    /// — through the project the tree's own `meta.json` records, because the
+    /// daemon that launched it is gone (design #537 D4).
+    #[test]
+    fn a_detached_tree_is_reclaimed_through_the_binding_it_recorded() {
+        let root = test_dir("detached-bound");
+        let user = test_user(&root.join("home"));
+        let users = HostUsers::new(BTreeMap::from([(
+            "acme/chug".to_string(),
+            ProjectUser::Bound(user.clone()),
+        )]));
+        let leftover = root.join(format!("{REMOVING_PREFIX}host-1-0-beef"));
+        std::fs::create_dir_all(leftover.join(WORKSPACE_DIR).join("target")).unwrap();
+        let meta = TaskMeta {
+            pid: 1,
+            pgid: 1,
+            start_time: None,
+            project: Some("acme/chug".to_string()),
+            job: Some(537),
+            task: Some(2),
+            files: Vec::new(),
+            unit: None,
+            scope: None,
+        };
+        std::fs::write(leftover.join(META_JSON), serde_json::to_vec(&meta).unwrap()).unwrap();
+
+        assert_eq!(
+            tree_user(&leftover, &users),
+            Some(&user),
+            "the tree's own record is what names its user after the task is gone"
+        );
+        assert_eq!(
+            tree_user(&leftover, &HostUsers::default()),
+            None,
+            "and a node that binds nobody deletes it as the daemon, as it always did"
+        );
+        sweep_detached(&root, &users);
+        assert!(!leftover.exists(), "the boot sweep reclaims it");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /// A bound task whose environment file it cannot read exits
     /// [`TASK_ENV_UNREADABLE`] rather than running with no environment at all.
     /// The guard is a **test** ahead of the source rather than a `||` after it,
@@ -2588,7 +3037,7 @@ mod tests {
             "the agent CLI's own tree outlives the process the harvest reads it after \
              (design #490 D6 amendment)"
         );
-        reclaim_credentials(&dir).unwrap();
+        reclaim_credentials(&dir, None).unwrap();
         assert!(
             transcript.join("s.jsonl").exists(),
             "the daemon's repeat of the teardown spares the same leaf"
@@ -2638,7 +3087,7 @@ mod tests {
         std::fs::create_dir_all(cache.join(other)).unwrap();
 
         assert_eq!(
-            sweep_agent_cache(&cache, &task),
+            sweep_agent_cache(&cache, &task, None),
             AgentCacheSweep::Swept {
                 examined: 2,
                 removed: 1,
@@ -2663,14 +3112,14 @@ mod tests {
         let cache = tmp.join("cache");
         let task = format!("{TASK_PREFIX}9a-1");
         assert_eq!(
-            sweep_agent_cache(&cache, &task),
+            sweep_agent_cache(&cache, &task, None),
             AgentCacheSweep::Absent,
             "a node the CLI never ran on is a skip, not a failure"
         );
         let other = "-private-tmp-somebody-else";
         std::fs::create_dir_all(cache.join(other)).unwrap();
         assert_eq!(
-            sweep_agent_cache(&cache, &task),
+            sweep_agent_cache(&cache, &task, None),
             AgentCacheSweep::Swept {
                 examined: 1,
                 removed: 0,
@@ -2680,7 +3129,7 @@ mod tests {
         );
         for name in ["", "-", "9a-1", "host", "?"] {
             assert_eq!(
-                sweep_agent_cache(&cache, name),
+                sweep_agent_cache(&cache, name, None),
                 AgentCacheSweep::Unkeyed,
                 "{name} is not a task directory this backend minted"
             );
@@ -3666,14 +4115,17 @@ mod tests {
             "it stays on the same mount"
         );
 
-        detach_and_remove(&dir).unwrap();
+        detach_and_remove(&dir, &HostUsers::default()).unwrap();
         assert!(!dir.exists());
         assert!(
             write_exit_code(&dir, 0).is_err(),
             "a late reaper write must not resurrect the tree"
         );
         assert!(!dir.exists());
-        assert!(detach_and_remove(&dir).is_ok(), "remove stays idempotent");
+        assert!(
+            detach_and_remove(&dir, &HostUsers::default()).is_ok(),
+            "remove stays idempotent"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

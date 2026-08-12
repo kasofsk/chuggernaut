@@ -1,6 +1,6 @@
 # Design #537 — Per-project unix users on a macOS host node
 
-Status: IMPLEMENTED IN PART — slice 0's measurements landed (jobs #557, #561), slice 8 moved the agent CLI to a node-wide path (job #571), slice 1's launch path landed (job #563), and slice 5 amended the siblings it supersedes (job #567). It is **inert until a node declares a binding**: `WORKER_HOST_USERS` is off everywhere, the deploy does not forward it yet (slice 3), and no node has the users (slice 4).
+Status: IMPLEMENTED IN PART — slice 0's measurements landed (jobs #557, #561), slice 8 moved the agent CLI to a node-wide path (job #571), slice 1's launch path landed (job #563), slice 2's teardown path landed (job #565), and slice 5 amended the siblings it supersedes (job #567). It is **inert until a node declares a binding**: `WORKER_HOST_USERS` is off everywhere, the deploy does not forward it yet (slice 3), and no node has the users (slice 4).
 
 Written against the tree at `4674210` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a sibling
@@ -46,7 +46,8 @@ the argument and its dated corrections, never edited
 | A host node is single-tenant, enforced at the node and fail-closed | `HostTenancy` read in `HostBackend::admit`, `crates/container/src/host.rs`; parsed in `crates/worker/src/config.rs` | True. The list already accepts **several** projects — nothing in the parse or the admit forbids two |
 | One host task at a time | `enforce_host_capacity`, `crates/worker/src/daemon.rs`, plus the running-task exclusion in `HostBackend::admit` | True |
 | The task directory is created `0700` by the daemon, and every wire path is rebased into it | `create_task_dir` and `rebase_path`, `crates/container/src/host.rs` | True unbound. A bound task's directory is `0770` with the project user's own group, which is §7's scheme: the daemon still writes `meta.json` and reads the results, and no other project can reach it (job #563) |
-| `remove` deletes the recorded files, the task directory, and this task's MCP-log subtree **under the daemon's own `HOME`** | `reclaim_agent_cache` reads `HOME` out of the daemon's environment, `crates/container/src/host.rs` | True, and it breaks the moment the task's home is not the daemon's |
+| `remove` deletes the recorded files, the task directory, and this task's MCP-log subtree — under the home of the user the task **ran as** | `agent_cache_root` and `remove_all_as`, `crates/container/src/host.rs` | True since job #565. It used to read `HOME` out of the daemon's environment, which reclaimed nothing the moment the task's home was not the daemon's |
+| Every delete and every signal a teardown performs escalates to the task user, the daemon-side pair a task's exit runs (`spawn_reaper`) and the boot sweep of a crashed `remove` included | `remove_all_as` / `signal_group_as` / `tree_user`, `crates/container/src/host.rs` | True since job #565. The escalation deletes and the daemon's own delete is the verdict; an unbound node is byte-identical to what it always did |
 | The daemon's own state on a Mac lives **under the login user's home** — `worker.env`, and `keys/worker.creds` / `keys/worker_git` beside it | the macOS branch of `deploy/prod/build-worker.sh` (`$NODE_HOME/chuggernaut-worker/…`); the launchd plist's `ENV_FILE` in `deploy/prod/install-worker-launchd.sh` | True. Measured 2026-08-10: the home is `0750` group `staff`, `worker.env` is `0644`, and a second uid whose **primary group is `staff`** reads it. The credentials at `0600` do not follow — the protection is the per-file mode, not the home |
 | A host task execs the agent CLI by **bare name off the `PATH` it inherits**, and that `PATH`'s CLI directory is now **node-wide** | `AgentCli::discover_on` (`crates/worker/src/agent_cli.rs`) resolves it only to advertise the capability; the `PATH` is `AGENT_PATH`, rendered **twice** — in `deploy/prod/install-worker-launchd.sh` (hand-run) and in `deploy/prod/build-worker.sh`'s own macOS plist (what the deploy reaches a node with), both now defaulting to `…:/usr/local/lib/chuggernaut/bin`, with `deploy/prod/install-worker-launchd.test.sh` comparing the two defaults whole | True since slice 8 (job #571). It used to be `…:$HOME/.local/bin`, which a second uid reached **only** through the `0750`+`staff` traversal D12 removes. **The platform half only**: placing the CLI at that path is the operator's, and it must happen before a project user leaves `staff` |
 | The cross-project secret boundary is **absent** on a Mac, accepted by job #526 | [#322](322-macos-native-runtime.md)'s 2026-08-09 correction | True today; this design is what replaces that decision |
@@ -74,10 +75,10 @@ the argument and its dated corrections, never edited
 | --- | --- | --- | --- | --- |
 | 0 | `human` — the measurements M1–M8 below, on `gumbo-air-0`, with no platform change: M1 and M2 ride an existing `mode: host` job type's own script | none | — | **Landed** (job #561). M1–M8 were **taken by job #557** on 2026-08-10 from a `mode: host` task the daemon spawned; that job merged nothing, so this row carries the number of the job that recorded it. **M1 passes** and C1 is viable; M2 and M3 changed a decision each ([the record](#correction--2026-08-10-job-561-slice-0-is-measured-m1-passes-and-the-staff-primary-group-is-load-bearing-in-two-directions)). One question is left open and is **not** closed by this row: M1 has not been taken with no console session |
 | 1 | `code` — resolve the per-project binding at boot and hand it to `HostBackend`; `launch` escalates **and hands the composed environment over as a file, not as environment** (M2); the task's `HOME` and task directory follow the task user | `HostBackend::new` signature, the host launch path (`crates/container/src/host.rs`) | 0 (M1, M2, M3) | **Landed** (job #563). `WORKER_HOST_USERS` is the node's declaration and D5's roster stays `WORKER_HOST_PROJECTS`; the environment file is the task user's own `0600` because the injected files are written **through** the escalation, which §3 assumed C1 could not reach ([the record](#correction--2026-08-12-job-563-slice-1-lands-and-the-file-modes-c1-was-argued-to-be-stuck-with-are-not-the-ones-it-got)). Inert until a node declares a binding |
-| 2 | `code` — every delete escalates: `kill`, `remove`, **and the daemon-side pair a task's exit already runs without it** — `spawn_reaper`'s `reclaim_credentials` + `reclaim_agent_cache`, and `sweep_detached` at boot; `reclaim_agent_cache` follows the **task** user's home rather than the daemon's | `ContainerBackend::kill` / `remove` on the host backend, and the reaper's teardown repeat | 1 | Proposed |
+| 2 | `code` — every delete escalates: `kill`, `remove`, **and the daemon-side pair a task's exit already runs without it** — `spawn_reaper`'s `reclaim_credentials` + `reclaim_agent_cache`, and `sweep_detached` at boot; `reclaim_agent_cache` follows the **task** user's home rather than the daemon's | `ContainerBackend::kill` / `remove` on the host backend, and the reaper's teardown repeat | 1 | **Landed** (job #565). One escalation shape for all of them, resolved out of each tree's own `meta.json` where no launch is left to ask; the escalation deletes and the daemon's own delete is the verdict, so a leak names both the path and the escalation ([the record](#correction--2026-08-12-job-565-slice-2-lands-and-the-listing-is-a-delete-too)). Inert until a node declares a binding |
 | 3 | `deploy` — `build-worker.sh` refuses a listed project whose user does not resolve on the node; `WORKER_HOST_ROOT` guidance and `deploy/prod/env.example` follow D7, including that the root is now an operator precondition on macOS | the node run spec | 1 | Proposed |
 | 4 | `docs` — a provisioning runbook (create the user, the group **as the user's primary group** per D12, the home, the `sudoers` line and **the `WORKER_HOST_ROOT` root itself**; verify; decommission; and the deletion asymmetry); `docs/reference/runbooks/worker-host-projects.md` §2 stops arguing single-tenancy as the boundary | runbook set | 3, 8 | Proposed |
-| 5 | `design` — amend [#322](322-macos-native-runtime.md)'s job #526 correction and [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)/§10 with what this replaces | design record | 1 | **Landed** (job #567). Both siblings carry the supersession and both say it is a supersession **in design**: of #526's three bounds one is replaced, one moves its enforcement site to a slice that has not landed, and one is untouched; §8's option (c) is recorded as a requirement and §10's list as the roster ([the record](#correction--2026-08-12-job-567-slice-5-the-siblings-carry-the-supersession-and-one-composition-claim-does-not-survive-the-landed-code)) |
+| 5 | `design` — amend [#322](322-macos-native-runtime.md)'s job #526 correction and [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)/§10 with what this replaces | design record | 1 | **Landed** (job #567). Both siblings carry the supersession and both say it is a supersession **in design**: of #526's three bounds one is replaced, one moves its enforcement site to slice 2 — which that amendment recorded as unlanded and which has since landed — and one is untouched; §8's option (c) is recorded as a requirement and §10's list as the roster ([the record](#correction--2026-08-12-job-567-slice-5-the-siblings-carry-the-supersession-and-one-composition-claim-does-not-survive-the-landed-code)) |
 | 6 | signing — formerly *deferred, once D8's operator input exists* | none | — | **Closed** (2026-08-10). D8 is answered and no platform work survives it; nothing smaller is left to do. [The record](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it) |
 | 7 | deferred — the cache ceiling and LRU eviction inherited from #534(b) | node cache policy | 1 | Deferred |
 | 8 | `deploy` — D12's other half: the agent CLI moves to a node-wide path and the daemon's rendered `PATH` follows it, so a project user outside `staff` can still exec it. **Must land before slice 4's provisioning**, or agent host work breaks the moment a project user stops being a member of `staff` | the node run spec — `AGENT_PATH` in **both** `deploy/prod/install-worker-launchd.sh` and `deploy/prod/build-worker.sh`'s macOS plist, plus the one-`PATH` assertion in `deploy/prod/install-worker-launchd.test.sh`, which pinned the login user's `~/.local/bin` | — | **Landed** (job #571). Both renderings tail at `/usr/local/lib/chuggernaut/bin` and neither carries a home directory, so the defaults are one string and the suite compares them whole. **The operator must place the CLI there before a project user is taken out of `staff`** ([the record](#correction--2026-08-12-job-571-slice-8-the-agent-cli-is-node-wide-and-the-move-is-an-ordering-not-just-a-path)) |
@@ -1369,3 +1370,108 @@ separates and which no slice here has been asked to amend; and
 for free* row stops being true only on a node that binds users — so it is
 correct until slice 4 lands, and amending it now would be the error this design
 keeps warning about.
+
+## Correction — 2026-08-12, job #565 (slice 2 lands, and the listing is a delete too)
+
+Appended by the job that **implemented** slice 2. D4 is unchanged and every
+surface §[7](#7-task-directories-ownership-and-every-call-site-that-changes)
+named is escalated, including the two the daemon performs with no task left to
+ask. What it corrects is three places where the body under-specified *how* a
+delete crosses the boundary, and one surface it did not name at all.
+
+### The listing is a delete too, and §7 only said the delete was
+
+§[7](#the-read-family-and-one-concrete-break) says the MCP-log sweep "must follow
+the **task** user's home, and — since it is a delete — through the escalation."
+Following that home is what makes the *listing* impossible for the daemon:
+`sweep_agent_cache` reads the cache root to match on the task directory's own
+name rather than computing the CLI's key, and that root now sits inside a home
+the daemon has no business traversing. A sweep that escalated only its deletes
+would list nothing, match nothing, and report a clean pass — which is the exact
+silence [#490](490-agent-work-on-a-mac.md) D6 exists to prevent, arriving through
+a different door. So the listing escalates too (`find … -mindepth 1 -maxdepth 1
+-print0`, NUL-separated because a subtree name is the CLI's slug of a path and
+nothing else can be ruled out of it).
+
+This is the only *read* this design escalates, and it is not a hole in D4's read
+family: `copy_file`, `find_file`, `logs` and `inspect` all read **inside the task
+directory**, which the `0770` group mode is exactly what makes reachable. This
+one reads inside the task user's **home**, where no group carries the daemon.
+
+### The escalation empties; the daemon's own delete is the verdict
+
+An escalated `rm -rf` of a task tree **cannot succeed**, and the body does not
+say so. Unlinking `host-{stamp}-{n}` from the host root needs write permission on
+that root, which is the daemon's and not the task user's — so the escalation
+deletes everything *inside* the tree and then fails on the last step. Ordering
+the two the other way round is what makes this readable rather than a permanent
+false failure: the escalation empties what the daemon cannot descend into, the
+daemon then unlinks what only it can, and **the daemon's own result is the
+verdict**. A refusal is carried into that verdict rather than discarded, so a
+real leak names both the path and the escalation that could not reach it, and an
+expected final-unlink refusal names nothing because there was no leak.
+
+The same ordering answers the agent cache, where the parent *is* the task user's
+own directory: there the escalation unlinks the entry itself and succeeds, and
+the daemon — which may not even be able to `stat` the path afterwards — is never
+asked.
+
+### A delete falls back to the daemon; a launch still does not
+
+[`HostUsers::refusal`](#the-methods-that-escalate) refuses a launch whose binding
+will not resolve rather than running it as the daemon, because that fall back
+would silently restore the shared uid this design removes. **A teardown falls
+back deliberately**, and the asymmetry is not an inconsistency: a delete the
+daemon performs can reach nothing the daemon could not already reach, so falling
+back widens no boundary — it only recovers the reclaim a node with a missing
+`sudoers` line would otherwise leak silently. `kill` falls back the same way, and
+says so at `error!` when it does.
+
+### Which teardowns are told the binding, and which resolve it
+
+`spawn_reaper`'s pair is handed the launch's own resolved user, because the
+launch that spawned it knew. `kill`, `remove` and the boot sweep resolve it out
+of the tree's **own `meta.json`** — `project`, through the node's binding — since
+the daemon that launched the task may have been replaced (spec §3.1's drain
+guarantee) or may be booting into someone else's leftovers. That is why the boot
+sweep needed no new state: `meta.json` already recorded the project, and slice 1
+already recorded the environment file in the same record's `files`, so
+[#529](529-secret-handling.md)'s rule that cleanup covers what the platform
+placed is satisfied by reclaiming what is recorded rather than by re-deriving a
+path.
+
+The daemon's own **exit-code write** still does not escalate, exactly as
+§[7](#the-daemons-own-deletes-which-no-task-is-left-to-perform) argues: it rides
+the task directory's group like the read family.
+
+### What is asserted, and what still cannot be
+
+The escalation itself has still never run — no node has the `sudoers` line
+(slice 4) and no gate host has a second uid to become — so this slice is tested
+exactly where slice 1's `write_as` is: the composition, and the pieces around it.
+`every_teardown_escalates_through_the_launchs_own_shape` asserts each script's
+argv is the launch's own `escalated` shape;
+`the_escalated_teardown_scripts_do_what_they_claim_on_this_shell` runs all three
+scripts under `/bin/sh` **without** the escalation, which is what catches the one
+form that would go silently wrong — `kill -s TERM -- -{pgid}`, measured working
+on `dash` (the gate) and `bash` (`/bin/sh` on the Mac);
+`the_mcp_log_sweep_follows_the_task_users_home_and_not_the_daemons` asserts the
+home resolution and sweeps a bound cache end to end through the fallback; and
+`a_teardown_that_cannot_delete_names_what_it_leaked` asserts the leak names the
+path and the escalation. What no test on this fleet can show is a delete
+*succeeding only because* it escalated — that needs the node slice 4 provisions,
+and it is the first thing to check there.
+
+### What the slice-5 siblings say about this slice, which was true when they said it
+
+Slice 5 (job #567) landed hours before this one and its two sibling amendments
+record slice 2 as **not landed**, in present tense, inside append-only bodies
+neither this job nor any later one rewrites:
+[#322](322-macos-native-runtime.md)'s "the daemon-side half … is #537's slice 2,
+still Proposed", and [#309](309-host-native-execution.md)'s §8 residual-risk row.
+Both are dated records of 2026-08-12 and both are correct as of the correction
+that carries them; **the slice table at the head of this document is the
+authority on what has landed**, and it is what a reader chasing either sentence
+arrives at. Nothing else in those amendments turns on the ordering — what they
+each argue about the uid boundary is unaffected, because slice 2 landing is what
+they said the boundary needed.

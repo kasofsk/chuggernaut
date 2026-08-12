@@ -222,3 +222,7 @@ Doc-reread: docs/reference/modules.md
 Doc-reread: docs/design/529-secret-handling.md
 
 Doc-reread: docs/design/537-per-project-users-macos.md
+
+Doc-reread: docs/design/537-per-project-users-macos.md
+Doc-reread: docs/implementation-notes.md
+Doc-reread: docs/reference/crates.md

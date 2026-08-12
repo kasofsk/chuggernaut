@@ -530,6 +530,74 @@ async fn a_declared_project_whose_user_does_not_resolve_refuses_rather_than_fall
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// A bound task's teardown reclaims **what the launch placed** — the tree, and
+/// the `0600` environment file design #529's cleanup rule covers — through the
+/// binding the task's own `meta.json` records, since the daemon that launched it
+/// may be gone (design #537 D4).
+///
+/// The escalation itself needs a node design #537 D9 provisioned, so what runs
+/// here is its fallback: what the daemon can still delete, it deletes, and a
+/// leak is an error rather than a silence.
+#[tokio::test]
+async fn a_bound_remove_reclaims_the_environment_file_and_the_task_tree() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp_root("users-remove");
+    let backend = HostBackend::new(
+        "w1",
+        root.join("tasks"),
+        Supervision::ProcessGroup,
+        capability(&root),
+        tenancy(),
+        HostUsers::new(BTreeMap::from([(
+            "acme/chug".to_string(),
+            ProjectUser::Bound(container::host::TaskUser {
+                name: "chug-chug".to_string(),
+                uid: 501,
+                gid: 501,
+                home: root.join("home"),
+            }),
+        )])),
+    )
+    .unwrap();
+
+    let id = "w1/host-1a2b-0".to_string();
+    let dir = task_dir(&root, &id);
+    std::fs::create_dir_all(dir.join("workspace").join("target")).unwrap();
+    std::fs::write(dir.join("workspace").join("target").join("big"), b"x").unwrap();
+    let env_file = dir.join("task.env");
+    std::fs::write(&env_file, b"export CHUG_SECRET='s3cret'\n").unwrap();
+    std::fs::set_permissions(&env_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    std::fs::write(
+        dir.join("meta.json"),
+        serde_json::json!({
+            "pid": 1,
+            "pgid": 1,
+            "start_time": null,
+            "project": "acme/chug",
+            "job": 537,
+            "task": 2,
+            "files": [env_file.display().to_string()],
+            "unit": null,
+            "scope": null,
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    backend.remove(&id).await.unwrap();
+    assert!(
+        !env_file.exists(),
+        "the environment file the launch placed is reclaimed with the rest"
+    );
+    assert!(!dir.exists(), "and so is the tree it sat in");
+    assert_eq!(
+        std::fs::read_dir(root.join("tasks")).unwrap().count(),
+        0,
+        "nothing detached is left behind either"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// A node that binds nobody — which is every node until an operator declares
 /// one — launches exactly as it did before design #537: no escalation, no
 /// environment file, and a task directory private to the daemon.
