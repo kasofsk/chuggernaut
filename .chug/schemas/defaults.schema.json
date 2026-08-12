@@ -85,6 +85,13 @@
             "null"
           ]
         },
+        "secret_files": {
+          "description": "Secrets this evaluator's container receives as **files** instead\n(design #529 S3), under the same scoping rule as `secrets:` and\ndisallowed for a human evaluator (no container).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "secrets": {
           "type": "array",
           "default": [],

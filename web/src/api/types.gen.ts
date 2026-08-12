@@ -626,6 +626,12 @@ export interface Evaluator {
    */
   required: boolean | null;
   run: string | null;
+  /**
+   * Secrets this evaluator's container receives as **files** instead
+   * (design #529 S3), under the same scoping rule as `secrets:` and
+   * disallowed for a human evaluator (no container).
+   */
+  secret_files?: string[];
   secrets: string[];
   /**
    * Staged evaluation ordering (spec §3.3): evaluators run in ascending
@@ -1363,6 +1369,14 @@ export interface WorkSpec {
    */
   run: string | null;
   /**
+   * Secrets the work container receives as **files** instead (design #529
+   * S3): each value lands at `0600` under the injected tree with
+   * `{NAME}_FILE` naming the path, and the value itself enters no
+   * environment. Scoped and disallowed exactly like `secrets:`, and
+   * inherited from nothing.
+   */
+  secret_files?: string[];
+  /**
    * Secrets injected into the work container (agent/command). Scoped here
    * because that is the only container they reach — evaluators declare
    * their own (§4.1). Disallowed for human work (no container).
@@ -1435,6 +1449,12 @@ export interface WrapUpSpec {
    * idempotent (a restart may re-launch it).
    */
   run?: string | null;
+  /**
+   * Secrets the `run` container receives as **files** instead (design #529
+   * S3), under the same scoping rule as `secrets:` and disallowed without
+   * `run`.
+   */
+  secret_files?: string[];
   /**
    * Secrets injected into the `run` container. Scoped here because that is
    * the only container they reach; not inherited from `work.secrets`.

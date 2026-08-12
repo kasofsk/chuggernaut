@@ -905,6 +905,9 @@ impl Core {
             )
             .await?,
         );
+        self.secret_file_delivery(owner, project, &evaluator.secret_files)
+            .await?
+            .merge_into(&mut env, &mut files);
         let audit = self
             .workload_delivery(&crate::workload::WorkloadLaunch {
                 owner,

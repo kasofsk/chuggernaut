@@ -152,6 +152,7 @@ pub fn approval_evaluator(resolved: &[Evaluator]) -> Option<Evaluator> {
         provider: None,
         model: None,
         secrets: Vec::new(),
+        secret_files: Vec::new(),
         workload_identities: Vec::new(),
         tools: vec![],
         required: Some(true),
@@ -239,6 +240,26 @@ resources:
         .unwrap()
     }
 
+    /// The per-job additive evaluator both fixtures below layer on, at the
+    /// stage the caller is about.
+    fn extra_ci_evaluator(stage: u32) -> Evaluator {
+        Evaluator {
+            name: "extra-ci".into(),
+            r#type: EvaluatorType::Command,
+            image: None,
+            run: Some("./ci.sh".into()),
+            prompt: None,
+            provider: None,
+            model: None,
+            secrets: vec![],
+            secret_files: vec![],
+            workload_identities: vec![],
+            tools: vec![],
+            required: None,
+            stage,
+        }
+    }
+
     fn job_with_extra_eval() -> Job {
         Job {
             id: 1,
@@ -254,20 +275,7 @@ resources:
             branch: "job/1".into(),
             base_ref: None,
             knowledge_tags: vec![],
-            eval: vec![Evaluator {
-                name: "extra-ci".into(),
-                r#type: EvaluatorType::Command,
-                image: None,
-                run: Some("./ci.sh".into()),
-                prompt: None,
-                provider: None,
-                model: None,
-                secrets: vec![],
-                workload_identities: vec![],
-                tools: vec![],
-                required: None,
-                stage: 0,
-            }],
+            eval: vec![extra_ci_evaluator(0)],
             require_approval: false,
             timeout: None,
             model: None,
@@ -404,20 +412,7 @@ resources:
         assert_eq!(resolved.eval[0].stage, 0);
 
         let mut job = approving_job();
-        job.eval = vec![Evaluator {
-            name: "extra-ci".into(),
-            r#type: EvaluatorType::Command,
-            image: None,
-            run: Some("./ci.sh".into()),
-            prompt: None,
-            provider: None,
-            model: None,
-            secrets: vec![],
-            workload_identities: vec![],
-            tools: vec![],
-            required: None,
-            stage: 7,
-        }];
+        job.eval = vec![extra_ci_evaluator(7)];
         let resolved = with_job_evaluators(staged_type(&[0]), &job).unwrap();
         let gate = resolved
             .eval

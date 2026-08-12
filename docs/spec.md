@@ -125,6 +125,7 @@ work:                          # required
 
   # type: agent or command
   secrets: [string]            # optional; injected into the work container only — scoped here because that is the only container top-level-declared secrets ever reached; evaluators declare their own. Disallowed for human work (no container).
+  secret_files: [string]       # optional; the same, delivered as FILES instead: each value lands at 0600 under the injected tree and {NAME}_FILE names the path, with the value in no env var (§8.2, design #529 S3). Scoped and disallowed exactly like secrets:, inherited from nothing, and a name may not appear in both lists. CONTAINER MODE ONLY — disallowed on a level resolving to runtime.mode: host, because {NAME}_FILE carries a wire path (§4.1, §8.2). A non-empty list requires min_dispatcher >= the secret-files epoch (§14.2)
   workload_identities: [string] # optional; cloud identities (§8.3) the work container may exchange a workload token for, each naming a cloud-identities.{owner}.{project}.{name} record. Scoped like secrets: and inherited from nothing; never a secret, so it can never ride the reserved global/agents grant (§8.2). A non-empty list requires min_dispatcher >= the workload-identity epoch (§14.2). Disallowed for human work (no container)
   tools: [AgentTool]           # optional; AGENT WORK ONLY. Extra agent tools added to the run's Work profile (§4.3): Task, Workflow. Additive only — the role's deny still applies, and the set is closed, so Bash/Edit/Write are not expressible. A non-empty list requires min_dispatcher >= the tools epoch (§14.2)
 
@@ -145,6 +146,7 @@ wrap_up:                       # optional; the job's third step (work → evalua
   name: string                 # optional; human-facing label for the wrap-up task, validated like an evaluator name ([A-Za-z0-9._-]+). Unset → derived from the mode: a command wrap-up takes its script's basename (.chug/tasks/web-publish.sh → web-publish). Stamped onto the task record's `label` so the UI reads `Command · publish`, not a bare `Command`
   image: string                # optional; image for the run container; falls back to top-level image (required when run is set and the job type has no top-level image, in container mode only — under runtime.mode: host a wrap-up with no image of its own is a host task and needs none). Disallowed without run
   secrets: [string]            # optional; secrets injected into the run container; not inherited from work.secrets. Disallowed without run
+  secret_files: [string]       # optional; the file form of the same (§8.2, design #529 S3); not inherited from work.secret_files. Container mode only, as above. Disallowed without run
   workload_identities: [string] # optional; cloud identities (§8.3) the run container may exchange a workload token for; not inherited from work.workload_identities. Disallowed without run
 
 job_deadline: duration         # optional; wall-clock limit on entire job (all retries + rework); clock starts when job first enters Ready; applies to all work types
@@ -166,6 +168,7 @@ eval:                          # optional; omit or leave empty for auto-pass
     # type: command or agent
     image: string              # optional; falls back to top-level image; one of the two is required in container mode — not under runtime.mode: host, where an evaluator with no image of its own is a host task (see note 2)
     secrets: [string]          # evaluator-specific secrets; not inherited from top-level
+    secret_files: [string]     # evaluator-specific secrets in the file form (§8.2, design #529 S3); not inherited from top-level. Container mode only, as above — an evaluator declaring its own image is a container task under mode: host and may declare it. Disallowed for a human evaluator (no container)
     workload_identities: [string] # evaluator-specific cloud identities (§8.3); not inherited from work.workload_identities. Disallowed for a human evaluator (no container)
     tools: [AgentTool]         # AGENT EVALUATORS ONLY; not inherited from work.tools. The same closed, additive set as above
 
@@ -221,6 +224,7 @@ inputs:                        # optional; the values a job of this type accepts
 | `provider` | disallowed | optional | disallowed |
 | `model` | disallowed | optional | disallowed |
 | `secrets` | optional | optional | disallowed |
+| `secret_files` | optional | optional | disallowed |
 | `workload_identities` | optional | optional | disallowed |
 | `tools` | disallowed | optional | disallowed |
 | `required` | optional | optional | optional |
@@ -900,7 +904,7 @@ Static configuration (fail-fast check against current HEAD of default branch):
 - For `work.type: agent` jobs with a `review` block: `work.review.prompt` path exists; the resolved review provider (`work.review.provider`, defaulting to the resolved work provider) is `claude` — inline review is not supported for other providers in v1
 - If `.chug/jobs/_defaults.yaml` exists: it parses against the evaluator schema, and no default evaluator name collides with an evaluator declared in any job type being validated
 - For each agent or human evaluator (including project defaults): the evaluator's `prompt` path exists
-- Every secret named in `secrets:` (`work.secrets` and per-evaluator) has an entry in the `secrets.*` KV bucket
+- Every secret named in `secrets:` or `secret_files:` (`work` and per-evaluator, both forms judged identically) has an entry in the `secrets.*` KV bucket
 - Every var named in `vars:` has an entry in the `vars.*` KV bucket
 - Every cloud identity named in `workload_identities:` (`work`, `wrap_up` and per-evaluator) has an entry in the `cloud-identities.*` KV bucket, reported per name as `cloud identity '{name}' is not set` — a misdeclared identity fails here rather than at token exchange inside the container
 - No declared secret or var name uses a reserved prefix — `CHUG_` (§5.3) or `JOB_` (§4.1), reported as `{noun} '{name}' uses the reserved '{prefix}' prefix ({why})`
@@ -1343,6 +1347,7 @@ NATS_TOKEN      <work-scoped JWT — see §7.4>
 CHUG_TASK_ID    43              # originating task id, stamped onto channel posts (§6.3)
 CHUG_PHASE      Work            # originating task phase, stamped onto channel posts (§6.3)
 # secrets (decrypted from age-encrypted NATS KV; named as declared in work.secrets:)
+# secrets declared in work.secret_files: instead appear ONLY as {NAME}_FILE, holding /chuggernaut/secrets/{NAME} — the value is on disk at 0600 and in no variable (§8.2). Container launches only: that value is a wire path, which the fourth surface below refuses in any other variable
 # platform agent credentials (agent containers only): the secrets in the reserved global/agents scope whose NAMES the platform's provider-credential set holds — CLAUDE_CODE_OAUTH_TOKEN and ANTHROPIC_API_KEY — env-named by the secret; declared secrets win on collision. Every other name under that scope is declined by name and injected nowhere (design #529 S1b). EXCEPT the provider's OAuth credential, which a container launch delivers on an inherited file descriptor instead of an env name (§4.3)
 GITHUB_TOKEN    ...
 # vars (from NATS KV; named as declared in top-level vars:) — CHUG_* and JOB_* names are reserved (§5.3, §4.1) and skipped
@@ -1368,6 +1373,7 @@ CHUG_TASK_ID    43              # originating task id, stamped onto channel post
 CHUG_PHASE      Evaluation      # originating task phase, stamped onto channel posts (§6.3)
 CHUG_EVALUATOR  review          # evaluator name, stamped onto channel posts (§6.3)
 # secrets (only those declared in the evaluator's own secrets: field)
+# and its own secret_files: field, as {NAME}_FILE paths (§8.2, container launches only) — neither list is inherited from work
 # vars (from NATS KV; named as declared in top-level vars:) — CHUG_* and JOB_* names are reserved (§5.3, §4.1) and skipped
 RUST_EDITION    2021
 # inputs (from Job.inputs) — evaluators receive them too, see below
@@ -2226,7 +2232,7 @@ pub trait SecretStore: Send + Sync {
 }
 ```
 
-`list` returns names only — values are never returned to callers outside the dispatcher. The dispatcher decrypts values at job launch and injects them as env vars — with one exception, the provider's OAuth credential in an agent container, which §4.3 delivers on an inherited descriptor instead. Containers never see the age key or the KV bucket. If any declared secret is missing at launch, the job parks: `Stalled` on a first launch (a pre-Work park, §575) and `Escalated` on a rework re-entry.
+`list` returns names only — values are never returned to callers outside the dispatcher. The dispatcher decrypts values at job launch and delivers them in one of **two forms**, declared per level (§1.1). **`secrets:` is the default and unchanged**: the value is injected as an env var named by the secret — with one exception, the provider's OAuth credential in an agent container, which §4.3 delivers on an inherited descriptor instead. **`secret_files:` delivers the value as a file** (design [#529](design/529-secret-handling.md) S3): the value is written at `0600` under the launch's injected tree as `/chuggernaut/secrets/{NAME}`, and only `{NAME}_FILE` — the path — enters the environment, so the value is absent from the container's `environ` and from `docker inspect`. The `{NAME}_FILE` spelling is the one a task script already prefers where both are possible (`.chug/tasks/deploy.sh`). Within one uid this is **not a boundary** — the task owns the file and reads it at will — and what it buys is that the value is not in a process image the kernel keeps serving for the process's whole life. The file rides the same injected tree as the SSH credential, so it is deleted at teardown by the mechanism §3.1 already guarantees, and it needs no cleanup of its own. **Container launches only.** `{NAME}_FILE` holds a wire path, and §4.1's fourth surface refuses a host launch carrying one in any variable outside the fixed set it names, so a level resolving to `runtime.mode: host` (§1.1) is refused the declaration at release validation (§2.2) rather than at launch — `secrets:` is what a host task gets today, and design [#309](design/309-host-native-execution.md) §8 owns the question of what a host-side file form would need. A level whose own `image` puts it back in a container under `mode: host` may declare it. A name may be declared in only one of the two lists at a level, and a non-empty `secret_files:` requires `min_dispatcher >=` the secret-files epoch (§14.2), because the level blocks reject unknown fields and an older dispatcher must refuse the config rather than deliver the secret by the env the declaration exists to avoid. Containers never see the age key or the KV bucket. If any declared secret is missing at launch, the job parks: `Stalled` on a first launch (a pre-Work park, §575) and `Escalated` on a rework re-entry.
 
 Key rotation requires re-encrypting all values with the new public key — a one-time admin operation exposed as a platform CLI command.
 
@@ -2640,13 +2646,17 @@ against the image's toolchain instead of as declared. A non-empty
 *inside* a nested block, so an N-1 dispatcher does not tolerate it at all — it
 rejects the whole config and parks every job of the type, which is the correct
 failure and exactly why the declaration must be authored with the epoch. A
-non-empty `tools:` grant (§1.1, §4.3) is gated for that same nested-block reason.
+non-empty `tools:` grant (§1.1, §4.3) is gated for that same nested-block reason,
+as is a non-empty `secret_files:` (§1.1, §8.2) — and there the park is not merely
+the correct failure but the necessary one, since a dispatcher that dropped the
+field would deliver the secret by the env the declaration exists to avoid.
 The rule exists because `min_dispatcher` is the one field an
 N-1 dispatcher **does** parse — it cannot see `inputs:` or `runtime:` at all, so
 without the declaration it would accept the config and run the job
 unparameterized. Each feature freezes its own constant at the epoch it shipped
 (`types::version::INPUTS_SCHEMA_EPOCH`, `SCHEDULE_INPUTS_SCHEMA_EPOCH`,
-`RUNTIME_SCHEMA_EPOCH`, `WORKLOAD_IDENTITY_SCHEMA_EPOCH`, `TOOLS_SCHEMA_EPOCH`), so a later bump for an unrelated feature never
+`RUNTIME_SCHEMA_EPOCH`, `WORKLOAD_IDENTITY_SCHEMA_EPOCH`, `TOOLS_SCHEMA_EPOCH`,
+`SECRET_FILES_SCHEMA_EPOCH`), so a later bump for an unrelated feature never
 retroactively raises what an existing config must declare — and those constants,
 not `CONFIG_SCHEMA_EPOCH`, are where a reader finds which epoch bought what.
 

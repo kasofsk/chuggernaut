@@ -142,6 +142,13 @@ pub struct WorkSpec {
     /// their own (§4.1). Disallowed for human work (no container).
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Secrets the work container receives as **files** instead (design #529
+    /// S3): each value lands at `0600` under the injected tree with
+    /// `{NAME}_FILE` naming the path, and the value itself enters no
+    /// environment. Scoped and disallowed exactly like `secrets:`, and
+    /// inherited from nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_files: Vec<String>,
     /// Cloud identities (design #313 A5) the work container may exchange a
     /// workload token for, each naming a `cloud-identities.*` record. Scoped
     /// here because that is the only container they reach; not inherited from
@@ -243,6 +250,11 @@ pub struct WrapUpSpec {
     /// the only container they reach; not inherited from `work.secrets`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secrets: Vec<String>,
+    /// Secrets the `run` container receives as **files** instead (design #529
+    /// S3), under the same scoping rule as `secrets:` and disallowed without
+    /// `run`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_files: Vec<String>,
     /// Cloud identities (design #313 A5) the `run` container may exchange a
     /// workload token for. The only container they reach; not inherited from
     /// `work.workload_identities`, and disallowed without `run`.
@@ -299,6 +311,19 @@ fn is_ascii_dashed_name(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// The suffix a file-delivered secret's pointer variable carries (design #529
+/// S3, correction 5): the spelling `.chug/tasks/deploy.sh` was already written
+/// against, rather than a second convention beside it.
+pub const SECRET_FILE_ENV_SUFFIX: &str = "_FILE";
+
+/// The environment variable naming a file-delivered secret's path — the value
+/// itself is delivered nowhere in the environment (spec §8.2). One spelling, so
+/// validation and the launch cannot disagree about what a declaration produces.
+#[must_use]
+pub fn secret_file_env_name(secret: &str) -> String {
+    format!("{secret}{SECRET_FILE_ENV_SUFFIX}")
 }
 
 /// Wrap-up mode after eval-pass (docs/reference/design-lifecycle.md).
@@ -518,6 +543,11 @@ pub struct Evaluator {
     pub model: Option<String>,
     #[serde(default)]
     pub secrets: Vec<String>,
+    /// Secrets this evaluator's container receives as **files** instead
+    /// (design #529 S3), under the same scoping rule as `secrets:` and
+    /// disallowed for a human evaluator (no container).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_files: Vec<String>,
     /// Cloud identities (design #313 A5) this evaluator's container may
     /// exchange a workload token for. The only container they reach; not
     /// inherited from `work.workload_identities`, and disallowed for a human
@@ -651,6 +681,7 @@ impl JobType {
                     (self.resources.is_some(), "resources"),
                     (self.work_retries.is_some(), "work_retries"),
                     (!self.work.secrets.is_empty(), "work.secrets"),
+                    (!self.work.secret_files.is_empty(), "work.secret_files"),
                     (
                         !self.work.workload_identities.is_empty(),
                         "work.workload_identities",
@@ -720,6 +751,7 @@ impl JobType {
                         (e.provider.is_some(), "provider"),
                         (e.model.is_some(), "model"),
                         (!e.secrets.is_empty(), "secrets"),
+                        (!e.secret_files.is_empty(), "secret_files"),
                         (!e.workload_identities.is_empty(), "workload_identities"),
                     ] {
                         if present {
@@ -805,6 +837,7 @@ impl JobType {
             for (present, field) in [
                 (wrap.image.is_some(), "wrap_up.image"),
                 (!wrap.secrets.is_empty(), "wrap_up.secrets"),
+                (!wrap.secret_files.is_empty(), "wrap_up.secret_files"),
                 (
                     !wrap.workload_identities.is_empty(),
                     "wrap_up.workload_identities",
@@ -833,6 +866,58 @@ impl JobType {
         errs.extend(self.validate_inputs());
         errs.extend(self.validate_workload_identities());
         errs.extend(self.validate_tools());
+        errs.extend(self.validate_secret_files());
+        errs
+    }
+
+    /// The `secret_files:` declaration rules (spec §1.1, §8.2; design #529 S3):
+    /// a level delivers a secret one way, never both, only into a container,
+    /// and any non-empty declaration requires the skew gate. A job type
+    /// declaring none produces no errors here, so it validates exactly as it
+    /// did before the feature existed.
+    fn validate_secret_files(&self) -> Vec<FieldRuleError> {
+        let mut errs = Vec::new();
+        let job_ctx = format!("job type '{}'", self.name);
+        let mut declared = vec![
+            SecretFilesLevel {
+                field: "work.secret_files",
+                context: job_ctx.clone(),
+                mode: self.level_mode(Level::Work),
+                files: &self.work.secret_files,
+                env_delivered: &self.work.secrets,
+            },
+            SecretFilesLevel {
+                field: "wrap_up.secret_files",
+                context: job_ctx,
+                mode: self.level_mode(Level::WrapUp),
+                files: &self.wrap_up.secret_files,
+                env_delivered: &self.wrap_up.secrets,
+            },
+        ];
+        for e in &self.eval {
+            declared.push(SecretFilesLevel {
+                field: "eval.secret_files",
+                context: format!("evaluator '{}'", e.name),
+                mode: self.level_mode(Level::Eval(e)),
+                files: &e.secret_files,
+                env_delivered: &e.secrets,
+            });
+        }
+        declared.retain(|level| !level.files.is_empty());
+        for level in &declared {
+            errs.extend(level.validate());
+        }
+        if !declared.is_empty()
+            && self.min_dispatcher.unwrap_or(0) < crate::version::SECRET_FILES_SCHEMA_EPOCH
+        {
+            errs.push(FieldRuleError::Required {
+                field: "min_dispatcher",
+                context: format!(
+                    "a job type declaring 'secret_files:' (needs min_dispatcher >= {})",
+                    crate::version::SECRET_FILES_SCHEMA_EPOCH
+                ),
+            });
+        }
         errs
     }
 
@@ -1184,6 +1269,17 @@ impl JobType {
             .flatten()
     }
 
+    /// The secrets a level receives as files (design #529 S3), read off the
+    /// level rather than passed in, so a queued relaunch and a fresh launch
+    /// resolve the same declaration.
+    pub fn level_secret_files<'a>(&'a self, level: Level<'a>) -> &'a [String] {
+        match level {
+            Level::Work => &self.work.secret_files,
+            Level::Eval(evaluator) => &evaluator.secret_files,
+            Level::WrapUp => &self.wrap_up.secret_files,
+        }
+    }
+
     /// The `image` a level declares for itself, ignoring the top-level
     /// fallback: the work task's image *is* the top-level one, so work declares
     /// none of its own.
@@ -1256,6 +1352,67 @@ impl JobType {
             }
         }
         Ok(merged)
+    }
+}
+
+/// One level's file-delivery declaration as validation reads it (design #529
+/// S3): where it was written, which backend it resolves to, and the two lists
+/// whose overlap decides how a name is delivered.
+struct SecretFilesLevel<'a> {
+    field: &'static str,
+    context: String,
+    mode: RuntimeMode,
+    files: &'a [String],
+    env_delivered: &'a [String],
+}
+
+impl SecretFilesLevel<'_> {
+    /// This level's rules: file delivery is **container mode only**, and a name
+    /// is delivered one way rather than resolved by injection order.
+    ///
+    /// The mode rule is not a policy choice — `{NAME}_FILE` holds a wire path,
+    /// and a host launch refuses a wire path in any variable outside the fixed
+    /// set spec §4.1 names (design #322 §2, `crates/container/src/host.rs`), so
+    /// the declaration is refused at release with its own reason rather than at
+    /// launch with that one.
+    fn validate(&self) -> Vec<FieldRuleError> {
+        let mut errs = Vec::new();
+        if self.mode != RuntimeMode::Container {
+            errs.push(FieldRuleError::Invalid {
+                field: self.field,
+                context: self.context.clone(),
+                reason: format!(
+                    "file delivery is container mode only, and this level resolves to \
+                     'runtime.mode: {}' — a host launch refuses the wire path '{{NAME}}_FILE' \
+                     carries (spec §4.1); declare 'secrets:' here instead",
+                    self.mode.as_str()
+                ),
+            });
+        }
+        for name in self.files {
+            let pointer = secret_file_env_name(name);
+            if self.env_delivered.contains(name) {
+                errs.push(FieldRuleError::Invalid {
+                    field: self.field,
+                    context: self.context.clone(),
+                    reason: format!(
+                        "{name:?} is declared for both env and file delivery; a level \
+                         delivers a secret one way"
+                    ),
+                });
+            }
+            if self.env_delivered.contains(&pointer) || self.files.contains(&pointer) {
+                errs.push(FieldRuleError::Invalid {
+                    field: self.field,
+                    context: self.context.clone(),
+                    reason: format!(
+                        "{name:?} is delivered as {pointer}, which the same level also \
+                         declares as a secret"
+                    ),
+                });
+            }
+        }
+        errs
     }
 }
 
@@ -3119,6 +3276,243 @@ rework_budget: 1
             assert!(
                 merged.eval.iter().any(|e| e.name == "ci"),
                 "{name}.yaml should inherit the project ci default"
+            );
+        }
+    }
+
+    fn jt_with_secret_files(block: &str) -> JobType {
+        JobType::parse(&format!(
+            "name: b\nimage: i:l\nmin_dispatcher: {}\n{block}",
+            crate::version::SECRET_FILES_SCHEMA_EPOCH
+        ))
+        .expect("parses")
+    }
+
+    /// Design #529 S3: file delivery is declared per level exactly as `secrets:`
+    /// is, and inherited by nothing — the property the env form already has and
+    /// this one must not weaken.
+    #[test]
+    fn secret_files_are_scoped_per_level_and_never_inherited() {
+        let jt = jt_with_secret_files(
+            "work:\n  type: command\n  run: ./build.sh\n  secret_files: [WORK_KEY]\n\
+             wrap_up:\n  run: ./publish.sh\n  secret_files: [PUBLISH_KEY]\n\
+             eval:\n  - name: digest\n    type: command\n    run: ./digest.sh\n    \
+             secret_files: [DIGEST_KEY]\n  \
+             - name: lint\n    type: command\n    run: ./lint.sh\n",
+        );
+        assert_eq!(jt.validate(), vec![]);
+        assert_eq!(jt.work.secret_files, vec!["WORK_KEY"]);
+        assert_eq!(jt.wrap_up.secret_files, vec!["PUBLISH_KEY"]);
+        assert_eq!(jt.eval[0].secret_files, vec!["DIGEST_KEY"]);
+        assert_eq!(jt.eval[1].secret_files, Vec::<String>::new());
+        assert_eq!(
+            jt.level_secret_files(Level::Eval(&jt.eval[0])),
+            ["DIGEST_KEY"]
+        );
+        assert!(jt.level_secret_files(Level::Eval(&jt.eval[1])).is_empty());
+    }
+
+    /// The skew gate (spec §14.2): the nested blocks carry
+    /// `deny_unknown_fields`, so a dispatcher that cannot see the field rejects
+    /// the whole config rather than delivering the secret by the env the
+    /// declaration exists to avoid.
+    #[test]
+    fn non_empty_secret_files_require_the_min_dispatcher_declaration() {
+        let expected = FieldRuleError::Required {
+            field: "min_dispatcher",
+            context: format!(
+                "a job type declaring 'secret_files:' (needs min_dispatcher >= {})",
+                crate::version::SECRET_FILES_SCHEMA_EPOCH
+            ),
+        };
+        for block in [
+            "work:\n  type: command\n  run: ./b.sh\n  secret_files: [K]\n",
+            "work:\n  type: command\n  run: ./b.sh\n\
+             eval:\n  - name: d\n    type: command\n    run: ./d.sh\n    secret_files: [K]\n",
+            "work:\n  type: command\n  run: ./b.sh\n\
+             wrap_up:\n  run: ./p.sh\n  secret_files: [K]\n",
+        ] {
+            let ungated = JobType::parse(&format!("name: b\nimage: i:l\n{block}")).unwrap();
+            assert!(ungated.validate().contains(&expected), "{block}");
+            let short = JobType::parse(&format!(
+                "name: b\nimage: i:l\nmin_dispatcher: {}\n{block}",
+                crate::version::SECRET_FILES_SCHEMA_EPOCH - 1
+            ))
+            .unwrap();
+            assert!(short.validate().contains(&expected), "{block}");
+            assert_eq!(jt_with_secret_files(block).validate(), vec![], "{block}");
+        }
+    }
+
+    /// A config using the new field against an older dispatcher must be refused,
+    /// not ignored: the blocks deny unknown fields, so the parse an N-1 binary
+    /// runs is this one.
+    #[test]
+    fn a_dispatcher_that_cannot_see_the_field_refuses_the_config() {
+        for block in [
+            "work:\n  type: command\n  run: ./b.sh\n  secret_file: [K]\n",
+            "work:\n  type: command\n  run: ./b.sh\n\
+             eval:\n  - name: d\n    type: command\n    run: ./d.sh\n    secretfiles: [K]\n",
+            "work:\n  type: command\n  run: ./b.sh\n\
+             wrap_up:\n  run: ./p.sh\n  Secret_files: [K]\n",
+        ] {
+            let err = JobType::parse(&format!("name: b\nimage: i:l\n{block}"))
+                .expect_err("an unknown key inside a nested block must fail parsing");
+            assert!(err.to_string().contains("unknown field"), "{err}");
+        }
+    }
+
+    /// One delivery per secret per level: the same name on both lists, or a
+    /// name whose `{NAME}_FILE` pointer the level also declares, is refused
+    /// rather than resolved by injection order.
+    #[test]
+    fn a_secret_is_delivered_one_way_per_level() {
+        let both = jt_with_secret_files(
+            "work:\n  type: command\n  run: ./b.sh\n  secrets: [K]\n  secret_files: [K]\n",
+        );
+        assert!(
+            both.validate().iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "work.secret_files",
+                    reason,
+                    ..
+                } if reason.contains("both env and file delivery")
+            )),
+            "{:?}",
+            both.validate()
+        );
+        let shadowed = jt_with_secret_files(
+            "work:\n  type: command\n  run: ./b.sh\n  secrets: [K_FILE]\n  secret_files: [K]\n",
+        );
+        assert!(
+            shadowed.validate().iter().any(|e| matches!(
+                e,
+                FieldRuleError::Invalid {
+                    field: "work.secret_files",
+                    reason,
+                    ..
+                } if reason.contains("K_FILE")
+            )),
+            "{:?}",
+            shadowed.validate()
+        );
+    }
+
+    /// A host launch refuses a wire path in any variable but the fixed set
+    /// spec §4.1 names, and `{NAME}_FILE` holds one — so a level resolving to
+    /// `runtime.mode: host` is refused at release rather than at launch, while
+    /// a level whose own `image` puts it back in a container is not.
+    #[test]
+    fn file_delivery_is_refused_on_a_level_that_resolves_to_host_mode() {
+        let host = |block: &str| {
+            JobType::parse(&format!(
+                "name: b\nmin_dispatcher: {}\nruntime:\n  mode: host\n  env: \"xcode:26.5\"\n\
+                 {block}",
+                crate::version::SECRET_FILES_SCHEMA_EPOCH
+            ))
+            .expect("parses")
+        };
+        for (block, field) in [
+            (
+                "work:\n  type: command\n  run: ./b.sh\n  secret_files: [K]\n",
+                "work.secret_files",
+            ),
+            (
+                "work:\n  type: command\n  run: ./b.sh\n\
+                 eval:\n  - name: d\n    type: command\n    run: ./d.sh\n    secret_files: [K]\n",
+                "eval.secret_files",
+            ),
+            (
+                "work:\n  type: command\n  run: ./b.sh\n\
+                 wrap_up:\n  run: ./p.sh\n  secret_files: [K]\n",
+                "wrap_up.secret_files",
+            ),
+        ] {
+            let jt = host(block);
+            assert!(
+                jt.validate().iter().any(|e| matches!(
+                    e,
+                    FieldRuleError::Invalid { field: f, reason, .. }
+                        if *f == field && reason.contains("container mode only")
+                )),
+                "{block}: {:?}",
+                jt.validate()
+            );
+        }
+
+        let container_evaluator = host(
+            "work:\n  type: command\n  run: ./b.sh\n\
+             eval:\n  - name: d\n    type: command\n    image: i:l\n    run: ./d.sh\n    \
+             secret_files: [K]\n",
+        );
+        assert_eq!(
+            container_evaluator.validate(),
+            vec![],
+            "an evaluator with its own image is a container task (design #309 P1)"
+        );
+    }
+
+    /// A container that does not exist cannot be handed a file either: human
+    /// work, a human evaluator and a wrap-up with no `run` refuse the
+    /// declaration exactly as they refuse `secrets:`.
+    #[test]
+    fn secret_files_need_a_container_to_deliver_into() {
+        for (block, field) in [
+            (
+                "work:\n  type: human\n  prompt: p.md\n  secret_files: [K]\n",
+                "work.secret_files",
+            ),
+            (
+                "work:\n  type: command\n  run: ./b.sh\n\
+                 eval:\n  - name: d\n    type: human\n    prompt: p.md\n    secret_files: [K]\n",
+                "secret_files",
+            ),
+            (
+                "work:\n  type: command\n  run: ./b.sh\n\
+                 wrap_up:\n  secret_files: [K]\n",
+                "wrap_up.secret_files",
+            ),
+        ] {
+            let jt = JobType::parse(&format!(
+                "name: b\nimage: i:l\nmin_dispatcher: {}\n{block}",
+                crate::version::SECRET_FILES_SCHEMA_EPOCH
+            ))
+            .expect("parses");
+            assert!(
+                jt.validate().iter().any(
+                    |e| matches!(e, FieldRuleError::Disallowed { field: f, .. } if *f == field)
+                ),
+                "{block}: {:?}",
+                jt.validate()
+            );
+        }
+    }
+
+    /// The epoch buys a form nothing has adopted yet: every shipped job type
+    /// parses, validates and serializes exactly as it did, because an
+    /// undeclared `secret_files:` never reaches the wire.
+    #[test]
+    fn no_shipped_job_type_declares_file_delivery() {
+        let defaults =
+            ProjectDefaults::parse(include_str!("../../../.chug/jobs/_defaults.yaml")).unwrap();
+        for yaml in REPO_JOB_TYPES {
+            let jt = JobType::parse(yaml)
+                .unwrap()
+                .with_defaults(&defaults)
+                .unwrap();
+            assert_eq!(jt.validate(), vec![], "{}: field rules", jt.name);
+            assert!(
+                jt.work.secret_files.is_empty()
+                    && jt.wrap_up.secret_files.is_empty()
+                    && jt.eval.iter().all(|e| e.secret_files.is_empty()),
+                "{}: adopting the form is a separate act",
+                jt.name
+            );
+            assert!(
+                !serde_yaml::to_string(&jt).unwrap().contains("secret_files"),
+                "{}: an undeclared secret_files must not appear on the wire",
+                jt.name
             );
         }
     }

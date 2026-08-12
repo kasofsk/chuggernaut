@@ -103,7 +103,7 @@ export const wireSamples = {
     placement_policy: "busyness",
     repo_url_base: "ssh://git@chug.example",
     repos_root: "/var/lib/chuggernaut/repos",
-    schema_epoch: 6,
+    schema_epoch: 7,
     secrets_encryption: true,
     triage_image: "chuggernaut/agent-claude:latest",
   } satisfies DispatcherConfigSnapshot,

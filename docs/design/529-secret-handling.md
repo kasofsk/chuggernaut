@@ -8,7 +8,15 @@ descriptor rather than in its environment, and the kernel property that window
 rests on is asserted at every launch — though M6's scope read was wrong on every
 launch until job #554 corrected it, which the first canary after the deploy is
 what surfaced. M7 has since measured the host path (job #549) and S2 has not been
-extended to it. Everything else below is proposed.
+extended to it. **S3 has landed** (job #569): a per-level `secret_files:`
+declaration delivers a project secret as a `0600` file with `{NAME}_FILE` naming
+the path, at `CONFIG_SCHEMA_EPOCH` 7 — the epoch this design said it would cost.
+It is **container mode only** — that path is a wire path, and a host launch
+refuses one outside the variables spec §4.1 fixes — so a host level is refused
+the declaration at release validation, and design
+[#309](309-host-native-execution.md) §8 still owns the host-side question.
+Nothing has adopted the form; adopting it is a separate act. Everything else
+below is proposed.
 
 Written against the tree at `927067b` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a
@@ -75,11 +83,11 @@ the argument and its dated corrections, never edited
 | A credential in the agent CLI's *memory* is out of the task's reach | Yama `ptrace_scope`, the node's kernel; `credential_ptrace_assertion`, `crates/agent/src/claude.rs` | **True today, and not by this platform's doing — now asserted rather than assumed** (M6, job #547, [corrected in job #554](#correction--2026-08-10-job-554-m6s-scope-read-a-sysctl-file-answers-once-and-reads-status-is-not-a-verdict-on-what-it-read)). Every agent launch reads both properties in the container's own view and prints the verdict; it never refuses |
 | …and the same holds on a **host** node, by a mechanism the run did not separate | `task_for_pid`, macOS code-signing and entitlements | **True, measured, and asserted nowhere** (M7, job #549). Unsigned code got no task port; that this holds whatever its relation to the target is macOS's documented gating rather than M7's result, whose control went unreported. The launch-time assertion above reads `/proc` and so cannot see this property either way. Entitled system tools on the node are the open half (M9) |
 | Credential-bearing payloads are kept out of argv | `claude_invocation`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Landed**, with a test asserting it |
-| The same reasoning is applied to the env | `credential_delivery`, `crates/agent/src/claude.rs` | **For the provider credential, yes** (S2). Declared `work.secrets` and project `vars` are still env-delivered — that is S3 |
+| The same reasoning is applied to the env | `credential_delivery`, `crates/agent/src/claude.rs` | **For the provider credential, yes** (S2), and **for a declared project secret, now optionally** (S3, job #569): a level listing a name under `secret_files:` gets a `0600` file and a `{NAME}_FILE` path instead, on a container launch. Env stays the default and no job type has adopted the form; project `vars` are env-only and stay so |
 | Injected files are deleted at teardown | `remove` / `reclaim_credentials`, [`crates/container/src/host.rs`](../../crates/container/src/host.rs); `docs/spec.md` §3.1 | **Landed**, on both backends |
 | Any artifact is redacted, ever | [`crates/store/src/artifacts.rs`](../../crates/store/src/artifacts.rs) | **No.** Zero redaction anywhere in the tree |
 | File delivery has plumbing | `InjectedFile`, [`crates/container/src/lib.rs`](../../crates/container/src/lib.rs) | **Landed** — used by SSH and by #313 |
-| File delivery has a *declaration* | [`crates/types/src/job_type.rs`](../../crates/types/src/job_type.rs) | **No.** That is S3, and it costs an epoch |
+| File delivery has a *declaration* | `secret_files:`, [`crates/types/src/job_type.rs`](../../crates/types/src/job_type.rs) | **Landed** (S3, job #569) at epoch 7 — per level, never inherited, container mode only, and adopted by no job type yet |
 
 **The declarative core is done and this design does not touch it.** What is left
 is four edges: one blanket grant that is wider than its purpose, one credential
@@ -186,7 +194,7 @@ that no cleanup path reaches.
 | **M6** | Assert `ptrace_scope` (and the absence of `CAP_SYS_PTRACE`) at launch instead of assuming it — the host-kernel property S2's window rests on (M1d) | **Landed** (job #547) — reported at every agent launch, never enforced; the fleet-policy half stays open. The scope half misreported `unknown` on every launch until job #554; [the correction](#correction--2026-08-10-job-554-m6s-scope-read-a-sysctl-file-answers-once-and-reads-status-is-not-a-verdict-on-what-it-read) |
 | **M7** | Measure M1c/M1d's equivalents on the **host** node path, where there is no `/proc` and `task_for_pid` governs | **Measured** (job #549) — both carry over, the memory half by a mechanism the run did not separate; S2 is **not** extended to the host path here. [The record](#measured--2026-08-10-job-549-m7-the-host-paths-equivalents--env-readable-task_for_pid-denied-and-why-sample-proves-nothing) |
 | **M9** | Measure whether a task's own code can drive an **entitled** system tool on a host node (`sample`, `vmmap`, `lldb` with a session that can authorize it) to extract a credential its own `task_for_pid` cannot | Proposed — the half M7 leaves open; it bounds how much D3's window is worth on a host node |
-| **S3** | A per-level file-delivery declaration for project secrets, over the existing `InjectedFile` plumbing, using the `{NAME}_FILE` convention `.chug/tasks/deploy.sh` already anticipates | Proposed — **costs an epoch bump**, moves *reach* |
+| **S3** | A per-level file-delivery declaration for project secrets, over the existing `InjectedFile` plumbing, using the `{NAME}_FILE` convention `.chug/tasks/deploy.sh` already anticipates | **Landed** (job #569), container mode only — `secret_files:` at `CONFIG_SCHEMA_EPOCH` 7; moves *reach*, not lifetime. [The record](#landed--2026-08-12-job-569-s3-the-declaration-exists-what-the-epoch-bought-and-what-cleanup-it-inherited) |
 | **S4** | Artifact redaction | Proposed — **out of scope here**; needs its own design, and D7 forbids implying it is covered |
 | **S5** | A secret-shaped-name warning when a `var` is written | Proposed — advisory, never a gate |
 
@@ -1611,3 +1619,114 @@ document that made it here would be repeating the defect it exists to close.
 - **Neither name is declared by any chuggernaut job type**, still. `.chug/jobs/`
   declares exactly `MINI_DEPLOY_KEY` and `DEPLOY_HEALTH_API_TOKEN`, across six
   declarations, and this refinement adds nothing to that tree.
+
+## Landed — 2026-08-12, job #569 (S3: the declaration exists, what the epoch bought, and what cleanup it inherited)
+
+§[8](#8-file-delivery-the-plumbing-is-free-the-declaration-is-not) said the
+plumbing was free and the declaration was not. Both halves held: the delivery is
+`container::InjectedFile` unchanged, and the whole cost was the schema — a new
+field inside three `deny_unknown_fields` blocks, which is exactly one
+`CONFIG_SCHEMA_EPOCH` bump, **6 → 7**, spent in the same commit as the field.
+
+### The shape, and why it is two lists rather than a re-typed one
+
+A level declares `secret_files: [NAME]` beside `secrets: [NAME]`. Both forms are
+per level — `work`, each evaluator, `wrap_up` — and inherited by nothing, which
+is the property the env form already had and the one this slice was told not to
+weaken. The launch resolves the list off the level itself
+(`JobType::level_secret_files`), so a queued relaunch and a fresh launch cannot
+disagree about which declaration a container is running under.
+
+The alternative §8 also names — re-typing `secrets:` to accept an entry object —
+was rejected on cost rather than on taste: `secrets: string[]` is a generated
+TypeScript type the operator UI reads (`web/src/pages/Library.tsx`), so a union
+entry would have pushed a schema change into the web tree for a form no config
+uses yet. Two lists keep every existing reader compiling and every existing
+declaration meaning exactly what it meant.
+
+**One name, one delivery.** A name in both lists at a level is a release
+validation error, and so is a name whose `{NAME}_FILE` pointer the same level
+declares as an ordinary secret — the second is the collision that would
+otherwise be resolved silently by injection order, which is how a path
+overwrites a value. The launch asserts the same property against the real env at
+the merge site, so validation and delivery are two independent chances to catch
+it rather than one.
+
+### Delivery, stated at the reach it actually buys
+
+The value lands at `/chuggernaut/secrets/{NAME}`, mode `0600`, and `{NAME}_FILE`
+holds that path. `0600` is **not** a boundary here and the doc comment says so:
+the task runs as the file's owner, and [D3](#decisions) is the whole argument for
+why that is still worth doing. What it buys is narrower and nameable — the value
+is absent from the launch env, so it is absent from the container's own
+`environ`, which M3 measured a process cannot un-publish, and from the
+`docker inspect` output §[10](#10-the-wire-one-good-property-and-one-honest-limit)
+records as readable by anything holding the node's socket. It is *not* absent
+from the task's own reach and no wording here should suggest it is.
+
+### The cleanup guarantee is inherited, and it was asserted rather than assumed
+
+Decision 2's teardown covers this delivery **because of where it is written**,
+not because of anything new: `/chuggernaut/secrets/` sits inside the tree
+`HostBackend::remove` reclaims by recorded path and `reclaim_credentials` empties
+the moment the command returns, and a container launch destroys the file with the
+container. That is a claim about a path, so it is now measured at that path:
+`injected_credentials_land_in_the_task_tree_and_die_with_the_command`
+([`crates/container/tests/host_backend.rs`](../../crates/container/tests/host_backend.rs))
+carries a `0600` secret file beside the SSH credential and asserts it is gone
+with them. Running the assertion beside the credential that already had it is the
+point — a separate test asserting the same mechanism twice would drift.
+
+What that test measures is the **teardown mechanism** at that path, not a host
+delivery: it injects the file directly, the way `InjectedFile` reaches any
+backend, and never composes the `{NAME}_FILE` variable a real launch would carry.
+It could not, for the reason the next section gives.
+
+### What an N-1 dispatcher does, confirmed rather than assumed
+
+The blocks carry `deny_unknown_fields`, so a dispatcher predating the field does
+not ignore it: `JobType::parse` fails, the type parks every job of that type
+(§14.2), and the merge gate refuses the branch on the declared `min_dispatcher`
+(§14.3). That is the failure this slice *wants* — a dropped field would deliver
+the secret by the env the declaration exists to avoid, which is worse than not
+running at all, and it is why the epoch is a hard requirement of the declaration
+rather than authorship advice. `a_dispatcher_that_cannot_see_the_field_refuses_the_config`
+pins it on the parse.
+
+### What this did not do
+
+- **Deliver on a host launch, and the tree now says so rather than discovering
+  it at launch.** `{NAME}_FILE` holds `/chuggernaut/secrets/{NAME}`, which is a
+  **wire path**, and `rebase_env`
+  ([`crates/container/src/host.rs`](../../crates/container/src/host.rs)) refuses a
+  wire path in the value of any variable outside the fixed three
+  `WIRE_PATH_VALUE_VARS` names — the fourth surface of design
+  [#322](322-macos-native-runtime.md) §2, which exists to catch exactly a new
+  consumer interpolating a wire path into a value. So the honest scope of this
+  slice is a container launch, and a host level declaring `secret_files:` is now
+  a release-validation error naming that reason
+  (`JobType::validate_secret_files`) rather than a launch that dies on a message
+  about wire paths. A level whose own `image` puts it back in a container under
+  `mode: host` is unaffected, which `level_mode` already decides.
+  The two ways out both belong to
+  [#309](309-host-native-execution.md) §8 rather than here: widen the allowlist
+  to a rule the host backend can state (a value that exactly names a file *this*
+  launch injects), or take option (b) first and make file delivery part of the
+  per-uid story. §8 already calls option (c) a follow-up rather than a
+  substitute, and nothing measured here changes that.
+- **Adopt it.** No `.chug/jobs/*.yaml` changed, and a test asserts every shipped
+  job type still parses, validates and serializes byte-identically —
+  `secret_files:` is absent from the wire when undeclared.
+  `.chug/tasks/deploy.sh` already prefers `MINI_DEPLOY_KEY_FILE` over the inline
+  value, so `deploy` is the cheapest first adopter whenever an operator wants it;
+  moving it is a config change plus an epoch declaration, and this job made
+  neither.
+- **Move the lifetime axis.** §[6](#6-does-313-generalise) is untouched: the
+  value delivered as a file is the same long-lived value, and nothing here mints
+  or expires anything.
+- **Reach `vars`.** A var is still env-only. D6 stands, and giving `vars` a file
+  form would be a second mechanism for a class the design deliberately treats as
+  a side door.
+- **Touch artifacts.** S4 is untouched and uncovered — a task that reads its own
+  secret file and echoes it produces exactly the durable record
+  [D7](#decisions) describes.

@@ -38,6 +38,7 @@ pub mod release;
 pub mod run;
 pub mod scan;
 pub mod schedules;
+pub mod secrets;
 pub mod trace;
 pub mod workload;
 

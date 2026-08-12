@@ -207,6 +207,13 @@
             "null"
           ]
         },
+        "secret_files": {
+          "description": "Secrets this evaluator's container receives as **files** instead\n(design #529 S3), under the same scoping rule as `secrets:` and\ndisallowed for a human evaluator (no container).",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "secrets": {
           "type": "array",
           "default": [],
@@ -489,6 +496,13 @@
             "null"
           ]
         },
+        "secret_files": {
+          "description": "Secrets the work container receives as **files** instead (design #529\nS3): each value lands at `0600` under the injected tree with\n`{NAME}_FILE` naming the path, and the value itself enters no\nenvironment. Scoped and disallowed exactly like `secrets:`, and\ninherited from nothing.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "secrets": {
           "description": "Secrets injected into the work container (agent/command). Scoped here\nbecause that is the only container they reach — evaluators declare\ntheir own (§4.1). Disallowed for human work (no container).",
           "type": "array",
@@ -567,6 +581,13 @@
             "string",
             "null"
           ]
+        },
+        "secret_files": {
+          "description": "Secrets the `run` container receives as **files** instead (design #529\nS3), under the same scoping rule as `secrets:` and disallowed without\n`run`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "secrets": {
           "description": "Secrets injected into the `run` container. Scoped here because that is\nthe only container they reach; not inherited from `work.secrets`.",

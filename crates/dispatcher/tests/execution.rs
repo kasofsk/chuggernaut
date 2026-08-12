@@ -2393,14 +2393,18 @@ async fn job_events(store: &NatsStore, _seq: u64) -> Vec<serde_json::Value> {
         .collect()
 }
 
-const IMPL_SECRET: &str = r#"
-name: impl-secret
-image: img:latest
-work:
-  type: agent
-  prompt: prompts/impl.md
-  secrets: [DEPLOY_KEY]
-"#;
+/// A work agent declaring one secret of each delivery form (design #529 S3),
+/// so one launch proves both against the same store.
+fn impl_secret_yaml() -> String {
+    format!(
+        "name: impl-secret\nimage: img:latest\nmin_dispatcher: {}\n\
+         work:\n  type: agent\n  prompt: prompts/impl.md\n  \
+         secrets: [DEPLOY_KEY]\n  secret_files: [DEPLOY_FILE_KEY]\n\
+         eval:\n  - name: ci\n    type: command\n    run: ./ci.sh\n    \
+         secret_files: [DEPLOY_FILE_KEY]\n",
+        types::SECRET_FILES_SCHEMA_EPOCH
+    )
+}
 
 /// Full launch wiring (§4.2/§8.2): the channel MCP binary is injected with its
 /// config entry, and declared secrets arrive age-decrypted in the env. The
@@ -2422,7 +2426,7 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
     let repo = TempRepo::create("acme", "api").await;
     let clone = repo.clone_branch("main").await;
     clone
-        .commit_file("jobs/impl-secret.yaml", IMPL_SECRET.as_bytes(), "t")
+        .commit_file("jobs/impl-secret.yaml", impl_secret_yaml().as_bytes(), "t")
         .await;
     clone
         .commit_file("prompts/impl.md", b"implement", "p")
@@ -2437,6 +2441,10 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
             store::secrets::AgeSecretStore::for_api(secrets_bucket, &public_key).unwrap();
         api_side
             .set("acme", "api", "DEPLOY_KEY", "s3cret-value")
+            .await
+            .unwrap();
+        api_side
+            .set("acme", "api", "DEPLOY_FILE_KEY", "file-only-value")
             .await
             .unwrap();
         api_side
@@ -2494,10 +2502,11 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         .parent()
         .unwrap()
         .to_path_buf();
+    let backend = Arc::new(FakeBackend::new());
     let core = Core::new(
         store.clone(),
         vcs::RepoManager::new(repos_root),
-        Arc::new(FakeBackend::new()),
+        backend.clone(),
         provider.clone(),
         CoreConfig {
             repo_url_base: "ssh://git@forge.example".into(),
@@ -2564,11 +2573,31 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
         [
             "/usr/local/bin/chuggernaut-channel",
             "/chuggernaut/ssh/id",
-            "/chuggernaut/ssh/id-cert.pub"
+            "/chuggernaut/ssh/id-cert.pub",
+            "/chuggernaut/secrets/DEPLOY_FILE_KEY"
         ]
     );
     assert_eq!(runs[0].files[0].mode, 0o755);
     assert_eq!(runs[0].files[1].mode, 0o600);
+    assert_eq!(
+        runs[0].files[3].mode, 0o600,
+        "design #529 S3 delivers at 0600"
+    );
+    assert_eq!(runs[0].files[3].contents, b"file-only-value");
+    assert_eq!(
+        runs[0].env.get("DEPLOY_FILE_KEY_FILE").map(String::as_str),
+        Some("/chuggernaut/secrets/DEPLOY_FILE_KEY"),
+        "the file-delivered secret is named by path, in the spelling deploy.sh prefers"
+    );
+    assert_eq!(
+        runs[0].env.get("DEPLOY_FILE_KEY"),
+        None,
+        "and its value enters the launch env under no name at all"
+    );
+    assert!(
+        !runs[0].env.values().any(|v| v == "file-only-value"),
+        "including under any other name"
+    );
     let cert = String::from_utf8(runs[0].files[2].contents.clone()).unwrap();
     assert!(cert.starts_with("ssh-ed25519-cert-v01@openssh.com"));
     assert!(
@@ -2578,6 +2607,31 @@ async fn agent_launch_carries_channel_mcp_and_decrypted_secrets() {
             .unwrap()
             .contains("/chuggernaut/ssh/id"),
         "GIT_SSH_COMMAND must reference the injected key"
+    );
+    let eval = backend
+        .launches()
+        .into_iter()
+        .find(|c| c.cmd.iter().any(|arg| arg.contains("./ci.sh")))
+        .expect("the ci evaluator ran in a container");
+    assert_eq!(
+        eval.env.get("DEPLOY_FILE_KEY_FILE").map(String::as_str),
+        Some("/chuggernaut/secrets/DEPLOY_FILE_KEY"),
+        "a command level declaring file delivery gets it too, off its own declaration"
+    );
+    assert_eq!(eval.env.get("DEPLOY_FILE_KEY"), None);
+    assert_eq!(
+        eval.env.get("DEPLOY_KEY"),
+        None,
+        "and nothing of the work level's declaration is inherited"
+    );
+    let delivered = eval
+        .files
+        .iter()
+        .find(|f| f.container_path == "/chuggernaut/secrets/DEPLOY_FILE_KEY")
+        .expect("the evaluator's own secret file");
+    assert_eq!(
+        (delivered.mode, &delivered.contents[..]),
+        (0o600, &b"file-only-value"[..])
     );
     assert_invariants_of(&sink);
 }
@@ -3679,6 +3733,7 @@ async fn job_level_evaluators_run_alongside_type_evaluators() {
         provider: None,
         model: None,
         secrets: vec![],
+        secret_files: vec![],
         workload_identities: vec![],
         tools: vec![],
         required: None,
@@ -3763,6 +3818,7 @@ async fn job_evaluator_name_collision_fails_release() {
         provider: None,
         model: None,
         secrets: vec![],
+        secret_files: vec![],
         workload_identities: vec![],
         tools: vec![],
         required: None,

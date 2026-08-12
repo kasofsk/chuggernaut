@@ -572,7 +572,9 @@ async fn an_undeclared_tenancy_admits_nobody() {
 /// The rebase over its remaining two surfaces, end to end: the credential lands
 /// under the task's own `chuggernaut/` at its declared mode, the env **value**
 /// that names it resolves to that same file from inside the task, and both are
-/// gone the moment the command returns (design #322 §2).
+/// gone the moment the command returns (design #322 §2). A file-delivered
+/// project secret rides that same tree, so this is where design #529 S3's
+/// teardown claim is measured rather than assumed.
 #[tokio::test]
 async fn injected_credentials_land_in_the_task_tree_and_die_with_the_command() {
     let root = temp_root("credentials");
@@ -605,6 +607,12 @@ async fn injected_credentials_land_in_the_task_tree_and_die_with_the_command() {
             mode: 0o644,
             artifact: None,
         },
+        InjectedFile {
+            container_path: format!("{}/secrets/DEPLOY_KEY", container::WIRE_CHUGGERNAUT),
+            contents: b"a project secret".to_vec(),
+            mode: 0o600,
+            artifact: None,
+        },
     ];
     let id = backend.launch(config).await.unwrap();
     let dir = task_dir(&root, &id);
@@ -612,6 +620,7 @@ async fn injected_credentials_land_in_the_task_tree_and_die_with_the_command() {
     assert_eq!(mode_of(&dir), 0o700, "the task directory is private");
     assert_eq!(mode_of(&dir.join("chuggernaut/ssh/id")), 0o600);
     assert_eq!(mode_of(&dir.join("chuggernaut/ssh/id-cert.pub")), 0o644);
+    assert_eq!(mode_of(&dir.join("chuggernaut/secrets/DEPLOY_KEY")), 0o600);
     release(&gate);
     assert_eq!(settle(&backend, &id).await, 0);
     assert_eq!(
@@ -622,6 +631,11 @@ async fn injected_credentials_land_in_the_task_tree_and_die_with_the_command() {
     assert!(
         !dir.join("chuggernaut/ssh").exists(),
         "the credentials die with the command, earlier than remove (#322 §2 teardown)"
+    );
+    assert!(
+        !dir.join("chuggernaut/secrets").exists(),
+        "and a file-delivered project secret with them, so #529 S3 inherits decision 2's \
+         cleanup guarantee rather than needing one of its own"
     );
     assert_eq!(
         std::fs::read_dir(dir.join("chuggernaut")).unwrap().count(),

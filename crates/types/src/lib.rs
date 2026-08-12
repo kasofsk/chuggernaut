@@ -48,7 +48,8 @@ pub use job::{
 };
 pub use job_type::{
     AgentTool, ConfigWarning, Evaluator, EvaluatorType, Input, InputKind, JobType, Placement,
-    ProjectDefaults, ReviewSpec, Runtime, RuntimeMode, WorkSpec, WorkType, WrapUpMode, WrapUpSpec,
+    ProjectDefaults, ReviewSpec, Runtime, RuntimeMode, SECRET_FILE_ENV_SUFFIX, WorkSpec, WorkType,
+    WrapUpMode, WrapUpSpec, secret_file_env_name,
 };
 pub use knowledge::{KnowledgeObject, KnowledgeScope};
 pub use platform::{
@@ -73,8 +74,9 @@ pub use task::{
 pub use user::{Identity, IdentityKind, ProjectRole, User};
 pub use version::{
     CHANNEL_PROTOCOL_VERSION, CONFIG_SCHEMA_EPOCH, ConfigSkew, INPUTS_SCHEMA_EPOCH,
-    RUNTIME_SCHEMA_EPOCH, SCHEDULE_INPUTS_SCHEMA_EPOCH, TOOLS_SCHEMA_EPOCH, WORKER_RPC_VERSION,
-    WORKLOAD_IDENTITY_SCHEMA_EPOCH, config_requires_dispatcher, declared_min_dispatcher,
+    RUNTIME_SCHEMA_EPOCH, SCHEDULE_INPUTS_SCHEMA_EPOCH, SECRET_FILES_SCHEMA_EPOCH,
+    TOOLS_SCHEMA_EPOCH, WORKER_RPC_VERSION, WORKLOAD_IDENTITY_SCHEMA_EPOCH,
+    config_requires_dispatcher, declared_min_dispatcher,
 };
 pub use worker::{
     CapacityObservation, CapacitySource, CapacityTransport, NodeCapabilities, ObservedCapabilities,

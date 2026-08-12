@@ -2129,6 +2129,24 @@ mod tests {
         }
     }
 
+    /// The premise design #529 S3's container-mode-only rule rests on: a
+    /// `{NAME}_FILE` secret pointer holds a wire path in a variable this
+    /// backend carries none for, so a host launch refuses it and validation
+    /// refuses the declaration first.
+    #[test]
+    fn a_secret_file_pointer_is_refused_on_a_host_launch() {
+        let dir = Path::new("/var/lib/chuggernaut/host-tasks/host-529-0");
+        let pointer = HashMap::from([(
+            "MINI_DEPLOY_KEY_FILE".to_string(),
+            "/chuggernaut/secrets/MINI_DEPLOY_KEY".to_string(),
+        )]);
+        let err = rebase_env(dir, &pointer).unwrap_err();
+        assert!(
+            err.contains("MINI_DEPLOY_KEY_FILE") && err.contains("not one of the variables"),
+            "{err}"
+        );
+    }
+
     /// Design #322 §2's fourth surface: an env **value** that embeds a wire
     /// prefix is rebased by the same substitution, and a prefix in any other
     /// value is the assertion firing — the third consumer this rule exists for.

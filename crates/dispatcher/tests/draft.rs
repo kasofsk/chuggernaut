@@ -555,6 +555,7 @@ async fn finalize_validation_failure_stays_draft() {
         provider: None,
         model: None,
         secrets: vec![],
+        secret_files: vec![],
         workload_identities: vec![],
         tools: vec![],
         required: None,

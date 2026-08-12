@@ -217,3 +217,6 @@ Doc-reread: CLAUDE.md
 Doc-reread: .chug/prompts/work/molt.md
 Doc-reread: .chug/tasks/review-molt.md
 Doc-reread: .chug/tasks/review-molt-loss.md
+Doc-reread: docs/spec.md
+Doc-reread: docs/reference/modules.md
+Doc-reread: docs/design/529-secret-handling.md

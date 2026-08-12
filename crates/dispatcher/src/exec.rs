@@ -286,6 +286,7 @@ impl Core {
             .work
             .secrets
             .iter()
+            .chain(job_type.work.secret_files.iter())
             .filter(|s| !kv.secrets.contains(*s))
             .map(|s| format!("secret '{s}'"))
             .chain(
@@ -504,6 +505,9 @@ impl Core {
                     )
                     .await?,
                 );
+                self.secret_file_delivery(owner, project, &job_type.work.secret_files)
+                    .await?
+                    .merge_into(&mut env, &mut files);
                 let audit = workload.merge_into(&mut env, &mut files);
                 self.record_workload_identities(&mut task, audit).await?;
                 let config = AgentRunConfig {
@@ -1704,29 +1708,11 @@ impl Core {
                 env.insert(name.clone(), value);
             }
         }
-        let injectable = secrets_declared
-            .iter()
-            .filter(|n| reserved_env_prefix(n).is_none());
-        match &self.secrets {
-            Some(secrets) => {
-                use store::secrets::SecretStore;
-                for name in injectable {
-                    if let Some(value) = secrets.get(owner, project, name).await? {
-                        env.insert(name.clone(), value);
-                    }
-                }
-            }
-            None => {
-                let secrets = self.store.raw_bucket(store::buckets::SECRETS).await?;
-                for name in injectable {
-                    if let Some(value) = secrets
-                        .get_json::<String>(&format!("{owner}.{project}.{name}"))
-                        .await?
-                    {
-                        env.insert(name.clone(), value);
-                    }
-                }
-            }
+        for (name, value) in self
+            .declared_secret_values(owner, project, secrets_declared)
+            .await?
+        {
+            env.insert(name, value);
         }
         self.container_env_inputs(owner, project, seq, &mut env)?;
         Ok(env)

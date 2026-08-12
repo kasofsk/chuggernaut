@@ -72,6 +72,7 @@ one surface.
 | `launch_queue` | Capacity-aware launch queue: park on `NoCapacity`, drain on slot-freed, escalate past `MAX_QUEUE_WAIT`. | §3.5 |
 | `scan` | Task-timeout and one-shot job-deadline scans, plus the schedule tick that drives `decide/schedule` and originates the jobs it fires; run inside the single-writer loop; also drains the launch queue. | §3.5, §1.1 |
 | `schedules` | The in-memory schedule table: `.chug/schedules/*.yaml` read at default-branch HEAD (invalid files skipped and logged, capped per project), refreshed at startup, after a squash-merge and on the periodic backstop, holding the two in-memory values the decider reads. | §1.1, §14 |
+| `secrets` | Declared project secrets at launch: the one read of the `secrets.*` bucket both delivery forms take, and the file form — a `0600` file per name in `secret_files:` under `/chuggernaut/secrets/`, with `{NAME}_FILE` naming the path and the value in no env var, asserted at the merge site; container launches only, since that path is a wire path (design #529 S3). | §8.2, §4.1 |
 | `reconcile` | Restart reconciliation of jobs left mid-execution, incl. re-deriving a parked job's missing escalation task from its stamped record; runs in the actor before the message loop. | §3.6 |
 | `channel` | Agent → operator channel posts: dispatcher writes `channels` KV and publishes each post to `job-events`. | §4.2 |
 | `run` | Production startup: wire store, repos, Docker fleet, provider into a spawned core; fail fast. | §3.6, §12.4 |

@@ -47,7 +47,7 @@
 /// generation cannot safely ignore — never for a tolerated additive change, and
 /// the per-feature constants below are where a reader finds what each epoch
 /// bought.
-pub const CONFIG_SCHEMA_EPOCH: u32 = 6;
+pub const CONFIG_SCHEMA_EPOCH: u32 = 7;
 
 /// The epoch at which job `inputs:` landed (#311, spec §1.1). A job type
 /// declaring a non-empty `inputs:` must declare `min_dispatcher` at least this
@@ -93,6 +93,15 @@ pub const WORKLOAD_IDENTITY_SCHEMA_EPOCH: u32 = 5;
 /// `deny_unknown_fields` reason [`WORKLOAD_IDENTITY_SCHEMA_EPOCH`] exists.
 /// Frozen at the epoch the feature shipped, like the four constants above.
 pub const TOOLS_SCHEMA_EPOCH: u32 = 6;
+
+/// The epoch at which per-level `secret_files:` landed (design #529 S3, spec
+/// §1.1, §8.2): a level declaring one must declare `min_dispatcher` at least
+/// this high ([`crate::JobType::validate`]), for the same `deny_unknown_fields`
+/// reason [`WORKLOAD_IDENTITY_SCHEMA_EPOCH`] exists — an N-1 dispatcher rejects
+/// the whole config rather than dropping the field, and a dispatcher that did
+/// drop it would deliver the secret by the env the declaration exists to avoid.
+/// Frozen at the epoch the feature shipped, like the five constants above.
+pub const SECRET_FILES_SCHEMA_EPOCH: u32 = 7;
 
 /// A config file that requires a newer dispatcher than the one reading it
 /// (spec §14.2): where the file was found, the epoch it declares, and the
@@ -210,6 +219,7 @@ mod tests {
             ("runtime", RUNTIME_SCHEMA_EPOCH),
             ("workload-identity", WORKLOAD_IDENTITY_SCHEMA_EPOCH),
             ("tools", TOOLS_SCHEMA_EPOCH),
+            ("secret-files", SECRET_FILES_SCHEMA_EPOCH),
         ];
         for (name, epoch) in feature_epochs {
             assert!(

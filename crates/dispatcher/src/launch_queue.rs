@@ -123,7 +123,7 @@ impl Core {
             )
             .await?;
         let runtime_env = job_type.level_runtime_env(level);
-        Ok(ContainerLaunchConfig {
+        let mut config = ContainerLaunchConfig {
             image: job_type.level_image(level).map(String::from),
             cmd: bootstrap_cmd(&["sh".into(), "-c".into(), run], runtime_env),
             env,
@@ -134,7 +134,11 @@ impl Core {
             memory_limit: job_type.resources.as_ref().and_then(|r| r.memory.clone()),
             node: job_type.placement_node().map(String::from),
             runtime_env: runtime_env.map(String::from),
-        })
+        };
+        self.secret_file_delivery(owner, project, job_type.level_secret_files(level))
+            .await?
+            .apply(&mut config);
+        Ok(config)
     }
 
     /// A command launch hit [`BackendError::NoCapacity`]: park the (already

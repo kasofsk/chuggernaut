@@ -174,14 +174,26 @@ pub async fn static_errors(
 /// Spec §4.1 has what each prefix protects, and why the rule covers vars as well
 /// as secrets (design #311 Decision 4, design #517 S1).
 fn static_errors_kv(seq: Option<u64>, job_type: &JobType, kv: &KvNames) -> Vec<ValidationError> {
-    let secrets = job_type.work.secrets.iter().chain(
-        job_type
-            .eval
-            .iter()
-            .flat_map(|e: &Evaluator| e.secrets.iter()),
-    );
+    let secrets = job_type
+        .work
+        .secrets
+        .iter()
+        .map(|name| ("secrets", name))
+        .chain(
+            job_type
+                .work
+                .secret_files
+                .iter()
+                .map(|name| ("secret_files", name)),
+        )
+        .chain(job_type.eval.iter().flat_map(|e: &Evaluator| {
+            e.secrets
+                .iter()
+                .map(|name| ("secrets", name))
+                .chain(e.secret_files.iter().map(|name| ("secret_files", name)))
+        }));
     let declared = secrets
-        .map(|name| ("secrets", "secret", name, kv.secrets.contains(name)))
+        .map(|(field, name)| (field, "secret", name, kv.secrets.contains(name)))
         .chain(
             job_type
                 .vars
