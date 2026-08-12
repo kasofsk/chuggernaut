@@ -14,6 +14,13 @@ a fail-closed allow-list, declared in the same file by the same script. For
 capacity see [`worker-capacity.md`](worker-capacity.md); for the standing deploy
 story, [`deploy/prod/README.md`](../../../deploy/prod/README.md) §6.
 
+**The list on this page is also the roster of unix users a node must have**, once
+that node binds each project to one:
+[`worker-host-users.md`](worker-host-users.md) is that procedure. The daemon's
+launch refusal for an unresolvable project names **this** page by path, so this
+is where an operator hitting it arrives — and the provisioning it is asking for
+is on the sibling.
+
 **This repo declares nothing.** No `chuggernaut.env` in the tree names a
 tenancy, and picking the projects is the operator's act by design. Everything
 below uses `<owner>/<project>` placeholders.
@@ -63,6 +70,44 @@ exists to give up.
 
 So: one node, one tenant, said out loud and enforced at the node. A project's
 own code persisting across its own tasks is the feature.
+
+### What that argument is still for, once the node binds unix users
+
+The paragraphs above are why single-tenancy was the *boundary*, and on every node
+in the fleet today they still are: `WORKER_HOST_USERS` is off everywhere, so every
+host task runs as the daemon's own uid and a second project on the node would read
+the first's credentials. **On a node that binds users, single-tenancy stops being
+the boundary and becomes the roster**
+([#537 §4](../../design/537-per-project-users-macos.md)) — a real thing to get
+right, and no longer a security control:
+
+- **The uid carries it instead.** Each project's host work runs as
+  `chug-{project}`, with a home, a group and a task directory of its own, and one
+  project's secrets stop being readable by another's task. The procedure — and its
+  ordering trap — is [`worker-host-users.md`](worker-host-users.md).
+- **The list becomes the set of users that must exist.** That is the whole of D5:
+  one declaration, read twice. What you write here decides which accounts the node
+  is provisioned with, and a listed project with no user has every host launch of
+  it refused by name.
+- **A uid bounds less than the paragraphs above do, and the remainder is why they
+  stay.** It is not a resource limit (one project can still fill the disk or
+  starve the node), it does not hide the process table (argv is readable across
+  users), it does not touch root, and it does not bound the daemon's own uid,
+  which can enter every project user by construction. The one place tenancy is
+  still doing security work on its own is `WORKER_NIX_PROJECTS`: a project's flake
+  is *evaluated inside `chug-worker`*, so listing a second project there crosses a
+  boundary no uid change moves ([`worker-kvm.md`](worker-kvm.md) §8, design #373
+  Decision 1).
+- **Two projects on one node also serialize.** `WORKER_SLOTS=1` is unchanged, so
+  a long iOS build blocks the other project's host work behind it. Per-project
+  users remove one of the two reasons the slot count cannot rise; CoreSimulator's
+  global device state is the other, and #537 takes neither.
+
+So the honest form is: list the projects this node is *provisioned* for, not
+merely the ones you would tolerate sharing a machine. The second question is
+[#537 D9](../../design/537-per-project-users-macos.md)'s, and its answer is not
+symmetric — a user you add over ssh is one whose record you cannot remove the same
+way.
 
 ---
 

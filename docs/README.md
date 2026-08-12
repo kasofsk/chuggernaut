@@ -44,6 +44,7 @@ from being the one everyone forgets (design
 | [`docs/reference/runbooks/worker-capacity.md`](reference/runbooks/worker-capacity.md) | Runbook: reading a worker node's capacity, changing it, and where each number comes from |
 | [`docs/reference/runbooks/worker-docker-grant.md`](reference/runbooks/worker-docker-grant.md) | Runbook: granting a worker node's docker socket to one `(project, job type)` |
 | [`docs/reference/runbooks/worker-host-projects.md`](reference/runbooks/worker-host-projects.md) | Runbook: declaring which projects a host node runs work for |
+| [`docs/reference/runbooks/worker-host-users.md`](reference/runbooks/worker-host-users.md) | Runbook: provisioning a host node's per-project unix users, and why removing one is not symmetric |
 | [`docs/reference/runbooks/worker-kvm.md`](reference/runbooks/worker-kvm.md) | Runbook: turning KVM on for a worker node |
 | [`docs/reference/runbooks/worker-native-daemon-nixos.md`](reference/runbooks/worker-native-daemon-nixos.md) | Runbook: converting a NixOS worker node from the containerized daemon to the native unit |
 | [`docs/design/000-rationale.md`](design/000-rationale.md) | The original v2 rationale: why the platform is shaped the way it is |
