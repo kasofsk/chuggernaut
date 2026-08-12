@@ -15,6 +15,14 @@ generalization" section). Spec deltas landed in §1.1, §1.2, §3.2, §3.3, §4.
 
 ## The lifecycle model
 
+**Boundary against [`docs/reference/lifecycle-model.md`](lifecycle-model.md).**
+This page owns the *generalized* phase vocabulary — what work, evaluation,
+wrap-up and triage mean as a pattern, independent of what a job produces. That
+page owns the *concrete machine*: the state set, the event alphabet, which
+module decides each transition, the effect vocabulary, the invariants, the
+authority split, and the ports. Phase meanings belong here; machinery belongs
+there.
+
 Every job, regardless of what it produces, moves through the same phases:
 
 ```mermaid

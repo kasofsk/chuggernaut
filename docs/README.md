@@ -34,6 +34,7 @@ from being the one everyone forgets (design
 | [`docs/reference/crates.md`](reference/crates.md) | The crate and module map: what each crate owns, and why |
 | [`docs/reference/design-lifecycle.md`](reference/design-lifecycle.md) | The job lifecycle generalization and its vocabulary |
 | [`docs/reference/docs.md`](reference/docs.md) | The doc policy: the two kinds of doc, the rules each obeys, and what the gates check |
+| [`docs/reference/lifecycle-model.md`](reference/lifecycle-model.md) | The concrete job/task machine — states, events, transitions, effects, invariants, authority, ports — as a reimplementer needs it |
 | [`docs/reference/modules.md`](reference/modules.md) | The module registry jobs are scoped against, one contract line per module |
 | [`docs/reference/structure-assessment.md`](reference/structure-assessment.md) | The 2026-07-23 audit of readiness for module-scoped work |
 | [`docs/reference/style.md`](reference/style.md) | The tiered blessed practices every change is held to |

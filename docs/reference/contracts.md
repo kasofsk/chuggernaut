@@ -32,7 +32,9 @@ gradient:
 
 **Semi-formal:**
 
-- The `Msg` enum itself (25 variants) is the *actual* high-level interface of
+- The `Msg` enum itself (30 variants — 24 commands carrying a `Reply`, 6
+  events; enumerated in `docs/reference/lifecycle-model.md`) is the *actual*
+  high-level interface of
   the entire dispatcher: every input — HTTP-originated request, container
   exit, timer tick — becomes a `Msg`. It is a protocol in all but name: shapes
   are typed, but pre/postconditions and error semantics ("409 while an attempt
@@ -80,7 +82,8 @@ inter-module interface structure the dispatcher currently lacks: modules stop
 sharing `&mut Core` and start exchanging values.**
 
 **Status: landed (B2 + C1).** The vocabulary is
-`chuggernaut_domain::effects::Effect` (~20 variants) with the interpreter in
+`chuggernaut_domain::effects::Effect` (28 variants, grouped in
+`docs/reference/lifecycle-model.md`) with the interpreter in
 `dispatcher::interpret` (`Core::interpret`) — the sole `&mut Core` coupling
 deciders keep. The first decider is `chuggernaut_domain::decide::escalation`,
 the C1 template every later phase copies (its shim: `Core::run_escalation`).
