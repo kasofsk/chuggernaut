@@ -41,19 +41,35 @@ DOMAIN="gui/$(id -u)"
 # way so the two renderings stay one shape (nix/chug-node/chug-worker-unit.test.sh
 # pins the Linux pair; deploy/prod/install-worker-launchd.test.sh pins this one).
 #
-# The login user's `~/.local/bin` is on that PATH because the agent CLI a host
-# AGENT task execs is resolved as a bare `claude` on the DAEMON's own PATH
-# (design #490 D3) — a host task has no image to carry one — and that directory
-# is where the CLI's own installer puts it. Measured on gumbo-air-0 (#490 M3):
-# `claude` at /Users/worksalot/.local/bin/claude, resolvable on the login PATH
-# and on none of the entries below it, so without this the node discovers no CLI
-# at boot and refuses every agent host launch by name. It rides LAST because it
-# is user-writable: this PATH is also every host task's, and a directory ahead of
-# /usr/bin would silently reselect `git` or `ssh` for work that never asked.
+# The tail entry is where the agent CLI lives on this NODE. A host AGENT task
+# execs it as a bare `claude` on the DAEMON's own PATH (design #490 D3) — a host
+# task has no image to carry one — so the directory it sits in has to be on this
+# list or the node discovers no CLI at boot and refuses every agent host launch
+# by name (#490 D5).
+#
+# It is /usr/local/lib/chuggernaut/bin and NOT the login user's ~/.local/bin,
+# where the CLI's own installer puts it, because design #537 D12 is about to take
+# `staff` off a project user's primary group: /Users/<login> is 0750 group staff
+# (#537 M3), and M8 measured that the ONLY reason a second uid could exec
+# /Users/worksalot/.local/bin/claude was that traversal. So the CLI moves to a
+# node-wide path outside every home, the way the host channel binary already sits
+# at CHANNEL_PATH_HOST (#490 D2). THE OPERATOR PLACES THE CLI THERE — installing
+# it is D3's operator step, unchanged — AND MUST DO SO BEFORE ANY PROJECT USER
+# LEAVES `staff`, or agent host work stops the moment provisioning lands
+# (docs/reference/runbooks/chug-node-adoption.md).
+#
+# A node that has not been given one is refused BY NAME rather than failing
+# inside a task, which is why this list carries exactly one CLI directory: an
+# entry still pointing into the login user's home would let the boot probe report
+# a CLI a project user cannot exec.
+#
+# It rides LAST because this PATH is also every host task's, and a directory
+# ahead of /usr/bin would silently reselect `git` or `ssh` for work that never
+# asked.
 ENV_FILE="${WORKER_ENV_FILE:-$HOME/chuggernaut-worker/worker.env}"
 BINARY="${WORKER_BINARY:-/usr/local/bin/chuggernaut}"
 LOG="$HOME/Library/Logs/chuggernaut/worker.log"
-AGENT_PATH="${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.local/bin}"
+AGENT_PATH="${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/lib/chuggernaut/bin}"
 
 if [ "$(uname -s)" != Darwin ]; then
   echo "install-worker-launchd: this host is not Darwin — a launchd agent supervises the daemon on macOS only, and on Linux the unit is nix/chug-node/'s or build-worker.sh's (design #440 D2); REFUSING" >&2

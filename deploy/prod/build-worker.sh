@@ -1716,14 +1716,24 @@ else
   # generation the node has ever run, and a previous one's "worker up" would
   # pass a daemon that never came up. Safe there and only there — the old agent
   # is gone and the new one has not been asked to start.
-  # The tail entry is the login user's `~/.local/bin`, where the agent CLI's own
-  # installer puts `claude`. A host AGENT task has no image to carry one, so the
-  # daemon resolves it on THIS PATH and advertises what it found (design #490
-  # D3); it rides last because a user-writable directory ahead of /usr/bin would
-  # reselect tools for every host task. The hand-run macOS installer under
-  # ./launchd-worker/ spells the same list — the two renderings are one shape,
-  # and its suite diffs them.
-  AGENT_PATH="${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$NODE_HOME/.local/bin}"
+  # The tail entry is the NODE-WIDE directory the operator installs the agent CLI
+  # in, /usr/local/lib/chuggernaut/bin. A host AGENT task has no image to carry
+  # one, so the daemon resolves `claude` on THIS PATH and advertises what it
+  # found (design #490 D3); it rides last because a directory ahead of /usr/bin
+  # would reselect tools for every host task.
+  #
+  # It was the login user's `~/.local/bin` until design #537 slice 8. That worked
+  # only through /Users/<login> being 0750 group `staff` with a project user's
+  # primary group also `staff` (#537 M8) — the traversal D12 removes — so the CLI
+  # moves outside every home, beside the host channel binary's own node-local
+  # path (#490 D2). The operator must place it there BEFORE a project user is
+  # taken out of `staff`, or agent host work stops the moment that lands. Exactly
+  # one CLI directory is on this list, so a node without one is refused by name
+  # (#490 D5) instead of failing inside a task.
+  #
+  # The hand-run macOS installer under ./launchd-worker/ spells the same list —
+  # the two renderings are one shape, and its suite compares them.
+  AGENT_PATH="${WORKER_PATH:-/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/lib/chuggernaut/bin}"
   case ":$AGENT_PATH:" in
     *":$CARGO_DIR:"*) ;;
     *) AGENT_PATH="$CARGO_DIR:$AGENT_PATH" ;;

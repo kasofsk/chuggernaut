@@ -31,7 +31,13 @@ correction](#correction--2026-08-09-job-510-slice-6-ran-what-two-host-tasks-on-t
 M1, M2, M3 and M4 are answered — M3 came back **no** and slice 4 is the answer to
 it, since the CLI's install directory is on the `PATH` both macOS installers
 render, so an agent already installed keeps the old one until its plist is
-re-rendered. **M6 is answerable but not answered**: slice 2 built the instrument
+re-rendered. **Which directory that is has moved since**: not the login user's
+`~/.local/bin` slice 4 rendered but the node-wide
+`/usr/local/lib/chuggernaut/bin`, because a per-project task user outside `staff`
+cannot traverse `/Users/<login>` to reach a CLI in it
+([#537](537-per-project-users-macos.md) D12, slice 8, job #571). D3 is unchanged
+in substance — the operator installs, discovery finds it, and installation and
+`PATH` still move together. **M6 is answerable but not answered**: slice 2 built the instrument
 and recorded the procedure ([the job #494
 correction](#correction--2026-08-08-job-494-slice-2-landed-and-how-m6-gets-answered)),
 whose precondition — a deploy carrying slice 1 — is now met, so what it wants is a
@@ -181,9 +187,11 @@ launch on a node that found none was refused **by name** in the daemon, naming t
 refusal — slice 5 replaced both with the single capability test in `admit`, which
 still carries the daemon-composed text naming that `PATH`. And M3's remedy: both macOS
 renderings (`deploy/prod/install-worker-launchd.sh` and
-`deploy/prod/build-worker.sh`) now carry the login user's `~/.local/bin` at the
-**tail** of the default `AGENT_PATH` — the tail because that `PATH` is every host
-task's too, and a user-writable directory ahead of `/usr/bin` would silently
+`deploy/prod/build-worker.sh`) carry the agent CLI's directory at the **tail** of
+the default `AGENT_PATH` — the login user's `~/.local/bin` as slice 4 rendered
+it, and since [#537](537-per-project-users-macos.md) slice 8 (job #571) the
+node-wide `/usr/local/lib/chuggernaut/bin` instead. The tail because that `PATH`
+is every host task's too, and a directory ahead of `/usr/bin` would silently
 reselect `git` or `ssh`. Installing the CLI stays the operator's step (D3); what
 moved is the directory the daemon looks in.
 

@@ -1,6 +1,6 @@
 # Design #537 — Per-project unix users on a macOS host node
 
-Status: PROPOSED — slice 0's measurements landed (jobs #557, #561); nothing else is built.
+Status: PROPOSED — slice 0's measurements landed (jobs #557, #561) and slice 8 moved the agent CLI to a node-wide path (job #571); no platform slice is built.
 
 Written against the tree at `4674210` (2026-08-10). Every claim about current
 behaviour was read out of the source named beside it rather than out of a sibling
@@ -48,7 +48,7 @@ the argument and its dated corrections, never edited
 | The task directory is created `0700` by the daemon, and every wire path is rebased into it | `create_private_dir` and `rebase_path`, `crates/container/src/host.rs` | True |
 | `remove` deletes the recorded files, the task directory, and this task's MCP-log subtree **under the daemon's own `HOME`** | `reclaim_agent_cache` reads `HOME` out of the daemon's environment, `crates/container/src/host.rs` | True, and it breaks the moment the task's home is not the daemon's |
 | The daemon's own state on a Mac lives **under the login user's home** — `worker.env`, and `keys/worker.creds` / `keys/worker_git` beside it | the macOS branch of `deploy/prod/build-worker.sh` (`$NODE_HOME/chuggernaut-worker/…`); the launchd plist's `ENV_FILE` in `deploy/prod/install-worker-launchd.sh` | True. Measured 2026-08-10: the home is `0750` group `staff`, `worker.env` is `0644`, and a second uid whose **primary group is `staff`** reads it. The credentials at `0600` do not follow — the protection is the per-file mode, not the home |
-| A host task execs the agent CLI by **bare name off the `PATH` it inherits**, which on the air resolves under the login user's home | `AgentCli::discover_on` (`crates/worker/src/agent_cli.rs`) resolves it only to advertise the capability; the `PATH` is `AGENT_PATH`, rendered **twice** — in `deploy/prod/install-worker-launchd.sh` (hand-run) and in `deploy/prod/build-worker.sh`'s own macOS plist (what the deploy reaches a node with), both defaulting to `…:$HOME/.local/bin`, with `deploy/prod/install-worker-launchd.test.sh` asserting the two carry one `PATH` | True, and measured to work for a second uid **only** through that same `0750`+`staff` traversal — which is why D12 exists |
+| A host task execs the agent CLI by **bare name off the `PATH` it inherits**, and that `PATH`'s CLI directory is now **node-wide** | `AgentCli::discover_on` (`crates/worker/src/agent_cli.rs`) resolves it only to advertise the capability; the `PATH` is `AGENT_PATH`, rendered **twice** — in `deploy/prod/install-worker-launchd.sh` (hand-run) and in `deploy/prod/build-worker.sh`'s own macOS plist (what the deploy reaches a node with), both now defaulting to `…:/usr/local/lib/chuggernaut/bin`, with `deploy/prod/install-worker-launchd.test.sh` comparing the two defaults whole | True since slice 8 (job #571). It used to be `…:$HOME/.local/bin`, which a second uid reached **only** through the `0750`+`staff` traversal D12 removes. **The platform half only**: placing the CLI at that path is the operator's, and it must happen before a project user leaves `staff` |
 | The cross-project secret boundary is **absent** on a Mac, accepted by job #526 | [#322](322-macos-native-runtime.md)'s 2026-08-09 correction | True today; this design is what replaces that decision |
 
 ## Decisions
@@ -66,7 +66,7 @@ the argument and its dated corrections, never edited
 | **D9** | **Provisioning is the operator's, by runbook, and it is not symmetric.** Creation over ssh works; directory-services deletion is refused (`eDSPermissionError -14120`). Every procedure is idempotent against a stale account record. | A platform that assumed it could delete a user would be assuming an access path the operator measured as absent. |
 | **D10** | **[#534](309-host-native-execution.md#phasing)'s deferred cache namespacing is retired by construction, and so is the *placement* half of its eviction slice. The ceiling and the LRU are not.** | Per-user homes make the collision impossible rather than avoided, and they move the caches out of the operator's own home — which was the stated reason placement had to precede eviction. |
 | **D11** | **Host-mode docker stops being ambient.** [#517](517-docker-access-for-jobs.md) D1 is untouched — jobs may use docker — but the host half's default inverts from granted-for-free to unreachable-unless-granted. | That is #517 D4's own S6 arriving early: per-task users were named there as the **only** mechanism that can withhold host-mode docker, and a uid change withholds it whether or not anyone intended it to. |
-| **D12** | **A project user's primary group is not `staff`, and the agent CLI moves to a node-wide path in the same act.** One decision, two directions: §[6](#6-provisioning-and-the-two-gates-smell)'s provisioning sets `chug-{project}` as the **primary** group rather than adding it beside `staff`, and the CLI moves the way `chuggernaut-channel-host` already did ([#490](490-agent-work-on-a-mac.md) D2 — the node-local path, not D3's discovery of it). | The shared `staff` primary group is load-bearing in **opposite** directions: it is what lets a project user read `worker.env` (M3, the thing this design exists to stop) and what lets it exec `/Users/worksalot/.local/bin/claude` (M8, the thing agent host work needs). Fixing M3 alone silently breaks agent host work, so the two are one decision or neither. |
+| **D12** | **A project user's primary group is not `staff`, and the agent CLI moves to a node-wide path in the same act.** One decision, two directions: §[6](#6-provisioning-and-the-two-gates-smell)'s provisioning sets `chug-{project}` as the **primary** group rather than adding it beside `staff`, and the CLI moves the way `chuggernaut-channel-host` already did ([#490](490-agent-work-on-a-mac.md) D2 — the node-local path, not D3's discovery of it). **The CLI half landed first** (slice 8, job #571): the path is `/usr/local/lib/chuggernaut/bin`, and the group half is still slice 4's to write. | The shared `staff` primary group is load-bearing in **opposite** directions: it is what lets a project user read `worker.env` (M3, the thing this design exists to stop) and what lets it exec `/Users/worksalot/.local/bin/claude` (M8, the thing agent host work needs). Fixing M3 alone silently breaks agent host work, so the two are one decision or neither. |
 
 ## Slices
 
@@ -80,7 +80,7 @@ the argument and its dated corrections, never edited
 | 5 | `design` — amend [#322](322-macos-native-runtime.md)'s job #526 correction and [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)/§10 with what this replaces | design record | 1 | Proposed |
 | 6 | signing — formerly *deferred, once D8's operator input exists* | none | — | **Closed** (2026-08-10). D8 is answered and no platform work survives it; nothing smaller is left to do. [The record](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it) |
 | 7 | deferred — the cache ceiling and LRU eviction inherited from #534(b) | node cache policy | 1 | Deferred |
-| 8 | `deploy` — D12's other half: the agent CLI moves to a node-wide path and the daemon's rendered `PATH` follows it, so a project user outside `staff` can still exec it. **Must land before slice 4's provisioning**, or agent host work breaks the moment a project user stops being a member of `staff` | the node run spec — `AGENT_PATH` in **both** `deploy/prod/install-worker-launchd.sh` and `deploy/prod/build-worker.sh`'s macOS plist, plus the one-`PATH` assertion in `deploy/prod/install-worker-launchd.test.sh`, which pins the login user's `~/.local/bin` today | — | Proposed |
+| 8 | `deploy` — D12's other half: the agent CLI moves to a node-wide path and the daemon's rendered `PATH` follows it, so a project user outside `staff` can still exec it. **Must land before slice 4's provisioning**, or agent host work breaks the moment a project user stops being a member of `staff` | the node run spec — `AGENT_PATH` in **both** `deploy/prod/install-worker-launchd.sh` and `deploy/prod/build-worker.sh`'s macOS plist, plus the one-`PATH` assertion in `deploy/prod/install-worker-launchd.test.sh`, which pinned the login user's `~/.local/bin` | — | **Landed** (job #571). Both renderings tail at `/usr/local/lib/chuggernaut/bin` and neither carries a home directory, so the defaults are one string and the suite compares them whole. **The operator must place the CLI there before a project user is taken out of `staff`** ([the record](#correction--2026-08-12-job-571-slice-8-the-agent-cli-is-node-wide-and-the-move-is-an-ordering-not-just-a-path)) |
 
 **Slice 0 gated every other row**, and it is the one that could have failed in a
 way that sent this design to its rejected alternative. It did not: slice 1 is
@@ -1154,3 +1154,61 @@ measured, treat unattended reboot as unproven on this node.
 - **Anything about a second project actually running.** `chug-probe` is a probe
   user, not `chug-beacon`: no project's work has been run under a project user,
   and slice 1 is what makes that possible.
+
+## Correction — 2026-08-12, job #571 (slice 8: the agent CLI is node-wide, and the move is an ordering, not just a path)
+
+D12's other half is landed, ahead of every platform slice and ahead of slice 4's
+provisioning, which is the whole point of it being a slice.
+
+**What landed, and it is two lines of `PATH` plus the suites that pin them.**
+Both macOS renderings of `AGENT_PATH` — `deploy/prod/install-worker-launchd.sh`
+(hand-run) and `deploy/prod/build-worker.sh`'s own plist (what the deploy reaches
+`gumbo-air-0` with) — now tail at **`/usr/local/lib/chuggernaut/bin`** instead of
+the login user's `~/.local/bin`. Nothing else about
+[#490](490-agent-work-on-a-mac.md) D3 changes: the daemon still discovers a bare
+`claude` on its own `PATH` at boot, still advertises `agent_cli`, and still
+refuses an agent-shaped host launch **by name** when it found none.
+
+**Why that path.** It is the directory shape `CHANNEL_PATH_HOST`
+(`/usr/local/lib/chuggernaut/chuggernaut-channel-host`) already has — the
+platform's own node-local tree, outside every home, traversable by any uid — and
+it is a *directory of its own* rather than `/usr/local/lib/chuggernaut` itself,
+because that `PATH` is every host task's too and putting the lib directory on it
+would make `chuggernaut-channel-host` and `worker-refresh.sh` bare-name
+resolvable in every task. It keeps the **tail** position slice 4 of #490 chose,
+for the reason that slice gave: a directory ahead of `/usr/bin` silently
+reselects `git` or `ssh` for work that never asked.
+
+**The ordering, which is the substance of this slice.** The move buys nothing on
+its own — it is what makes D12's *other* direction safe to apply. So, plainly:
+**the operator must place the CLI at `/usr/local/lib/chuggernaut/bin/claude`
+before any project user is taken out of `staff`** (or `/Users/<login>` is
+tightened to `0700`). Until then a converted mac keeps working exactly as M8
+measured, through the traversal; after the group change, a CLI reachable only
+under the login user's home is one the task's uid cannot exec. The runbook step
+is in `docs/reference/runbooks/chug-node-adoption.md`, and it wants a real file
+rather than a symlink into a home — a symlink resolves to the same denied path.
+
+**What this deliberately does not do.**
+
+- **It does not install the CLI, and it does not create the directory.**
+  Installation is D3's operator step and stays one; the deploy writes only what
+  it builds. A node whose directory is absent or empty is exactly a node with no
+  CLI, which is the case #490 D5 already handles.
+- **It does not make an already-installed agent follow.** A plist keeps the
+  `PATH` it was rendered with, so a converted mac needs the installer re-run (or
+  a deploy that re-renders the plist) after the CLI is placed — the same caveat
+  #490 slice 4 carried, restated because the path it applies to has moved.
+- **It leaves exactly one CLI directory on that `PATH`**, on purpose. Keeping
+  `~/.local/bin` beside the node-wide entry as a fallback would let the boot
+  probe advertise a CLI a project user cannot exec, converting D5's refusal by
+  name into a failure inside the task — the silent shape this design's §7 is
+  written against. Both suites assert the absence, not just the presence.
+
+**What the suites pin now.** `deploy/prod/install-worker-launchd.test.sh` case 1b
+asserts the node-wide directory is on the rendered `PATH`, that the login user's
+is not, and — new — compares the two renderings' `AGENT_PATH` defaults **whole**
+rather than grepping the deploy for a substring, which is possible only because
+neither default carries a home path any more and the two are one string.
+`deploy/prod/build-worker.test.sh` case 2s asserts the same pair on the plist the
+deploy actually renders. Both were red against the unfixed tree.

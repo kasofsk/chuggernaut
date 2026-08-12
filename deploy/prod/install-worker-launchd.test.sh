@@ -73,6 +73,10 @@ ln -s "$BIN/uname" "$BIN/launchctl" "$BIN/plutil" "$NODOCKER/"
 ENV_FILE="$HOME_DIR/chuggernaut-worker/worker.env"
 BINARY="$WORK/usr/chuggernaut"
 PLIST="$HOME_DIR/Library/LaunchAgents/com.chuggernaut.worker.plist"
+# Where the agent CLI lives on the NODE since design #537 slice 8 — a real path
+# on the worker mac, never rebased into this suite's throwaway $HOME, because
+# being outside every home is the whole property it is here to pin (#537 D12).
+AGENT_CLI_DIR=/usr/local/lib/chuggernaut/bin
 printf "WORKER_NODE='air'\n" > "$ENV_FILE"
 printf '#!/bin/sh\n' > "$BINARY"
 chmod +x "$BINARY"
@@ -97,7 +101,7 @@ run
 [ "$rc" -eq 0 ] || fail "the happy path must install: $(cat "$WORK/out")"
 [ -f "$PLIST" ] || fail "no plist was written"
 
-MAC_PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME_DIR/.local/bin"
+MAC_PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$AGENT_CLI_DIR"
 sed -n '/^  PLIST_TEXT="<?xml/,/^<\/plist>"$/p' "$BUILDER" |
 	sed -e '1s|^  PLIST_TEXT="||' -e '$s|"$||' -e 's|\\"|"|g' \
 		-e 's|\$AGENT_LABEL|com.chuggernaut.worker|g' \
@@ -140,16 +144,23 @@ grep -qF "<key>PATH</key><string>$MAC_PATH</string>" "$PLIST" ||
 printf "WORKER_NODE='air'\n" > "$ENV_FILE"
 echo "ok: the run spec's WORKER_CARGO directory leads the agent's PATH, once"
 
-# ── Case 1b: the agent CLI's directory is on the PATH this renders ────────────
-# M3, pinned as a test (design #490 slice 0, job #492): on gumbo-air-0 `claude`
-# is at ~/.local/bin/claude and `PATH=$AGENT_PATH command -v claude` found
-# NOTHING, so the daemon's boot probe (#490 D3) would report the CLI absent with
-# the CLI installed and working, and D5 would refuse every agent host launch by
-# name. Asked as element membership in the rendered PATH rather than by running
-# `command -v` under it: the entries below ~/.local/bin are the REAL /usr/bin
-# and /usr/local/bin of whatever host runs this suite, and the gate's own agent
-# image carries a `claude` in one of them — a resolution check would pass there
-# for a reason no worker mac shares.
+# ── Case 1b: the agent CLI's NODE-WIDE directory is on the PATH this renders ──
+# Two measurements, one assertion. #490 M3 (job #492): on gumbo-air-0 `claude` is
+# at ~/.local/bin/claude and `PATH=$AGENT_PATH command -v claude` found NOTHING,
+# so the daemon's boot probe (#490 D3) would report the CLI absent with the CLI
+# installed and working, and D5 would refuse every agent host launch by name.
+# #537 M8 (job #557): a second uid execs that same file ONLY through
+# /Users/<login> being 0750 group `staff`, which #537 D12 takes away — so the
+# directory has to be outside every home, and a home entry left beside the
+# node-wide one would put the probe back to advertising a CLI a project user
+# cannot exec. Hence both halves below: the node-wide directory is on the PATH,
+# and the login user's is not.
+#
+# Asked as element membership in the rendered PATH rather than by running
+# `command -v` under it: the other entries are the REAL /usr/bin and
+# /usr/local/bin of whatever host runs this suite, and the gate's own agent image
+# carries a `claude` in one of them — a resolution check would pass there for a
+# reason no worker mac shares.
 mkdir -p "$HOME_DIR/.local/bin"
 printf '#!/bin/sh\necho 2.1.198\n' > "$HOME_DIR/.local/bin/claude"
 chmod +x "$HOME_DIR/.local/bin/claude"
@@ -159,18 +170,41 @@ run
 RENDERED_PATH="$(sed -n 's|.*<key>PATH</key><string>\(.*\)</string>.*|\1|p' "$PLIST")"
 [ -n "$RENDERED_PATH" ] || fail "no PATH could be read out of the rendered plist"
 case ":$RENDERED_PATH:" in
-*":$HOME_DIR/.local/bin:"*) ;;
-*) fail "the agent CLI's install directory is on none of the entries this agent gives the daemon ('$RENDERED_PATH') — #490 D3's probe would report the CLI absent and D5 would refuse every agent host launch by name" ;;
+*":$AGENT_CLI_DIR:"*) ;;
+*) fail "the agent CLI's node-wide directory '$AGENT_CLI_DIR' is on none of the entries this agent gives the daemon ('$RENDERED_PATH') — #490 D3's probe would report the CLI absent and D5 would refuse every agent host launch by name" ;;
 esac
 [ -x "$HOME_DIR/.local/bin/claude" ] ||
 	fail "the fixture CLI is not runnable, so this case pinned nothing"
+case ":$RENDERED_PATH:" in
+*":$HOME_DIR/.local/bin:"*)
+	fail "the login user's ~/.local/bin is still on the daemon's PATH ('$RENDERED_PATH') — a CLI found only there is one a project user outside \`staff\` cannot exec (#537 M8), so the node would advertise the capability and then fail inside the task instead of refusing by name (#537 D12)" ;;
+esac
 rm -f "$HOME_DIR/.local/bin/claude"
 
 # The same directory in build-worker.sh's rendering, because a node converted by
-# hand and a node the deploy converts must not differ in what they can serve.
-grep -qF 'NODE_HOME/.local/bin' "$BUILDER" ||
-	fail "build-worker.sh renders a macOS agent whose PATH cannot resolve the agent CLI — the two installers must carry one PATH (#490 D3)"
-echo "ok: the agent CLI's directory is on the PATH both installers render"
+# hand and a node the deploy converts must not differ in what they can serve —
+# and the deploy's is the one that reaches gumbo-air-0. Compared whole rather
+# than grepped for the tail: with the CLI's directory node-wide, neither default
+# carries a home path any more, so the two are ONE string and drift of any kind
+# fails here.
+agent_path_default() {
+	sed -n 's|^[[:space:]]*AGENT_PATH="${WORKER_PATH:-\(.*\)}"$|\1|p' "$1"
+}
+INSTALLER_DEFAULT="$(agent_path_default "$SUT")"
+BUILDER_DEFAULT="$(agent_path_default "$BUILDER")"
+[ -n "$INSTALLER_DEFAULT" ] ||
+	fail "no default AGENT_PATH could be read out of $SUT — the extraction, not the installer, is what broke"
+[ -n "$BUILDER_DEFAULT" ] ||
+	fail "no default AGENT_PATH could be read out of $BUILDER — the extraction, not the deploy, is what broke"
+[ "$INSTALLER_DEFAULT" = "$BUILDER_DEFAULT" ] ||
+	fail "the two macOS renderings carry different default PATHs, so a node the deploy converts and a node converted by hand serve different work (#490 D3):
+  $SUT: $INSTALLER_DEFAULT
+  $BUILDER: $BUILDER_DEFAULT"
+[ "$INSTALLER_DEFAULT" = "$MAC_PATH" ] ||
+	fail "the default PATH both renderings carry is not the one this suite pins:
+  rendered: $INSTALLER_DEFAULT
+  expected: $MAC_PATH"
+echo "ok: the agent CLI's node-wide directory is on the one PATH both installers render"
 
 # ── Case 2: it cannot be installed on the Mini ────────────────────────────────
 # Job #467's finding: install-launchd.sh globs its template directory, so a

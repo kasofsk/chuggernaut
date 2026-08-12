@@ -432,11 +432,26 @@ Two things to know before converting one:
   it looks for an executable `claude` on the daemon's own `PATH` and advertises
   the answer as `NodeCapabilities.agent_cli`, warning (never refusing) when it
   finds none. On a mac that `PATH` is the launchd agent's, so the CLI has to sit
-  on it: the default now carries the login user's `~/.local/bin`, where the
-  CLI's own installer puts it, **and an agent already installed keeps the PATH
-  it was rendered with** — re-run the installer (or a deploy that renders the
-  plist) after installing the CLI, then check the boot log for
-  `discovered the agent CLI`.
+  on it — and since design [#537](../../design/537-per-project-users-macos.md)
+  slice 8 the directory both renderings carry is the **node-wide**
+  `/usr/local/lib/chuggernaut/bin`, not the login user's `~/.local/bin` where the
+  CLI's own installer puts it. Install it there, as a real file rather than a
+  symlink into a home:
+
+  ```sh
+  sudo mkdir -p /usr/local/lib/chuggernaut/bin
+  sudo install -m 0755 ~/.local/bin/claude /usr/local/lib/chuggernaut/bin/claude
+  ```
+
+  **This must be done before any project user is provisioned outside `staff`**
+  (#537 D12): a CLI reachable only under `/Users/<login>` (`0750`, group `staff`)
+  is one such a user cannot exec, and moving the CLI is what keeps agent host
+  work alive across that change. **An agent already installed keeps the PATH it
+  was rendered with** — re-run the installer (or a deploy that renders the plist)
+  after installing the CLI, then check the boot log for
+  `discovered the agent CLI`. A node with no CLI on that `PATH` refuses agent
+  host launches **by name** rather than failing inside a task, so a missed step
+  here is loud.
 - **"No docker at all" is a Darwin property.** On Linux the worker image is
   still built, because #440 D6 holds there and that image is the only place a
   Linux node's daemon binary comes from. A host-only Linux node skips the agent

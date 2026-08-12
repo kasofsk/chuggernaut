@@ -1627,6 +1627,23 @@ case "$GOT_PLIST" in
   *"<key>KeepAlive</key><true/>"*) ;;
   *) fail "the agent must be kept alive, as --restart=always was" ;;
 esac
+# The PATH this agent carries is where a host AGENT task's bare `claude` resolves
+# (#490 D3), and since design #537 slice 8 that directory is NODE-WIDE: a project
+# user whose primary group is not `staff` cannot traverse /Users/<login> (0750
+# staff) to a CLI in the login user's home, which is the only reason M8's exec
+# worked. Both halves are asserted — the node-wide directory present, the login
+# user's absent — because leaving the home entry beside it would let the boot
+# probe advertise a CLI the task cannot exec, turning a refusal by name (#490 D5)
+# into a failure inside the task.
+case "$GOT_PLIST" in
+  *"<key>PATH</key><string>"*":/usr/local/lib/chuggernaut/bin</string>"*) ;;
+  *) fail "the macOS agent's PATH must end at the agent CLI's node-wide directory (#537 D12):
+$(printf '%s\n' "$GOT_PLIST" | grep -F '<key>PATH</key>')" ;;
+esac
+case "$GOT_PLIST" in
+  *"/Users/op/.local/bin"*)
+    fail "the login user's ~/.local/bin is still on the macOS agent's PATH — a CLI found only there is one a project user outside \`staff\` cannot exec (#537 M8/D12)" ;;
+esac
 grep_log "launchctl bootstrap gui/\$(id -u) '/Users/op/Library/LaunchAgents/com.chuggernaut.worker.plist'"
 grep_log "launchctl bootout gui/\$(id -u)/com.chuggernaut.worker"
 grep_log "plutil -lint"
