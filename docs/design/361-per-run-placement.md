@@ -1,22 +1,19 @@
 # Design — Per-run placement: how a run picks its node (gap 10)
 
-Status: FINDING — gap 10 needs no new Job-record field, and #311 Decision 1
-stands unamended. Closed and unchanged since 2026-08-01; it opens no work, so
-there is no slice table.
+Status: FINDING — gap 10 needs no new Job-record field; #311 Decision 1 stands unamended and no work is opened.
 
-Written against the tree at `c73d76b` (2026-08-01). Every claim about
-Chuggernaut's current behavior below was read out of the source or out of
-[`docs/spec.md`](../spec.md) in this tree, not carried over from the brief or from
-the sibling designs; where the brief or a sibling doc disagrees with what the
-source says, the source wins and the disagreement is recorded in
-[Corrections](#corrections-verified-against-the-tree). The **beacon** half is
-different and is marked as such throughout: `~/beacon` is not checked out in
-this workspace, so nothing here re-derives it — the primary evidence is the one
+Closes [#308](308-gha-port.md) gap 10, which #308 opened and deliberately
+declined to decide. Verified against the tree at `c73d76b` (2026-08-01); where a
+sibling doc disagrees with the source, the source wins and the disagreement is
+recorded in [Corrections](#corrections-verified-against-the-tree). The **beacon**
+half is different and is marked as such throughout: `~/beacon` is not checked out
+in this workspace, so nothing here re-derives it — the primary evidence is the one
 `runs-on:` expression [#308 §A3](308-gha-port.md#a3-beacon-already-parameterizes-placement-per-run)
 recorded verbatim from the operator's 2026-07-30 inspection.
 
-This document closes [#308](308-gha-port.md) gap 10, which #308 opened and
-deliberately declined to decide.
+Two job types pin today, `android-proof` and `docker-proof`
+([#543](543-placement-granularity.md)); the body's table row and correction
+saying none does date from 2026-08-01 and are superseded on that point alone.
 
 ## The question
 

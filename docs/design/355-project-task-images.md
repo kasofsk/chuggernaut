@@ -1,25 +1,29 @@
 # Design #355 — Project-supplied task images (#308 gap 12)
 
-Status: PROPOSED — **not built and unowned.** There is no
-`PROJECT_IMAGE_SCHEMA_EPOCH` in `crates/types/src/version.rs`, no `build_image`
-worker op and no project-supplied image anywhere in the tree. The part of this
-document that is live is §3's sequencing rule — the epoch is a counter, not a
-reservation — which it adopted from
-[#313](313-workload-identity-image-builds.md) and which every epoch bump since
-has followed. No slice table: this document sequences an epoch, not a set of
-slices. One mechanic the body describes has since moved: the per-level `image`
-fallback it counts in four dispatcher call sites is one accessor,
-`JobType::level_image` (job #507); the three `pub image: Option<String>`
-declaration sites its argument rests on are unchanged.
+Status: PROPOSED — nothing built, unowned; only its epoch sequencing rule is live.
 
-Written against the tree at `fce9e33` and re-verified at `e5723c7`, which adds
-only this file. Every claim about current behavior below was read out of
-`docs/spec.md` and the source in this repo rather than inferred from a sibling
-design; where the brief and the tree disagree, the tree wins and the
-disagreement is recorded in [Corrections](#corrections-verified-against-the-tree).
-One class of claim in the brief is **not verifiable from this tree at all** —
-anything about the beacon repository, which is not checked in here — and every
-such claim is marked where it is used.
+Nothing this document proposes exists in the tree: no
+`PROJECT_IMAGE_SCHEMA_EPOCH` in `crates/types/src/version.rs`, no `build_image`
+worker op, no project-supplied image anywhere. It concludes **O2** — the worker
+daemon builds a project's task image as it already builds its own — with O1
+(registry plus a launch-time pull) as the named successor under a stated
+trigger ([The options](#the-options)). It waits on
+[#309](./309-host-native-execution.md) §4's `NodeCapabilities` for the placement
+filter, and on an epoch it deliberately does not number. No slice table: this
+sequences an epoch, not slices.
+
+Live already: [§3](#3-the-epoch-and-the-sequencing-rule)'s sequencing rule — the
+epoch is a counter, not a reservation, and each feature freezes its own constant
+— adopted from [#313](./313-workload-identity-image-builds.md) and followed by
+every epoch bump since.
+
+The body was verified against the tree at `fce9e33`, and its disagreements with
+the brief are in [Corrections](#corrections-verified-against-the-tree). Two
+qualifications carry forward: the per-level `image` fallback it counts in four
+dispatcher call sites is one accessor today, `JobType::level_image` (job #507),
+though the three `pub image: Option<String>` declaration sites its argument
+rests on are unchanged; and its claims about the beacon repository rest on the
+survey in #308, since beacon is not checked into this tree.
 
 ---
 

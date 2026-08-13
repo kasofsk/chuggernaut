@@ -1,27 +1,23 @@
 # Design — paste-a-prompt onboarding: stand up an instance and onboard your own repo
 
-Status: PROPOSED — **nothing here is built and no job has been filed against
-it.** `BOOTSTRAP.md` does not exist, and the Claude Code skill
-(`.claude/skills/chug-install/SKILL.md`) is still the only narrator. One later
-decision bears on it without resolving it:
+Status: PROPOSED — nothing here is built and no job has been filed against it.
+
+`BOOTSTRAP.md` does not exist, and the Claude Code skill
+(`.claude/skills/chug-install/SKILL.md`) is still the only narrator. There is no
+slice table. One later decision bears on this document without resolving it:
 [#415](415-knowledge-architecture.md) D12 rules that the repo root keeps only
 `README.md` and `CLAUDE.md`, which the root-level `BOOTSTRAP.md` proposed below
-would have to be reconciled with. No slice table — this document has none to
-lift.
-
-Written against the tree at `470cc0c` (2026-07-30). Every claim about current
-behaviour below was read out of the source or out of [docs/spec.md](../spec.md);
-where this document and the job brief disagree, the tree wins and the
-disagreement is recorded in §[1](#1-what-the-tree-actually-says).
+would have to be reconciled with. Written against the tree at `470cc0c`
+(2026-07-30); where this document and the job brief disagree, the tree wins, and
+§[1](#1-what-the-tree-actually-says) records the disagreement.
 
 **The problem.** A person who has heard of Chuggernaut has no checkout, no
 tailnet access, and possibly no Claude Code. They should be able to paste a
 short prompt into whatever coding agent they already use and, some tens of
 minutes later, be looking at a web UI where *their own repository* is a project
 with a working job type, a real CI gate, and a merged first job. Today the only
-supported narrator is a Claude Code skill
-(`.claude/skills/chug-install/SKILL.md`), the only tested substrate is macOS,
-and an imported repo ends up with no `.chug/` directory at all.
+tested substrate is macOS, and an imported repo ends up with no `.chug/`
+directory at all (§[1](#1-what-the-tree-actually-says)).
 
 **The decision this document makes.** Keep `deploy/prod/chug-install.sh` as the
 machine half and grow it; add `BOOTSTRAP.md` at the repo root as the single

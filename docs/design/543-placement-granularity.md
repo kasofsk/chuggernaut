@@ -1,25 +1,13 @@
 # Design #543 — Placement granularity: what a task needs, and where it says so
 
-Status: IMPLEMENTED IN PART — S1, S2 and S3 landed (jobs #550, #556, #551); S4
-remains.
+Status: IMPLEMENTED IN PART — S1, S2 and S3 landed (jobs #550, #556, #551); S4 remains.
 
-Written against the tree at `fa1c414` (2026-08-10), and reworked against it
-after review. Every claim about current behaviour was read out of the source
-named beside it rather than out of a sibling design doc **or out of this job's
-own brief** — two of the brief's assertions do not survive that reading
-(Corrections 4 and 6), and they are recorded in
-[Corrections](#corrections-verified-against-the-tree) with the five other
-findings, three of which correct earlier cycles of this document. S1 needs no
-schema field and no epoch bump; S4 needs one **and** a node-side advertisement
-this tree does not yet have; S2 and S3 are gated on S1 and D5 respectively.
-
-**Three slices have since landed.** S1 (job #550) matches a launch's
-`runtime.env` against `NodeCapabilities.envs` in `choose_placement`. S2 (job #556)
-then dropped `mac-proof`'s `node: air` pin, which that match makes redundant.
-S3 (job #551) requires `CHUG_PHASE=Work` in `DockerGrant::admits`
-alongside the `(project, job type)` pair it already matched, so an allow-listed
-type's evaluators — the appended `ci` one included — receive no socket. S4 is
-untouched, and no schema epoch has moved.
+Written against the tree at `fa1c414` (2026-08-10). Every claim about current
+behaviour was read out of the source named beside it rather than out of a
+sibling design doc **or out of this job's own brief**; the seven findings that
+reading produced are recorded in
+[Corrections](#corrections-verified-against-the-tree), two of them corrections
+to the brief itself.
 
 ## Current state
 
@@ -45,8 +33,12 @@ the argument and its dated corrections, never edited
 **Two** job types pin today, `android-proof` and `docker-proof`, and that is the
 whole of `.chug/jobs/` carrying a `placement:` block. Each pins for a requirement
 it cannot otherwise state — section 2's third column — and neither is reachable
-by S1. `mac-proof` was the third until job #556; its requirement *is* an env, so
-it now states it and names no machine.
+by S1: `android-proof` declares a top-level `image:` and no `runtime:` block, so
+it has no `runtime.env` for any matcher to read, and `docker-proof`'s requirement
+is a grant D6 keeps invisible to placement. `mac-proof` states its requirement as
+an env and names no machine. S1 needed no schema field and no epoch; S4 needs one
+`CONFIG_SCHEMA_EPOCH` bump **and** a node-side advertisement this tree does not
+yet have, and no epoch has moved.
 
 ## Decisions
 
@@ -70,14 +62,14 @@ it now states it and names no machine.
   today (Correction 7) — and section 6 prices both halves.
 - **D4. `placement.node` does not become per-level.** Not because the harm is
   imaginary — section 3 measures it, and S1 does not remove all of it — and not
-  because the two cost the same: corrected, the per-level pin is the *cheaper*
-  of the two. It is declined because both spend the same irreducible thing (one
+  because the two cost the same: the per-level pin is the *cheaper* of the
+  two. It is declined because both spend the same irreducible thing (one
   `CONFIG_SCHEMA_EPOCH` bump and a permanent config field), only one of them
   expresses the requirement, and what the cheaper one buys after S1 is one slot
   of two on a container node. Section 6 makes that case in full.
 - **D5. A node-side grant is scoped to work, not to every level.** Job #542
-  measured that an evaluator of an allow-listed type holds the socket, including
-  the `ci` one appended by `.chug/jobs/_defaults.yaml` — an evaluator whose author
+  measured an evaluator of an allow-listed type holding the socket, the `ci` one
+  appended by `.chug/jobs/_defaults.yaml` included — an evaluator whose author
   never asked for node root. This amends [#517](517-docker-access-for-jobs.md) D3.
   The level discriminator must be `CHUG_PHASE`, for the reason in section 7.
 - **D6. A grant is enforced at the node and is never a placement input.** D5 and

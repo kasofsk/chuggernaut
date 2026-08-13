@@ -1,22 +1,26 @@
 # Design #238 — forge-ingest stays in the dispatcher (for now)
 
-Status: FINDING — still true at this commit. `crates/dispatcher/src/forge_ingest/`
-is still four modules inside the dispatcher crate and nothing has moved out of
-it. The finding decides one thing — do not force the split yet — and the work
-that would make it separable is [#215](215-refactor-plan.md)'s Track H, which
-is dormant. There is no slice table because this document proposes no work.
+Status: FINDING — open; forge-ingest is still inside the dispatcher crate and not separable.
+
+`crates/dispatcher/src/forge_ingest/` is still four modules inside the
+dispatcher crate and nothing has moved out of it. The finding decides one thing
+— do not force the split yet — and the work that would make it separable is
+[#215](215-refactor-plan.md)'s Track H (H1, H2), which never ran. #215 is now
+superseded by the fresh reimplementation, and this finding is still open on its
+own terms: forge-ingest has not earned a crate boundary, for reasons that
+outlive that plan. There is no slice table because this document proposes no
+work.
 
 Written against the tree at `01624fd`, the parent of the C9 commit that moved
 platform-ops out. Every claim below was read out of the source, not inferred
-from the docs.
+from the docs; every site the body names still exists, though its line numbers
+and file lengths have drifted since.
 
 C9 asked for two context crates. One landed: `crates/platform-ops` holds
 `fleet`/`cd`/`harvest`/`seed`, and `crates/dispatcher/src/platform_ops.rs` is
 the adapter that lends it views off the single writer's fields. The other did
-not, and this note is the "stop and file a design note instead of forcing it"
-half of the ticket: **forge-ingest is not separable from the lifecycle loop
-today**, the reason is specific and cheap to state, and the work that makes it
-separable is already planned as Track H.
+not: **forge-ingest is not separable from the lifecycle loop today**, and the
+reason is specific and cheap to state.
 
 Related: [refactor-plan](215-refactor-plan.md) (Track H; the "no
 _speculative_ crate splits" rule), [NORTH-STAR §1](../README.md),

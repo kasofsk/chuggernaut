@@ -2,100 +2,34 @@
 
 Status: IMPLEMENTED IN PART — half A is deployed and proven end to end (job #430); S6's consumer half and half B remain.
 
-Half A's code landed across jobs #410 (S1), #411 (S2), #412 (S5), #413 (S3)
-and #414 (S4), and prod was observed on 2026-08-09 running a dispatcher at
-epoch 5 (S3d), at the commit job #508's deploy carried. S6 — the operator's
-provider registration — has since split in two: the **proof** half is applied
-and proven (job #430), and the **consumer** half, a provider in whichever GCP
-project holds the registry, is not.
+Doc 4 of 4 extracting implementable specs from [design #308](./308-gha-port.md):
+its category D (image build and push) and its taken decision "chuggernaut becomes
+an OIDC issuer" are the motivation. Written against the tree at `d7ebfae`. Every
+claim about Google Cloud's Workload Identity Federation is cited inline under
+[Verification of the provider claims](#verification-of-the-provider-claims);
+where a sibling doc disagrees with the tree the tree wins, and the disagreement is
+recorded in [Corrections](#corrections-verified-against-the-tree). The one live
+sibling dependency is [#309 host-native execution](./309-host-native-execution.md),
+and only for a diagnostic — named in
+[Sequencing](#sequencing-and-what-ships-first) (slice S11) and in
+[B1](#b1-the-build-mechanism)'s `NodeCapabilities` note. What this document needs
+from [#310](./310-scheduled-jobs.md), [#311](./311-job-inputs.md) and
+[#293](./293-worker-capacity.md) is a mechanism available today.
 
-**Amended 2026-08-10 (job #553): S6 splits, and only its proof half is
-satisfied.** This head said provider registration was undone and that S6 was
-"the single remaining link". Job #430 had already climbed the whole ladder
-against an applied pool, provider and IAM binding, reporting `VERDICT PASS` —
-and a `gcp-proof` job merges nothing, so no commit moved to prompt the
-correction. What remains of S6 is the **consumer** half, which is S7's question
-and beacon-side. See [the 2026-08-10
-amendment](#amendment--2026-08-10-job-553-s6-splits-into-a-proof-half-and-a-consumer-half).
-
-**Amended 2026-08-09 (job #517): Decision 0 is amended and half B collapses to
-B-I.** The operator has accepted docker access for jobs, so the recommended
-shape is no longer B-IV's filtering proxy but the **real socket**, bound
-node-side into allow-listed launches, with the credential escalation
-consciously accepted. B-IV's reasoning stays standing as the first rung of an
-escalation ladder. B2, B3, B4, S6 and S7 are unaffected; only S8 changes
-content. See [the 2026-08-09 amendment](#amendment--2026-08-09-job-517-decision-0-amended-half-b-collapses-to-b-i)
-and [#517](./517-docker-access-for-jobs.md), which owns the decision, its cost
-and its revisit trigger.
-
-**Amended 2026-08-04 (job #409), against the tree at `f1e3b41`.** The operator
-has taken half A's four open decisions. They are recorded in
-[Decisions taken](#decisions-taken-2026-08-04) and marked in the sections that
-argue them, with every rejected option and its reasoning left standing — the
-rejections are why the decisions are defensible, and
-[A4](#a4-the-public-reachability-problem-the-crux)'s rejected options now carry
-an explicit trigger for revisiting them. Three factual claims were
-corrected, and the epoch bump is re-derived from
-[`crates/types/src/version.rs`](../../crates/types/src/version.rs): **4 → 5**,
-not the `1 → 2` [A5](#skew-this-field-costs-an-epoch-bump) inherited from its
-siblings. Half B is untouched beyond
-[correction 2](#corrections-verified-against-the-tree)'s scope note and the
-consequence it has for slice S7. **No code changed** — slices S1–S5 are separate
-jobs, and this amendment exists so they can cite the document safely.
-
-The status token is `IMPLEMENTED IN PART` from S2 onward, per
-[`docs/design-docs.md`](../../docs/design-docs.md)'s vocabulary — some slices
-merged, and the qualifier says which. S1 generates a keypair, S2 is the pure
-mint, S5 serves two documents on a loopback bind, and S3 parses and gates the
-declaration; the first slice a job container sees is **S4, which has since
-shipped** — a declared identity now produces a usable credential inside its own
-container, and job #430 exchanged one at a registered provider end to end
-(S6's proof half).
-
-Written against the tree at `d7ebfae`. Every claim about current behavior below
-was read out of [docs/spec.md](../spec.md) and the source in this repo; where the
-brief or a sibling doc disagrees with the tree, the tree wins and the
-disagreement is recorded in
-[Corrections](#corrections-verified-against-the-tree). Every claim about Google
-Cloud's Workload Identity Federation was fetched from current provider
-documentation and is cited inline — see
-[Verification of the provider claims](#verification-of-the-provider-claims).
-
-Doc 4 of 4 — and the last — extracting implementable specs from
-[design #308](./308-gha-port.md). Its category D (image build and push) and its
-taken decision "Chuggernaut becomes an OIDC issuer" are the motivation.
-
-**Three of the four sibling docs have since shipped** — this paragraph said the
-opposite when the document was first written, and the amendment corrects it.
-[#310 scheduled jobs](./310-scheduled-jobs.md),
-[#311 job inputs](./311-job-inputs.md) and
-[#293 worker capacity](./293-worker-capacity.md) all read `Status:
-IMPLEMENTED`; `inputs:` is a real field on `JobType`
-([`crates/types/src/job_type.rs`](../../crates/types/src/job_type.rs)) with
-[`.chug/jobs/rollback.yaml`](../../.chug/jobs/rollback.yaml) as its shipped
-first consumer at `min_dispatcher: 2`.
-[#309 host-native execution](./309-host-native-execution.md) is the only sibling
-still `PROPOSED`, and even its `runtime:` epoch is already frozen in the tree as
-`RUNTIME_SCHEMA_EPOCH = 4`. So the live dependency below is on **#309 alone** —
-named where it is real in [Sequencing](#sequencing-and-what-ships-first) (slice
-S11) and in [B1](#b1-the-build-mechanism)'s `NodeCapabilities` note. Everything
-this document needs from #310, #311 and #293 is a mechanism available today.
-
-Related: [docs/spec.md](../spec.md) §1.1 (job types, per-container secret
-scoping, the config root), §2.2 (release validation's three passes), §3.1
-(fleet, worker daemon, node-local build caching, worker self-refresh), §4.1
-(container env), §4.2/§4.3 (injected files, the job brief), §5.3 (the reserved
-`CHUG_` prefix), §6.3 (events), §7.1 (JWT RS256), §7.4 (per-job credentials),
-§8.2 (age-encrypted secrets), §10.1 (container isolation), §10.2 (secrets
-discipline), §10.3 (audit trail), §12.1 (platform init; private keys mounted at
-runtime, never in NATS KV), §12.3 (admin CLI), §14 (config and version skew),
-Appendix: Infrastructure Summary, Appendix: Deferred;
-[deploy/prod/README.md](../../deploy/prod/README.md) §4 (R2 backups), §5a/§5b
-(tailnet vs public exposure), §6 (image builds on the node);
-[docs/reference/style.md](../reference/style.md) (Tier 1 no host-daemon reach, Tier 2 #2 asserts, #3
-bounds, #4 naming, #6 tests; Tier 3 simplicity, single writer);
-[CLAUDE.md](../../CLAUDE.md) ("the evaluation gates ARE the CI"; per-consumer
-forge); [docs/reference/testing.md](../reference/testing.md); [docs/reference/crates.md](../reference/crates.md).
+Related: [docs/spec.md](../spec.md) §1.1 (job types, per-container secret scoping,
+the config root), §2.2 (release validation), §3.1 (fleet, worker daemon,
+node-local build caching, worker self-refresh), §4.1 (container env), §4.2/§4.3
+(injected files, the job brief), §5.3 (the reserved `CHUG_` prefix), §6.3
+(events), §6.7 (the issuer's two documents), §7.1 (JWT RS256), §7.4 (per-job
+credentials), §8.2 (age-encrypted secrets), §8.3 (cloud identities), §10.1
+(container isolation), §10.2 (secrets discipline), §10.3 (audit trail), §12.1
+(platform init; private keys mounted at runtime, never in NATS KV), §12.3 (admin
+CLI), §14 (config and version skew), Appendix: Infrastructure Summary, Appendix:
+Deferred; [deploy/prod/README.md](../../deploy/prod/README.md) §4 (R2 backups),
+§5a/§5b (tailnet vs public exposure), §6 (image builds on the node);
+[docs/reference/style.md](../reference/style.md);
+[CLAUDE.md](../../CLAUDE.md); [docs/reference/testing.md](../reference/testing.md);
+[docs/reference/crates.md](../reference/crates.md).
 
 ## Current state
 
@@ -104,11 +38,10 @@ rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument and its dated amendments,
 never edited into the prose above them.*
 
-**Half A's code is done, deployed and proven end to end; what is left of S6 is
-its consumer half, and half B is still a design.** S3d was observed satisfied on
-2026-08-09, and **S6 is two halves rather than one link**.
+**Half A's code is done, deployed and proven end to end. What is left is S6's
+consumer half; half B is still a design and has no slice past S9 and no owner.**
 
-- **The proof half is satisfied.** A pool, an OIDC provider over the uploaded JWK
+- **S6's proof half is satisfied.** A pool, an OIDC provider over the uploaded JWK
   set, and one `workloadIdentityUser` binding are applied in the shared
   `daekon-ai` project, with an attribute condition naming **`kasofsk/chuggernaut`**
   ([`infra/gcp-proof/mod.tf`](../../infra/gcp-proof)). Job #430 climbed every rung
@@ -117,85 +50,58 @@ its consumer half, and half B is still a design.** S3d was observed satisfied on
   real STS accepts, impersonates the granted service account, reads the granted
   bucket, is refused the denied one, and an evaluator declaring no identity gets
   nothing.
-- **The consumer half is not.** No provider is registered for beacon or any other
-  consumer project, and none ever will be **here**:
+- **The consumer half is not, and is not this repo's to apply.**
   [`infra/README.md`](../../infra/README.md) states that there are no beacon
-  resources in this repo and there never will be — beacon's
+  resources here and there never will be — beacon's
   `kasofsk/beacon:infra/gcp-workload-id/` is operator-owned and lives in beacon's
   own repo — and this root's attribute condition names `kasofsk/chuggernaut`
-  precisely so beacon's eventual provider is a **separate resource** that this one
-  cannot grow into by accident. So what gates S9 is not "register a provider" in
-  general but *that* provider, in whichever GCP project holds the registry, which
-  is [S7](#sequencing-and-what-ships-first)'s question.
+  precisely so beacon's eventual provider is a **separate resource this one cannot
+  grow into by accident**. So what gates S9 is not "register a provider" in general
+  but *that* provider, in whichever GCP project holds the registry, which is
+  [S7](#sequencing-and-what-ships-first)'s question. See [the 2026-08-10
+  amendment](#amendment--2026-08-10-job-553-s6-splits-into-a-proof-half-and-a-consumer-half).
 
-Half B — the image build and push — has no slice past S9 and no owner.
+**Half B's adopted shape is B-I — the real docker socket**, bound node-side into
+the containers of allow-listed launches, with the credential escalation
+consciously accepted; [#517](./517-docker-access-for-jobs.md) owns that decision,
+its cost and its revisit trigger. B-IV's filtering proxy is superseded and its
+reasoning stays standing as the first rung of an escalation ladder. B2, B3, B4, S6
+and S7 are unaffected; only S8's content changes. See [the 2026-08-09
+amendment](#amendment--2026-08-09-job-517-decision-0-amended-half-b-collapses-to-b-i).
 
-**The proof half is satisfied by an observation, not a commit, and that is why
-this head was five days stale.** A `gcp-proof` job is a report: its `wrap_up` is
-`type: none` and its branch carries no commits, so no `job/429` or `job/430`
-commit exists and nothing in the tree moved to prompt an update. The record lives
-beside the terraform instead — the `principal_set` comment in
+**An operator slice here is recorded by observation, never by a commit.** A
+`gcp-proof` job is a report — `wrap_up: type: none` over a branch carrying no
+commits ([`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml)) — and a
+`deploy` job merges nothing
+([`.chug/jobs/deploy.yaml`](../../.chug/jobs/deploy.yaml)), so no `job/430` or
+`job/508` commit exists, and `.chug/tasks/check-doc-facts.sh` check 3 resolves a
+`**Landed** (job #N)` row against exactly such a commit. The S3d and S6 rows below
+break that shape deliberately. The proof's record lives beside the terraform
+instead: the `principal_set` comment in
 [`infra/gcp-proof/mod.tf`](../../infra/gcp-proof) and the retraction section of
 [`infra/README.md`](../../infra/README.md), both written by job #431 on
-2026-08-05, which is also where job #429's earlier refusal is disposed of as IAM
-propagation rather than evidence about the member.
+2026-08-05.
 
-**What satisfies it is an observation, not a commit.** `GET
-/api/v1/platform/config` against prod reported `dispatcher.schema_epoch: 5`
-beside `dispatcher_sha` `8da61424b9bf53a7322bf5aa5f39d92a35c2ebc2` — the commit
-job #508's deploy carried. That snapshot describes **the one dispatcher**, not
-the fleet:
+**The *deployed* epoch is what the merge gate compares against, so a constant in
+the tree proves nothing.** [`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml)
+declares `min_dispatcher: 5`: a pre-epoch-5 dispatcher parks such a job
+`config_schema_skew` at release and launches nothing (§14.2), an epoch-5
+dispatcher runs it, and §3.3 step 0 refuses to land a branch whose
+`.chug/jobs/*.yaml` declares an epoch above the running binary's
+([`crates/dispatcher/src/release.rs`](../../crates/dispatcher/src/release.rs)).
+S9's `build-image` inherits the same gate. What confirms a deploy is therefore a
+live reading: prod's `GET /api/v1/platform/config` reports
+`dispatcher.schema_epoch` from the running binary's own constant
+([`crates/dispatcher/src/config.rs`](../../crates/dispatcher/src/config.rs)), and
+that snapshot describes **one dispatcher, not the fleet** —
 [`DispatcherConfigSnapshot`](../../crates/types/src/platform.rs) carries a single
-`schema_epoch` and a single `dispatcher_sha`, and the api serves it verbatim
-under `dispatcher`
-([`crates/api/src/routes.rs`](../../crates/api/src/routes.rs)). The `nodes[]`
-entries carry no epoch at all — `WorkerNode::version` is the *worker daemon's*
-build string, last reported by that node's ping — so the two nodes agreeing is
-evidence about the worker refresh, never about the dispatcher's epoch. The
-tree's `CONFIG_SCHEMA_EPOCH` was 5 as well when this landed, and that is *not* what satisfies the
-slice: §14.3's merge gate compares a config's `min_dispatcher` against the epoch
-the **running** binary reports, which is exactly what that snapshot measures
-(`schema_epoch` is set from the binary's own constant —
-[`crates/dispatcher/src/config.rs`](../../crates/dispatcher/src/config.rs)), so a
-constant in the tree proves nothing about what is deployed.
+`schema_epoch` and a single `dispatcher_sha`, while the `nodes[]` entries carry no
+epoch at all, `WorkerNode::version` being the *worker daemon's* build string.
 
-**The consequence this job type feels is at release**, and the date is when
-someone looked rather than when it became true.
-[`.chug/jobs/gcp-proof.yaml`](../../.chug/jobs/gcp-proof.yaml) has declared
-`min_dispatcher: 5` since job #417 on 2026-08-04: what a pre-epoch-5 dispatcher
-does with that file is park the job `config_schema_skew` at release and launch
-nothing (§14.2), and an epoch-5 dispatcher runs it. S9's `build-image` will
-inherit the same gate. The merge side is gated too — §3.3 step 0 has the
-dispatcher refuse to *land* a branch declaring an epoch above its own, over
-every `.chug/jobs/*.yaml` on that branch and not only the ones it changed
-([`crates/dispatcher/src/release.rs`](../../crates/dispatcher/src/release.rs)) —
-but that scan is job #421's own code, landed hours *after* #417 merged, and a
-landed gate still needs its own deploy before any dispatcher runs it.
-
-**So no merge in this history dates the deploy**, #417's least of all. The only
-skew signal at that merge was `config_schema_gate()` in
-[`.chug/tasks/ci.sh`](../../.chug/tasks/ci.sh), whose no-`CHUG_API_URL` branch
-compares the config against **the checkout's own epoch** — evidence that CI
-compared the tree against itself, and nothing about any deployed dispatcher
-([CLAUDE.md](../../CLAUDE.md)). What #421's scan buys is a mechanism rather than
-a date: once a dispatcher carrying it is running, any successful landing implies
-epoch ≥ 5, because that file sits on every branch. But the tree dates #421's own
-deploy no better than it dates #508's, which is why the row below records an
-observation and not a closing date.
-
-S3d's row below deliberately breaks the table's `**Landed** (job #N)` shape. A
-`deploy` job carries no commits and merges nothing
-([`.chug/jobs/deploy.yaml`](../../.chug/jobs/deploy.yaml)), so no `job/508`
-commit exists — and `.chug/tasks/check-doc-facts.sh` check 3 resolves that shape
-against exactly such a commit. An operator slice is recorded by observation
-instead, which is exactly how S6's proof half is recorded above — and its
-consumer half will have to be recorded the same way.
-
-**Half A's four decisions**, lifted from [Decisions taken,
-2026-08-04](#decisions-taken-2026-08-04). The operator took all four on that
-date; each is argued in the section named, and the rejected options and the
-reasoning that keeps them stay in the body table, which is the only place they
-are written.
+**Half A's four decisions**, taken by the operator on 2026-08-04. Each is argued
+in the section named, and every rejected option with the reasoning that keeps it
+stays in [Decisions taken](#decisions-taken-2026-08-04)'s table, which is the only
+place they are written.
 
 | # | Decision | Argued in |
 | --- | --- | --- |

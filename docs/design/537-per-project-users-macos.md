@@ -1,42 +1,15 @@
 # Design #537 — Per-project unix users on a macOS host node
 
-Status: IMPLEMENTED IN PART — slice 0's measurements landed (jobs #557, #561), slice 8 moved the agent CLI to a node-wide path (job #571), slice 1's launch path landed (job #563), slice 2's teardown path landed (job #565), slice 5 amended the siblings it supersedes (job #567), slice 3's deploy gate landed (job #566), and slice 4's provisioning runbook landed (job #572). It is **inert until a node declares a binding**: `WORKER_HOST_USERS` is off everywhere and no node has the users — slice 4 wrote the procedure that provisions them and the order it has to be run in, and running it is the operator's act. The deploy now forwards the declaration and **refuses** a node whose roster names a project it has no unix user for.
+Status: IMPLEMENTED IN PART — slices 0-5 and 8 landed, 6 closed, 7 deferred; inert until a node is provisioned.
 
-Written against the tree at `4674210` (2026-08-10). Every claim about current
-behaviour was read out of the source named beside it rather than out of a sibling
-design doc; where a sibling and the tree disagree, the disagreement is recorded
-in the corrections section at the end. The measurement that opens this design was
-taken by the operator on `gumbo-air-0` on 2026-08-10 and is reproduced verbatim
-in the first section, with a line drawn under what it licenses and what it does
-not.
-
-**One of the two things that measurement left open has since been answered by the
-operator rather than by a measurement.** Signing does not use the login keychain
-section 1 found absent — real builds are signed by fastlane from ordinary
-secrets — so **D8 is closed and slice 6 with it**, and the file-keychain
-direction §[5](#5-signing) records is retired. What that changes here, what it
-changes in [#322](322-macos-native-runtime.md), and the one thing it hands to
-[#529](529-secret-handling.md) are in
-[the 2026-08-10 correction](#correction--2026-08-10-job-558-signing-is-answered-fastlane-from-secrets-so-d8-closes-and-slice-6-with-it).
-
-**The other one is now measured, and M1 passes.** A `mode: host` task the
-**daemon's own launch path** spawned drove CoreSimulator as `chug-probe` through
-`sudo -n -u chug-probe -H`, in a device set of its own — so this design is **not**
-sent to [its rejected shared-uid alternative](#10-the-rejected-alternative-one-shared-worksalot-uid),
-and C1 is viable. M1–M8 and what each answered are in the measurement table
-below; the record, the two things the measurements *change* rather than confirm,
-and the one question they leave open are in
-[the 2026-08-10 slice-0 correction](#correction--2026-08-10-job-561-slice-0-is-measured-m1-passes-and-the-staff-primary-group-is-load-bearing-in-two-directions).
-Read that question before treating slice 0 as closed: M1 passed in a session
-inherited from the login user's **console** session, and the headless case is
-untested.
+Written against the tree at `4674210` (2026-08-10); every claim about current
+behaviour is read out of the source named beside it. The rejected alternative —
+[one shared `worksalot` uid](#10-the-rejected-alternative-one-shared-worksalot-uid)
+— stays recorded below with the condition that would revive it. Everything after
+the horizontal rule is the append-only argument and its dated corrections
+([#415](415-knowledge-architecture.md) D2).
 
 ## Current state
-
-*This section is the mutable head: it is rewritten to current truth whenever
-anything below it changes. Everything after the horizontal rule is append-only —
-the argument and its dated corrections, never edited
-([#415](415-knowledge-architecture.md) D2).*
 
 | Fact | Where | State |
 | --- | --- | --- |
@@ -46,10 +19,10 @@ the argument and its dated corrections, never edited
 | A host node is single-tenant, enforced at the node and fail-closed | `HostTenancy` read in `HostBackend::admit`, `crates/container/src/host.rs`; parsed in `crates/worker/src/config.rs` | True. The list already accepts **several** projects — nothing in the parse or the admit forbids two |
 | One host task at a time | `enforce_host_capacity`, `crates/worker/src/daemon.rs`, plus the running-task exclusion in `HostBackend::admit` | True |
 | The task directory is created `0700` by the daemon, and every wire path is rebased into it | `create_task_dir` and `rebase_path`, `crates/container/src/host.rs` | True unbound. A bound task's directory is `0770` with the project user's own group, which is §7's scheme: the daemon still writes `meta.json` and reads the results, and no other project can reach it (job #563) |
-| `remove` deletes the recorded files, the task directory, and this task's MCP-log subtree — under the home of the user the task **ran as** | `agent_cache_root` and `remove_all_as`, `crates/container/src/host.rs` | True since job #565. It used to read `HOME` out of the daemon's environment, which reclaimed nothing the moment the task's home was not the daemon's |
+| `remove` deletes the recorded files, the task directory, and this task's MCP-log subtree — under the home of the user the task **ran as** | `agent_cache_root` and `remove_all_as`, `crates/container/src/host.rs` | True since job #565: the reclaim follows the **task** user's home rather than the daemon's, so it reclaims what the task actually wrote |
 | Every delete and every signal a teardown performs escalates to the task user, the daemon-side pair a task's exit runs (`spawn_reaper`) and the boot sweep of a crashed `remove` included | `remove_all_as` / `signal_group_as` / `tree_user`, `crates/container/src/host.rs` | True since job #565. The escalation deletes and the daemon's own delete is the verdict; an unbound node is byte-identical to what it always did |
 | The daemon's own state on a Mac lives **under the login user's home** — `worker.env`, and `keys/worker.creds` / `keys/worker_git` beside it | the macOS branch of `deploy/prod/build-worker.sh` (`$NODE_HOME/chuggernaut-worker/…`); the launchd plist's `ENV_FILE` in `deploy/prod/install-worker-launchd.sh` | True. Measured 2026-08-10: the home is `0750` group `staff`, `worker.env` is `0644`, and a second uid whose **primary group is `staff`** reads it. The credentials at `0600` do not follow — the protection is the per-file mode, not the home |
-| A host task execs the agent CLI by **bare name off the `PATH` it inherits**, and that `PATH`'s CLI directory is now **node-wide** | `AgentCli::discover_on` (`crates/worker/src/agent_cli.rs`) resolves it only to advertise the capability; the `PATH` is `AGENT_PATH`, rendered **twice** — in `deploy/prod/install-worker-launchd.sh` (hand-run) and in `deploy/prod/build-worker.sh`'s own macOS plist (what the deploy reaches a node with), both now defaulting to `…:/usr/local/lib/chuggernaut/bin`, with `deploy/prod/install-worker-launchd.test.sh` comparing the two defaults whole | True since slice 8 (job #571). It used to be `…:$HOME/.local/bin`, which a second uid reached **only** through the `0750`+`staff` traversal D12 removes. **The platform half only**: placing the CLI at that path is the operator's, and it must happen before a project user leaves `staff` |
+| A host task execs the agent CLI by **bare name off the `PATH` it inherits**, and that `PATH`'s CLI directory is now **node-wide** | `AgentCli::discover_on` (`crates/worker/src/agent_cli.rs`) resolves it only to advertise the capability; the `PATH` is `AGENT_PATH`, rendered **twice** — in `deploy/prod/install-worker-launchd.sh` (hand-run) and in `deploy/prod/build-worker.sh`'s own macOS plist (what the deploy reaches a node with), both now defaulting to `…:/usr/local/lib/chuggernaut/bin`, with `deploy/prod/install-worker-launchd.test.sh` comparing the two defaults whole | True since slice 8 (job #571). **The platform half only**: placing the CLI at that path is the operator's, and it must happen before a project user leaves `staff`, or agent host work breaks the moment the group changes |
 | The cross-project secret boundary is **absent** on a Mac, accepted by job #526 | [#322](322-macos-native-runtime.md)'s 2026-08-09 correction | True today; this design is what replaces that decision |
 
 ## Decisions
@@ -83,19 +56,19 @@ the argument and its dated corrections, never edited
 | 7 | deferred — the cache ceiling and LRU eviction inherited from #534(b) | node cache policy | 1 | Deferred |
 | 8 | `deploy` — D12's other half: the agent CLI moves to a node-wide path and the daemon's rendered `PATH` follows it, so a project user outside `staff` can still exec it. **Must land before slice 4's provisioning**, or agent host work breaks the moment a project user stops being a member of `staff` | the node run spec — `AGENT_PATH` in **both** `deploy/prod/install-worker-launchd.sh` and `deploy/prod/build-worker.sh`'s macOS plist, plus the one-`PATH` assertion in `deploy/prod/install-worker-launchd.test.sh`, which pinned the login user's `~/.local/bin` | — | **Landed** (job #571). Both renderings tail at `/usr/local/lib/chuggernaut/bin` and neither carries a home directory, so the defaults are one string and the suite compares them whole. **The operator must place the CLI there before a project user is taken out of `staff`** ([the record](#correction--2026-08-12-job-571-slice-8-the-agent-cli-is-node-wide-and-the-move-is-an-ordering-not-just-a-path)) |
 
-**Slice 0 gated every other row**, and it is the one that could have failed in a
-way that sent this design to its rejected alternative. It did not: slice 1 is
-unblocked, and slices 3 and 4 carry D12 with them. What slice 0 did **not**
-settle is M1 under no console session — recorded as an open question rather than
-as a row, because it is the same measurement asked of a state of the machine.
+**What slice 0 does not settle**: M1 passed in an Aqua session inherited from the
+login user's **console** session, so the headless case — an unattended reboot,
+before anyone logs in — is untested, and unattended reboot is unproven on this
+node. It is an open question rather than a row, because it is the same
+measurement asked of a state of the machine
+([how it would be taken, and what a failure would mean](#the-open-question-and-it-is-the-one-that-decides-the-design)).
 
 ## What was measured first, and what it answered
 
-None of these was answerable from this workspace. Each names what it decides, so
-a failing row changes a decision rather than producing a note — and two of them
-did. **All eight were taken by job #557 on `gumbo-air-0`, 2026-08-10**, from a
-`mode: host` task the daemon spawned; the record — what each answer changes, and
-the one it leaves open — is
+Each names what it decides, so a failing row changes a decision rather than
+producing a note — and two of them did. **All eight were taken by job #557 on
+`gumbo-air-0`, 2026-08-10**, from a `mode: host` task the daemon spawned; the
+record is
 [below](#correction--2026-08-10-job-561-slice-0-is-measured-m1-passes-and-the-staff-primary-group-is-load-bearing-in-two-directions).
 
 | # | Measurement | Decides | Answer (job #557, 2026-08-10) |

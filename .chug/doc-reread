@@ -240,3 +240,30 @@ Doc-reread: docs/reference/docs.md
 Doc-reread: CLAUDE.md
 Doc-reread: .chug/prompts/work/molt.md
 Doc-reread: .chug/tasks/review-molt.md
+
+Doc-reread: CLAUDE.md
+Doc-reread: docs/reference/style.md
+Doc-reread: docs/reference/docs.md
+Doc-reread: docs/design/533-molt.md
+Doc-reread: docs/reference/testing.md
+Doc-reread: docs/reference/crates.md
+Doc-reread: docs/reference/lifecycle-model.md
+Doc-reread: docs/reference/contracts.md
+Doc-reread: docs/spec.md
+Doc-reread: docs/implementation-notes.md
+Doc-reread: docs/design/415-knowledge-architecture.md
+
+Doc-reread: docs/reference/lifecycle-model.md
+Doc-reread: docs/reference/contracts.md
+Doc-reread: docs/design/169-handoff-continuity.md
+Doc-reread: docs/design/440-native-worker-daemon.md
+Doc-reread: docs/design/533-molt.md
+
+Doc-reread: docs/reference/testing.md
+Doc-reread: CLAUDE.md
+Doc-reread: docs/reference/lifecycle-model.md
+Doc-reread: docs/design/309-host-native-execution.md
+Doc-reread: docs/design/517-docker-access-for-jobs.md
+Doc-reread: docs/design/362-binary-artifacts.md
+Doc-reread: docs/design/373-project-toolchains.md
+Doc-reread: docs/design/533-molt.md

@@ -1,41 +1,52 @@
 # Design #308 — Porting beacon's GitHub Actions onto Chuggernaut
 
-Status: PROPOSED, amended 2026-07-30 (job #320), corrected 2026-08-09 (jobs #520, #530).
+Status: PROPOSED — a survey; all four children shipped code, and the port itself has not begun.
 
-A survey whose job was to spawn children; all four were written and **all four**
-have shipped code. The port itself has not begun. See
-[Current state](#current-state). The head was rewritten on 2026-08-09 by job #513,
-and again by job #520 for the operator decision that beacon is imported as a
-**platform-owned** project — which inverts phase 0b's role and is recorded as
-[A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts).
+*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+this title block, [Current state](#current-state) and [Provenance](#provenance) are
+rewritten to current truth whenever anything below them changes. Everything from
+[Problem](#problem) onward is append-only — the original survey, its 2026-07-30
+amendment and its corrections, never edited into the prose above them.*
 
-The original was written against the tree at `0346a80`; the amendment against
-`00dd0dc`. **Four corrections to this doc's own claims** — one retraction, one
-overstatement, one finding it was missing entirely, one made stale by shipped
-code — **plus one added phase**: see
-[What #308 got wrong](#what-308-got-wrong), which is where a downstream reader
-should look first. A **fifth** correction was appended on 2026-08-09 and is the
-one that moves the ordering:
-[A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts).
-A **sixth**, also 2026-08-09, retires [gap 8](#gaps-ranked): nobody merges in
-chuggernaut, so "auto-merge vs human-merge" names no choice this platform offers
-— the question with a referent is whether a human gates a job, and that is an
-evaluation criterion, already shipped in two spellings
-([A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here)).
-
-Every claim about *Chuggernaut's* current behavior, at all three
-dates, was read out of `docs/spec.md` and the source in this repo, not inferred from
-the docs; the corrections in
-[What the brief got wrong](#what-the-brief-got-wrong) are the ones the original
-survey found.
-
-Children (the implementable specs extracted from this survey):
+**What this doc is.** A survey of beacon's 41 GitHub Actions workflows against
+Chuggernaut: a [category map](#category-map-the-41-workflows) of all 41, a ranked
+[gap list](#gaps-ranked), a dependency [ordering](#ordering), and a proposal for
+host-native workers ([H](#h-host-native-workers)). Its job was to spawn children,
+and all four were written and all four have shipped code —
 [#309 host-native execution](309-host-native-execution.md),
 [#310 scheduled jobs](310-scheduled-jobs.md),
 [#311 job inputs](311-job-inputs.md),
 [#313 workload identity and image builds](313-workload-identity-image-builds.md).
 Where a claim of this doc now lives in a child, the child is cited rather than
 restated.
+
+**What it concluded.** Chuggernaut's execution substrate is stronger than GHA
+exactly where the two overlap — staged gates, rework loops, per-container secret
+scoping, a merge gate that holds against the exact tree that lands, single-writer
+concurrency — and absent where they do not: triggers, parameterization, keyed
+caching, binary artifacts, and machine-level execution. One structural difference
+generates most of the hard cases: **GHA's isolation unit is a machine and
+Chuggernaut's is a container.** [H](#h-host-native-workers) is the proposal that
+addresses it and everything before H is what ports without it; category F (mobile)
+is the one category no amount of container cleverness reaches.
+
+**The corrections to reach before citing any section.** The body is append-only,
+so a correction sits at the end rather than in the section it touches, and each
+affected section carries a pointer into the list.
+[What the brief got wrong](#what-the-brief-got-wrong) holds seven claims of the
+job brief that do not survive contact with the tree (three make the port cheaper,
+four add work or re-sequence it). [What #308 got wrong](#what-308-got-wrong) is the
+same treatment applied to this doc:
+[A1](#a1-image-builds-do-not-dissolve-into-host-mode) retracts "image builds
+dissolve into host mode", [A2](#a2-the-keyed-caching-gap-was-overstated) retracts
+the keyed-caching claim, [A3](#a3-beacon-already-parameterizes-placement-per-run)
+adds per-run placement, [A4](#a4-job-inputs-shipped-so-gap-1-is-retired) retires
+gap 1, [A5](#a5-the-missing-phase-onboarding-beacon-as-a-project) adds phase 0b,
+and two 2026-08-09 corrections stand as top-level sections at the very end:
+[A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts) (beacon
+imports platform-owned, and 0b inverts) and
+[A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here) (gap 8 is
+retired).
 
 Related: [docs/spec.md](../spec.md) §1.1 (job-type config), §3.1 (dispatcher
 backends, fleet, node-local build cache), §3.3 (staged evaluation, merge gate),
@@ -49,25 +60,11 @@ to the same announce payload this doc wants to extend).
 
 ## Current state
 
-*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
-rewritten to current truth whenever anything below it changes. Everything after
-this section is append-only — the original survey, its 2026-07-30 amendment and
-its corrections, never edited into the prose above them.*
-
-**This is a survey, and its job was to spawn children.** All four children were
-written and all four have shipped code — [#309](309-host-native-execution.md) P0
-(job #434), [#310](310-scheduled-jobs.md) (jobs #359/#360),
-[#311](311-job-inputs.md) slice A (job #314) and
-[#313](313-workload-identity-image-builds.md) half A (job #413). Shipped is not
-the same as in use, and the two halves of that sentence have moved apart: #309
-P0 is now **on for one node** — `gumbo-air-0` advertises `host` and has run
-agent host tasks ([#490](490-agent-work-on-a-mac.md) slice 6) — and #313 half A
-is deployed and **proven end to end** against chuggernaut's own provider
-(job #430), leaving open only a **consumer** project's provider registration,
-which that doc's head now carries as the second half of its S6. The port itself — beacon's workflows actually running here — has not
-begun, and **cannot be judged from this tree**: `~/beacon` is not checked out,
-so every phase whose work lives in that repo is reported below as unknown
-rather than guessed.
+**The port has not begun** — no beacon workflow runs here — and it **cannot be
+judged from this tree**: `~/beacon` is not checked out, so every phase whose work
+lives in that repo reads *Unknown* below rather than guessed. Shipped is not the
+same as in use: what the children landed is platform capability, exercised against
+in-repo fixtures and proof job types, never against beacon.
 
 The rows below are the states of [Ordering](#ordering)'s table, which is a
 dependency reading rather than a commitment, and which keeps each phase's
@@ -88,102 +85,114 @@ argument. **Phase numbers are never reassigned** — the children cite them.
 | **9** | Job inputs → unblocks rollback | **Landed** (job #314) — [#311](311-job-inputs.md) slice A, with jobs #315–#317 and #319 |
 | **10** | Per-run placement | Answered, not scheduled — [#361](361-per-run-placement.md) found gap 10 needs no new field |
 
-### Phase 0b, after the platform-owned decision
+### Phase 0b is a cutover, not a prerequisite
 
-Row 0b said "Onboard beacon as a **linked-origin** project" until 2026-08-09, and
-[A5](#a5-the-missing-phase-onboarding-beacon-as-a-project) argued that kind was a
-requirement. The operator has decided otherwise: beacon is imported as a
-**platform-owned** project — the kind this repo is, where the bare repo owns
-`main` and GitHub is a force-pushed read-only mirror — with beacon's
-`.github/workflows/` **disabled** at import. A5's analysis of the linked-origin
-mode stays standing as the rejected option; what changed is which mode beacon
-gets.
+beacon is imported as a **platform-owned** project — the kind this repo is, where
+the bare repo owns `main` and GitHub is a force-pushed read-only mirror — with
+beacon's `.github/workflows/` **disabled** (not deleted) at import, because a
+mirror's force-push still fires `push`-triggered workflows and two systems
+deploying one target is a race the single-writer dispatcher cannot see.
+**Linked-origin is the rejected option**, and
+[A5](#a5-the-missing-phase-onboarding-beacon-as-a-project)'s account of that mode
+is accurate and stands; what is false is that beacon *must* be that kind.
 
 **The consequence is an inversion, and it is the part to read.** Linked-origin
-would have been additive and reversible, so 0b came *first* and phases 1, 5, 6
-and 8 hung off it. A platform-owned import is the **cutover**: after it the
-platform owns `main` and there is no incremental-porting window on the far side,
-so those phases are now work to be proven **before** 0b rather than work it
-unblocks. That is not a deadlock — proof job types against in-repo fixtures
+would have been additive and reversible, so 0b would have come first and phases 1,
+5, 6 and 8 hung off it. A platform-owned import is the point of no return: there
+is no incremental-porting window on the far side, so those phases are work to be
+proven **before** 0b, and 0b is the most expensive phase in the table rather than
+the cheapest. Not a deadlock — proof job types against in-repo fixtures
 (`.chug/jobs/android-proof.yaml`, `.chug/jobs/mac-proof.yaml`,
-`.chug/jobs/gcp-proof.yaml`) already prove capability with no beacon anywhere.
-The full argument, the reason the workflows are disabled, and what it does to
-[D2](#open-decisions) are in
+`.chug/jobs/gcp-proof.yaml`) prove capability with no beacon anywhere, all three
+declaring `wrap_up: type: none`, so the cost of being wrong is one report. Full
+argument, and what it does to [D2](#open-decisions), in
 [A6](#a6-beacon-imports-as-a-platform-owned-project-and-phase-0b-inverts).
+
+**Two things a proof cannot cover, both open.** A fixture does not prove beacon's
+own `.chug/` config is right — a job type in beacon's repo does nothing until
+beacon is a project, so its first exercise happens after `main` has moved, and how
+to rehearse the cutover is undecided. And **how "disabled" is achieved is an open
+operator step**: nothing in this tree touches a workflow directory, so it is an
+out-of-band action on the GitHub side, to be named in the import runbook.
 
 ### Phase 8's macOS leg, precisely
 
-Row 8 said "**Linux-proven only**, with no macOS node in the fleet" until
-2026-08-09. Both halves are now false, and the replacement is narrower than
-"category F is done" — so what the two `mac-proof` runs on `gumbo-air-0` do and
-do not license is worth stating in full. The record is
-[#490](490-agent-work-on-a-mac.md)'s job #510 correction, and the machinery is
-`.chug/jobs/mac-proof.yaml` (`runtime: {mode: host, env: "xcode:26.5"}`). Both
-runs were pinned with `placement: {node: air}`; the pin came out in job #556
-once placement began matching the declared environment against what a node
-advertises ([#543](543-placement-granularity.md) S2), and the type now names no
-machine.
-
-**What the runs demonstrated:**
-
-- an **authenticated** agent CLI running as a native macOS process rather than
-  in a container, with its `session.jsonl` harvested end to end at 462,085
-  bytes (job #506);
-- the Mach-O `chuggernaut-channel` the node installs carrying `update_status`
-  and `submit_result` on the first call, on both runs;
-- a real **iOS simulator** exercised against the runtime the node's
-  `xcode:26.5` toolchain carries — `simctl boot`, then
-  `launch com.apple.Preferences` inside the booted device;
-- **host work and container CI in one job** (job #509), which is
-  [#309](309-host-native-execution.md) §1's worked case running for the first
-  time.
-
-**What it does not license.** The claim is "proven on the air by `mac-proof`",
-not "category F ports". It is one node, one job type, and a *proof*: `mac-proof`
-declares `wrap_up: type: none`, so it merges nothing and gates nothing, and no
-beacon workflow — fastlane, `flutter-integration-tests`, or any other — has run
-here. The Android leg of this phase is untouched by that work and stands where
-[#367](367-android-emulator-execution.md) A1/A2 left it.
+The claim is "proven on the air by `mac-proof`", not "category F ports". The two
+runs (jobs #506 and #509, recorded in [#490](490-agent-work-on-a-mac.md)) drove an
+authenticated agent CLI as a native macOS process, the Mach-O
+`chuggernaut-channel` the node installs, a booted iOS simulator, and host work
+plus container CI in one job — [#309](309-host-native-execution.md) §1's worked
+case running for the first time. It is one node, one job type and a *proof*:
+`mac-proof` declares `wrap_up: type: none`, so it merges nothing and gates
+nothing, and no beacon workflow — fastlane, `flutter-integration-tests` or any
+other — has run here. The Android leg is untouched by that work. Neither run pins
+a machine any more: the `placement: {node: air}` pin came out in job #556 once
+placement began matching a declared environment against what a node advertises
+([#543](543-placement-granularity.md) S2).
 
 **Two findings from the proof bear on the port — one open, one withdrawn:**
 
-- **M7 has two samples and no verdict.** Simulator state one task leaves for
-  the next made the second run *cheaper*, not disturbed; two observations of
-  "did not disturb" are not "cannot disturb", so
+- **M7 has two samples and no verdict.** Simulator state one task leaves for the
+  next made the second run *cheaper*, not disturbed; two observations of "did not
+  disturb" are not "cannot disturb", so
   [#490](490-agent-work-on-a-mac.md) D4's one host task per node stays and
   [#322](322-macos-native-runtime.md) §5's per-task device set stays deferred.
 - **`xcrun simctl spawn <udid>` is not broken, and the session was the wrong
-  culprit.** The proof runs' `LaunchdSimError` 111 and `NSPOSIXErrorDomain` 2
-  were recorded here as a property of the session a host task gets; both
-  reproduce over an ordinary SSH session and separate by **argument**, so that
-  attribution is withdrawn ([#490](490-agent-work-on-a-mac.md)'s job #527
-  correction). What is left is the ordinary iOS constraint: `spawn` runs the
-  named program inside the simulator's own filesystem, so a ported workflow
-  shelling out to it hits nothing host-task-specific unless it names a binary
-  the runtime does not carry.
+  culprit.** The proof runs' `LaunchdSimError` 111 and `NSPOSIXErrorDomain` 2 were
+  recorded here as a property of the session a host task gets; both reproduce over
+  an ordinary SSH session and separate by **argument**, so that attribution is
+  withdrawn ([#490](490-agent-work-on-a-mac.md)'s job #527 correction). What is
+  left is the ordinary iOS constraint: `spawn` runs the named program inside the
+  simulator's own filesystem, so a ported workflow shelling out to it hits nothing
+  host-task-specific unless it names a binary the runtime does not carry.
+
+### Which gaps are still open
+
+Ranking and reasoning are in [Gaps, ranked](#gaps-ranked); this is where its
+eleven rows stand. **Gap numbers are stable identifiers** — siblings cite "Gap 1
+of #308" — so a retired gap keeps its number and loses its rank.
+
+| Gap | Where it stands |
+| --- | --- |
+| 3 host-native execution | **Open**, and first in the ranking — #309 P0 landed and is on for one node; the rest is open |
+| 2 cron | **Open** — [#310](310-scheduled-jobs.md)'s minimum useful version landed; it is the trigger class category E depends on |
+| 10 per-run placement | **Answered** by [#361](361-per-run-placement.md), with no `Job` change and #311 Decision 1 unamended ([A3](#a3-beacon-already-parameterizes-placement-per-run)) |
+| 11 no image registry | **Open** — operator infrastructure rather than code, and phase 6's second dependency |
+| 6 OIDC issuer prerequisite | **Open in part** — #313 half A is deployed and proven against chuggernaut's own provider; a consumer project's provider registration is not |
+| 5 artifacts | **Answered** by [#362](362-binary-artifacts.md) — S0–S2 landed (jobs #363, #381), S3 deferred behind a second consumer |
+| 7 outbound webhooks | **Open** — `crates/webhooks/src/lib.rs` is a stub, and it blocks `sentry-resolve` |
+| 9 node-level exclusive resources | **Open** — #309 §5b / P4, which forces an epoch bump on its own |
+| 4 keyed caching | **Open remnant only** — one namespaced persistent directory in the worker; the rest folded into gap 3 ([A2](#a2-the-keyed-caching-gap-was-overstated)) |
+| 8 auto-merge vs human-merge | **Retired** — a category error: nobody merges here, so gating a job on a person is an evaluation criterion ([A7](#a7-gap-8-is-retired-merging-is-not-an-act-a-person-performs-here)) |
+| 1 job inputs / parameterization | **Retired** — shipped and deployed; matrix / fan-out stays excluded by decision, #311 Decision 7 ([A4](#a4-job-inputs-shipped-so-gap-1-is-retired)) |
+
+Both [open decisions](#open-decisions) go with them: D1 (image builds) by
+[A1](#a1-image-builds-do-not-dissolve-into-host-mode), with
+[#517](517-docker-access-for-jobs.md) since adopting the scoped socket; D2 by A7.
+What the doc still declines to decide is in
+[What this doc does not decide](#what-this-doc-does-not-decide).
 
 ## Provenance
 
 Two halves, with different evidentiary weight, and the doc marks which is which:
 
 - **The beacon half** — 41 workflows and 14 composite actions in `beacon`'s
-  `.github/`, plus the quilbert/scrybert agent protocol — came from the survey
-  in the job brief. That repo is still not checked out in this workspace, so
-  nothing written here re-derives it. Where a decision hangs on a beacon detail,
-  the doc says so, and that detail should be re-read before the corresponding
-  phase starts.
-
-  **It has now been verified once.** On **2026-07-30** the operator inspected
-  `~/beacon/.github` directly and re-checked the claims this amendment turns on.
-  The two findings recorded in [A2](#a2-the-keyed-caching-gap-was-overstated) and
-  [A3](#a3-beacon-already-parameterizes-placement-per-run) — that exactly one
-  workflow uses `actions/cache`, and that thirteen jobs select their runner from
-  a dispatch input — are **verified fact with that provenance and date**, not
-  survey inference, and are stated as such below. Beacon claims *not* re-read on
-  that pass (the 41/14 counts, the quilbert/scrybert protocol, the emulator
-  workarounds, the two `:latest`-only pushes) keep their original weight; and
-  anything that changed in `.github/` after 2026-07-30 is unverified again.
-- **The Chuggernaut half** is verified against this tree, at both dates. Paths
+  `.github/`, plus the quilbert/scrybert agent protocol — came from the survey in
+  the job brief, and `~/beacon` is still not checked out here, so nothing written
+  here re-derives it. Where a decision hangs on a beacon detail, the doc says so,
+  and that detail should be re-read before the corresponding phase starts. **It
+  has been verified once**, on **2026-07-30**, by the operator inspecting
+  `~/beacon/.github` directly: the two findings in
+  [A2](#a2-the-keyed-caching-gap-was-overstated) and
+  [A3](#a3-beacon-already-parameterizes-placement-per-run) — exactly one workflow
+  uses `actions/cache`, and thirteen jobs select their runner from a dispatch
+  input — are **verified fact with that provenance and date**, not survey
+  inference. Claims *not* re-read on that pass (the 41/14 counts, the
+  quilbert/scrybert protocol, the emulator workarounds, the two `:latest`-only
+  pushes) keep their original weight, and anything that changed in `.github/`
+  after 2026-07-30 is unverified again.
+- **The Chuggernaut half** is verified against this tree, at all three dates (the
+  original survey, the 2026-07-30 amendment, the 2026-08-09 corrections). Paths
   and spec sections are citations, not illustrations.
 
 ## Problem

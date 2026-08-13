@@ -2,57 +2,48 @@
 
 Status: IMPLEMENTED — shipped in jobs #324, #330, #331 and #332.
 
-All three slices landed: slice A — `crates/types/src/groups.rs`, `Job.groups`
-and the write paths — in #324; slice B — `crates/types/src/rollup.rs`,
-`req.groups.list`/`req.designs.list` in
-`crates/dispatcher/src/handlers/groups.rs`, and `GET .../groups` and
-`GET .../designs` — in #330; slice C — the Designs view
-(`web/src/pages/Designs.tsx`) in #331, and the group chips, filter and picker
-in #332. The **Deferred** list under
+A group is an operator-set label on the job record — `Job.groups`, many per job,
+inert to execution, mutable in every state including terminal. The membership
+edge is the only thing stored; every enumeration, count and roll-up is derived
+from the job records at read time. `docs/spec.md` §1.1 and §6.2 carry the
+shipped surface and `docs/reference/docs.md` carries the design registry it
+feeds; this document is the argument for both. The **Deferred** list under
 [Minimum useful version](#minimum-useful-version) is untouched and still
 describes what has not been built.
 
-Note that the survey in
+This doc supersedes part of job **#185**'s settled shape — an implementation
+ticket carrying `deps = [all children]`, with Blocked → unblock-on-Done as the
+roll-up. That mechanism is disqualified in
+[Decision 1](#decision-1-deps-cannot-carry-membership); two of #185's six points
+survive intact and are load-bearing
+([Decision 9](#decision-9-what-happens-to-185-86-and-88)).
+
+Written against the tree at `00dd0dc`, and left as written: the survey in
 [Corrections](#corrections-verified-against-the-tree) and the worked example
-under [Decision 8](#decision-8-status-hygiene-without-a-second-writer) quote the
-`Status:` lines as they read at `00dd0dc`; several have since been amended —
-including this one, and the `design/311-job-inputs` case Decision 8 uses as its
-example. They are left as written, because the argument is the record of what
-the tree said when it was made.
+under [Decision 8](#decision-8-status-hygiene-without-a-second-writer) quote
+`Status:` lines as they read there, and several have since been amended,
+including this one.
 
-Written against the tree at `00dd0dc`. Every claim about current behavior below
-was read out of `docs/spec.md` and the source in this repo; where the brief and the
-tree disagree, the tree wins and the disagreement is recorded in
-[Corrections](#corrections-verified-against-the-tree).
-
-This doc deliberately reopens a decided direction. Job **#185** (Frozen,
-`design`) records a settled shape — an implementation ticket carrying
-`deps = [all children]`, where the existing Blocked → unblock-on-Done machinery
-*is* the roll-up. Two of its six points survive here intact and are load-bearing
-([Decision 9](#decision-9-what-happens-to-185-86-and-88)); three do not survive
-contact with the tree. The supersede is argued from
-[Decision 1](#decision-1-deps-cannot-carry-membership), not assumed.
-
-Related: [docs/spec.md](../spec.md) §1.1 (the `Job` record, `knowledge_tags`,
-derived `retry_count`/`rework_count`), §1.2 (claims), §1.4 (buckets, the `rdeps`
-derived cache), §2.1 (the state machine, Draft edits, batches, the Revoked
-cascade), §2.2 (release validation's three passes), §3.6 (startup rebuild), §4.3
-(the job brief), §4.4 (upfront knowledge injection), §6.1/§6.2 (subjects and
-HTTP), §6.3 (events), §13.4 (factory provenance), §14 (config and version skew),
-Appendix: Deferred; [docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) (the job
-lifecycle); [docs/reference/style.md](../reference/style.md) (Tier 1 no-duplication and pure `types`;
-Tier 2 #2 asserts, #3 bounds, #4 naming, #6 tests; Tier 3 single writer,
-simplicity, zero technical debt); [docs/reference/crates.md](../reference/crates.md) (crate
+Related: [docs/spec.md](../spec.md) §1.1 (`Job.groups`, `knowledge_tags`, derived
+`retry_count`/`rework_count`), §1.2 (claims), §1.4/§3.6 (the `rdeps` derived
+cache and the startup rebuild), §2.1 (the state machine, Draft edits, batches,
+the Revoked cascade), §2.2 (release validation's three passes), §4.3 (the job
+brief), §4.4 (knowledge injection), §6.1/§6.2 (subjects and HTTP), §6.3 (events),
+§13.4 (factory provenance), §14 (config and version skew), Appendix: Deferred;
+[docs/reference/docs.md](../reference/docs.md) (the `Status:` vocabulary and how
+a design reaches the Designs view);
+[docs/reference/design-lifecycle.md](../reference/design-lifecycle.md) (the job
+lifecycle); [docs/reference/style.md](../reference/style.md) (single writer,
+bounds, pure `types`); [docs/reference/crates.md](../reference/crates.md) (crate
 ownership); [docs/reference/testing.md](../reference/testing.md) (test tiers);
-[docs/README.md](../README.md) and [docs/reference/contracts.md](../reference/contracts.md)
-(decider/effect factoring); [CLAUDE.md](../../CLAUDE.md) (single writer, `store`
-is the only crate that talks to NATS, `types` is pure data).
-
-Sibling designs cited for precedent: [#311](./311-job-inputs.md) (the additive
-`Job` field and its skew analysis — the closest precedent for what is proposed
-here), [#310](./310-scheduled-jobs.md) (derived-over-stored, and the rejected
-`Job.origin` consolidation), [#308](./308-gha-port.md),
-[#309](./309-host-native-execution.md), [#293](./293-worker-capacity.md),
+[docs/README.md](../README.md) and
+[docs/reference/contracts.md](../reference/contracts.md) (decider/effect
+factoring); [CLAUDE.md](../../CLAUDE.md). Sibling designs cited for precedent:
+[#311](./311-job-inputs.md) (the additive `Job` field and its skew analysis — the
+closest precedent for what is proposed here), [#310](./310-scheduled-jobs.md)
+(derived-over-stored, and the rejected `Job.origin` consolidation),
+[#308](./308-gha-port.md), [#309](./309-host-native-execution.md),
+[#293](./293-worker-capacity.md),
 [#313](./313-workload-identity-image-builds.md).
 
 ## Problem

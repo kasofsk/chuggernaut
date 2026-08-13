@@ -1,131 +1,30 @@
 # Design #415 — Knowledge architecture: one definition per concept, and prose that cannot go quietly stale
 
-Status: IMPLEMENTED — D1–D15 decided; S0 through S12 all landed, in jobs #416
-through #468. One clause of S11 is deferred with cause rather than done: the
-`wiki/` prose note it would have consumed is untracked, so it is out of every
-job's reach.
+Status: IMPLEMENTED — D1–D15 decided, S0 through S12 all landed, one S11 clause deferred with cause.
 
-The decisions D1–D12 were taken with the operator on 2026-08-04; S8 reversed
-[D8](#d8-tags-point-they-do-not-carry) while landing (job #416), S1c landed
-as `doc-lint.sh` rule 5 (job #437), and job #436 landed S2, emptying the
-path-warning list — see the
-[2026-08-05 correction](#correction--2026-08-05-job-436-s2-swept-and-a-third-marker).
-S1b landed on 2026-08-05 (job #438): both checks are
-`.chug/tasks/check-doc-facts.sh`, whole-tree and blocking on every job — see the
-[S1b correction](#correction--2026-08-05-job-438-s1b-landed-and-the-eleven).
-S3 landed on 2026-08-05 (job #441): the root holds `README.md` and `CLAUDE.md`
-and nothing else — see the
-[S3 correction](#correction--2026-08-05-job-441-s3-the-move). Job #443 cleared
-that correction's nineteen doc comments and paid the doc-length ratchet they
-carried; the gate-scope gap that let them through is **recorded and left open**,
-not closed — see the
-[#443 finding](#finding--2026-08-05-job-443-the-doc-comment-residue-and-the-gate-scope-it-fell-through).
-S5 split while landing (job #444): **S5a** is check 3, the slice ↔ merged-job
-check, and it is live — see the
-[S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split).
-**S5b** — the head retrofit — landed on 2026-08-05 (job #445): every
-`docs/design/*.md` now carries a `Status:` line, eleven of them carry a slice
-table in check 3's shape (nine retrofitted, plus this doc and
-[#440](440-native-worker-daemon.md), which already had one), and the three
-demoted plans say what they are. What it
-deliberately did *not* do is invent a slice table for a doc that had none — see
-the [S5b correction](#correction--2026-08-05-job-445-s5b-the-head-retrofit).
-S6 landed on 2026-08-05 (job #446): `.chug/tasks/doc-staleness.sh` is the
-git-derived ledger, advisory in CI and in the hook, and at that job's base
-**30 of the 61 docs that make a file claim** came back suspect — 7 of them by a
-day or more. That number moves with every commit and is meant to. It blocks
-only on a doc the current diff edits, and [D7](#d7-the-staleness-ledger)'s
-pre-commit half of that rule turned out to be unclearable and was not built —
-see the
-[S6 correction](#correction--2026-08-05-job-446-s6-the-ledger-and-the-block-that-could-not-clear).
-The CI half then proved unclearable too, one level up: it escalated jobs #449
-and #453, both of which could only be landed by squashing the branch. Job #454
-took a `*.md` mover off the **blocking** side of the ledger — a cross-reference
-is a pointer, and doc-names-doc is the only edge that can form a cycle — which
-makes the gate satisfiable in one rework commit while the advisory reading list
-keeps the edge. See the
-[#454 correction](#correction--2026-08-06-job-454-d7-the-gate-that-a-rework-could-not-clear).
-Satisfiable is not the same as *right*, and job #471 measured the difference:
-across the three jobs `--gate` had blocked, one finding was arguable and two
-were ordering artifacts, because a timestamp cannot express attention. The block
-stands and its clearing rule changed — a `Doc-reread: <path>` trailer in a
-commit message on the branch now clears exactly the doc it names, which is an
-assertion a content edit is not. See the
-[#471 correction](#correction--2026-08-06-job-471-d7s-blocking-half-asked-for-the-wrong-thing).
-That assertion turned out to be rebase-fragile — a commit message is the one
-thing a rework rewrites — so job #482 gave it a second, tree-carried home in
-`.chug/doc-reread`, read from the branch's diff. See the
-[#482 correction](#correction--2026-08-07-job-482-d7s-assertion-did-not-survive-a-rebase).
-S4 landed on 2026-08-05 (job #449), last of the original programme:
-`docs/concepts.md` holds **12** rows and check 4 is live. Its measured yield is
-**one** duplicate in the whole tree *under the two shapes D4 gates* — the value
-is preventive, and the head says so rather than claiming a sweep it did not
-make. A third shape the corpus uses more than either gated one is
-[measured and deliberately unmodelled](#the-shape-d4-did-not-name). `Status:` is still
-`IMPLEMENTED IN PART` for a reason the ticket did not have: S9–S12 were appended
-after the slice list was written, and none of them is built. See the
-[S4 correction](#correction--2026-08-05-job-449-s4-check-4-and-the-yield-it-does-not-have).
-S7 landed on 2026-08-05 (job #448): `.chug/tasks/docs-update.md` is rewritten
-around [D1](#d1-two-kinds-of-doc-and-only-two)/[D10](#d10-the-implementing-job-owns-the-update)
-and `.chug/tasks/review-docs-updated.md` is no longer a placeholder — it blocks
-on **three** classes rather than [D9](#d9-the-evaluator-judges-only-what-a-script-cannot)'s
-two, and the doc-table paths S7's brief said to fix were already correct —
-job #441 had fixed them. See the
-[S7 correction](#correction--2026-08-05-job-448-s7-the-instructions-and-the-evaluators-teeth).
-Job #450 landed no slice: it deleted every **suite case count** from this head
-and from `docs/reference/testing.md`. The `.chug/tasks/check-doc-facts.test.sh`
-total had drifted through three values, and two of job #449's reviewers derived
-it differently from each other — neither by running it. Running it at the base
-job #449 branched from reproduces the standing value the two were jointly
-correcting, so the number they condemned had been right for the tree it
-described and stale only because the suite had since grown. That is the count
-class [check 4 could not own](#what-check-4-cannot-do-and-what-took-its-slot),
-and its first real instance argues the reviewer-rule framing is too weak — see
-the [#450 finding](#finding--2026-08-05-job-450-a-case-count-two-reviewers-derived-differently).
-D13–D15 and S9–S12 were added on 2026-08-05
-by job #435, written against the tree at `810a91b`; their three measurements were
-read out of that commit and three claims in the ticket that proposed them did not
-survive it — see the
-[2026-08-05 amendment](#amendment--2026-08-05-job-435-structural-health).
-S9 and S10 landed on 2026-08-06 (job #461): `docs/reference/docs.md` states the
-policy in the present tense and absorbs `docs/design-docs.md`, which is reduced
-to a pointer rather than deleted; `docs/README.md` carries a catalogue row per
-tracked doc under `docs/`, and check 5 compares the two sets both ways as an
-error in every job's pre-stage — see the
-[S9/S10 correction](#correction--2026-08-06-job-461-s9-and-s10-the-policy-doc-and-the-catalogue).
-S11 landed on 2026-08-06 (job #467): `docs/overview.md` is the synthesis page,
-written as [D13](#d13-the-synthesis-page-is-a-reference-doc) asks — routing
-tables whose left cell is a question and whose right cell is the doc that
-answers it, so a line on the page cannot go stale unless the doc it links stops
-answering. Its row's second clause was **not** done and is not claimed: the
-`wiki/` prose note it names is untracked, and an untracked file is the
-operator's to move, not a job's — see the
-[S11 correction](#correction--2026-08-06-job-467-s11-the-synthesis-page-and-the-wiki-clause-that-could-not-run).
-S12 landed on 2026-08-06 (job #468), last of the programme to be built:
-`.chug/tasks/doc-staleness.sh` reports each doc's inbound-reference count and
-**zero of the 41 docs under `docs/` is an orphan** at that base. The catalogue
-is excluded as a referrer — the decision that keeps the check from being
-constant-true — and the count needs a second route, `doc-lint.sh --emit-links`,
-because `docs/design/` cites its siblings by relative link rather than by
-backticked path. With S11 already merged, that is every slice, and `Status:`
-moves for the first time — see the
-[S12 correction](#correction--2026-08-06-job-468-s12-the-orphan-half-and-the-two-routes).
+D1–D12 were decided with the operator on 2026-08-04; D13–D15 and S9–S12 were
+appended on 2026-08-05 by the
+[structural-health amendment](#amendment--2026-08-05-job-435-structural-health),
+which is also where three claims of the ticket proposing them are refused.
+[M1–M7](#the-problem-measured) were read out of the tree at `28e5aa1`, and the
+reference counts in [what the move costs](#what-it-costs-honestly) at `d781496`;
+each is labelled where it appears, and the commands are given so a reader can
+re-run them rather than trust them. [Check 1](#two-markers-not-one) verifies the
+file a citation names and never its line number, because a `path:line` citation
+inside this document went stale in the four commits it took to write it.
 
-Measured against the tree at `28e5aa1` (2026-08-04). Every number below was read
-out of that commit, not carried over from the brief; the commands are given so a
-reader can re-run them rather than trust them. The branch was later rebased onto
-`69e48b2`; the M-table still reproduces at the stated sha, and the reference
-counts in [what the move costs](#what-it-costs-honestly) were re-measured at
-`d781496` and are labelled there. Two figures shifted at the new base: #313 grew
-to 1,428 lines (M6 → 16,055), and `docs/spec.md`'s age-key line moved from 2201 to
-2217 — a `path:line` citation going stale inside this document, in the four
-commits it took to write it, which is exactly why [check 1](#two-markers-not-one)
-verifies the file and not the line number.
-
-Supersedes job #86 (*inaugural design doc: docs, wiki, tags, and blessed
-practices*), Frozen since the first hundred jobs. #86's five-section scope was
-right; this doc is written with the ~320 jobs of failure corpus #86 was drafted
-without.
+Body corrections a reader still needs and the slice table below does not link:
+the [#443 finding](#finding--2026-08-05-job-443-the-doc-comment-residue-and-the-gate-scope-it-fell-through)
+(the doc-comment residue, and the gate scope it fell through), the
+[#450 finding](#finding--2026-08-05-job-450-a-case-count-two-reviewers-derived-differently)
+(a count no gate can own), the
+[S9/S10 correction](#correction--2026-08-06-job-461-s9-and-s10-the-policy-doc-and-the-catalogue)
+(the policy doc and the catalogue), and the
+[#454](#correction--2026-08-06-job-454-d7-the-gate-that-a-rework-could-not-clear)
+and [#482](#correction--2026-08-07-job-482-d7s-assertion-did-not-survive-a-rebase)
+corrections (why [D7](#d7-the-staleness-ledger)'s blocking half clears on an
+assertion, and why that assertion is carried in the tree as well as in a commit
+message).
 
 ## Current state
 
@@ -208,26 +107,43 @@ wiki/                  Obsidian vault; diagrams, not prose — exempt (D12)
 | — | `security-assessment.md` (1,147 lines, untracked) | **Out of scope**; its own job |
 
 **All sixteen rows are landed — S0, S1a, S1b, S1c, S2, S3, S4, S5a, S5b, S6, S7, S8, S9, S10, S11 and S12.**
-No row is intent any longer, so none now carries the marker docs/reference/style.md's doc-claim
-rule — which this
-document is partly written to make enforceable — asks of one. This sentence read *six* and omitted
-S3 until job #444 corrected it, four jobs after S3 merged: a count in the head is
-exactly the class of claim [check 4 cannot own](#what-check-4-cannot-do-and-what-took-its-slot),
-so it is a reviewer's to catch.
+No row is intent any longer, so none carries the marker docs/reference/style.md's
+doc-claim rule — which this document is partly written to make enforceable —
+asks of one.
 
-This head went stale **within a day of merging**: job #416 landed S8 on
-2026-08-04, appended its correction to the body per [D10](#d10-the-implementing-job-owns-the-update),
-and left the table above still saying nothing was implemented and still naming
-job #87 as live work. That is the drift **check 3** (slice ↔ merged job,
-[S5a](#slices)) exists to catch, and it did not exist yet — so a human had to
-notice. Check 3 now exists (job #444) and **would still not have caught either
-half**: both are *under*-claims — a head saying `PROPOSED — no slice
-implemented` over a slice that had merged, and a row naming #87 as future work
-after it was revoked — and check 3 resolves claims that a job *did* land. The
-correction is recorded rather than argued away in
-[the S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split);
-the under-claim is [D7](#d7-the-staleness-ledger)'s and
-[D9](#d9-the-evaluator-judges-only-what-a-script-cannot)'s, not check 3's.
+### What is still left open
+
+Four gaps in the mechanical half are recorded rather than closed. Each is a
+reviewer's or the operator's, not a script's, and none is deferred work waiting
+on a slice.
+
+- **A count in prose is nobody's check.** It is exactly the class
+  [check 4 cannot own](#what-check-4-cannot-do-and-what-took-its-slot), and its
+  first real instance argues that leaving it to a reviewer rule is too weak —
+  one number drifted through three values across job #449's **four** evaluation
+  cycles, and the two reviewers who finally blocked on it derived replacements
+  that disagreed with each other, neither by running the suite. No gate is
+  proposed and none should be; the
+  rule is stated at full strength in the
+  [#450 finding](#finding--2026-08-05-job-450-a-case-count-two-reviewers-derived-differently)
+  instead. This head's own slice count drifted that way once.
+- **Check 3 resolves over-claims only.** A head claiming *less* than has landed,
+  or naming revoked work as live, asserts nothing check 3 reads — it resolves
+  claims that a job *did* land. This head drifted that way within a day of
+  merging (see [the S5a correction](#correction--2026-08-05-job-444-s5a-check-3-landed-and-s5-split)),
+  and the under-claim stays [D7](#d7-the-staleness-ledger)'s and
+  [D9](#d9-the-evaluator-judges-only-what-a-script-cannot)'s.
+- **Check 1's corpus is `*.md`, so a doc named by *title* is outside every gate**
+  — and outside markdown is the larger half of the references to the documents
+  the rules live in. A citation is not a path claim, so widening check 1 is the
+  wrong repair; whether a citation check belongs anywhere is **left open for the
+  operator**, not closed. See the
+  [#443 finding](#finding--2026-08-05-job-443-the-doc-comment-residue-and-the-gate-scope-it-fell-through).
+- **A third definitional shape is measured and deliberately unmodelled.** The
+  corpus uses it more than either shape [D4](#d4-ban-duplicate-definitions-allow-duplicate-mentions)
+  gates, and check 4 does not read it — which is also why check 4's yield is one
+  duplicate tree-wide and its value is preventive rather than a sweep. See
+  [the shape D4 did not name](#the-shape-d4-did-not-name).
 
 ### S1a as landed, re-measured
 

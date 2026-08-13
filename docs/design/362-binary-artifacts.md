@@ -1,20 +1,18 @@
 # Design — Binary artifact handoff between jobs (gap 5)
 
-Status: FINDING — gap 5 is a harvest-and-retention gap, not a store; the cross-job half is retired. S0–S2 landed (jobs #363, #381); S3 stays deferred behind a second consumer.
+Status: FINDING — gap 5 is harvest and retention, not a cross-job store; S3 waits on a second consumer.
 
-Written against the tree at `8997c4e` (2026-08-01; the source tree is unchanged
+Written against the tree at `8997c4e` (2026-08-01; the source tree was unchanged
 since `a539b7d`, which this document's first revision was written against).
-Every claim about
-Chuggernaut's current behavior below was read out of the source or out of
-[`docs/spec.md`](../spec.md) in this tree, not carried over from the brief or from
-a sibling design; where the brief or a sibling disagrees with the source, the
-source wins and the disagreement is recorded in
-[Corrections](#corrections-verified-against-the-tree). The **beacon** half is
-different: `~/beacon` is not checked out in this workspace, so nothing here
-re-derives it — the artifact inventory is the operator's 2026-08-01 inspection,
-relied on secondhand and marked as such wherever it is load-bearing.
+Every claim about current behavior below was read out of the source or out of
+[`docs/spec.md`](../spec.md), not carried over from the brief or from a sibling
+design.
 
-This document closes [#308](308-gha-port.md) gap 5.
+This document closes [#308](308-gha-port.md) gap 5. Where the brief or a sibling
+design disagrees with the source, the source wins and the disagreement is
+recorded in [Corrections](#corrections-verified-against-the-tree). The **beacon**
+half is secondhand throughout: `~/beacon` is not checked out in this workspace,
+so the artifact inventory is the operator's 2026-08-01 inspection.
 
 ## Current state
 
@@ -24,8 +22,11 @@ this section is append-only — the original argument and its dated corrections,
 never edited into the prose above them.*
 
 The finding holds: gap 5 is a harvest-and-retention gap, and the harvest half
-shipped. The rows below are the states of [Sequencing](#sequencing)'s table,
-which keeps each slice's full argument.
+shipped. The rows below are the current state;
+[Sequencing](#sequencing) keeps each slice's full argument, and
+[What is true today](#what-is-true-today-verified-in-this-tree) with
+[C3](#c3-the-real-size-regime-is-copy_file-on-a-worker-node-not-the-object-store)
+describe the tree **before** S0–S2 landed.
 
 | Slice | What | State |
 | --- | --- | --- |

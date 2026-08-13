@@ -1,85 +1,31 @@
 # Design — Host-native execution (node kind, selector, capabilities, exclusive resources)
 
-Status: PROPOSED; **P0 landed 2026-08-05 (job #434)** — `HostBackend`,
-`WORKER_MODES` routing and the `slots: 1` enforcement, on for `gumbo-air-0`
-since [#490](490-agent-work-on-a-mac.md) slice 6 and off on every other node —
-and **P1 landed 2026-08-07 (jobs #401, #478, #479)**: `runtime.mode: host` became a
-legal declaration that nothing placed by
-([P1 as landed](#p1-as-landed-2026-08-07--the-host-rows-field-rules-job-478)),
-and a dual-mode node now routes each launch by its declared mode
-([P1 as landed, per-launch routing](#p1-as-landed-2026-08-07--per-launch-mode-routing-job-479))
-— and **P2 landed 2026-08-07 (jobs #483, #484)**: `NodeCapabilities` rides both
-worker transports and is ingested in `probe_worker`
-([the 2026-08-07 note](#note-2026-08-07--slice-5-landed-runtimemode-not-execmode-job-483)),
-and `choose_placement` now filters candidates by the mode a launch requires, so
-host work is **routable** — a host job type placed by capability rather than by
-a pin
-([the 2026-08-07 note on slice 6](#note-2026-08-07--slice-6-landed-host-work-is-routable-job-484)).
-§1's recommendation had already shipped before P0 started; see
-[the 2026-08-05 correction](#correction-2026-08-05--1-already-shipped-p0-landed)
-and its addendum on `remove` racing its own reaper.
+Status: IMPLEMENTED IN PART — P0, P1 and P2 landed; P3 partly; P4 and P5 unbuilt.
 
-**[§10](#10-trust-and-tenancy)'s docker-socket rule is inverted as of 2026-08-09
-(job #517).** Host tasks on `gumbo-air-0` reach a working docker daemon by file
-ownership, and the operator has accepted that rather than closed it; the rule's
-*mechanism* clause — a node-side allow-list entry, never a job-type field the
-platform honors on request — survives unweakened. See
-[the 2026-08-09 amendment](#amendment--2026-08-09-job-517-the-docker-socket-rule-inverts)
-and [#517](517-docker-access-for-jobs.md), which owns the decision.
+Written against the tree at `b801b76`. Every claim about current behavior below
+was read out of the source and out of [docs/spec.md](../spec.md), not inferred
+from the docs.
 
-**§10's tenancy list is built as of 2026-08-09 (job #525).** The same amendment
-recorded `WORKER_HOST_PROJECTS` as a variable five designs named and no source
-file held; it now exists, fail-closed, enforced in `container::host::HostTenancy`
-at every host launch and refused at the deploy when a `host` node declares none.
-The finding stands as history; see
-[the 2026-08-09 note](#note-2026-08-09--10s-tenancy-list-is-built-job-525) and
-[`docs/reference/runbooks/worker-host-projects.md`](../reference/runbooks/worker-host-projects.md).
-
-**[§8](#8-secrets-on-a-shared-host)'s per-task user pool is unavailable on macOS,
-and the operator has accepted the absent boundary (2026-08-09, job #526).** Host
-tasks on `gumbo-air-0` run as the node's existing login user; option (b) is kept
-unweakened for a Linux host node, of which there are none. With §8 unavailable,
-§10's tenancy list is the only remaining bound on cross-task exposure — built by
-job #525 just above, and awaiting the deploy that declares one for `gumbo-air-0`.
-See
-[the 2026-08-09 amendment on tenancy](#amendment--2026-08-09-job-526-8s-recommendation-is-unavailable-on-macos-and-10s-tenancy-list-is-now-the-only-bound)
-and [#322](322-macos-native-runtime.md), which owns the decision.
-
-**[§9](#9-environment-and-state)'s declared caches — P5 — split three ways on
-2026-08-10 (job #534).** On a host node there is no container, so `~/.gradle`,
-`~/.pub-cache` and DerivedData already persist in the login user's home between
-tasks and nothing reclaims them: the *persistence* half of §9 is free and the
-*bound* is missing. So **placement + eviction is the live gap**, namespacing is
-deferred behind single-tenancy, and §9's `chug.caches` flake attribute — kept,
-not deleted — has **no carrier** on a Mac, whose environment reference is
-`xcode:`. The intended declaration site is recorded as intent rather than taken.
-See
-[the 2026-08-10 correction](#correction--2026-08-10-job-534-9s-p5-splits-the-caches-already-work-so-the-live-gap-is-placement-and-eviction).
-
-Written against the tree at `b801b76`. Every claim about current behavior was
-read out of the source and out of [docs/spec.md](../spec.md), not inferred from
-the docs; where the job brief and the tree disagree, the tree wins and the
-disagreement is recorded under [Corrections](#corrections-to-the-brief).
-
-This is doc 1 of 4 extracting implementable specs from
-[design #308](./308-gha-port.md). Section H of that doc (H.1–H.6) argues *why*
-host-native execution is wanted — the category map, the gap ranking and the
-beacon survey are there and are not restated here. This doc decides the parts
-H explicitly left open: the schema syntax for a host-mode selector, the host
-analogue of every `ContainerBackend` method, capability advertisement, placement
-and exclusive resources, drain, resource limits, secrets, environment/state, and
-tenancy.
-
-Docs 2–4 (scheduled jobs; job parameterization; workload identity and image
-builds) are separate and cite this one. Nothing here decides them.
+Doc 1 of 4 extracting implementable specs from [design #308](./308-gha-port.md),
+whose section H argues *why* host-native execution is wanted — the category map,
+the gap ranking and the beacon survey are there and are not restated here. This
+doc decides the parts H left open: the schema syntax for a host-mode selector,
+the host analogue of every `ContainerBackend` method, capability advertisement,
+placement and exclusive resources, drain, resource limits, secrets,
+environment/state, and tenancy. Docs 2–4 (scheduled jobs; job parameterization;
+workload identity and image builds) cite this one and nothing here decides them.
+Where the commissioning brief and the tree disagree, the tree wins, and the
+disagreements are recorded under
+[Corrections to the brief](#corrections-to-the-brief).
 
 Related: [docs/spec.md](../spec.md) §3.1 (backends, dynamic worker registration,
 placement, node-local build caching), §3.5 (launch capacity queue, task
 timeout), §3.6 (restart reconciliation), §14 (config/version skew), Appendix:
-Deferred; [design #293](./293-worker-capacity.md) (worker capacity — overlaps
-this work directly and is reconciled with throughout);
+Deferred; [design #293](./293-worker-capacity.md) (worker capacity — reconciled
+with throughout);
 [docs/reference/design-lifecycle.md](../reference/design-lifecycle.md);
-[docs/reference/style.md](../reference/style.md); [docs/reference/crates.md](../reference/crates.md).
+[docs/reference/style.md](../reference/style.md);
+[docs/reference/crates.md](../reference/crates.md).
 
 ## Current state
 
@@ -88,69 +34,75 @@ rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument and its dated corrections,
 never edited into the prose above them.*
 
-Two phases have landed, one of them early and out of order. P0 is in the tree
-(`crates/container/src/host.rs`, `WORKER_MODES`) and is **on for one node** —
-`gumbo-air-0` advertises `host`, and [#490](490-agent-work-on-a-mac.md) slice 6
-ran the first host tasks on it. P1 is complete: its schema half arrived ahead of P0
-in job #401, driven by [#373](373-project-toolchains.md), job #478 landed
-the host row's own field rules (`crates/types/src/job_type.rs` — top-level
-`image` disallowed, `runtime.env` required, the evaluator-image requirement
-narrowed by the [Coexistence](#coexistence-on-a-mixed-fleet) precedence rule)
-and deleted the refusal, with no epoch bump, and job #479 carried the resolved
-mode to the worker: `image` is `Option<String>` on both the launch config and
-the wire (`WORKER_RPC_VERSION` 2), a node constructs exactly the backends its
-`WORKER_MODES` names, and one naming both routes each launch by the image's
-presence. **P2 is landed.** Its slice 5 shipped in job #483 now that its
-gate — [#293](293-worker-capacity.md) job 3 — is in: `NodeCapabilities` is a
-wire record on both
-`PingOk` and `WorkerAnnounce` (`crates/types/src/worker.rs`), additive and so
-still at `WORKER_RPC_VERSION` 2, a daemon derives its own from `WORKER_MODES`,
-and the dispatcher ingests it inside `probe_worker` on the reply path with the
-`ping`-wins precedence §4 argues for (`crates/worker/src/backend.rs`). Its
-modes are `types::job_type::RuntimeMode`, not the `ExecMode` §4 sketches — see
-[the 2026-08-07 note](#note-2026-08-07--slice-5-landed-runtimemode-not-execmode-job-483).
-Its slice 6 shipped in job #484: `choose_placement` takes the mode the launch's
-`image` selects, excludes every candidate not advertising it, and separates
-"no node advertises this mode" from "every capable node is full" — see
-[the 2026-08-07 note on slice 6](#note-2026-08-07--slice-6-landed-host-work-is-routable-job-484).
-So a host job type is now **well-formed and routable**, on any node that
-advertises the mode and with no pin. The precedence rule
-[Coexistence](#coexistence-on-a-mixed-fleet) states is honoured at the launch as
-well as in validation since job #507: `types::JobType`'s `level_image`,
-`level_mode` and `level_runtime_env` resolve a launch from the level it is for,
-so a level whose own `image` resolves it **out of the job type's mode** — a host
-job type's container evaluator — inherits no `runtime.env`, while under
-`mode: container` an `image` and an `env` still layer
-([#373](373-project-toolchains.md) Decision 2). That is what makes "host work,
-container CI, one job" actually run, and it has: [#490](490-agent-work-on-a-mac.md)
-slice 6's second run is the first job to have taken a host work task and a
-container `ci` evaluator to Done together. The carve-out is
-[the 2026-08-08 correction](#correction-2026-08-08--the-precedence-rule-fires-only-across-a-mode-boundary-job-507).
-**P3 is partly landed.** Job #524 gave
-`NodeCapabilities.resources_enforced` its first reader: `choose_placement` now
-takes a `LaunchRequirements { mode, resource_limits }` and admits a launch
-declaring `resources.cpu`/`memory` only onto a node that enforces them **for
-that launch's resolved mode**, while `HostBackend::admit` refuses — hard, naming
-the field and the node — one that arrives anyway through a `placement.node` pin
+**Host mode is declarable, placeable and exercised.** A job type declaring
+`runtime.mode: host` validates (`crates/types/src/job_type.rs`); a daemon whose
+`WORKER_MODES` names `host` constructs the host backend
+(`crates/container/src/host.rs`) and routes each launch by the presence of an
+`image`; and `choose_placement` excludes every candidate that does not advertise
+the mode a launch requires, so host work is placed without a `placement.node`
+pin. `gumbo-air-0` is the one node advertising `host` and
+[`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) the one job type
+declaring it. A host-capable node serves **one task at a time, of either kind** —
+refused at boot above one slot, not left to convention. The precedence rule
+[Coexistence](#coexistence-on-a-mixed-fleet) states holds at the launch as well
+as in validation: a level whose own `image` resolves it out of the job type's
+mode — a host job type's container `ci` evaluator — inherits no `runtime.env`,
+while under `mode: container` an `image` and an `env` still layer
+([the 2026-08-08 correction](#correction-2026-08-08--the-precedence-rule-fires-only-across-a-mode-boundary-job-507)).
+Host work, container CI, one job is what runs today.
+
+**Nothing bounds a host task's cpu or memory on any platform, so a host job type
+must declare neither `resources.cpu` nor `resources.memory`** ([§7](#7-resource-limits)).
+Placement admits a launch declaring either only onto a node that enforces limits
+**for that launch's resolved mode**, and `HostBackend::admit` refuses — hard,
+naming the field and the node — one that arrives anyway through a pin
 ([the 2026-08-09 note](#note-2026-08-09--7s-predicate-and-backstop-landed-job-524)).
-Reading the advertisement per mode is what keeps a dual-mode node like
-`gumbo-air-0` from claiming a bound that is false for its host launches; nothing
-bounds a host task's cpu or memory on any platform, so a host job type must
-declare neither, and the platform now says so at placement instead of at nothing.
-The rest of P3 — per-task users ([§8](#8-secrets-on-a-shared-host)), transient
-scopes as a *limits* mechanism ([§7](#7-resource-limits)) — and everything from
-P4 on is unstarted, with one qualification: **macOS took §8's boundary at a
-different granularity**. [#537](537-per-project-users-macos.md) puts one unix
-user per **project** on a host node, escalated to with `sudo` rather than
-`systemd-run --uid=`, and its launch path landed in job #563 — **inert**, since
-no node declares `WORKER_HOST_USERS`. §8's slot-sized pool is unweakened for
-Linux and still has no node to land on; what §8 and §10 should now be read as is
-[the 2026-08-12 amendment](#amendment--2026-08-12-job-567-8s-pool-is-the-wrong-granularity-for-macos-its-option-c-is-a-requirement-there-and-10s-list-becomes-the-roster). [#440](440-native-worker-daemon.md) is the design for the
-native-supervision prerequisite P0 named and left unowned. **P5 is unbuilt as
-code and re-scoped as plan**: its GC-root and warm-set thirds were settled
-elsewhere, and what is left of its declared caches now names one live slice —
-relocating a host node's caches into a platform-owned root and evicting it — over
-two deferrals, per the 2026-08-10 correction linked above.
+`task_timeout` is mode-independent and still bounds the task in time.
+
+**Tenancy is enforced at the node.** `WORKER_HOST_PROJECTS` names the
+`owner/project` slugs a node runs host work for; anything else is a hard
+`BackendError::Launch` at `HostBackend::admit`, an unset list admits nobody, and
+a deploy declaring `host` with no list beside it is refused
+([the runbook](../reference/runbooks/worker-host-projects.md)).
+[§10](#10-trust-and-tenancy)'s docker-socket rule is **inverted**: host tasks on
+`gumbo-air-0` reach a working docker daemon by file ownership and the operator
+has accepted that rather than closed it ([#517](517-docker-access-for-jobs.md)
+owns the decision). Its *mechanism* clause survives unweakened — docker access
+is a node-side allow-list entry, **never** a job-type field the platform honors
+on request.
+
+**The secret boundary [§8](#8-secrets-on-a-shared-host) recommends is
+unavailable on macOS.** Option (b)'s per-task user pool is kept unweakened for a
+Linux host node, of which there are none; macOS takes one unix user per
+**project** instead ([#537](537-per-project-users-macos.md)), whose launch path
+landed in job #563 and is **inert** — no node declares `WORKER_HOST_USERS`. So
+host tasks run as the node's existing login user, every value in a launch env is
+readable by any process of that uid, and §10's roster is the whole of the bound
+until a node binds users
+([the 2026-08-12 amendment](#amendment--2026-08-12-job-567-8s-pool-is-the-wrong-granularity-for-macos-its-option-c-is-a-requirement-there-and-10s-list-becomes-the-roster),
+[the 2026-08-09 amendment](#amendment--2026-08-09-job-526-8s-recommendation-is-unavailable-on-macos-and-10s-tenancy-list-is-now-the-only-bound)).
+
+**P5's declared caches: the persistence is free and the bound is missing.** On a
+host node there is no container, so `~/.gradle`, `~/.pub-cache` and DerivedData
+persist in the task user's home between tasks and no sweep anywhere reclaims
+them. What is owed is a platform-owned cache root with a ceiling and LRU
+eviction; namespacing is retired by construction wherever per-project users bind
+and deferred behind single-tenancy otherwise; and the declaration site is
+deferred with its intended answer recorded — a file in the project repo naming
+caches from a fixed node-known vocabulary, never paths — because §9's
+`chug.caches` flake attribute has no carrier on a Mac, whose environment
+reference is `xcode:`
+([the 2026-08-10 correction](#correction--2026-08-10-job-534-9s-p5-splits-the-caches-already-work-so-the-live-gap-is-placement-and-eviction)).
+
+Still open: P4's device leases, which become live only when a host node must run
+a second, non-device-bound task concurrently; P3's per-task users and
+[§6](#6-drain)'s transient scopes as a *limits* mechanism, neither with a
+platform to land on; and one gap this design did not create and has not closed —
+`resources.cpu`/`memory` reach only **command** launches, so an agent work
+container has never been bounded by either field on any node
+([the 2026-08-09 note](#note-2026-08-09--7s-predicate-and-backstop-landed-job-524)).
+[#440](440-native-worker-daemon.md) owns the native-supervision prerequisite P0
+named and left unowned.
 
 The rows below are the states of [Phasing](#phasing)'s table, which keeps each
 phase's full argument; the seven-row table in

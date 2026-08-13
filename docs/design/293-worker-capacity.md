@@ -2,34 +2,14 @@
 
 Status: IMPLEMENTED — shipped in jobs #295–#301.
 
-All seven jobs of the [implementation plan](#implementation-plan-sliced-into-jobs)
-below are merged and deployed: the spec §3.1 capacity-ownership amendment
-(#295), the worker daemon's capacity cell and the dispatcher's observation,
-intent and reconciliation halves (#296–#298), `PUT
-/api/v1/platform/fleet/{node}/capacity` in `crates/api/src/routes.rs` (#299),
-the cluster view's capacity control in `web/src/pages/Cluster.tsx` (#300), and
-the ops documentation, now at
-[`docs/reference/runbooks/worker-capacity.md`](../reference/runbooks/worker-capacity.md) (#301).
-What follows is the record of the argument, not a live proposal.
-
-Written against the tree at `a90d660`; every claim about current behavior below
-was read out of the source, not inferred from the docs. Prompted by the
-2026-07-26 prod incident described under [Problem](#problem).
-
-Revised after review: the capacity ordering key now survives a daemon restart
-(§1 — a counter alone would have frozen a node's capacity after every deploy),
-and the fleet-level startup gate is narrowed so that worker capacity never
-vetoes a boot (§5a — otherwise a drain to zero would be unrecoverable from the
-UI that caused it).
-
-Revised again on 2026-08-05 (job #449): principle 5's bold label restated the
-*single writer* principle, which [docs/reference/style.md](../reference/style.md#tier-3--principles)
-owns and design [#415](415-knowledge-architecture.md) D4 lets only one doc write
-in definitional shape. The principle this design is held to is unchanged; the
-label now names what it asserts about the fleet record and links the owner.
+Written against the tree at `a90d660`, prompted by the 2026-07-26 prod incident
+described under [Problem](#problem).
 
 Related: [spec §3.1](../spec.md) (dispatcher backends, dynamic worker
-registration), [docs/reference/style.md](../reference/style.md) (contract-first change rule),
+registration) — the normative text this design amended;
+[`docs/reference/runbooks/worker-capacity.md`](../reference/runbooks/worker-capacity.md)
+— the operator page for reading, changing and draining capacity;
+[docs/reference/style.md](../reference/style.md) (contract-first change rule);
 [deploy/prod/README.md](../../deploy/prod/README.md) §6.
 
 ## Current state
@@ -38,10 +18,14 @@ registration), [docs/reference/style.md](../reference/style.md) (contract-first 
 rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
 
-Done and deployed. Capacity has one source of truth — the daemon's live
-announce, ordered by `(capacity_epoch, capacity_generation)` — and an operator
-changes it from the cluster view. Nothing here is open. The rows below are the
-states of [Implementation plan (sliced into jobs)](#implementation-plan-sliced-into-jobs),
+Done and deployed, and nothing here is open. Capacity has one source of truth —
+the daemon's live report, carried on both the ~15s announce and the `ping` reply
+and ordered by `(capacity_epoch, capacity_generation)` — and a platform admin
+changes a node's desired count from the cluster view. The argument below is the
+record, not a live proposal; its spec-amendment and wire-shape sections still
+read as proposals, and both are applied, with [spec §3.1](../spec.md) the live
+normative text. The rows below are the states of
+[Implementation plan (sliced into jobs)](#implementation-plan-sliced-into-jobs),
 which keeps each job's contract and its dependency.
 
 | Job | What | State |

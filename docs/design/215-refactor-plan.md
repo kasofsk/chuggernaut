@@ -1,52 +1,56 @@
 # Incremental restructuring plan — Rust, no rewrite
 
-Status: PARTLY EXECUTED, now DORMANT — **no track is being worked, and the plan
-has no owner.** Several tickets did land as ordinary jobs, and the body records
-that unevenly. **B1, C1 and C7** carry a landed marker in their own paragraph;
-**C6**'s is inside the shared C2–C6 paragraph; Track D's marker sits on **D2**,
-not D1. **A2, A3 and A4** landed too but say so only obliquely — A3's landing is
-asserted inside A4's paragraph, and A2's, A3's and A4's evidence is in the tree
-(`docs/reference/modules.md`, `.chug/tasks/check-modules.sh`, and `clippy.toml`
-plus the workspace lint denies, in that order) rather than in a marker here. The last
-implementing job to amend this file did so
-on 2026-07-31 (job #342); nothing has been picked up since. Its reversal of
-[#210](210-ts-rewrite-plan.md) stands, and
-[#238](238-forge-ingest-crate-boundary.md) is a finding filed against its Track
-H. Read it as the standing map of the restructuring, not as a queue somebody is
-working. There is no slice table: the tracks are prose paragraphs and the
-per-ticket landed markers are where they were written — lifting them into a
-table would be inventing a plan shape the document never had.
+Status: SUPERSEDED — the fresh reimplementation replaces this plan's incremental-in-Rust premise.
 
-Companion to `docs/README.md` (target factoring), `docs/reference/contracts.md` (interface
-extraction), and `docs/reference/structure-assessment.md` (current-state audit). This plan
-**supersedes `docs/design/210-ts-rewrite-plan.md`**: we are staying in Rust and refactoring the
-existing code incrementally toward the north star. The rewrite plan's durable
-ideas — golden decision traces, effects-as-data, contract-first change rule —
-survive here as Track B; only the language migration is dropped.
+**The premise is gone, not just the queue.** This plan's whole shape is "keep the
+Rust dispatcher in production and de-braid it track by track"; the project is
+beginning a **fresh reimplementation of the dispatcher, language not yet
+chosen**, so the tracks below are no longer a route anyone is on. Several tickets
+did land as ordinary jobs before it went dormant, and the body records that
+unevenly — the per-ticket landed markers are where they were written, and are now
+read as history rather than as a queue. There is no slice table: the tracks are
+prose paragraphs, and lifting their markers into one would invent a plan shape
+the document never had.
 
-Design **#208** (the Python dispatcher) was the other language-migration
-proposal; it is **closed/superseded** by this decision. No dispatcher rewrite
-in any language is on the table — the surviving `docs/design/210-ts-rewrite-plan.md` is kept
-only as a source of the Track-B ideas above.
+**What survives the supersession is the target, not the route.** The structural
+end-state this plan steered toward is `docs/README.md`'s target factoring, and
+the parts of it that already exist are described in the present tense elsewhere:
+[`docs/reference/lifecycle-model.md`](../reference/lifecycle-model.md) for the
+machine a reimplementation must reproduce,
+[`docs/reference/contracts.md`](../reference/contracts.md) for the
+decider/effects seam and the formalization ratchet, and
+[`docs/reference/crates.md`](../reference/crates.md) for the boundary invariants.
+Read those first. Read *this* for the argument about **why** the de-braiding was
+sequenced the way it was — which boundary had to harden before the next one could
+be drawn — because that ordering argument is about the domain, not about Rust,
+and a reimplementation faces it again on day one.
 
-Ground truth this plan is based on (2026-07-24): `state.rs` is the only pure
-dispatcher module (zero awaits); `eval.rs`/`exec.rs`/`core.rs`/`handlers.rs`
-carry ~640 await sites between them; no `Effect` enum, invariant checker, or
-boundary lint exists yet; the web `api.ts` is a hand-written 754-line mirror
-of the Rust `types` crate; schemars codegen is already a proven, drift-tested
-pattern (`crates/cli/src/schema.rs` → `.chug/schemas/*.schema.json`); CI is
-`.chug/tasks/ci.sh`, run as the job evaluator, which executes
-`cargo test --workspace` on Rust-touching diffs.
+**Two language decisions this plan closed are open again.** Its reversal of
+[#210](210-ts-rewrite-plan.md) — stay in Rust, do not migrate language — is the
+decision the reimplementation now reverses in turn, and design **#208** (the
+Python dispatcher) was closed in the same move. Both arguments are live and are
+worth re-reading rather than re-deriving; #210 holds them. Track B's ideas —
+golden decision traces, effects-as-data, the contract-first change rule —
+originated there and are revived with them.
 
-Read that paragraph as a **dated snapshot, not a current-state claim** — the
-tracks it motivates have since overtaken four of its statements. The pure core
-is now its own crate (`crates/domain`, six deciders under `decide/`), so
-`state.rs` is no longer the only pure module; the `Effect` enum and
-`interpret.rs` landed in B2; `invariants.rs` landed in B1; and the boundary
-lint is `crates/test-utils/tests/boundary_guard.rs` (A3). Its remaining
-figures have drifted with the tree and are kept as history — re-measure
-before scoping against any of them. Tracks F–I below, and C7's line count,
-are sized against the tree as of **2026-07-26**.
+[#238](238-forge-ingest-crate-boundary.md) is a finding filed against Track H,
+and it is still open on its own terms: forge-ingest has not earned its crate
+boundary, for reasons that outlive this plan.
+
+**The ground truth the tracks were sized against**, kept because the sequencing
+argument above is unreadable without it — dated 2026-07-24, and **history, not a
+current-state claim**: `state.rs` was the only pure dispatcher module (zero
+awaits); `eval.rs`/`exec.rs`/`core.rs`/`handlers.rs` carried **~640 await sites**
+between them; no `Effect` enum, invariant checker or boundary lint existed; the
+web `api.ts` was a hand-written 754-line mirror of the Rust `types` crate;
+schemars codegen was already a proven, drift-tested pattern
+(`crates/cli/src/schema.rs` → `.chug/schemas/api.schema.json`); CI was
+`.chug/tasks/ci.sh`, run as the job evaluator. **Where the braided I/O sat, and
+how much of it there was, is the premise of the whole track ordering** — four of
+those statements were overtaken by the tracks they motivated, and the remaining
+figures have drifted with the tree. Tracks F–I and C7's line count are sized
+against 2026-07-26. **Do not scope against any number in this document without
+re-measuring.**
 
 ## Shape of the plan
 

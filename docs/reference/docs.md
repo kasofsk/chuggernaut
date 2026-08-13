@@ -85,11 +85,17 @@ by the gates below.
 
 Status: IMPLEMENTED — shipped in jobs #324, #330, #331 and #332.
 
-Written against the tree at `00dd0dc`. Every claim about current behavior below
-was read out of `docs/spec.md` and the source in this repo; where the brief and the
-tree disagree, the tree wins and the disagreement is recorded in
-[Corrections](#corrections-verified-against-the-tree).
+A group is an operator-set label on the job record — `Job.groups`, many per job,
+inert to execution, mutable in every state including terminal. …
 ```
+
+Only the first two non-blank lines are quoted as a contract; the third is
+whatever that head opens with, and it moves as the head is rewritten. A
+provenance preamble in the shape "written against the tree at `<sha>`; where the
+brief and the tree disagree, the tree wins and the disagreement is recorded in
+Corrections" is the usual opening, and
+[`docs/design/322-macos-native-runtime.md`](../design/322-macos-native-runtime.md)
+carries one as exactly that third line.
 
 1. **Line 1 is an `# ` heading** — the document's title, and what the operator
    UI's Designs view labels the row with. A document without one falls back to
@@ -261,8 +267,9 @@ Five things about that table are decisions rather than accidents:
   commit, so there is nobody for it to fail. It carries **no threshold and no
   "molt recommended" line** for the same reason `doc-staleness.sh` stays
   advisory: a number nobody calibrated becomes either noise or a target. It ranks
-  and an operator reads the top. Before the first molt it reports every doc as
-  `never` molted, measured from nothing, which is the honest answer.
+  and an operator reads the top. With no `job/N: molt` commit in its history it
+  measures every doc from nothing and reports `never`, which is the honest
+  answer rather than a fault.
 - **No gate can ask whether a molt lost something.** Every other row catches a doc
   saying something *wrong*; shedding produces docs that say something *less*, and
   a gate that failed a diff for removing a true sentence would fail every molt.
@@ -315,7 +322,8 @@ doc-claim rule is where each one's meaning is stated.
   every rule on this page, and the measurements behind it.
 - [design #533](../design/533-molt.md) — the argument behind the licensed
   deletion above, and the shedding it exists for. Its machinery is landed (S2,
-  job #548); no molt has run yet.
+  job #548), and the first molt is S4 — the reference tier and the design heads,
+  with an empty deletion set. No design doc has been deleted yet; that is S5.
 - [`docs/reference/style.md`](style.md) — the blessed practices, including the
   doc-claim rule and the marker syntax.
 - [`docs/concepts.md`](../concepts.md) — the concept registry, and the criterion

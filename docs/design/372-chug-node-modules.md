@@ -1,22 +1,14 @@
 # Design #372 — `chug-node`: NixOS and nix-darwin modules for worker-host preparation
 
-Status: IMPLEMENTED IN PART — slices 1 and 3 landed (jobs #383, #404) and both prod nodes are adopted; slice 2 and slice 1's CI stage are open. Supersedes design job #265.
+Status: IMPLEMENTED IN PART — modules landed and both prod nodes adopted; slice 1's CI stage stays open.
 
-Written against the tree at `5aeb439`, this branch's base. The first draft was written at `fef87f9` and has
-been revised twice after review; the one commit between those two trees,
-`5aeb439` (`job/371: design`), amended exactly one file —
-[`docs/design/367-android-emulator-execution.md`](./367-android-emulator-execution.md),
-by 598 lines — and that amendment inverted the first draft's C1, which is what
-C1 is now about. Every claim about current behavior below
-was read out of `docs/spec.md` and the source in this repo; where the brief and the
-tree disagree, the tree wins and the disagreement is recorded in
-[Corrections](#corrections-verified-against-the-tree). Claims about *Nix* — what
-`virtualisation.docker` generates, whether nix-darwin evaluates `assertions`,
-what `nix.gc` looks like on each platform — were read out of upstream sources
-fetched while writing (nixpkgs `nixos-25.05`, nix-darwin `master`) and are cited
-with what was read, not with what is remembered. This design carries forward
-job #265's decision and its "must not declare the container" conclusion; it does
-not reopen either.
+Written against the tree at `5aeb439`. It carries job #265's decision and its
+"must not declare the container" conclusion and reopens neither. Claims about
+*Nix* — what `virtualisation.docker` generates, whether nix-darwin evaluates
+`assertions`, what `nix.gc` looks like on each platform — are read out of
+upstream nixpkgs `nixos-25.05` and nix-darwin `master`, cited with what was
+read; where the brief and the tree disagree the tree wins, and the disagreement
+is recorded in [Corrections](#corrections-verified-against-the-tree).
 
 ## Current state
 
@@ -24,22 +16,31 @@ not reopen either.
 rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
 
-**The modules exist and are adopted; one slice is unstarted and one shipped
-short of what it asked for.** `flake.nix` and `nix/chug-node/` are in the tree,
-both prod nodes were adopted on 2026-08-03 (secondhand — the host repo is not
-checked out here), and the runbooks record what that adoption taught. Slice 1
-landed **without** the skipping `nix flake check` stage it also asked for:
-`.chug/tasks/ci.sh` has no nix stage, so nothing in this repo's CI evaluates
-`nix/chug-node/` — a gap [#440](440-native-worker-daemon.md) slice 7 inherited,
-named and did **not** close.
+`flake.nix` and `nix/chug-node/` are in the tree and both prod nodes run them;
+[`docs/reference/runbooks/chug-node-adoption.md`](../reference/runbooks/chug-node-adoption.md)
+is the adoption procedure. **Nothing in this repo's CI evaluates the nix.**
+`.chug/tasks/ci.sh` has no nix stage — the gap slice 1 left open and
+[#440](440-native-worker-daemon.md) slice 7 names without closing — and the one
+file under `nix/chug-node/` that CI does run,
+`nix/chug-node/chug-worker-unit.test.sh`, is text over text: the unit template
+against the one `deploy/prod/build-worker.sh` renders. A green job says those
+two renderings agree and says nothing about whether the nix evaluates. The
+consuming host repo's `nixos-rebuild build` is still the only real gate.
 
-**§8 is amended, and only for the object it never considered.** The module still
-declares no `chug-worker` *container*; since [#440](440-native-worker-daemon.md)
-D2 (job #475) it declares the systemd unit over the installed **binary**, opt-in
-behind `chug.node.daemon.enable` and off by default, with §8's four reasons
-answered one at a time — see
+**§8 is amended, and only for the object it never considered.** The module
+declares no `chug-worker` *container*; since
+[#440](440-native-worker-daemon.md) D2 it declares the systemd unit over the
+installed **binary**, opt-in behind `chug.node.daemon.enable` and off by
+default, with §8's four reasons answered one at a time — see
 [the correction](#correction--2026-08-07-job-475-8-amended-for-a-unit-over-a-binary).
 §6's refusal of a drain hook and §7's clocks are untouched.
+
+**One of the three facts [below](#what-could-not-be-verified-and-what-that-means)
+is closed; the other two stand.** The GitHub mirror is publicly readable,
+measured 2026-08-04 by a credential-free `git ls-remote`
+([the correction](#correction--2026-08-04-job-423-the-mirrors-visibility-is-measured-it-is-public)),
+so §2.2's `github:` transport needs no credential in a host repo's closure and
+its ssh-front fallback stays unbought.
 
 The rows below are [10. Implementation slices](#10-implementation-slices)'s four
 numbered items with their states; the section itself is prose and stays that

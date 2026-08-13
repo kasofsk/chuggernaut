@@ -1,50 +1,35 @@
 # Design #373 — Project-supplied toolchains: nix environments in container mode (clock 3)
 
-Status: FINDING, amended 2026-08-02 — clock 3 in container mode on dedicated nodes; image+env layer; P1 shipped (job #384), 45s cap (C6); P2 shipped (job #403).
+Status: FINDING — both slices shipped; clock 3 runs in container mode on dedicated nodes.
 
-Written against the tree at `5aeb439` (this branch adds only this document).
-Every claim about this repository was read out of the source or out of
-[`docs/spec.md`](../spec.md). Every claim about node behavior was **measured on
-`gumbo-nuc-0` on 2026-08-02** and the commands are given, so a reader can re-run
-them rather than trust them. Where a sibling design and a measurement disagree,
-the measurement wins and the disagreement is recorded in
-[Corrections](#corrections). This revision answers review findings on the first
-draft; the substantive changes are
-[Decision 3](#decision-3--resolution-and-the-realise-site) (new),
-[Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism)
-(rewritten) and [Weighed against #355](#weighed-against-355--when-a-project-picks-which)
-(new).
+Written against the tree at `5aeb439`. Every claim about node behavior was
+measured on `gumbo-nuc-0` on 2026-08-02 and the commands are given, so a reader
+can re-run them rather than trust them. Where a sibling design and a measurement
+disagree the measurement wins, and where the two dated as-shipped sections and
+the argument above them disagree the merged tree wins; both disagreements are
+recorded in place ([Corrections](#corrections)) rather than edited away.
 
 This document was **claimed and written by the operator**, not delegated: the
 decisions below were worked through directly.
 
-**Amended after P1 merged** (job #387). Job #384 shipped [P1](#sequencing) at `2bd4bf3`, and
-implementing it settled three things this document had guessed and one it had
-priced wrong. The bound in
-[3c](#3c-the-realise-is-bounded-and-it-is-outside-task_timeout) is not a free
-parameter — it has a **45-second ceiling**, which turns
-[Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism)'s
-warming job from an optimization into a precondition
-([C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization)).
-The three smaller divergences are recorded in
-[P1 as shipped](#p1-as-shipped-job-384). Everything in that section is read out
-of the merged tree; where it and the argument above it disagree, the merged tree
-wins.
-
 ## Current state
 
-*The **mutable head** ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
+*The mutable head ([#415](415-knowledge-architecture.md) [D2](415-knowledge-architecture.md#d2-every-design-doc-opens-with-a-mutable-current-state-head)):
 rewritten to current truth whenever anything below it changes. Everything after
-this section is append-only — the original argument and its two dated
-as-shipped sections, never edited into the prose above them.*
+this section is append-only.*
 
 **Both slices shipped.** `runtime.env` is accepted in container mode, the store
 is mounted and the environment injected, and the realise step runs in the worker
-under a 45-second ceiling. The finding that motivated it stands: clock 3 belongs
-in container mode on dedicated nodes, and warming is a scheduled job rather than
-a platform mechanism — so there is no third slice and none is planned.
+under a 45-second ceiling
+([C6](#c6-the-realise-bound-has-a-45-second-ceiling-so-warming-is-a-precondition-not-an-optimization)),
+which makes warming a precondition of running such a job type rather than an
+optimization. The finding that motivated it stands: clock 3 belongs in container
+mode on dedicated nodes ([Decision 1](#decision-1--tenancy-dedicated-nodes-only)),
+and warming is a scheduled job rather than a platform mechanism
+([Decision 5](#decision-5--warming-is-a-scheduled-job-not-a-platform-mechanism))
+— so there is no third slice and none is planned.
 
-One claim about a sibling has since gone stale: [C7](#c7-rule-4s-n1-fail-safe-holds-for-neither-row)
+One claim about a sibling is stale where it stands: [C7](#c7-rule-4s-n1-fail-safe-holds-for-neither-row)
 calls the top-level `image` ban under `runtime.mode: host` unlanded debt, and
 [#309](309-host-native-execution.md) P1 landed it in job #478 without changing
 C7's N−1 conclusion ([C8](#c8-the-image-ban-c7-called-unlanded-debt-has-landed-and-c7s-conclusion-is-unchanged)).

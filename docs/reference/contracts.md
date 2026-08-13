@@ -183,6 +183,64 @@ and `.chug/tasks/check-duplication.sh` match a lexical *fact*. Placement is a
 fleet decision (`docs/spec.md` §3.1); a second source for `node` is a design, not a
 call site. Reject one by name.
 
+**Why the refusal is this firm.** Placement sits at the two stronger of the
+three authorities that touch a run: which node a job type's containers land on
+is a repo file, so
+changing it costs a merge through the full evaluator and merge-gate path, and how
+much capacity a node offers — including drain to zero — is a platform-admin act.
+Creating a job, by contrast, is available to any member, and a triage container
+may do it from inside a container whose input is externally-authored issue text.
+A per-run node field would move a fleet decision to the weakest authority in the
+system, and to a non-human one.
+
+**Drain beats a pin**, which is what bounds the damage a pin can do. A launch
+pinned to a node an operator has drained to zero sees no free slot, takes the
+retryable capacity path and joins the queue — it never lands. So a *per-run*
+pin, were one ever added, could not defeat drain, could not exceed a node's slot
+count, could not spill onto an unintended node and could not land on an
+out-of-service one. The residual risk such a pin would carry is co-location and
+attention-steering, not capacity capture. The bound is stated about the
+mechanism this section refuses to add, so that the refusal rests on the right
+argument rather than on an overstated hazard.
+
+**Capability is the currency routine placement should use; identity is the
+escape hatch.** A constraint can only *shrink* the candidate set, leaving the
+choice within it to policy and live load, where a name removes policy, load and
+headroom from the decision at once. A node asserts a capability about itself — a
+boot-time fact derived from its own configuration, with every absent field read
+closed — and a job creator cannot forge one, whereas a node name is whatever
+string was typed and can only be shape-checked, because the fleet list lives in
+the dispatcher's environment and cannot be validated offline. On a fleet where a
+class has exactly one member the two coincide, and three differences survive
+that coincidence: a capability degrades correctly when the class grows, it
+records the *reason* rather than the target, and it is the **node** that asserts
+membership rather than the job creator — which is the authorization difference.
+
+**A launch's required mode is read off the launch config itself, never off the
+job type it came from.** A job type may declare host mode while an evaluator
+level it carries has its own image and is container work, so the job type's mode
+is not the launch's mode. Threading a resolved mode down from the dispatcher was
+rejected for creating a second answer to one question — a placement that believed
+it would route a container evaluator onto a host-only node. One selector, read
+the same way by placement and by the node's own refusal, is what makes a
+wrong-mode refusal unreachable rather than merely unlikely. The job type's own
+resolved mode keeps its other job — deciding which fields its YAML may carry;
+what is read off the launch is only *where the launch goes*.
+
+**Capability matching has two halves, and pricing one prices half the feature.**
+A capability match is an **advertisement plus a matcher**. Nothing advertises a
+device today, so a node must first be made to say it holds one before any
+predicate has something to read.
+
+Two constraints hold whatever encoding is chosen. The advertisement is
+**additive and absent-means-nothing**, so it moves no `WORKER_RPC_VERSION` —
+but the matcher's job-type field still costs a `CONFIG_SCHEMA_EPOCH` bump, and
+that is the half worth pricing. And the advertisement is a **discovered** fact
+rather than an operator assertion, or it becomes a second grant surface: it
+would publish the operator's allow-list onto every ping payload and into the
+fleet view, and it would invite the scheduler to enforce what only the node may
+enforce. One matcher with a second source list — never a second matcher.
+
 ### 3. Invariants — what must always hold
 
 Harvest every "must"/"always"/"never" comment and defensive pattern into one

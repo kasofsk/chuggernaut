@@ -22,24 +22,24 @@ started through testcontainers, which needs a Docker daemon; it never execs a
 dropped and a child process there would outlive the binary unreaped. `ci.sh`
 provides the URL — a communal Docker NATS for the whole gate when a daemon is
 usable, else the image's baked `nats-server` started by the gate itself. That
-second path is **on by default** since job 382 fixed the four dispatcher tier-2
-tests that went red while the tier was dark (`CHUG_CI_LOCAL_NATS=0` opts back
-out), which is what makes the tier run on an evaluator container — those get no
-Docker socket.
+second path is **on by default** (`CHUG_CI_LOCAL_NATS=0` opts back out), which
+is what makes the tier run on an evaluator container — those get no Docker
+socket. A dark tier is not a quiet one: real tier-2 failures sit unseen behind
+it.
 
 The private route (`NatsTestServer::spawn`/`spawn_with_config`, the
 `require_nats_config!` guard) never consults the URL — its callers need
 production bucket names that cannot be namespaced, or a server configuration of
-their own. Since job 408 it is a private `nats-server -js` **process** per
+their own. Since #408 it is a private `nats-server -js` **process** per
 caller when the binary is on `PATH` (an OS-chosen port via `-p -1`, a fresh temp
 store dir, both reclaimed on drop), and a private container otherwise;
 `CHUG_TEST_NATS_LOCAL=0` forces the container. So the private-server files —
-the five job 408 measured, plus `dispatcher/tests/workload_identity.rs` (#313
-S4) — now run on a Docker-less evaluator too — but `announce_tier2` still subtracts
+the five in the table below, plus `dispatcher/tests/workload_identity.rs` (#313
+S4) — run on a Docker-less evaluator too, but `announce_tier2` still subtracts
 them from the tally whenever the gate's own NATS came from a URL rather than a
-daemon, which since 408 **understates** what ran. What the gate announces is the
-*result* of its start attempt and never a separate probe — the two drifting
-apart is what job 375 found, and `.chug/tasks/ci.test.sh` pins both the claim and
+daemon, so that tally **understates** what ran. What the gate announces is the
+*result* of its start attempt and never a separate probe — a probe and the thing
+it describes drift apart — and `.chug/tasks/ci.test.sh` pins both the claim and
 its size to the mechanism. It prints the tier state up front and a per-tier pass
 tally at the end (`tier-2 (NATS): N passed across M file(s)`, flagged as an upper
 bound when the private-server tests self-skipped, since cargo counts a skip as a
@@ -52,60 +52,58 @@ are tier-2 files that self-skip on a Docker-less host through
 `test_utils::backend_suite::docker_available()`. They are not a third tier; there
 is no third tier to run. Note that this is a per-*file* list, not a per-directory
 one: `crates/container/tests/host_backend.rs` sits beside `docker_backend.rs` and
-needs neither a daemon nor a broker. A *private NATS server* is no longer one of those
-reasons; a Docker **backend** still is, and 13 of `nats_backend.rs`'s 20 tests
-skip on that guard on a Docker-less host even though all 20 now get a server.
-`declared_kvm_without_the_device_refuses_to_start` is one of the 13 and job 408
-added its guard: it asserts a pure *config* refusal, but `daemon::local_backend`
+needs neither a daemon nor a broker. A Docker **backend** is the only reason left
+— a private NATS server is not one — and 13 of `nats_backend.rs`'s 20 tests
+skip on that guard on a Docker-less host even though all 20 get a server.
+`declared_kvm_without_the_device_refuses_to_start` is one of the 13:
+it asserts a pure *config* refusal, but `daemon::local_backend`
 constructs the Docker client before it validates the `WORKER_KVM` device path,
 so on a Docker-less host the refusal under test is masked by `Socket not found:
 /var/run/docker.sock`. Sequencing the local check first would make the assertion
 host-independent; that is `crates/worker`'s to decide, not the harness's.
 
-### What running the five private-server files costs (job 408)
+### What running the five private-server files costs
 
-Before 408 they cost ~15ms **because they did nothing**; the honest comparison is
-against what running them buys. Measured per binary on one host with
-`RUST_MIN_STACK=16777216`, cargo's own `finished in`, before → after:
+Measured per binary on one host with `RUST_MIN_STACK=16777216`, cargo's own
+`finished in`:
 
-| file | before | after | what runs now |
-| --- | --- | --- | --- |
-| `auth/tests/nats_live.rs` | 0.00s | **12.12s** | 1 test, operator-mode server |
-| `cli/tests/init_admin.rs` | 0.01s | 0.81s | 3 tests |
-| `dispatcher/tests/fleet_e2e.rs` | 0.00s | 0.17s | 2 tests |
-| `worker/tests/nats_backend.rs` | 0.00s | 0.12s | 20 spawns, 7 tests past the Docker guard |
-| `chuggernaut-channel/tests/stdio.rs` | 0.00s | 0.07s | 1 test |
-| `test-utils/tests/local_nats.rs` (new) | — | 0.10s | 2 tests, 3 servers |
+| file | cost | what runs |
+| --- | --- | --- |
+| `auth/tests/nats_live.rs` | **12.12s** | 1 test, operator-mode server |
+| `cli/tests/init_admin.rs` | 0.81s | 3 tests |
+| `dispatcher/tests/fleet_e2e.rs` | 0.17s | 2 tests |
+| `worker/tests/nats_backend.rs` | 0.12s | 20 spawns, 7 tests past the Docker guard |
+| `chuggernaut-channel/tests/stdio.rs` | 0.07s | 1 test |
+| `test-utils/tests/local_nats.rs` | 0.10s | 2 tests, 3 servers |
 
-Cargo runs test binaries one at a time, so those deltas add: ~+13.3s on job 407's
-23.44s whole-workspace baseline, ~36.7s in total. That is arithmetic on the table
+Cargo runs test binaries one at a time, so those add ~13.3s to the 23.44s
+whole-workspace baseline below, ~36.7s in total. That is arithmetic on the table
 above, not a sixth measurement.
 
 **Starting the server is not the cost.** A private `nats-server` is up and
 serving in ~34ms, so all ~26 of them across the five binaries are well under a
 second in total. `nats_live.rs` is 12.1s because it asserts **denials**, and a
 denial is only observable as a wait: four of its assertions wait 3s each for a
-request the server must never answer. That is inherent to what it proves. It was
-19.1s until 408 bounded the fifth one, which passed a 200ms *backoff* to
-`request_with_retry(attempts = 1)` — where the backoff is never reached — and so
-waited async-nats' 10s default request timeout instead (docs/reference/style.md Tier-2 rule 3:
-every wait a timeout).
+request the server must never answer. That is inherent to what it proves. The
+trap that inflates such a file is a *backoff* passed to
+`request_with_retry(attempts = 1)`, where the backoff is never reached — the wait
+falls through to async-nats' 10s default request timeout instead
+(docs/reference/style.md Tier-2 rule 3: every wait a timeout).
 
-### A skip costs nothing (job 407)
+### A skip costs nothing
 
 A test that *cannot* run must not be allowed to cost time, because cargo counts a
-self-skip as a pass and the cost is therefore invisible. Until job 407 it was not
-free: `NatsTestServer::start` answered an unreachable Docker daemon with a
-five-attempt retry loop whose backoff sleeps total **5s**, paid once per
+self-skip as a pass and the cost is therefore invisible. The cost this rule was
+bought with: `NatsTestServer::start` answering an unreachable Docker daemon with
+a five-attempt retry loop whose backoff sleeps total **5s**, paid once per
 `shared()` binary and once per `spawn()` **call** — so the five private-server
 files burnt 30.1s of a 54.2s whole-workspace run (55%) proving Docker was still
-absent. A client-init failure is now classified as permanent, recorded
+absent. A client-init failure is classified as permanent, recorded
 process-wide, and answered instantly for every later caller; only a *transient*
-container failure is still retried. Measured on one 12-core host against a local
-`nats-server`, fresh JetStream store, per-binary: **54.19s → 23.44s**, with
-`worker/tests/nats_backend.rs` 10.03s → 5ms and `auth/tests/nats_live.rs`,
-`chuggernaut-channel/tests/stdio.rs`, `cli/tests/init_admin.rs`,
-`dispatcher/tests/fleet_e2e.rs` each ~5.02s → 3–5ms. With no broker reachable at
+container failure is retried. Measured on one 12-core host against a local
+`nats-server`, fresh JetStream store, per-binary: **54.19s → 23.44s**, the whole
+saving in the NATS binaries (`worker/tests/nats_backend.rs` 10.03s → 5ms, the
+other four ~5.02s → 3–5ms each). With no broker reachable at
 all — a work container, where every NATS binary took the retry path — the same
 run went **139.40s → 4.15s**. Every binary's pass count is unchanged.
 `crates/test-utils/src/nats.rs`'s own unit test pins the property by pointing
@@ -133,15 +131,16 @@ one.
 `dispatcher::core`'s scan ticker fires every **30s**, so a test whose assertion
 one `trigger_scan` failed to satisfy is not lost — the next tick rescues it, and
 the only evidence is a binary that takes 30s instead of 0.3s while still
-reporting `ok`. That is what the 30.25s attributed to
-`dispatcher/tests/dynamic_fleet.rs` was:
+reporting `ok`. The 30.25s attributed to
+`dispatcher/tests/dynamic_fleet.rs` was one:
 `heartbeat_loss_stops_placement_but_preserves_running` set a **1ms**
 `worker_heartbeat_timeout` and then raced it, because `announce_worker` and
 `trigger_scan` are two messages to one actor and the scan can read the heartbeat
-it just recorded less than a millisecond old. Measured here at 4 of 15 runs
-taking 31.1–31.4s against 2.5–3.5s, all 15 green under the old 60s ceiling; the
-fix is `Duration::ZERO`, which makes the lapse a property of the scan rather
-than of elapsed wall clock, and 40 runs then stayed under 4.2s with none failing.
+it just recorded less than a millisecond old. A rescued wait is green under any
+ceiling above 30s — measured at 4 of 15 runs taking 31.1–31.4s against 2.5–3.5s,
+all 15 green under a 60s one — so the 20s `DEFAULT_TIMEOUT` above is what exposes
+it. The fix in such a test is `Duration::ZERO`, which makes the lapse a property
+of the scan rather than of elapsed wall clock.
 The general rule: **a threshold a test asks the dispatcher to cross must not be
 one the test has to out-run**, and a tier-2 wait quantised to 30s (or 60s, or
 90s) is a scan-tick rescue rather than a slow broker.
@@ -152,7 +151,7 @@ a **manual verification note** in the work summary. To run the tier locally
 without Docker, start the `nats-server` binary yourself and point the harness at
 it: `nats-server -js & CHUG_TEST_NATS_URL=nats://127.0.0.1:4222 cargo test`. That
 URL serves the shared suites; the private-server suites serve themselves from the
-same binary on `PATH` (job 408), so with `nats-server` installed this *is* a
+same binary on `PATH`, so with `nats-server` installed this *is* a
 whole-tier run except for the files that need a real Docker daemon.
 
 ## Tier 1: Unit
@@ -170,7 +169,7 @@ Pure-logic tests, no I/O, colocated with the code:
 - `store` against a **real NATS server** (`test-utils` reuses the `CHUG_TEST_NATS_URL` server when one is exported, else starts a `nats:2.10-alpine` container through testcontainers; skips only when neither is available): bucket creation, watch semantics, stream replay-from-sequence, request-reply retry
 - `vcs` against **temp bare repos on disk**: branch lifecycle, squash-merge (clean, no-op, conflict), conflict-context builder, diff-by-job-state including the Done-state `git log --grep` recovery
 - `container` against the **local Docker socket** (skipped when unavailable): launch/wait/kill/inspect/copy_file, bootstrap wrapper, resource limits
-- `container`'s `HostBackend` against **real processes on the test machine** (`crates/container/tests/host_backend.rs`, design #309 P0): the launch → inspect → logs → `logs_tail` → `copy_file` → `remove` round trip, the one-task-per-node exclusion, the refusal of a launch that declares an `image` (design #309 §1: the image's absence is what selects this backend), the group kill, and a simulated daemon restart. A host task is a process group and a directory, so this file needs **neither Docker nor NATS**. Five tests are the exception. Three are design #440 D3's supervision-unit assertions (a task's own scope, a task surviving the teardown of the launching unit, and D8's `setsid()` escapee reached through the scope); the fourth is job #459's `a_setsid_escapee_is_staged_under_a_scope_as_well`, which asserts no part of D3 and exists to measure whether an escapee stages under a scope at all, and the fifth is job #462's `a_scoped_task_is_handed_the_dollars_its_command_was_written_with`, which asserts that the scope's client does not rewrite the task's command on its way through. All five need a systemd that can create a transient scope **and** a cgroup-v2 hierarchy to read the result back from, and self-skip through `scope_or_skip` — printing the reason and "is NOT covered by this run" — on a machine with neither. The evaluator has neither (no `systemd-run`, pid 1 is `sh`), so they run only against a systemd host. They take the manager `probe_supervision` chose rather than naming one, so an unprivileged run gets the `--user` scope polkit grants it (job #451) and signals and tears down that same manager's units; a run as root gets the system scope. A `--user` run needs `XDG_RUNTIME_DIR` (or `DBUS_SESSION_BUS_ADDRESS`) in the environment `cargo test` itself carries — the probe hands them to its `systemd-run` client and refuses when it holds neither (job #453) — so an interactive login has them and an `env -i` invocation does not. Run them on a prospective host-mode node with `cargo test -p container --test host_backend -- --nocapture` and read the output for "skipping". Every read of a launched task's cgroup **taken at launch** goes through `supervised_cgroup`, which polls for the pid to enter the unit under a 10s bound rather than reading once: `systemd-run --scope` execs the task only after the manager's start job completes, so a read taken the instant `launch` returns sees the **launcher's** cgroup and fails an assertion the mechanism would have satisfied. Once membership is established there is nothing left to race, so a single read is the right assertion — which is what the teardown test's last one is, re-reading the task's cgroup after the teardown to show it was not reparented. That test depends on the polled check for both its stand-in daemon's unit and its task's, and on the task's cgroup not being inside the daemon's, before it tears anything down — an assertion that a task outlived a teardown says nothing unless the task was supervised at all. The two that assert D3 pass on a systemd node — measured on `gumbo-nuc-0` on 2026-08-06, which is what proves D3's Linux half through the shipped path ([#440's Linux execution](../design/440-native-worker-daemon.md#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456)); D3's third, D8's escapee, has never reached its assertion — it failed in its own staging on every run so far, and job #462 **diagnoses** that failure — from systemd's own documentation and source rather than from a run, none of the mechanism having been executed — as `systemd-run --scope` expanding the argv itself, collapsing the fixture's `"$$"` to `"$"` so the pidfile never held a number ([#440's client rewriting the command](../design/440-native-worker-daemon.md#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462)); `scope_args` now passes `--expand-environment=no`, and whether that clears the staging is one operator run away. Its staging — a `setsid()` child that leaves the task's process group — needs no systemd and is asserted on every machine by `a_setsid_escapee_is_staged_outside_the_task_process_group`, which also asserts that a task's `kill` does *not* reach the escapee, so D8's premise is measured where the scope's half cannot be. That passing test is also what rules the cwd, the log fds and the composed environment out as the staging failure's cause **on their own**: it carries all three through the same `HostBackend::launch` with the same `escapee_script`, differing only in `Supervision`, and stages the escapee anyway — so what remains is an interaction between the scope and one of them, which is where a fourth attempt would have to look ([#440's third attempt](../design/440-native-worker-daemon.md#correction-2026-08-06--the-escapees-own-trace-and-three-differences-ruled-out-job-458)). `a_setsid_escapee_is_staged_under_a_scope_as_well` is where that fourth attempt looks: the same script, helper and staging assertion with **only** the `Supervision` changed, so a red says the defect reproduces in the simplest fixture and D8's test is only its first victim, and a green says the cause is something the D8 test does and this one does not. It ran on `gumbo-nuc-0` at tree `e0b6570` and was red, which is what put the failure in the shipped launch path rather than in D8's fixture ([#440's one variable](../design/440-native-worker-daemon.md#correction-2026-08-06--the-one-variable-four-attempts-never-changed-job-459)). `a_scoped_task_is_handed_the_dollars_its_command_was_written_with` is that cause with no `setsid` in the way: a scoped task whose whole command is `printf %s "$$" > …`, asserting the file holds a pid, so a client that rewrites the dispatcher's command is red there and names itself instead of surfacing as a staging timeout three tests away. Since job #458 the escapee redirects its own stderr to an `escapee.trace` path of its own before it writes anything, so a failed pidfile write is told apart from a child that never ran — a discrimination `a_failing_escapee_write_reports_into_the_escapees_own_trace` asserts on every machine by making the pidfile path a directory. Every test that stages an escapee resolves `setsid` through `container::host::task_path()`, the `PATH` a launch composes, rather than through the environment `cargo test` carries — the same string today, since the floor copies the daemon's `PATH` and in tier 2 the daemon *is* the test process, so this is the guard following the floor rather than the caller and not a bug that fired. The macOS half of D3 has no test at all and is an operator procedure: `docs/reference/runbooks/macos-host-supervision-proof.md`
+- `container`'s `HostBackend` against **real processes on the test machine** (`crates/container/tests/host_backend.rs`, design #309 P0): the launch → inspect → logs → `logs_tail` → `copy_file` → `remove` round trip, the one-task-per-node exclusion, the refusal of a launch that declares an `image` (design #309 §1: the image's absence is what selects this backend), the group kill, and a simulated daemon restart. A host task is a process group and a directory, so this file needs **neither Docker nor NATS**. Five tests are the exception. Three assert design #440 D3's supervision units (a task's own scope, a task surviving the teardown of the launching unit, and D8's `setsid()` escapee reached through the scope); `a_setsid_escapee_is_staged_under_a_scope_as_well` asserts no part of D3 and measures whether an escapee stages under a scope at all; `a_scoped_task_is_handed_the_dollars_its_command_was_written_with` asserts that the scope's client does not rewrite the task's command on its way through. All five need a systemd that can create a transient scope **and** a cgroup-v2 hierarchy to read the result back from, and self-skip through `scope_or_skip` — printing the reason and "is NOT covered by this run" — on a machine with neither. The evaluator has neither (no `systemd-run`, pid 1 is `sh`), so they run only against a systemd host. They take the manager `probe_supervision` chose rather than naming one, so an unprivileged run gets the `--user` scope polkit grants it and signals and tears down that same manager's units; a run as root gets the system scope. A `--user` run needs `XDG_RUNTIME_DIR` (or `DBUS_SESSION_BUS_ADDRESS`) in the environment `cargo test` itself carries — the probe hands them to its `systemd-run` client and refuses when it holds neither — so an interactive login has them and an `env -i` invocation does not. Run them on a prospective host-mode node with `cargo test -p container --test host_backend -- --nocapture` and read the output for "skipping". Every read of a launched task's cgroup **taken at launch** goes through `supervised_cgroup`, which polls for the pid to enter the unit under a 10s bound rather than reading once: `systemd-run --scope` execs the task only after the manager's start job completes, so a read taken the instant `launch` returns sees the **launcher's** cgroup and fails an assertion the mechanism would have satisfied. Once membership is established there is nothing left to race, so a single read is the right assertion — which is what the teardown test's last one is, re-reading the task's cgroup after the teardown to show it was not reparented. That test depends on the polled check for both its stand-in daemon's unit and its task's, and on the task's cgroup not being inside the daemon's, before it tears anything down — an assertion that a task outlived a teardown says nothing unless the task was supervised at all. The two that assert D3 pass on a systemd node (measured on `gumbo-nuc-0`, 2026-08-06), which is what proves D3's Linux half through the shipped path ([#440's Linux execution](../design/440-native-worker-daemon.md#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456)). **D3's third, D8's escapee, has reached its assertion exactly once**: all thirteen tests in this file passed with **nothing skipped** on `gumbo-nuc-0` under systemd 260.2, and the second half of that sentence is the load-bearing one, since a green run *with* skips says nothing at all ([#440's execution proof](../design/440-native-worker-daemon.md#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466)). Until that run it failed in its own staging, diagnosed from systemd's documentation and source rather than from a run as `systemd-run --scope` expanding the argv itself, collapsing the fixture's `"$$"` to `"$"` so the pidfile never held a number ([#440's client rewriting the command](../design/440-native-worker-daemon.md#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462)); `scope_args` passes `--expand-environment=no`, and that one run is what turned the diagnosis into a measurement. **One run on one host is the whole of the evidence** — every CI run of this file skips all five. Its staging — a `setsid()` child that leaves the task's process group — needs no systemd and is asserted on every machine by `a_setsid_escapee_is_staged_outside_the_task_process_group`, which also asserts that a task's `kill` does *not* reach the escapee, so D8's premise is measured where the scope's half cannot be. That passing test is also what rules the cwd, the log fds and the composed environment out as the staging failure's cause **on their own**: it carries all three through the same `HostBackend::launch` with the same `escapee_script`, differing only in `Supervision`, and stages the escapee anyway — so what remains is an interaction between the scope and one of them ([#440's third attempt](../design/440-native-worker-daemon.md#correction-2026-08-06--the-escapees-own-trace-and-three-differences-ruled-out-job-458)). `a_setsid_escapee_is_staged_under_a_scope_as_well` is where that hypothesis is tested: the same script, helper and staging assertion with **only** the `Supervision` changed, so a red says the defect reproduces in the simplest fixture and D8's test is only its first victim, and a green says the cause is something the D8 test does and this one does not. It was red on `gumbo-nuc-0` at tree `e0b6570`, **before** `scope_args` passed `--expand-environment=no`, which is what put the failure in the shipped launch path rather than in D8's fixture; it passes with the other twelve in the run above ([#440's one variable](../design/440-native-worker-daemon.md#correction-2026-08-06--the-one-variable-four-attempts-never-changed-job-459)). `a_scoped_task_is_handed_the_dollars_its_command_was_written_with` is that cause with no `setsid` in the way: a scoped task whose whole command is `printf %s "$$" > …`, asserting the file holds a pid, so a client that rewrites the dispatcher's command is red there and names itself instead of surfacing as a staging timeout three tests away. The escapee redirects its own stderr to an `escapee.trace` path of its own before it writes anything, so a failed pidfile write is told apart from a child that never ran — a discrimination `a_failing_escapee_write_reports_into_the_escapees_own_trace` asserts on every machine by making the pidfile path a directory. Every test that stages an escapee resolves `setsid` through `container::host::task_path()`, the `PATH` a launch composes, rather than through the environment `cargo test` carries — the same string today, since the floor copies the daemon's `PATH` and in tier 2 the daemon *is* the test process, so this is the guard following the floor rather than the caller and not a bug that fired. The macOS half of D3 has no test at all and is an operator procedure: `docs/reference/runbooks/macos-host-supervision-proof.md`
 - `dispatcher` with **real NATS + fake `ContainerBackend` + fake `AgentProvider`** (`test-utils`): full lifecycle runs entirely in-process — seed jobs, drive Ready→Work→Evaluation→Done, retries, rework, escalation, revoke cascades, restart reconciliation (kill and restart the dispatcher task mid-run, assert §3.6 behavior), factory batching/backpressure with synthetic ingest events
 - `api` with **real NATS + a stub responder**: route auth matrix, SSE replay via `Last-Event-ID`, secret encryption on write, ingest token validation
 
@@ -190,14 +189,14 @@ test can be "covered at tier 3" today.** Measured against the tree on
   (`crates/chuggernaut/src/main.rs`).
 - No file under `crates/` references `fixtures/` at all, so no test reads one.
 
-Earlier revisions of this page described a `sample.json` smoke graph and a
-load-bearing `studybuddy/` project under `fixtures/`, in the present tense. Those
+The `sample.json` smoke graph and the load-bearing `studybuddy/` project under
+`fixtures/` that earlier revisions of this page described in the present tense
 were **v1** fixtures; the v1 tree was deleted when v2 was promoted to the repo
 root (`c5bec73`, 2026-07-20) and nothing in v2 ever consumed them. The seed
 command was v1's too (`Seed { .. }`, "seed jobs from a fixture file", in the v1
-CLI); the v2 binary has never had one. What was left here was a v1 tier
-described in the present tense plus a plan for porting it, with nothing to
-separate the two.
+CLI); the v2 binary has never had one. A v1 tier described in the present tense
+beside a plan for porting it, with nothing separating the two, is what this
+section replaces.
 
 ### The intent, kept as intent
 
@@ -299,11 +298,11 @@ a throwaway repo against stubbed
 `emulator`. No NATS, no Docker, no network. Run one directly: `sh .chug/tasks/check-comments.test.sh`.
 
 **`.chug/tasks/ci.sh` runs all of them, unconditionally, as its last pure-shell
-stage** (job #385; before that nothing executed a single one, and
-`coverage.test.sh` had been red for a day). Unconditional because a diff touching
+stage.** Unconditional because a diff touching
 only `deploy/`, `.githooks/`, `nix/` or a `.chug/tasks/*.sh` other than `ci.sh`
 triggers neither the cargo stage nor the web one — those diffs are exactly what
-these suites cover.
+these suites cover, and a suite nothing runs goes red unnoticed:
+`coverage.test.sh` sat red for a day while no stage executed a single suite.
 
 - **Discovery is `git ls-files '*.test.sh'`** — a new suite is picked up with no
   list to update, and tracked-files-only keeps `node_modules/` and `target/` out
@@ -319,39 +318,41 @@ these suites cover.
   unconditional stage's cost is every job's cost. Measured 2026-08-02 on the
   `agent-rust` container: **36.8s for the 17 that existed then**, of which
   `deploy/prod/update-refresh.test.sh` alone is 27.1s (stub polling sleeps);
+  and **58s for the 28 that exist on 2026-08-12** — the population grows and the
+  bound has not, so the headroom is now under a factor of two and the next
+  aggregate is what decides whether 120s still holds;
   `android-proof.test.sh` (#367 A2) adds ~9s, most of it three deliberately short
   emulator bounds it waits out. `check-doc-facts.test.sh` (#415 S1b, S4, S5a, S6)
-  adds 0.65s (re-measured 2026-08-05 on the same container, after check 4's cases
-  landed) — it stubs nothing, because all four checks it pins read a
+  adds 0.65s (measured 2026-08-05 on the same container) — it stubs nothing,
+  because all four checks it pins read a
   throwaway `git init` fixture rather than the tree: check 3 gets its own, whose
   two `job/N:` commits *are* the history it resolves against, and check 4 a third
   holding the registry, the doc that owns its one registered term, and a second
   doc to write about it from.
-  `doc-staleness.test.sh` (#415 S6, job #454) adds ~0.2s, and its fixture is a
+  `doc-staleness.test.sh` (#415 S6) adds ~0.2s, and its fixture is a
   *history* rather than a tree — three commits written with an explicit
   `GIT_COMMITTER_DATE`, because "the file moved after the doc did" cannot be
   expressed in a repo that committed everything at once. The same three commits
   carry a pair of docs that name **each other**, one of them reworked in the
-  last commit: that is the ordering `--gate` used to block on and no rework
-  commit could clear, and it is pinned beside the non-doc ordering that still
-  blocks.
-  `docker-proof.test.sh` (design #517, job #538) adds ~2.5s, and its stub answers
+  last commit: a cycle no rework commit can clear, which is why a `*.md` mover
+  never blocks, pinned beside the non-doc ordering that does.
+  `docker-proof.test.sh` (design #517) adds ~2.5s, and its stub answers
   the **Engine API** rather than a URL: it keeps the image and the container the
   earlier rungs created, so rung 6's re-listing is answered by what the ladder
   actually did rather than by a constant, and it reads the run's marker back out
   of the build context it was posted. It binds a real `AF_UNIX` file with
   `python3` (falling back to `perl`), because `[ -S ]` is rung 1's whole question
   and a regular file standing in for the socket would answer it wrong.
-  `check-molt.test.sh` (design #533 S2, job #548) adds ~2s (measured 2026-08-10)
+  `check-molt.test.sh` (design #533 S2) adds ~2s (measured 2026-08-10)
   and stubs nothing —
   every check it pins is a **before-and-after**, so each case needs a
   fixture with real history: a base commit holding the pre-molt corpus, a second
   commit doing the shedding, and `BASE_BRANCH` pointing at the first. The molt
   commit must also sit on its **own branch**, which is where the cost goes and
-  where the first draft went wrong — on `main` the merge-base with `BASE_BRANCH`
-  is HEAD itself, so the diff is empty, every deletion check goes quiet, and five
-  cases passed while proving nothing.
-  `molt-debt.test.sh` (design #533 S3, job #573) adds ~0.7s and exists for **one
+  where the trap is: on `main` the merge-base with `BASE_BRANCH`
+  is HEAD itself, so the diff is empty, every deletion check goes quiet, and
+  cases pass while proving nothing.
+  `molt-debt.test.sh` (design #533 S3) adds ~0.7s and exists for **one
   case: a doc that moved.** The reader's whole correctness risk is that a pathspec
   suppresses rename detection, and that failure is silent and *plausible* — it
   reports a large number where a large number is expected, with exit 0. So the
@@ -404,7 +405,7 @@ these suites cover.
   `agent-rust-image.test.sh`; `/var` → `/private/var` in `pre-commit.test.sh`).
   Trust the gate over a laptop.
 - They are **not** in `.githooks/pre-commit`: the hook is ~2s by design and these
-  are 36.8s.
+  are tens of seconds — 58s at 28 suites on 2026-08-12.
 
 ## Conventions
 
@@ -421,6 +422,9 @@ these suites cover.
   its epoch, and one that does not leaves the wire clean. Where a golden judges a
   population read from the tree, assert the population is complete too, or the
   goldens quietly judge a subset
+- **A fixture must reproduce the production byte shape, not a tidy version of it.** Where a fixture stands for a file the kernel or another process serves, write the bytes that reader actually sees. One fixture wrote a trailing newline the real source never delivers, so the test asserted the success branch against a shape the node does not produce and stayed green while the property it guarded was misreported on every launch. Run the test against the *unfixed* code and watch it go red, or the fixture is asserting itself
+- **A conditional node-side grant needs a test that asserts the negative space.** For an allow-listed launch, assert the produced launch config carries the device *and* every mount; for a launch outside the list, assert it carries neither. A test that checks only the positive case passes just as well against a node that hands the grant to everyone, which is the failure that matters
+- **A guard suite may take this repo's own `.chug/jobs/` as its input.** `crates/test-utils/tests/placement_guard.rs` places every level of every job type twice on a fleet shaped like the live one — once carrying the limits and environment the level resolves to, once carrying neither — and requires the two answers to be identical. That is what turns "a no-op for every job type today" from a claim into a measurement, and it fails by name if a removed pin is restored
 - Coverage is tracked per crate (v1 discipline carries over); `chuggernaut_domain::state` and `release` validation are held to ~100% branch coverage — they are the correctness core
 
 ## Coverage: on demand, never a gate
@@ -438,7 +442,7 @@ thing you ask for, not a thing that runs on every push
 ([#308](../design/308-gha-port.md) §G).
 
 Two limits to read the number with. The run starts the image's `nats-server` and
-exports `CHUG_TEST_NATS_URL`, so tier-2 executes — and since job 408 the
+exports `CHUG_TEST_NATS_URL`, so tier-2 executes — and the
 *private*-server suites are measured too, because they serve themselves from the
 same binary `start_nats` puts on `PATH`. What still self-skips is only what needs
 a Docker **backend**: 7 of `docker_backend.rs`'s 8 tests, 13 of

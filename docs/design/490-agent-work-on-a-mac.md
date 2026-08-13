@@ -1,22 +1,12 @@
 # Design — agent work on a Mac
 
-Status: IMPLEMENTED — slices 0–7 landed in jobs #491–#514; D6 amended in job #512 and its sweep landed in job #514; M7 at two samples.
+Status: IMPLEMENTED — all eight slices landed; slice 6 ran on the air and slice 7's teardown has not; M6 and M7 stay open.
 
-Written against the tree at `d556a6c` (job #489's `code` merge, the last commit
-touching source before this branch): every claim below was read out of the
-source named beside it, not inferred from the docs. **No host task of any kind
-has ever run on real hardware**, so with one exception the whole document is
-reasoning over a tree, not observation of a fleet. The exception is D1's
-slugifier measurement, which was run against an unauthenticated CLI and is
-labelled where it appears. [What must be measured on the air
-first](#what-must-be-measured-on-the-air-first) gathers every remaining
-unverified fact, the decision it holds up, and what that decision becomes if it
-turns out false. **That table has since been answered** — read it together with
-[the slice 0 correction](#correction--2026-08-08-job-492-slice-0-measured-d1s-recorded-limit-and-a-live-transcript-loss-defect),
-which supersedes the preceding paragraph's "one exception" and D1's recorded
-limits. **And the sentence in bold above is history**: slice 6 ran two agent
-host tasks on `gumbo-air-0`, and what they measured is [the job #510
-correction](#correction--2026-08-09-job-510-slice-6-ran-what-two-host-tasks-on-the-air-measured).
+The argument below was written against the tree at `d556a6c`, before any host
+task of any kind had run. It has since been measured on `gumbo-air-0`: [what
+must be measured on the air first](#what-must-be-measured-on-the-air-first)
+carries each fact's verdict beside it, and the dated corrections carry the
+evidence.
 
 ## Current state
 
@@ -28,221 +18,95 @@ this section is append-only — the original argument, never edited.*
 `gumbo-air-0`, the first host work of any kind this platform has performed
 ([the job #510
 correction](#correction--2026-08-09-job-510-slice-6-ran-what-two-host-tasks-on-the-air-measured)).
-M1, M2, M3 and M4 are answered — M3 came back **no** and slice 4 is the answer to
-it, since the CLI's install directory is on the `PATH` both macOS installers
-render, so an agent already installed keeps the old one until its plist is
-re-rendered. **Which directory that is has moved since**: not the login user's
-`~/.local/bin` slice 4 rendered but the node-wide
-`/usr/local/lib/chuggernaut/bin`, because a per-project task user outside `staff`
-cannot traverse `/Users/<login>` to reach a CLI in it
-([#537](537-per-project-users-macos.md) D12, slice 8, job #571). D3 is unchanged
-in substance — the operator installs, discovery finds it, and installation and
-`PATH` still move together. **M6 is answerable but not answered**: slice 2 built the instrument
-and recorded the procedure ([the job #494
-correction](#correction--2026-08-08-job-494-slice-2-landed-and-how-m6-gets-answered)),
-whose precondition — a deploy carrying slice 1 — is now met, so what it wants is a
-population to count.
+D1–D7 all stand, D6 with its premise withdrawn and its teardown grown. What that
+adds up to on a Mac:
 
-**D6 is amended and closed. M7 is not.**
+- **The transcript is resolved, never computed**, on every node and both
+  backends: `ContainerBackend::find_file(id, dir, name)` answers which files
+  under a directory are named `{session_id}.jsonl`, and the harvest copies the
+  one that resolves with `copy_file_chunked` at the artifact store's
+  `MAX_BLOB_BYTES`. Zero matches, several, a resolution that never answered and a
+  resolved path the copy did not produce are each a loud miss carrying a
+  `transcript-missing.json` marker artifact. `find_file` is additive on the
+  worker wire, so an N-1 daemon answers `unknown op` and the caller falls back to
+  the computed path — **for a container launch only**, since a host task's root
+  is reached through a symlink.
+- **A host-capable node provisions its own channel binary** at
+  `/usr/local/lib/chuggernaut/chuggernaut-channel-host`, beside the injected
+  Linux one, each asked its own executor's question before it is installed.
+  `Core::channel_mcp` names that path for a host launch and injects nothing.
+- **The daemon discovers the agent CLI on its own `PATH`** and advertises it as
+  `NodeCapabilities.agent_cli`; `HostBackend::admit` refuses an agent-shaped host
+  launch **by name** when either that CLI or the node's own channel binary is
+  absent, and the field rule that forbade `work.type: agent` under `mode: host`
+  is deleted. The CLI's directory sits at the **tail** of the `PATH` both macOS
+  installers render — the node-wide `/usr/local/lib/chuggernaut/bin` since
+  [#537](537-per-project-users-macos.md) D12 (slice 8, job #571) rather than the
+  login user's `~/.local/bin`, because a per-project task user outside `staff`
+  cannot traverse `/Users/<login>` to reach a CLI there. The tail, because that
+  `PATH` is every host task's too and a directory ahead of `/usr/bin` would
+  silently reselect `git` or `ssh`. Installing the CLI stays the operator's step
+  (D3); what moved is the directory the daemon looks in.
+- **`CLAUDE_CONFIG_DIR` is rebased by value**, so the CLI's transcript tree lands
+  inside the task directory where `find_file` looks; the wrapper's teardown
+  spares that one leaf for the harvest that runs after the process is gone, and
+  `sweep_agent_cache` then reclaims the CLI's own MCP-log subtree for that task.
+  A launch's `cmd` is the one surface the rebase does not reach, so the agent's
+  command resolves its three `/chuggernaut` paths through `$CHUG_HOST_CREDS`.
+  Container launches are byte-identical through all of it.
+- **Host work and container CI run as one job.** A container level of a host job
+  type is handed no `runtime.env`, so the appended `ci` evaluator is the ordinary
+  container task its own image makes it, and
+  [#309](./309-host-native-execution.md) §1's worked case runs end to end ([the
+  job #507
+  correction](#correction--2026-08-08-job-507-the-launch-path-now-scopes-runtimeenv-to-the-level-it-launches)).
+  `.chug/jobs/mac-proof.yaml` is the one job type declaring `mode: host` and it
+  carries no `placement` pin: since job #556
+  ([#543](543-placement-granularity.md) S2) placement matches a launch's declared
+  `runtime.env` against `NodeCapabilities.envs`, so a Mac without `xcode:26.5`
+  cannot take the proof and one with it is a legitimate host for it.
+- **A host launch declaring `resources.cpu` or `memory` is refused**, rather than
+  warned and run — D7's revisit trigger fired in job #524 and the fix landed in
+  the flag's reader rather than in the wire ([the 2026-08-09
+  amendment](#amendment--2026-08-09-job-524-d7s-trigger-fired-and-the-warning-became-a-refusal)).
 
-- **[D6](#d6--credential-lifetime-is-unchanged-in-mechanism-longer-in-duration) is
-  amended a second time and closed** ([the job #512
-  correction](#correction--2026-08-09-job-512-d6-amended-the-premise-is-false-the-guarantee-holds-and-the-teardown-grows-by-one-path)).
-  Its first amendment was slice 5's, because the teardown it said to keep would
-  have deleted every host transcript before the harvest could read it, so it
-  spares the CLI's own config directory with the secrets half unchanged ([the job
-  #497 correction](#correction--2026-08-08-job-497-d6-amended-the-teardown-spared-the-clis-own-tree)).
-  Its remaining premise — that the CLI confines itself to `CLAUDE_CONFIG_DIR` —
-  is what slice 6 measured under an authenticated CLI running as the daemon's
-  user, and it is **false**: one directory, the CLI's own MCP log tree under the
-  daemon user's cache, outlives the task and accretes across tasks. **The
-  guarantee that premise was holding up survives anyway** — nothing in that
-  residue is a credential, and the injected tree is still deleted the moment the
-  command returns — so D6 keeps its decision and grows its teardown by exactly
-  that one path. The M5 row's own "Teardown grows, or the daemon user does" is
-  resolved in favour of the first, with the second rejected on the tree rather
-  than left hanging; [slice 7](#slices) landed that sweep in job #514, so the
-  teardown a host task's own wrapper begins now ends with the CLI's MCP-log
-  subtree for that task — listed out of the cache root by the task directory's
-  own name, never computed, and best-effort on the nix reaper's charter
-  (`sweep_agent_cache` and `reclaim_agent_cache`, `crates/container/src/host.rs`).
-- **[D7](#d7--a-host-tasks-resources-are-unbounded-and-the-node-flag-does-not-say-so)'s
-  revisit trigger has fired, and the fix was not the one it priced.** D7
-  accepted the misdescription on the ground that *"nothing consumes it"*, and
-  named the trigger: **the first reader that decides something from this flag**.
-  Job #524 is that reader ([#309](./309-host-native-execution.md) §7's placement
-  predicate), and it needed no shape change to `NodeCapabilities` — the reader
-  narrows the node's one bool to the launch's resolved mode, so a dual-mode air
-  still advertises `true` and still never has that `true` applied to a host
-  launch. The per-launch warning D7 called "the signal that is actually true" is
-  now a refusal: a host launch declaring `cpu`/`memory` is `BackendError::Launch`
-  naming the field and the node. See [the 2026-08-09
-  amendment](#amendment--2026-08-09-job-524-d7s-trigger-fired-and-the-warning-became-a-refusal).
+**The production defect slice 1 repaired is why M6 still has no answer.**
+Work-agent transcripts were being silently dropped on the container fleet by
+`copy_file`'s worker-RPC size bound, at a rate the artifact store makes
+measurable ([the job #492
+finding](#the-production-finding-the-transcript-loss-is-not-latent-it-is-happening)),
+so every absence measured before the deploy carrying slice 1 measures that cause
+rather than M6's question.
+
+**What is not settled**, none of it waiting on a decision:
+
+- **[M6](#what-must-be-measured-on-the-air-first) is answerable and unanswered.**
+  Slice 2 built the instrument and [job #494's
+  procedure](#m6s-measurement-procedure-and-why-it-could-not-be-run-here) says
+  how to read it; its precondition — a deploy carrying slice 1 — is met, so what
+  it wants is a population of agent tasks to count markers over. Until it
+  answers, `ESCALATION_ARMED` is `false` and no job's state changes on a
+  transcript miss. The same count is the check on whether slice 1's raise of the
+  copy ceiling was enough.
 - **[M7](#what-must-be-measured-on-the-air-first) has two samples and no
   verdict.** Simulator state the first task left made the second **cheaper**, not
   disturbed; two observations of "did not disturb" are not "cannot disturb", and
   the second run archived a baseline for a third to diff.
   [D4](#d4--one-host-task-per-node-stays) is unchanged.
-- **The `simctl spawn` failure recorded beside those two runs was
-  misattributed**, and the attribution is withdrawn ([the job #527
-  correction](#correction--2026-08-09-job-527-the-simctl-spawn-finding-was-misattributed-the-argument-not-the-session)).
-  It is not a property of the daemon's session — both error codes reproduce over
-  an ordinary SSH session, and they separate by **argument**: `spawn` runs the
-  named program inside the simulator's own filesystem, and iOS ships `launchctl`
-  but no `uname`. `.chug/prompts/work/mac-proof.md` §2 had asked for a command
-  that cannot pass anywhere, and now asks for one that does.
+- **The sweep bounds one residue, not every residue.** A cwd *outside* the task
+  directory yields a cache key the predicate deliberately does not match, and
+  [D6](#d6--credential-lifetime-is-unchanged-in-mechanism-longer-in-duration)'s
+  revisit trigger — host tasks running unattended on a **shared** node — stays:
+  the sweep bounds how long the residue sits on the node, not who can read it
+  while it is there.
 
-**The machinery has since lost its pin, and the reason it was written for is
-what removed it.** Slice 6 gave `.chug/jobs/mac-proof.yaml` a `placement: {node:
-air}` on the argument that an unpinned release "could satisfy `host` on some
-future second Mac and prove nothing about this one". Job #556
-([#543](543-placement-granularity.md) S2) deleted the block, because job #550
-had made `choose_placement` match the declared `runtime.env` against
-`NodeCapabilities.envs`: a second Mac carrying a different Xcode does not
-advertise `xcode:26.5` and cannot take the proof, one carrying 26.5 is a
-legitimate host for it, and the requirement is now checked rather than
-approximated. The dated bullet in [the job #502
-correction](#correction--2026-08-08-job-502-slice-6-needed-machinery-and-the-appended-ci-refuses-an-xcode-job-type)
-records the pin as slice 6 landed it and is history, not current shape.
-
-Everything else about the machinery holds. The platform gap job #502 found is
-closed: a container level of a host job type is handed no `runtime.env`, so the
-appended `ci` evaluator runs as the ordinary container task its own image makes
-it ([the job #507
-correction](#correction--2026-08-08-job-507-the-launch-path-now-scopes-runtimeenv-to-the-level-it-launches)),
-and [#309](./309-host-native-execution.md) §1's "host work, container CI, one
-job" ran end to end for the first time.
-No other decision was overturned. Three things changed on the way here:
-
-- **M3 made slice 4's work required rather than confirmatory.** `claude` is
-  installed on `gumbo-air-0` and was not on the daemon's `PATH`, so D3's probe
-  would have found nothing and D5 would have refused every agent host launch by
-  name; slice 4 landed the `PATH` alongside the probe (below).
-- **Candidate 1 is now rejected on correctness, not only on fragility.** The CLI
-  slugifies the *resolved realpath*, so a computed slug is wrong today on any
-  task root reached through a symlink — which is the ordinary shape on macOS.
-- **Slice 1 repairs a live production defect and is no longer only an enabler
-  for host mode.** Work-agent transcripts are being silently dropped on the
-  container fleet right now, by `copy_file`'s worker-RPC size bound, at a rate
-  the artifact store makes measurable. That also makes M6's premise already
-  false, which is slice 2's problem.
-
-The correction below carries the evidence for each.
-
-**What slice 1 landed**, exactly as D1a's surface table specifies:
-`ContainerBackend::find_file(id, dir, name)` on both backends — Docker streams
-the directory's tar and reads its headers (the container has exited, so
-`exec find` is unavailable), the host backend walks the rebased directory and
-maps results back through `unrebase_path`, `rebase_path`'s new inverse — plus
-the `find_file` RPC pair, its arm in the daemon's op match, the routing, and both
-fakes. `Harvester::collect_agent` resolves and then reads with
-**`copy_file_chunked`** at the artifact store's own `MAX_BLOB_BYTES`, so the
-production defect below is repaired: a transcript over `MAX_COPY_FILE_BYTES` is
-harvested whole, and one over the new ceiling is refused at **error** level
-naming the loss rather than dropped. `find_file` is bounded at
-`container::FIND_FILE_MATCHES_MAX` matches and, on a host node, by scan depth and
-entries visited as well. **No `WORKER_RPC_VERSION` bump**: a daemon that does not
-know the op answers `unknown op`, and the caller falls back to the computed path
-— for a **container** launch only, per the realpath finding below.
-
-**What slice 2 landed** (job #494): zero matches and several matches are logged
-at **error**, and every miss — including a resolution that never answered —
-stores the fourth `ArtifactKind`, `transcript-missing.json`, naming the branch
-that refused, the session id, the directory searched and, for several, the paths
-found. `Harvester::collect_agent` returns that outcome on an `AgentHarvest`
-rather than raising it, and `TranscriptMiss::escalation` is **written and
-unarmed** — `ESCALATION_ARMED` is `false`, so no job's state can change on this
-outcome until M6 is answered.
-
-**What slice 3 landed**, in `deploy/prod/build-worker.sh` and
-`deploy/prod/worker-refresh.sh` only — no Rust changed. A host-capable node is
-handed a **second** channel binary at `/usr/local/lib/chuggernaut/chuggernaut-channel-host`,
-beside the injected `/usr/local/lib/chuggernaut/chuggernaut-channel`, whose
-`e_machine` guard is untouched. Both scripts derive `serves_host` beside
-`serves_container`, in the daemon's own spelling; `--bin chuggernaut-channel` is
-back in `NATIVE_BINS` unconditionally, since between them the two rules cover
-every legal `WORKER_MODES` (this is job #487's condition reversed, and its
-premise — that host mode is command-only, so nothing reads the file — is what
-[slice 5](#slices) removed). On **Darwin** the host copy comes out of the node's
-own `cargo build` and the injected one out of the image; on **Linux** both are
-the same bytes out of the same image, staged and guarded separately because the
-node's userland is not the container's. Each is asked its **own** executor's
-question before anything is installed: the injected copy against the container's
-architecture, the host copy by being **run** on the node, with an ELF in the host
-slot refused by name as the other half of the pair. Nothing **read** the new
-file until slice 5, which is where the daemon-side config variable D2 left open
-belongs: a host agent launch's MCP config names that path, and
-`HostBackend::admit` stats it per launch and refuses when nothing runnable is
-there. A
-container-only node's deploy is unchanged, and a host-capable one differs by
-exactly one `docker cp` (asserted as a delta in both suites).
-
-**What slice 4 landed** (job #496): `worker::agent_cli` probes the daemon's own
-`PATH` for an executable `claude` at boot, on a host-capable node only, and
-`NodeCapabilities` carries the answer as a new `agent_cli` flag — additive,
-defaulting to **false** when absent, so a daemon predating the probe reads as
-unable to serve agent work. No `WORKER_RPC_VERSION` bump. An agent-shaped host
-launch on a node that found none was refused **by name** in the daemon, naming the
-`PATH` searched, ahead of `HostBackend::admit`'s blanket `CLAUDE_CONFIG_DIR`
-refusal — slice 5 replaced both with the single capability test in `admit`, which
-still carries the daemon-composed text naming that `PATH`. And M3's remedy: both macOS
-renderings (`deploy/prod/install-worker-launchd.sh` and
-`deploy/prod/build-worker.sh`) carry the agent CLI's directory at the **tail** of
-the default `AGENT_PATH` — the login user's `~/.local/bin` as slice 4 rendered
-it, and since [#537](537-per-project-users-macos.md) slice 8 (job #571) the
-node-wide `/usr/local/lib/chuggernaut/bin` instead. The tail because that `PATH`
-is every host task's too, and a directory ahead of `/usr/bin` would silently
-reselect `git` or `ssh`. Installing the CLI stays the operator's step (D3); what
-moved is the directory the daemon looks in.
-
-**What slice 5 landed** (job #497), which is the slice that actually permits
-agent work on a Mac. `HostBackend::admit`'s `CLAUDE_CONFIG_DIR` refusal is now a
-test of the node's `AgentCapability` — the CLI the daemon discovered (D3) and a
-runnable channel binary of the node's own (D2) — refusing **by name** whichever
-is absent and admitting the launch when neither is. The daemon still discovers
-and now hands both facts to the backend at construction, the way it already
-hands it `Supervision`, so slice 4's `admit_agent_cli` is gone rather than
-duplicated: one place judges an agent-shaped launch, which is what D5 names.
-`validate_host_serves_commands_only` is deleted, so a `mode: host` job type may
-declare `work.type: agent` (and `human`); the `image` and `runtime.env` rules
-under `mode: host` are untouched, and an evaluator declaring its own image still
-resolves to container mode — host work, container CI, one job, asserted as its
-own test.
-
-Three things had to follow for such a launch to be able to run at all, none of
-them named in the slices, all of them found by writing the test that admits one:
-`Core::channel_mcp` routes on the launch's `image` — the selector every backend
-routes on — and for a host task **injects nothing** and names
-`/usr/local/lib/chuggernaut/chuggernaut-channel-host`, the path slice 3
-installs, since an MCP config's `command` is file *contents* that no backend
-rebases (which is also why the path is a constant rather than the deploy's
-`WORKER_HOST_CHANNEL_BINARY` knob: overriding that relocates the install away
-from where a launch execs it, and the capability refusal is what says so).
-`CLAUDE_CONFIG_DIR` joins the two variables whose **values** the host backend
-rebases (#322 §2's fourth surface) — without it every agent host launch was
-refused by `rebase_env`, and with it the CLI's transcript tree lands inside the
-task directory where slice 1's `find_file` looks, which took **amending D6**:
-the wrapper's teardown deleted that tree whole at process exit, so it now
-reclaims the injected tree's entries and spares the CLI's own config directory
-([the job #497 correction](#correction--2026-08-08-job-497-d6-amended-the-teardown-spared-the-clis-own-tree)).
-And the agent's **command**
-resolves its three `/chuggernaut` paths through `$CHUG_HOST_CREDS`, because a
-launch's `cmd` is the one surface the rebase does not reach — the same
-indirection `bootstrap_cmd` uses for the clone destination. Container launches
-are byte-identical through all three.
-
-**What slice 6 produced** (jobs #504–#509), which is a record rather than a
-change: an authenticated agent CLI running as a native macOS process on
-`gumbo-air-0`, its `session.jsonl` harvested at **462,085 bytes**, and
-`update_status`/`submit_result` carried first-call through the Mach-O
-`chuggernaut-channel` the node installs — M1's last conjunction and M2's residual,
-both of which needed an authenticated CLI as the launcher and so could not be
-measured before. Two launch-blocking defects were found by attempting it and
-fixed between the runs: a wire prefix that matched mid-segment, refusing every
-launch carrying this repository's `REPO_URL` (job #505), and a container level
-inheriting the job type's `runtime.env` (job #507). Both had survived five slices
-of full CI gates and stage-0 review, because none of those slices had ever
-launched a host task.
+**One recorded finding is withdrawn.** The `simctl spawn` failure beside slice
+6's two runs is not a property of the daemon's session — both error codes
+reproduce over an ordinary SSH session, and they separate by **argument**:
+`spawn` runs the named program inside the simulator's own filesystem, and iOS
+ships `launchctl` but no `uname` ([the job #527
+correction](#correction--2026-08-09-job-527-the-simctl-spawn-finding-was-misattributed-the-argument-not-the-session)).
+`.chug/prompts/work/mac-proof.md` §2 now asks for a command that can pass.
 
 This document is [#322](./322-macos-native-runtime.md) P2's **agent half**,
 which that design files as *"Later, deliberately"*. It is being taken up early

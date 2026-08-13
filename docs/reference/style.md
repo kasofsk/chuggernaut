@@ -69,8 +69,8 @@ that debt is what the pending checks will pin down.
   the Track C ticket that dissolves them, so existing debt is greppable
   (`git grep 'clippy::too_many_lines'`, `git grep 'TODO(style)'`) while new code
   cannot add a violation without an explicit, reviewable allow. The marker rides
-  the attribute rather than a comment above it — job #342 deleted every non-doc
-  comment in the tree. Crate-level `#![allow]` of these
+  the attribute rather than a comment above it, because the comment rule below
+  bans the comment. Crate-level `#![allow]` of these
   three lints defeats the ratchet and is rejected on sight.
 
 - **Formatting is `rustfmt` / `prettier` defaults.** *(live for Rust:
@@ -85,8 +85,8 @@ that debt is what the pending checks will pin down.
 
 - **No comments except doc comments; a doc comment is at most 2 sentences.**
   *(live: `.chug/tasks/check-comments.sh` runs from `.chug/tasks/ci.sh`,
-  unconditionally and before the Rust early-exit, over the Rust and TypeScript
-  sources in the diff — and from `.githooks/pre-commit` in `--staged` mode, so a
+  unconditionally and before the Rust early-exit, over the tracked Rust and
+  TypeScript sources — and from `.githooks/pre-commit` in `--staged` mode, so a
   comment is caught at the commit rather than a rework cycle later.)* `//`, `/* */` and every trailing-on-a-code-line form
   are rejected; `///`, `//!`, `/** */`, `/*! */` are the only prose a source
   file may carry, and each block stays inside two sentences. Longer than that
@@ -109,9 +109,9 @@ that debt is what the pending checks will pin down.
   line is an ordinary comment and the gate rejects it. Write the justification
   so it fits, however long that line runs.
 
-  **Rule 1 is absolute; rule 2 is still a ratchet.** Job #342 deleted every
-  non-doc comment in the tree — the rationale worth keeping was hoisted into
-  [`docs/implementation-notes.md`](../implementation-notes.md) — so the gate
+  **Rule 1 is absolute; rule 2 is still a ratchet.** The tree carries zero
+  non-doc comments — job #342 deleted them, hoisting the rationale worth keeping
+  into [`docs/implementation-notes.md`](../implementation-notes.md) — so the gate
   lints every tracked Rust/TypeScript source and one non-doc comment anywhere
   fails it, changed file or not. The two-sentence cap still has pre-existing
   debt (~500 over-long doc comments), so it judges only blocks a diff adds a
@@ -165,8 +165,8 @@ verify it in seconds and must name it when rejecting.
    execute — it never performs an effect. *Why:* pure decision logic is
    exhaustively testable at tier 1 of `docs/reference/testing.md`, and the decider/effects
    seam is the whole point of the north-star factoring.
-   (`chuggernaut_domain::{effects, decide}` exist as of B2/C1;
-   `decide::escalation` is the worked template a new decider copies.)
+   (`chuggernaut_domain::{effects, decide}` exist; `decide::escalation` is the
+   worked template a new decider copies.)
 
 2. **Assert liberally in domain code — arguments, postconditions, and
    invariants.** Aim for TigerStyle's density (on average, two assertions per
@@ -308,8 +308,8 @@ verify it in seconds and must name it when rejecting.
    a pointer rather than a claim about that content, and it is the only edge
    that can form a cycle no rework commit can clear. That block clears on an
    asserted re-read — a `Doc-reread: <path>` line, one per doc, as a trailer in
-   a commit message on the branch (job #471) or as a line the branch's diff adds
-   to `.chug/doc-reread` (job #482) — because a timestamp records that a doc was
+   a commit message on the branch or as a line the branch's diff adds to
+   `.chug/doc-reread` — because a timestamp records that a doc was
    edited, where the gate is asking whether anyone looked. Write it in the file
    when the branch is being reworked: a rebase that squashes or re-authors a
    commit destroys a trailer, and content is what it carries through.
@@ -322,13 +322,12 @@ verify it in seconds and must name it when rejecting.
    to it. The one licensed exception is not a rewrite either — a `molt` job may
    **delete** a whole design whose `Status:` leads with `IMPLEMENTED` and is not
    `IMPLEMENTED IN PART` (`docs/reference/docs.md`), and removing a file
-   annotates no body. *Why:* one week produced five — a `.github/`
-   workflow mirror that did not exist and a `tier-2 ENABLED` announcement over a
-   tier that self-skipped (#375, #378/#382), 17 shell suites nothing executed
-   (#385), a duplication gate analysing no `.nix` files (#383), `check-modules.sh`
-   verifying row presence but never content (#382), and `docs/reference/testing.md`'s tier 3,
-   whose fixtures went out with the v1 tree and whose `chuggernaut seed` command
-   v2 never had (#394).
+   annotates no body. *Why:* one week produced five (jobs #375–#394) — a `.github/`
+   workflow mirror that did not exist, a `tier-2 ENABLED` announcement over a
+   tier that self-skipped, 17 shell suites nothing executed, a duplication gate
+   analysing no `.nix` files, `check-modules.sh` verifying row presence but never
+   content, and `docs/reference/testing.md`'s tier 3, whose fixtures went out
+   with the v1 tree and whose `chuggernaut seed` command v2 never had.
 
 6. **New behavior lands with a regression test at the lowest tier that can
    express it** (`docs/reference/testing.md`); the correctness core (`chuggernaut_domain::state`,
@@ -336,12 +335,11 @@ verify it in seconds and must name it when rejecting.
    the tier, the more often the test actually runs.
 
 7. **Re-derive every host fact inside the namespace that will use it.** The
-   namespace that runs the code is not always the node: until design #440
-   slice 4 the worker daemon was itself a container
-   (`deploy/prod/build-worker.sh`, now a native unit — though every deployed
-   node still runs the container until an operator converts it), so a path,
-   device or socket the host has is absent to `chug-worker` unless it is
-   mounted in. That is where all four cases below came from, and the rule
+   namespace that runs the code is not always the node: the worker daemon is a
+   native unit since design #440 slice 4 (`deploy/prod/build-worker.sh`), though
+   every deployed node still runs the container until an operator converts it,
+   so a path, device or socket the host has is absent to `chug-worker` unless it
+   is mounted in. That is where the cases below came from, and the rule
    outlives the packaging: whatever the view is, ask it — and **existence,
    identity and provenance are three separate questions**: a check that answers
    one does not answer the others. Ask all
@@ -351,18 +349,54 @@ verify it in seconds and must name it when rejecting.
    daemon's view — the container's while the daemon is one, and even natively
    only about what that process may reach — never about the node as such:
    provision host state from the deploy script, and check it from the daemon in
-   the daemon's own view. *Why:* this
-   one root cause produced a rework cycle in job #374 (a boot-time `/dev/kvm`
-   check that reads the daemon container's view, so — on a node whose daemon is
-   still the container — enabling KVM also means passing the device into
-   `chug-worker`), in #379/#380 (a `create_dir_all` of
-   `WORKER_CACHE_DIR` that lands in the daemon's writable layer and never on the
-   host, which is why `worker-refresh.sh` deliberately does not `mkdir` it), and
-   in all three of job #384's (a realise target mounted nowhere — *existence*; a
-   leaf bind that resolved the operator's symlink away, so the path existed but
-   was not a store path — *identity*; fixed by binding the parent and asserting
-   the canonicalized target lands under the store — *provenance*).
+   the daemon's own view. *Why:* this one root cause has produced a rework cycle
+   repeatedly. A boot-time `/dev/kvm` check reads the daemon container's view, so
+   — on a node whose daemon is still the container — enabling KVM also means
+   passing the device into `chug-worker`. A `create_dir_all` of
+   `WORKER_CACHE_DIR` lands in the daemon's writable layer and never on the host,
+   which is why `worker-refresh.sh` deliberately does not `mkdir` it. And three
+   failures in one job: a realise target mounted nowhere — *existence*; a leaf
+   bind that resolved the operator's symlink away, so the path existed but was
+   not a store path — *identity*; fixed by binding the parent and asserting the
+   canonicalized target lands under the store — *provenance*.
    Design [#373](../design/373-project-toolchains.md) is the long record.
+
+   **Two further questions the first three miss**, each found the expensive way.
+   **Reachability by uid**: an environment-composition guarantee bounds what a
+   task is *told*, never what its uid may *open* — a host task inheriting only
+   `PATH` and `HOME` still resolves a docker client's active context under that
+   `HOME` to a socket its own user owns, so existence, identity and provenance
+   all pass while the capability arrives by file ownership
+   ([#517](../design/517-docker-access-for-jobs.md)). **Which kernel execs it**:
+   a fact true by construction *inside* a container — a binary's platform, a
+   socket's path — is still being assumed after the daemon leaves it, and an
+   audit of the launch flags cannot see a premise that was never a flag, so ask
+   each artifact the question its own executor asks rather than the one the
+   staging machine asks, and prove every staged binary runs on its executor
+   before the first install ([#440](../design/440-native-worker-daemon.md)).
+
+8. **A tool's outcome measures the tool, not your claim.** A profiler succeeding
+   against another process measures the *entitlement on that profiler*, not what
+   the caller may reach; the caller's privilege is a different check, and in the
+   case that produced this rule that check was a denial. **And a denial with no
+   control identifies no mechanism** — a single refusal is equally consistent
+   with "denied by direction" and "denied by the caller's provenance", so run the
+   control (the same read against a process the reader forked itself) or say
+   plainly that the mechanism is documented behaviour rather than your result.
+   *Why:* this shape has produced three recorded errors in this corpus, each one
+   a measurement that looked conclusive and established something adjacent to
+   what it was cited for ([#529](../design/529-secret-handling.md)).
+
+9. **A content hash never enters operator-typed config.** A content-addressed
+   path changes with every rebuild of what it names, so config holding one keeps
+   working against the *previous* artifact until it is garbage-collected, then
+   fails with a not-found on a path nobody typed recently — silent wrongness
+   followed by an unattributable failure. Name a stable path the platform's own
+   activation maintains, and let whatever already resolves host paths resolve it
+   at the moment of use. *Why:* it relocates a physical fact of the node into
+   config that goes silently wrong at the next rebuild — the same failure shape
+   as rule 7, arriving through the config file instead of the namespace
+   ([#367](../design/367-android-emulator-execution.md)).
 
 ## Tier 3 — principles
 
@@ -375,6 +409,16 @@ verify it in seconds and must name it when rejecting.
 - **Zero technical debt.** Fix it at design time; a problem deferred into a
   running orchestrator costs an order of magnitude more than one caught in
   the ticket.
+- **A control that reports success and does nothing is worse than no control.**
+  Prefer a loud refusal at the declaration to a grant that silently never
+  matches, and a refused boot to serving on with a capability quietly dropped.
+  An unenforced intention gets read as a statement of fact and then reasoned
+  from: design [#517](../design/517-docker-access-for-jobs.md) is the long
+  record, where a rule saying host tasks do not get the docker socket entered
+  the tree on 2026-07-29, was believed from that day, and was false the whole
+  time on the node that had one — until job #516's read-only probe measured it
+  on 2026-08-09 and design #517 recorded the amendment. Eleven days is all it
+  takes; the sentence never carried a check.
 - **Dependencies need a stated justification.** Not zero-deps absolutism —
   but every new crate or npm package added must say in its commit message
   what it buys and why vendoring or writing it is worse.

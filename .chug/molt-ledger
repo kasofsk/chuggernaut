@@ -22,3 +22,263 @@ the sheddings themselves are deleted rather than filed: a tracked archive is
 corpus the next molt must molt, and an untracked one is out of every gate's and
 job's reach. The absence of a third option is #533 D2's whole argument, and this
 ledger is the accounting, not the archive.
+
+## Molt 1 — job #576 (design #533 S4). Deletion set: EMPTY. No doc removed.
+
+Format: <doc> | [class] what the passage said -> survivor. [S] = saga, shed.
+C1 live constraint, C2 rejected-but-purchasable, C3 open hole, C4 measurement
+still evidence, C5 fact about the world. C1-C5 lines below record a passage
+weighed against that class and RELOCATED, not dropped.
+
+### Reference tier
+
+CLAUDE.md | [S] "since #382 baked nats-server became default; since #408 they self-serve" -> present-tense default + the understates-what-ran trap
+CLAUDE.md | [S] "since #385 CI runs the shell suites" -> suites stay in the gate list, undated
+CLAUDE.md | [S] "checks 1 and 2 lived in doc-lint.sh as warnings until S1b moved them" -> none; pure relocation history
+CLAUDE.md | [S] "#416 orphaned ten tag-file references" -> the orphaning kept as the reason the gate is whole-tree
+CLAUDE.md | [S] "since #471 ... since #482 ..." ordering of the Doc-reread halves -> both places stated present-tense, rebase argument intact
+CLAUDE.md | [S] "jobs #449 and #453 were forced into a squash" -> the cycle argument itself
+CLAUDE.md | [S] "0 of 41 measured at job #468" -> "measured whole-tree the finding is 0"
+CLAUDE.md | [S] "36.8s for the 17 suites on 2026-08-02" -> the two slow suites, as the reason the 120s budget binds
+CLAUDE.md | [S] "#421 is the job that fixed reading it that way" -> the rule, bolded
+CLAUDE.md | [S] per-gate landing attributions (#342, #415 S7, #446, #454, #444, #449, #501, #548) -> every rule they were attached to, verbatim
+CLAUDE.md | [S] ".gitignore used to exclude infra/ entirely" -> the standing git behaviour + the diagnostic symptom
+CLAUDE.md | [FIX] "No molt has run yet" -> restated: first molt shed heads + reference tier, deleted nothing
+
+docs/reference/style.md | [S] "job #342 deleted every non-doc comment" as the marker's reason -> "because the comment rule below bans the comment"
+docs/reference/style.md | [S] "exist as of B2/C1" on domain::{effects,decide} -> "exist", present tense
+docs/reference/style.md | [S] which job added each half of the Doc-reread assertion -> both places, both readers, the rebase reason
+docs/reference/style.md | [S] per-case job attribution on the five false doc claims -> all five cases verbatim + one range pointer (#375-#394)
+docs/reference/style.md | [S] "until #440 slice 4 the worker daemon was itself a container" -> present tense + the open hole (deployed nodes still run the container)
+docs/reference/style.md | [S] rule 7's "in #374 ... in #379/#380 ... in all three of #384's" scaffolding -> all four cases + the existence/identity/provenance triad, whole
+docs/reference/style.md | [FIX] bullet said check-comments.sh reads "sources in the diff"; rule 1 is whole-tree -> corrected
+
+docs/reference/testing.md | [S] "on by default since job 382 fixed four tests that went red while the tier was dark" -> "A dark tier is not a quiet one"
+docs/reference/testing.md | [S] "the two drifting apart is what job 375 found" -> the rule + "a probe and the thing it describes drift apart"
+docs/reference/testing.md | [S] before/after framing of the private-server cost table -> one cost column; totals kept
+docs/reference/testing.md | [S] "It was 19.1s until 408 bounded the fifth one" -> the trap in present tense (backoff never reached at attempts=1)
+docs/reference/testing.md | [S] per-binary saving list (4 files, 5.02s -> 3-5ms each) -> "the whole saving in the NATS binaries" + worst case verbatim
+docs/reference/testing.md | [S] "40 runs then stayed under 4.2s with none failing" -> the rule + the 4-of-15 evidence + why 20s is the exposing ceiling
+docs/reference/testing.md | [S] job attributions #451/#453/#458/#459/#462 in the host_backend bullet -> every constraint, trap and hole; four #440 correction links kept
+docs/reference/testing.md | [S] "(job #385; before that nothing executed a single one)" -> "a suite nothing runs goes red unnoticed: coverage.test.sh sat red for a day"
+docs/reference/testing.md | [S] bare job numbers on four suite rows -> the design slice refs kept
+docs/reference/testing.md | [FIX] "D8's escapee has never reached its assertion ... one operator run away" -> FALSE; job #466 ran it 13/13, 0 skipped, systemd 260.2. Corrected.
+
+docs/implementation-notes.md | [S] 29 chronology clauses across the file ("historically", "used to", "arrived at", "since #N", "keeps the pre-#270 shape", deploy #212/#267 incident attributions, "job #462 diagnosed / #466 then ran it", "P0's backend_kind picked one backend at boot", "since #393 gave it a second", "(#207 review, cycle 2)", "Job #342's diff is ...", "it used to render inside the artifacts <td>", "the old platform drift/freshness view", "It used to be seeded from the SSE history replay", "moved into the pure decider with C6") -> in every case the rule, trap, measurement or rejection restated in the present tense; 255 -> 226 job refs
+docs/implementation-notes.md | [C2] rejected shapes restated hypothetically rather than historically (advisory-elsewhere limits, boot-time backend selection, inline exit synthesis, unchunked transcript read, SSE-replay channel seeding) -> kept, reframed
+
+docs/spec.md | [S] Sec 14 preamble "job #63 merged ... first victim #69" -> the 2026-07-22 incident itself, kept
+docs/spec.md | [S] "Auto-deploy (#108)" provenance tag on a present-tense fact -> the fact
+docs/spec.md | [S] Sec 4.1 "agent-rust did until #352 ... It was deleted as" -> "does not, because the seed is measured redundant"
+docs/spec.md | [S] Sec 3.1 "Since #352 removed the warm-target seed" -> "With no warm-target seed in the build images"
+docs/spec.md | [S] Sec 3.6 "which #76 stamps at launch" -> "which is stamped at launch"
+docs/spec.md | [S] Sec 3.1 transcript "silently lost until #490 slice 1 / since slice 2 it is loud" -> both facts, present tense
+docs/spec.md | [S] Sec 1.1 slice-by-slice walk of how #490 emptied #322 Sec 2 N2 -> "The field rule that forbade it is superseded", with the reason
+docs/spec.md | [S] Sec 12.5 "Job Wizard Credential (retired)" tombstone for removed machinery -> none; verified zero inbound references, and its ANTHROPIC_API_KEY claim contradicted Sec 4.1
+docs/spec.md | [FIX] Sec 2.2 prose said a failed re-validation and a failed launch-time validation go to Escalated; Sec 2.1 rows and Effect::Stall say Stalled -> corrected to Stalled (two sentences)
+
+docs/reference/crates.md | [S] "platform-ops has left this tree / what remains here is the adapter" -> present-tense crate + adapter sentence
+docs/reference/crates.md | [S] "now"/"since #490 slice 5"/"Since design #440 slice 7" tense markers -> the same claims, tenseless, citations kept
+docs/reference/crates.md | [S] job #525 / job #565 attributions beside HostTenancy and the teardown rule -> the design citations that hold the argument
+docs/reference/crates.md | [FIX] store listed UserStore/ChannelStore/PushStore -> none exist in crates/; replaced with the real set
+docs/reference/crates.md | [FIX] "modules.md at the repo root" -> it is at docs/reference/
+docs/reference/crates.md | [FIX] "NodeCapabilities is a report rather than an input" -> false since #543 S1; placement reads modes, resources_enforced, envs
+
+### Design heads (28 compacted)
+
+Scope claim, restated to exactly what was checked rather than asserted. For each
+of the 28, the highest base-side line this diff touches was computed from the
+diff hunks and located against the base file's own `## ` headings. In 23 the
+last touched line falls in the Status paragraph or `## Current state`. In five it
+falls in a later section this molt judged head-side, and each is named here with
+the boundary judged and why, because "body untouched" is a claim a reader is
+entitled to have itemised rather than asserted:
+
+  308-gha-port     -> `## Provenance` (base 165-187). No `---` anywhere in the
+                      doc; the argument starts at `## Problem` (189). The section
+                      had already been amended in place (the dated 2026-07-30
+                      "verified once" paragraph), so the tree treats it as
+                      mutable. Reflow only: every fact, date and caveat kept.
+  440-native-...   -> `## Decisions` D3/D8 cells (base 153-165). Boundary judged
+                      at the THIRD `---` (base 221), where `## 1. One daemon or
+                      two` begins; `---` at 151 and 196 bracket Decisions/Slices/
+                      What-is-true-today, all three of which the tree already
+                      edits (D3 and D8 carried links to later corrections in the
+                      base). Shed: repeated tree hashes and command lines.
+  529-secret-...   -> `## Slices` (base 186-228), above the `---` at 230.
+  537-per-proj-... -> `## What was measured first` (base 92-98), above the `---`
+                      at 112.
+  543-placement... -> `## Decisions` (base 51-80), above the `---` at 98.
+
+Two docs had body prose edited and are RESTORED from base in this rework:
+490-agent-work-on-a-mac (everything below `## What phase 1 refuses, and why`,
+base 258 onward) and 372-chug-node-modules (`## What could not be verified, and
+what that means`, base 55-95). Nothing from either restore is shed; the head
+each kept is unchanged, and 372 gains one head paragraph carrying the job #423
+measurement forward. See the summary's close-calls section.
+
+000-rationale | [S] head chronology folded into a paragraph; Status shortened to one phrase -> philosophy, key decisions, Technology Choices and Deferred all untouched
+169-handoff-continuity | [S] "originally-we-thought" framing of the no-slice-table rule -> the rule itself
+169-handoff-continuity | [S] the 2026-07-24 self-assertion of verification -> a dated re-verification of all nine tickets, all nine confirmed still open, T9's three drifts included
+210-ts-rewrite-plan | [S] "nobody is executing this plan, and nobody is expected to" -> CORRECTED, not shed: the analysis is revived by the coming reimplementation
+215-refactor-plan | [S] which of A2/A3/A4/B1/C1/C6/C7 landed and where each marker sits -> the markers stay where they were written, in the body
+215-refactor-plan | [S] "last implementing job to amend this file did so on 2026-07-31 (job #342)" -> none
+238-forge-ingest | [S] "this note is the stop-and-file-a-design-note half of the ticket" -> none; meta-narration
+293-worker-capacity | [S] seven-job landing recap, two "Revised after review" paragraphs -> the implementation-plan table, untouched
+308-gha-port | [S] head narration of six corrections and two head rewrites -> a routing block naming each correction and what it changed
+309-host-native-execution | [S] P0/P1/P2 landing chronology and five bolded amendment bulletins -> the phase table + present-tense current truth, every link kept
+310-scheduled-jobs | [S] "#359 shipped items 1,2,6 and #360 shipped 3,4,5" -> "(jobs #359 and #360)" as attribution
+310-scheduled-jobs | [FIX] head said inputs: is still deferred -> it shipped (#311 slice C); corrected
+311-job-inputs | [S] 30-line slice-by-slice landing narrative with the full epoch chain -> the two binding decisions + a tree map + the frozen epoch values
+313-workload-identity | [S] "Half A's code landed across #410/#411/#412/#413/#414"; three "Amended (job #N)" paragraphs; the five-days-stale self-narration -> slice table + the two body amendments, still linked
+321-job-groups | [S] three-slice landing recap and the #185 supersession retold -> a statement of what a group is, plus the Decision 1 link. CITATION BLOCK RESTORED BY ORCHESTRATOR after the first agent over-pruned it
+322-macos-native-runtime | [S] nine-clause Status landing narrative; W1/W2/W4/W5/N2/P1 mechanics; the #510-then-#527 two-step -> the state table + three present-tense paragraphs
+323-paste-a-prompt | [S] methodology narration and a duplicated problem restatement -> none needed; head was already near-minimal
+355-project-task-images | [S] re-verification chronology and methodology narration -> the head now states what it concluded and what blocks it (head GREW, 24 -> 28 lines)
+361-per-run-placement | [S] "Closed and unchanged since 2026-08-01" and sourcing narration -> the Status line
+362-binary-artifacts | [S] head landing recap -> Status states gap 5's finding and what S3 waits on
+367-android-emulator | [S] the 2026-08-02 amendment paragraph; the "/dev/kvm appears three times in the corpus" census (now false) -> corrections 8-12 and Sec 1/Sec 7
+372-chug-node-modules | [S] draft chronology (fef87f9, revised twice, the 598-line #367 amendment) -> body C1 and Sec 11
+373-project-toolchains | [S] the whole "Amended after P1 merged (job #387)" paragraph -> Current state (45s ceiling + C6 link), slice table, "P1 as shipped"
+415-knowledge-architecture | [S] ~110 lines of per-slice landing narrative S0-S12 -> the slice table, verbatim
+415-knowledge-architecture | [S] the #446 -> #454 -> #471 -> #482 chronology of D7's block being fixed four times -> the outcome, with #454 and #482 linked
+415-knowledge-architecture | [S] the #450 narration, S5b's inventory, the rebase provenance -> their slice rows
+440-native-worker-daemon | [S] five-paragraph chronology of the #476/#480/#487/#540 corrections -> two compacted paragraphs + the same links
+440-native-worker-daemon | [S] jobs #451/#453/#455/#456/#457 as a five-step fixing sequence (75 lines) -> ONE sentence: the systemd v254/v258 window
+440-native-worker-daemon | [S] repeated tree hashes and the cargo test command line in prose and in D3/D8 cells -> host, OS, systemd version and the proof links
+490-agent-work-on-a-mac | [S] head landing narrative across eight slices -> the slice table + D1-D7 restated as current decisions
+517-docker-access | [S] slice-by-slice chronology and eight "What S<n> landed" recaps -> the slice table + a current statement of which grants exist and how one is made
+529-secret-handling | [S] Status paragraph narrating S1a->S1b->S2+M6->#554->M7->S3 in landing order -> the current-state and slice tables
+529-secret-handling | [S] the M2, M7 and M1d/M8 recap paragraphs -> current-state rows + the body corrections, still linked
+533-molt | [S] "the machinery is built and no molt has run yet" -> "the first molt has run, and deleted nothing"
+537-per-project-users | [S] Status line reciting seven landing jobs; the D8/slice-6 and M1 closure recaps -> the slice table + the measurement table, both verbatim
+543-placement-granularity | [S] "Three slices have since landed" per-job narrative; the mac-proof pin chronology -> the slice table + current-state rows
+
+## Cycle 3 — restorations, after review-molt-loss named 13 losses
+
+Not sheds. Each line below UNDOES or repairs a cycle-1 compaction that lost a
+fact rather than a narration; the shed lines above that they qualify are left in
+place, because the ledger is a record of what was attempted as well as what
+stands. Reviewed in the summary's close-calls section.
+
+169-handoff-continuity | [RESTORE] head had closed T9 drift 3 ("the misleading comments went with #342's purge"). FALSE: they are /// doc comments, the class #342 preserved, live at crates/types/src/task.rs and crates/domain/src/decide/eval.rs. An open hole (class 3) closed by assertion -> reopened, with the two files named
+docs/reference/testing.md | [RESTORE] "It is red on a systemd node" (present tense, tree anchor dropped) contradicted the same paragraph's 13-of-13 green run -> re-anchored to tree e0b6570, before --expand-environment=no
+440-native-worker-daemon | [RESTORE] head merged two proof strengths into "D3 on both platforms" through the shipped path. macOS D3 is mechanism-only -> two-tier phrasing restored; the unrun runbook named
+490-agent-work-on-a-mac | [RESTORE] Status said "all eight slices landed and ran on the air"; only slice 6 ran -> slice 7's teardown named as landed-but-unexercised
+529-secret-handling | [RESTORE] findings range widened to M1a-M9, swallowing M9 (proposed, and a HOST question) into "established" -> M1a-M5 established, M6 shipped assertion, M7 the host measurement, M9 explicitly outside
+docs/implementation-notes.md | [RESTORE] "none over 690,432 bytes, so the store's ceiling is not the binding one" INVERTED a censored measurement into headroom, and dropped "task 1 missing on nine jobs" -> the censoring restored, the inference deleted, and the provenance (job #492's survey of #478-#489) restored with it, since a measurement kept as evidence has to stay re-runnable (class 4: a measurement still serving as evidence)
+415-knowledge-architecture | [RESTORE] "four reviewers passed one drifting number" misread the body's four EVALUATION CYCLES -> restated as #449's four cycles and two disagreeing reviewers
+docs/reference/lifecycle-model.md | [FIX] its second, narrower spec disagreement was left asserting spec 2.2 says "Escalated" after this same commit changed 2.2 to "Stalled" -> recorded as closed. The Draft->Draft finding above it is untouched
+367-android-emulator | [RESTORE] head shed the unreproducibility note (no ssh, no /dev/kvm, no /nix, no docker socket) that body line 197 points back at -> restored as a named amendment note; class 3, an open "could not be verified"
+215-refactor-plan | [RESTORE] the 2026-07-24 ground-truth paragraph was deleted while the head still cited it and told a reimplementer to read this doc for the sequencing argument -> restored, labelled dated history; ~640 await sites is that argument's premise
+docs/reference/style.md | [FIX] "believed for a year" was invented; the repo is under five months old. The replacement span was invented too -> the dates git can produce: #309 (which carries the rule at line 1051) entered the tree 2026-07-29, job #516's read-only probe measured it 2026-08-09, design #517 recorded the amendment. Eleven days, and the measurement attributed to the job that performed it
+docs/reference/docs.md | [FIX] the header-contract worked example quoted a #321 paragraph this molt had rewritten -> example now quotes #321 as it reads, and the provenance-preamble shape points at #322, whose third non-blank line IS one (#311's sits mid-head, so it could not show what "the usual opening" looks like)
+533-molt | [FIX] "ten docs directly under docs/reference/" -> nine (3 + 9 = the row's own 12); the ef11e80 63% body-lines baseline restored to the table, since D3 makes it the figure a later body-compaction decision is measured against
+
+## Cycle 6 — the promotions, accounted; and 30 repairs to them
+
+The previous cycles' ledger recorded 150+ sheds and exactly ONE relocation line,
+while the molt's core act — 313 new lines in `docs/reference/lifecycle-model.md`
+and 47 in `docs/reference/contracts.md` — went unaccounted. That asymmetry is
+itself the defect: a promotion is a passage weighed against a class and moved,
+so it belongs in this ledger for the same reason a shed does. The `[C*]` block
+below is that accounting, written after the fact. The `[FIX]` block after it
+repairs the promotions themselves: an adversarial audit against `crates/` found
+that several paraphrases had widened, inverted or dropped the qualifier their
+source design carried, which is the one failure mode a promotion has.
+
+### Promotions into the reference tier — what moved, and the class that licensed it
+
+lifecycle-model.md 2 | [C1] #310's anchor rule: three disjoint branches, never a max <- 310 body "The anchor rule, stated precisely"
+lifecycle-model.md 2 | [C1] #310's skip bound: a second in-memory value, not the anchor <- 310 body "The bound needs state, and the anchor cannot supply it"
+lifecycle-model.md 4 | [C3] the job-creation seam: a decision the shell must originate, named as the one place the decider/effects split does not close <- 310 body
+lifecycle-model.md 4 | [C1] placement is job-scoped in a task-scoped system; no per-level override <- 543 D4
+lifecycle-model.md 4 | [C1] the empty-declaration assert sits at the injection site, and which launch paths reach it <- 313 A6
+lifecycle-model.md 4 | [C3] triage and escalation launches bypass that assert silently <- 313 A6; an open hole, immune under class 3
+lifecycle-model.md 4 | [C1] the four context blocks, and the framing rule that keeps review independent <- 169 Parts 1 and 3
+lifecycle-model.md 5 | [C1] invariant 6's "non-terminal", and skip as repeated-failure suppression <- 310 D4/D9
+lifecycle-model.md 5 | [C2] cancel-previous, rejected on its merits <- 310 D4. Purchasable, so it may compact and may not drop
+lifecycle-model.md 5 | [C3] context blocks that are not pure functions of persisted records <- 169 Part 3
+lifecycle-model.md 6 | [C1] the merge-gate hold is core state, and what a crate boundary would cost <- 238
+lifecycle-model.md 6 | [C1] node-local authority: advertise vs grant, and the self-granting-loop argument <- 517 C4
+lifecycle-model.md 6 | [C2] advertising the grant set, rejected <- 543 D6
+lifecycle-model.md 6 | [C2] the exclusive-resource lease, rejected for container-mode device work <- 367
+lifecycle-model.md 7 | [C1] the port has no pull; a run-inside image is not a produced image <- 355 Decision 0
+lifecycle-model.md 7 | [C1] the retryable/hard criterion for a new failure <- 309 5a, 355
+lifecycle-model.md 7 | [C5] detach-before-delete, and why a full run finds it and a targeted one does not <- 309, 322
+lifecycle-model.md 7 | [C1] capacity is observation-derived; the reservation is not a ledger <- 293
+lifecycle-model.md 7 | [C1] wire paths, total in both directions, and the value allow-list <- 309, 322
+lifecycle-model.md 7 | [C5] the macOS bind resolves inside the VM, silently binding nothing <- 372 5 A7
+lifecycle-model.md 7 | [C1] exit-status authority is the task, not the supervisor <- 322
+lifecycle-model.md 7 | [C1] bounds are per-mode; a host job type declares no cpu or memory limit <- 309 7
+lifecycle-model.md 7 | [C3] declared limits never reach an agent launch on any node <- 309; an open hole
+lifecycle-model.md 7 | [C1] a launch call's budget bounds node-side pre-launch work, or it orphans <- 373
+lifecycle-model.md 7 | [C2] why these are ports and not enum variants <- 322
+lifecycle-model.md 7 | [C1] the worker RPC stays off the durable path, so a secret gets no retained copy <- 529
+contracts.md | [C2] the per-run node field, rejected, with the authority argument intact <- 361
+contracts.md | [C4] drain beats a pin — the bound on what a per-run pin could do <- 361
+contracts.md | [C2] node name as placement currency, rejected in favour of capability <- 361
+contracts.md | [C2] threading a resolved mode down from the dispatcher, rejected <- 309
+contracts.md | [C1] a capability match is an advertisement plus a matcher; pricing one prices half <- 543 6
+
+### Repairs to those promotions, after an adversarial re-audit against crates/
+
+lifecycle-model.md 2 | [FIX] the terminal anchor branch dropped its fallback (a record predating the completion field anchors on creation, never the epoch) -> restored; pinned by a_terminal_job_without_a_completion_anchors_on_its_creation
+lifecycle-model.md 2 | [FIX] "the maximum would dominate" named the wrong term -> first-seen dominates the maximum
+lifecycle-model.md 2 | [FIX] "both values safe to lose on restart" carried a justification covering only one -> the never-fired starvation weakness restored (class 3, an open hole the compaction had swallowed)
+lifecycle-model.md 4 | [FIX] "the single place a decision does not reduce to an effect" was FALSE — every decider returns a step value beside its effects, as this same section says three paragraphs earlier -> narrowed to the id a decider cannot mint
+lifecycle-model.md 4 | [FIX] the pinned-level list named a call site as a level and omitted the merge gate and wrap-up -> the real set
+lifecycle-model.md 4 | [FIX] D4's rationale was reduced to the bare principle D4 explicitly REFUSES to rest on -> both "not because" clauses restored, with the revisit conditions
+lifecycle-model.md 4 | [FIX] "no vendor credential variable" asserted a stricter invariant than the tree holds; the assert judges the value, not the name, because a project may set that variable itself -> corrected
+lifecycle-model.md 4 | [FIX] "appended" — the predecessor block is PREPENDED -> corrected
+lifecycle-model.md 4 | [FIX] "two edges deliberately carry nothing" INVERTED #169's two highest-severity gaps into a design property. The ratified-lean edge is work -> wrap-up, not work -> evaluation -> corrected; this is the most damaging item the audit found, because a reimplementer would have built the gap in on purpose
+lifecycle-model.md 4 | [FIX] "every embedded stream is tail-capped" — structured findings are uncapped and are #169's T7 -> corrected (class 3 restored)
+lifecycle-model.md 4 | [FIX] "each block says so in a sentence of its own" — the rework block has no framing sentence; #169 proposes the convention rather than recording it -> three of four
+lifecycle-model.md 5 | [FIX] the suppression was attributed to the invariant rather than to the skip rule it protects -> corrected
+lifecycle-model.md 5 | [FIX] the silent-disable cost dropped #310 D9's "distinguishable only by looking" and both existing mitigations -> restored
+lifecycle-model.md 5 | [FIX] cancel-previous was presented as unbuildable for want of a primitive; #310 D4 rejects it ON ITS MERITS -> restored as a rejection (class 2)
+lifecycle-model.md 5 | [FIX] the rework block was listed as satisfying the restart-safety rule; #169 lists it as a qualified VIOLATION, and re-review was dropped from the compliant set -> corrected
+lifecycle-model.md 5 | [FIX] "once golden traces exist" — they exist, and this doc cites them two bullets earlier; they record effect labels and no prompt -> corrected
+lifecycle-model.md 6 | [FIX] the merge-gate hold was stated as a flat prohibition on forge-ingest writing it; forge-ingest writes it today, safely, inside the single actor. #238 states the hazard as conditional on a crate boundary -> corrected
+lifecycle-model.md 6 | [FIX] "the devices it holds" — no node advertises a device; #543 S4 is Proposed -> corrected, and the sentence no longer contradicts the section's own closing paragraph
+lifecycle-model.md 6 | [FIX] three identity stamps generalised from the docker socket to every grant; device and toolchain grants match the project alone -> corrected
+lifecycle-model.md 6 | [FIX] "none of them is a job-type field" over-extended #517 C4's socket argument onto /dev/kvm, which #367 2.1 answers "yes, eventually" -> scoped to the socket, with #367's CVE counterweight restored (class 2: the phasing argument is not a principle)
+lifecycle-model.md 6 | [FIX] "a misplacement is a refused launch and never a silent grant" — a non-admitted device or socket launch RUNS without it and fails late at the command -> corrected; only tenancy and user refusals refuse outright
+lifecycle-model.md 6 | [FIX] "refused there loudly, and requeued" contradicted this doc's own port section -> a grant refusal is a hard launch error
+lifecycle-model.md 6 | [FIX] "waiting rather than hypothetical" inverted a hypothetical second node into a pending condition -> latent, pending a second node
+lifecycle-model.md 6 | [FIX] the lease argument dropped #367's residual: write access into the shared tree lapses the namespacing premise -> restored (class 3)
+lifecycle-model.md 7 | [FIX] "missing node capabilities must never be spelled as the retryable one" INVERTED the tree: fleet-wide absence queues, only a pin is hard -> corrected; it had contradicted this doc 90 lines later
+lifecycle-model.md 7 | [FIX] "destroy the wedged-fleet diagnostic" foreclosed the alternative #355 leaves open (a distinct queue reason with its own bound) -> degrade, with the alternative named
+lifecycle-model.md 7 | [FIX] "a capability refusal is raised at launch, never at boot" is false of a mode precondition, which IS refused at boot -> scoped to a kind of work
+lifecycle-model.md 7 | [FIX] "the two managed listings fail loud" is true of a node's own scan and false of the fleet aggregation, contradicting this doc three paragraphs above -> scoped
+lifecycle-model.md 7 | [FIX] "an entry the backend cannot classify counts as running" conflated identity with liveness — true of the identity listing, false of the host liveness answer -> both grains stated
+lifecycle-model.md 7 | [FIX] "resolves these prefixes BELOW the port can only ever run a container" was exactly backwards -> above
+lifecycle-model.md 7 | [FIX] value rebasing implied every variable; it is a closed allow-list, and a longer segment such as a repo URL passes untouched -> restored
+lifecycle-model.md 7 | [FIX] "a mid-task replacement, which the platform guarantees does not interrupt in-flight work" inverted #440 D4: a supervisor holding host work REFUSES the swap, and neither half covers a reboot -> corrected
+lifecycle-model.md 7 | [FIX] the liveness ladder asserted a boot generation the tree does not carry and demoted the live set, which is the real second rung -> corrected, with boot generation and the durable verdict marked <!-- intent -->
+lifecycle-model.md 7 | [FIX] "synthesized once, durably" — it is recomputed on every inspect -> corrected
+lifecycle-model.md 7 | [FIX] resource enforcement "not a property of the node" asserted the negation of #490 D7's accepted wart -> the wart restored
+contracts.md | [FIX] "the system's two strongest authorities" — a node operator's own env file is stronger still; #361 says "the two stronger" of its own three -> corrected
+contracts.md | [FIX] the four "cannot"s were scoped by #361 to a hypothetical attacker-set per-run pin -> re-scoped, so the refusal rests on the right argument
+contracts.md | [FIX] the non-forgeability claim dropped "with every absent field failing closed", which is what makes it safe rather than merely true -> restored
+contracts.md | [FIX] "the difference is" asserted exhaustiveness over two of #361's three surviving differences; the third IS the authorization argument -> all three
+contracts.md | [FIX] "capability IS the currency of routine placement" stated a recommendation as a present-tense fact -> "should use"
+contracts.md | [FIX] "never off the job type" read as though resolved_mode has no role; it still decides the field rules -> restored
+contracts.md | [FIX] "moves no wire epoch" priced only the free half; the matcher costs a CONFIG_SCHEMA_EPOCH bump, which is #543's own point -> both halves priced, and the two constants distinguished
+contracts.md | [FIX] "a second grant surface with none of the node-consent property" was backwards — the first grant surface IS an operator assertion, and its safety comes from living on the node -> replaced with #543 D6's two actual reasons
+contracts.md | [FIX] a fourth ### broke the announced 1/2/3 enumeration of "The three contract vocabularies" -> demoted to a bolded lead-in
+169-handoff-continuity | [FIX] T1 asserted unqualified what E1 states of CYCLE 1 only; later cycles add the re-review block and a retry adds the predecessor block, both ratified -> qualified
+169-handoff-continuity | [FIX] drift 3 was relocated to two files silently, contradicting Part 4 and E5, and attributed one verbatim quote to both files when it lives in one; the stated cause (the purge spared them) was not the cause (the io-split carve moved them) -> all three corrected
+169-handoff-continuity | [FIX] the base head's provenance clause was dropped; the whole body's authority rests on it -> restored
+440-native-worker-daemon | [FIX] "the runbook that would do it has not been run" was FALSE and had no base ancestor — the runbook records PASSED on macOS 26.5.1 at c8a8354, and 440's own body retracts the older "nobody has run it" -> a manufactured regression, deleted; the two-tier phrasing kept and sourced
+440-native-worker-daemon | [FIX] the Linux restriction on the setsid() escape had moved into a relative clause and read unconditional on a skim -> "closed on Linux" restored, with 692656e and the cargo command line back in the head
+440-native-worker-daemon | [FIX] the systemd version window dropped why the defect was reachable at all (the proving node runs 260.2, past the v258 cutover) -> restored
+533-molt | [FIX] seven figures were measured at an early commit and never re-measured after three repair commits put lines back; one was wrong when written -> all re-measured at this commit
+373-project-toolchains | [FIX] the head's ONLY authority marker — "claimed and written by the operator, not delegated: the decisions below were worked through directly" — was shed with no ledger line, leaving five Decisions readable as an agent's inference a later job could overturn on its own analysis -> restored verbatim (class 1: a live constraint on who may reverse them)
+309-host-native-execution | [FIX] the provenance anchor "Written against the tree at b801b76 ... read out of the source, not inferred from the docs" was shed; the body below is append-only and still asserts what was true then, so with no sha a reader cannot bound its staleness -> restored (20 of 28 designs still carry one, and docs/reference/docs.md names the preamble as "the usual opening")
+517-docker-access-for-jobs | [FIX] same shed, same class: the ff3258a anchor and its read-out-of-the-source clause -> restored
+362-binary-artifacts | [FIX] same shed: the 8997c4e anchor, including the second sha a539b7d and the fact that the source tree was unchanged between the two revisions -> restored
+docs/reference/testing.md | [FIX] "the hook is ~2s and these are 36.8s" was present tense over a population that has grown 17 -> 28; the 2026-08-02 baseline is kept as the dated baseline it is and 58s at 28 suites (2026-08-12) added beside it, so the 120s headroom question stays answerable (class 4: a measurement still serving as evidence)
+CLAUDE.md | [FIX] the bullet named a 120s bound and 28 suites with no aggregate to reason from, the aggregate having been shed here as a duplicate of testing.md's -> the current total restored in one clause, pointing at testing.md for the series
+lifecycle-model.md 7 | [FIX] "every decider returns a step value beside its effects" is false — escalation::decide returns (Vec<Transition>, Vec<Effect>) with no step -> narrowed to the five lifecycle-phase deciders, naming escalation as the exception
+533-molt | [FIX] the ef11e80 job-reference cell read ~578, which the row's own stated command reproduces on no population the prose admits, and lifecycle-model.md did not exist at that commit -> 454 over 11 docs, with the non-comparability stated

@@ -1,16 +1,41 @@
 # Design #169 — Task-handoff continuity: the matrix
 
-Status: DRAFT — the audit is the deliverable and it stands; the nine tickets in
-[Part 6](#part-6--the-tickets-prioritized) are a prioritized backlog, not a
-slice table. **No ticket carries a job number**, and nothing in the tree or in
-the commit subjects maps a `T`-label to one, so this document is deliberately
-left without a landed-state table: attributing one would be a guess, and a
-guessed slice row is the drift [#415](415-knowledge-architecture.md) exists to
-prevent.
+Status: DRAFT — the audit stands and all nine of its tickets remain open.
+
+The nine tickets in [Part 6](#part-6--the-tickets-prioritized) are a prioritized
+backlog, not a slice table. **No ticket carries a job number**, and nothing in
+the tree or in the commit subjects maps a `T`-label to one, so this document
+carries no landed-state table: a guessed slice row is the drift
+[#415](415-knowledge-architecture.md) exists to prevent.
 
 Produced in an interactive session (2026-07-24, operator + Claude) from a
 code-level audit of the dispatcher at `0c6ad52` — every claim about current
 behavior below was verified against the source, not inferred from older docs.
+
+**Open as of 2026-08-12, re-verified against the tree.** T1–T8 all stand:
+`spawn_eval_agent` composes the **cycle-1** evaluator prompt as evaluator prompt
+file + job brief only (T1), later cycles adding the #155 re-review block and an
+evaluator retry the #168 predecessor block, both of which E4 and E5 ratify; the
+full-rework path still builds its `EvalResult`s with `output: None` (T2);
+`ensure_exec_state` still initializes `eval_context` empty, so the #121 handoff
+and every escalation resolution are still lost across a restart (T3, T4); no
+upstream block reaches a dependent's brief (T5); a claimed agent attempt still
+parks with the bare prompt (T6); structured findings are still uncapped (T7);
+the `work_retries_exhausted` detail still drops the operator's notes (T8). T9's
+sweep stands whole: all three of [Part 4](#part-4--spec-drift-to-fold-in)'s
+drifts are open — 1 and 2 in [`docs/spec.md`](../spec.md), and 3 in the source,
+though no longer in the file Part 4 names. The io-split carve took those
+comments out of `crates/dispatcher/src/eval.rs`; the drift is live in the
+`output` field's own doc comment at `crates/types/src/task.rs`, which still
+calls a command evaluator's tail "threaded into the rework brief and #155's
+re-review", and echoed without the job number at
+`crates/domain/src/decide/eval.rs`. Both are `///` doc comments, so the comment
+purge left them standing. `prior_review_block` still returns `None` for any
+non-agent prior, so a command evaluator's evidence reaches no re-review at all.
+The named symbols all still live in
+`crates/dispatcher/src/exec.rs` and `crates/dispatcher/src/eval.rs`; the
+`dispatcher::context` module [Part 5](#part-5--structural-alignment-north-star--contracts)
+asks for does not exist yet.
 
 ## Problem
 

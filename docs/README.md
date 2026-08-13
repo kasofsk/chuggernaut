@@ -50,8 +50,8 @@ from being the one everyone forgets (design
 | [`docs/reference/runbooks/worker-native-daemon-nixos.md`](reference/runbooks/worker-native-daemon-nixos.md) | Runbook: converting a NixOS worker node from the containerized daemon to the native unit |
 | [`docs/design/000-rationale.md`](design/000-rationale.md) | The original v2 rationale: why the platform is shaped the way it is |
 | [`docs/design/169-handoff-continuity.md`](design/169-handoff-continuity.md) | Audit: what one task hands the next, and where continuity breaks |
-| [`docs/design/210-ts-rewrite-plan.md`](design/210-ts-rewrite-plan.md) | The dormant TypeScript dispatcher rewrite plan, kept for its analysis |
-| [`docs/design/215-refactor-plan.md`](design/215-refactor-plan.md) | The incremental Rust restructuring plan — partly executed, now dormant |
+| [`docs/design/210-ts-rewrite-plan.md`](design/210-ts-rewrite-plan.md) | The dormant TypeScript dispatcher rewrite plan, whose analysis the reimplementation revives |
+| [`docs/design/215-refactor-plan.md`](design/215-refactor-plan.md) | The incremental-in-Rust restructuring plan, superseded; kept for its sequencing argument |
 | [`docs/design/238-forge-ingest-crate-boundary.md`](design/238-forge-ingest-crate-boundary.md) | Why forge-ingest stays inside the dispatcher for now |
 | [`docs/design/293-worker-capacity.md`](design/293-worker-capacity.md) | Worker capacity: one source of truth, changeable from the UI |
 | [`docs/design/308-gha-port.md`](design/308-gha-port.md) | Survey: what porting a real GitHub Actions suite onto Chuggernaut would need |

@@ -1,64 +1,25 @@
 # Design #529 — Secret handling: the declarative model's edges, and the platform token's reach
 
-Status: IMPLEMENTED IN PART — S1 is complete: S1a landed observe-only (job #545)
-and **S1b now enforces** (job #555), so the reserved `global/agents` grant
-carries the provider-credential names and nothing else. S2+M6 landed together
-(job #547): the provider credential reaches an agent container on an inherited
-descriptor rather than in its environment, and the kernel property that window
-rests on is asserted at every launch — though M6's scope read was wrong on every
-launch until job #554 corrected it, which the first canary after the deploy is
-what surfaced. M7 has since measured the host path (job #549) and S2 has not been
-extended to it. **S3 has landed** (job #569): a per-level `secret_files:`
-declaration delivers a project secret as a `0600` file with `{NAME}_FILE` naming
-the path, at `CONFIG_SCHEMA_EPOCH` 7 — the epoch this design said it would cost.
-It is **container mode only** — that path is a wire path, and a host launch
-refuses one outside the variables spec §4.1 fixes — so a host level is refused
-the declaration at release validation, and design
-[#309](309-host-native-execution.md) §8 still owns the host-side question.
-Nothing has adopted the form; adopting it is a separate act. Everything else
-below is proposed.
+Status: IMPLEMENTED IN PART — S1, S2, M6 and S3 have landed; S4, S5 and M9 are proposed.
 
-Written against the tree at `927067b` (2026-08-10). Every claim about current
-behaviour was read out of the source named beside it rather than out of a
-sibling design doc **or out of this job's own brief**; where the two disagree the
-tree wins, and the disagreement is in
+Written against the tree at `927067b`. Every claim about current behaviour is read
+out of the source named beside it rather than out of a sibling design doc; where the
+two disagree the tree wins, and the disagreement is in
 [Corrections](#corrections-verified-against-the-tree). Findings are marked
-`M1a`–`M5` and each says where it was established: most inside **this job's own
-work container** — a Debian 12 Linux container on the production fleet running
-`claude` 2.1.226, `JOB_TYPE=design`, `CHUG_PHASE=Work` — and the rest out of
-this repo's own source. The brief asked for a measurement rather than an assumption
-about the agent CLI's credential sources;
-§[3](#3-decision-1-what-the-measurement-says) is that measurement, and it changes
-the answer.
+`M1a`–`M9`, and each says where it was established. **`M1a`–`M5` are the
+established ones**, all inside a work container, and none of them transfers to a
+host task by argument — that path has no `/proc`. `M6` is a shipped launch-time
+assertion rather than a measurement; `M7` is the one measurement taken against
+the host path; and **`M9` is not established at all** — it is proposed, it is the
+half `M7` leaves open, and it is a **host**-node question, so nothing below
+should be read as answering it.
 
-**M2 — the one row §3 left unverified — was run in job #546 and it holds.** The
-agent CLI authenticates from an inherited file descriptor with
-`CLAUDE_CODE_OAUTH_TOKEN` absent from its environment, and the source is genuinely
-consumed: a second launch on the drained pipe fails, and nothing lands on disk.
-The `apiKeyHelper` fallback §[4](#4-the-options-for-decision-1)(d) named is **not**
-a drop-in — it delivers an API key, and this platform's credential is an OAuth
-token, which it rejects. Both results, their invocations and their limits are in
-the [2026-08-10 correction](#correction--2026-08-10-job-546-m2-measured-the-fd-source-authenticates-and-apikeyhelper-will-not-take-this-credential),
-which is what S2 should be built against.
-
-Two of those rows are new in this revision and both were assumptions before. **M1d**
-settles the premise every slice here rests on — that a credential in the agent
-CLI's memory is out of the task's reach — by measuring it from a shell the CLI
-spawned rather than inheriting the brief's word for it: it holds, and it holds
-because of a **host sysctl this platform does not set**, which is why it now
-ships a slice (M6) instead of a sentence. **M8** replaces "small and knowable"
-with two numbers for the `global/agents` scope. Both are container-mode findings.
-
-**M7 — the host path those two do not reach — was measured on `gumbo-air-0` and
-both verdicts carry over.** A same-uid descendant reads another process's
-environment there as it does under `/proc`, and raw memory stays out of reach:
-`task_for_pid` refused an unsigned reader. That macOS refuses it on the caller's
-code signature rather than on Yama's ancestor rule is macOS's documented gating
-and **not** what this run separated — its control went unreported, so the denial
-it measured is equally consistent with either mechanism. What the measurement
-licenses, what it does not, and the one thing it leaves open (**M9** — whether a
-task can drive an entitled system tool to do what its own code cannot) are in the
-[2026-08-10 measurement](#measured--2026-08-10-job-549-m7-the-host-paths-equivalents--env-readable-task_for_pid-denied-and-why-sample-proves-nothing).
+**Nothing here builds a boundary, and no wording should be read as claiming one.**
+A declaration bounds the task, never the code inside it, and the agent CLI runs as
+the task. S2 buys a *window* rather than a lifetime (D5), on a container launch
+only — a host agent is still env-delivered. S3 moves *reach* and not lifetime:
+every forwarded secret's lifetime is rotation discipline, and no artifact is
+redacted anywhere.
 
 ## Current state
 
@@ -75,7 +36,7 @@ the argument and its dated corrections, never edited
 | The SSH key and certificate are minted per task at the same TTL | `ssh_credential_files`, `exec.rs` | **Landed** |
 | A workload token is minted per container, TTL-capped | [`docs/spec.md`](../spec.md) §8.3, [#313](313-workload-identity-image-builds.md) | **Landed** (epoch 5, proved in job #430) |
 | Declared secrets, project `vars` and `global/agents` carry a TTL | — | **No.** Injected verbatim; lifetime is rotation discipline |
-| `global/agents` is narrowed to what the agent CLI needs | `inject_platform_agent_secrets`, `exec.rs` | **Landed** (S1b, job #555). A name outside the provider-credential set is declined by name and injected nowhere; **in effect from the next deploy**, not from the merge |
+| `global/agents` is narrowed to what the agent CLI needs | `inject_platform_agent_secrets`, `exec.rs` | **Landed** (S1b, job #555). A name outside the provider-credential set is declined by name and injected nowhere; **in effect from the dispatcher deploy that carries it**, not from the merge |
 | A provider-credential name set exists in the tree | `PROVIDER_CREDENTIAL_NAMES`, [`crates/agent/src/lib.rs`](../../crates/agent/src/lib.rs), from `claude::CREDENTIAL_ENV_NAMES` | **Landed** (S1a), and **it is the exclusion** since S1b — `is_provider_credential` decides what the grant carries |
 | The platform's provider token is out of the task's reach | `credential_delivery`, [`crates/agent/src/claude.rs`](../../crates/agent/src/claude.rs) | **Narrowed, not closed** (S2, job #547), and **container launches only** — a host task is still env-delivered, which M7 now makes a choice rather than an unknown. A *window* instead of the process's lifetime; still no boundary, exactly as D5 says |
 | The agent CLI will take that token from a withdrawable source instead | `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, the shipped CLI | **Yes, measured** (M2, job #546) — an inherited fd, read once, leaving no file and no env entry. **In use** since S2 |
@@ -87,7 +48,7 @@ the argument and its dated corrections, never edited
 | Injected files are deleted at teardown | `remove` / `reclaim_credentials`, [`crates/container/src/host.rs`](../../crates/container/src/host.rs); `docs/spec.md` §3.1 | **Landed**, on both backends |
 | Any artifact is redacted, ever | [`crates/store/src/artifacts.rs`](../../crates/store/src/artifacts.rs) | **No.** Zero redaction anywhere in the tree |
 | File delivery has plumbing | `InjectedFile`, [`crates/container/src/lib.rs`](../../crates/container/src/lib.rs) | **Landed** — used by SSH and by #313 |
-| File delivery has a *declaration* | `secret_files:`, [`crates/types/src/job_type.rs`](../../crates/types/src/job_type.rs) | **Landed** (S3, job #569) at epoch 7 — per level, never inherited, container mode only, and adopted by no job type yet |
+| File delivery has a *declaration* | `secret_files:`, [`crates/types/src/job_type.rs`](../../crates/types/src/job_type.rs) | **Landed** (S3, job #569) at `CONFIG_SCHEMA_EPOCH` 7 — per level, never inherited, and adopted by no job type yet. **Container mode only**: `{NAME}_FILE` holds a wire path, which a host launch refuses outside the fixed variables spec §4.1 names, so a host level declaring `secret_files:` is a release-validation error and design [#309](309-host-native-execution.md) §8 still owns the host-side question |
 
 **The declarative core is done and this design does not touch it.** What is left
 is four edges: one blanket grant that is wider than its purpose, one credential
@@ -146,13 +107,11 @@ that no cleanup path reaches.
   neither on the host path today, because M6's assertion reads `/proc`.
 
 - **D4. What credential sources the agent CLI accepts is a measurement, and the
-  measurement is now taken.** §[3](#3-decision-1-what-the-measurement-says)
-  established the current behaviour and found a named fd-delivery source in the
-  shipped bundle whose semantics it could not establish; M2 ran that source and it
-  works, so S2 builds on a measured mechanism rather than a hoped-for one. The
-  half of D4 that still stands is the discipline, not the doubt: the answer is a
-  third party's behaviour at **one version**, so S2 ships an assertion at launch
-  the way M6 does, not a comment.
+  measurement is taken** (§[3](#3-decision-1-what-the-measurement-says), M2), so S2
+  builds on a measured mechanism rather than a hoped-for one. The half of D4 that
+  still stands is the discipline, not the doubt: the answer is a third party's
+  behaviour at **one version**, so S2 ships an assertion at launch the way M6 does,
+  not a comment.
 
 - **D5. Decision 1 as written is satisfiable today only by a boundary this
   design does not build.** "The task must not be able to read the file holding
@@ -204,28 +163,19 @@ available to this platform shortens the lifetime of a forwarded secret, and
 inventing a slice that claimed to would be exactly the defect
 [#322](322-macos-native-runtime.md)'s open item recorded.
 
-**One named consumer for the other axis has since arrived from outside this
-repo, and it is a candidate rather than a row.** §6 sized #313's reach against
-the two secret names `.chug/jobs/` declares and found neither adoptable by that
-mechanism. beacon's fastlane workflows declare two more — both **stored cloud
-service-account keys**, one of them against a Google Cloud Storage bucket, which
-is a workload-identity-federation consumer. That is the first concrete candidate
-for #313's mechanism to arrive from a real workflow rather than from argument;
-it adds no slice and no decision.
-[The record](#candidate--2026-08-10-job-558-a-named-consumer-for-313s-mechanism-arriving-from-beacons-real-workflows).
-
-**That candidate is two halves and only one of them has evidence.** For the Play
-half (`PLAY_STORE_SERVICE_ACCOUNT_KEY`, through fastlane's `supply`), an upstream
-change merged in December 2025 makes the tool route on the credential JSON's
-`type` field and so accept an external-account credential — the shape workload
-identity federation produces — with no new option. For the iOS half
-(`MATCH_SERVICE_ACCOUNT_KEY`, through `match`'s Google Cloud Storage backend),
-nothing is measured and #558's wording stands unchanged. So the Play half has a
-**named upstream mechanism and no measurement here**, the iOS half has neither,
-and §6's result is untouched either way: still no slice, still nothing on the
-lifetime axis, because a mechanism named in someone else's repository is not a
-bound this platform can assert.
-[The record](#refinement--2026-08-10-job-559-558s-candidate-splits-supply-takes-external-account-credentials-matchs-gcs-storage-is-unmeasured).
+**One named consumer for the other axis has arrived from outside this repo, and it
+is a candidate rather than a row.** beacon's fastlane workflows declare two
+**stored cloud service-account keys** — `PLAY_STORE_SERVICE_ACCOUNT_KEY` and
+`MATCH_SERVICE_ACCOUNT_KEY`, the second against a Google Cloud Storage bucket,
+which is a workload-identity-federation consumer. The Play half has a **named
+upstream mechanism and no measurement here**: fastlane's `supply` routes on the
+credential JSON's `type` field and so accepts an external-account credential, with
+no new option. The iOS half, through `match`'s GCS backend, has neither. §6's
+result is untouched either way — no slice, and nothing on the lifetime axis,
+because a mechanism named in someone else's repository is not a bound this
+platform can assert. The records:
+[#558](#candidate--2026-08-10-job-558-a-named-consumer-for-313s-mechanism-arriving-from-beacons-real-workflows),
+[#559](#refinement--2026-08-10-job-559-558s-candidate-splits-supply-takes-external-account-credentials-matchs-gcs-storage-is-unmeasured).
 
 ---
 

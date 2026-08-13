@@ -10,6 +10,10 @@ Don't re-derive these — read them:
 
 - `docs/spec.md` — normative behavior (the data model, state machine, prompts). The source of truth.
 - `docs/design/000-rationale.md` — rationale; `docs/reference/design-lifecycle.md` — the job/release lifecycle in depth.
+- `docs/reference/lifecycle-model.md` — the concrete job/task machine as a reimplementation
+  needs it: states, the event alphabet, the transition table, the Effect vocabulary,
+  the invariants, the authority split and the port boundary. Language-neutral, so it
+  outlives `crates/`; two `### Finding:` sections are open holes, not settled model.
 - `docs/reference/crates.md` — the crate/module map: what each crate owns and why. Read before adding a crate
   or moving responsibility between them.
 - `docs/reference/testing.md` — the test tiers and where a given test belongs (two are built;
@@ -28,8 +32,9 @@ Don't re-derive these — read them:
   catalogue is the index it requires a row in.
 - `docs/concepts.md` — the concept registry: which doc owns each term's definition.
   A routing table, not a glossary — follow the row rather than restating the term.
-- `docs/implementation-notes.md` — per-module rationale, hoisted out of the comments
-  job #342 deleted. Notes, not norms: `docs/spec.md` and the design docs still win.
+- `docs/implementation-notes.md` — per-module rationale, hoisted out of the code
+  comments this tree no longer carries. Notes, not norms: `docs/spec.md` and the
+  design docs still win.
 - Each `crates/*/src/lib.rs` opens with a `//!` doc comment pointing at its spec section.
 
 ## Build & test
@@ -55,13 +60,14 @@ files needing a Docker **backend** still self-skip there. The skip guards are th
 `require_nats!` / `require_nats_config!`
 macros and `test_utils::backend_suite::docker_available()`; there is no `e2e!`
 macro, and no tier-3 suite for one to guard (`docs/reference/testing.md`). **A skip is free and
-must stay free**: since #407 an unreachable Docker daemon is a permanent,
-process-wide verdict answered instantly, not a 5s retry backoff per call — that
-was 55% of the suite's wall time. Measure on a **fresh** JetStream store dir
+must stay free**: an unreachable Docker daemon is a permanent, process-wide
+verdict answered instantly, not a 5s retry backoff per call — the backoff was
+55% of the suite's wall time (#407). Measure on a **fresh** JetStream store dir
 with `RUST_MIN_STACK=16777216`, or the numbers lie (`docs/reference/testing.md`). And a tier-2
 binary that costs ~30s while still reporting `ok` is almost always a wait rescued
 by the core's 30s scan tick, not a slow broker — `test_utils::wait::DEFAULT_TIMEOUT`
-is **20s** so that now fails loudly instead of hiding (`docs/reference/testing.md`).
+is **20s**, under that tick, so the wait fails loudly instead of hiding
+(`docs/reference/testing.md`).
 
 ## CI — the evaluation gates ARE the CI
 
@@ -76,11 +82,11 @@ the absence of a workflow file.
   `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D
   warnings`, and `cargo test --workspace --no-fail-fast`. Tier-2 executes only when
   the gate can hand the harness a broker — a communal Docker NATS, or the image's
-  baked `nats-server`, which since #382 is the default on a Docker-less host
+  baked `nats-server`, the default on a Docker-less host
   (`CHUG_CI_LOCAL_NATS=0` opts out) — and says which of the
-  two happened, naming the private-server files as dark on the URL-only path;
-  since #408 they serve themselves from the same baked binary, so that
-  subtraction now **understates** what ran. Otherwise it announces the skip. It is diff-aware, with two independent
+  two happened. It names the private-server files as dark on the URL-only path,
+  which **understates** what ran: those files serve themselves from the same
+  baked binary. Otherwise it announces the skip. It is diff-aware, with two independent
   stages: a diff touching `web/` runs `npm ci && npm run build` (tsc + vite), a
   diff touching Rust paths runs the cargo gate, and a doc/config-only diff runs
   neither and gates in seconds.
@@ -94,7 +100,7 @@ the absence of a workflow file.
   the comment lint, `.chug/tasks/check-shell-quoting.sh`, the shell-quoting gate,
   `.chug/tasks/check-doc-facts.sh`, the doc-fact gate,
   `.chug/tasks/doc-staleness.sh`, the staleness ledger, and
-  since #385 **the repo's 28 `*.test.sh` shell suites**.
+  **the repo's 28 `*.test.sh` shell suites**.
   Any clone fails the gate.
 - **A quote inside the word of a `${VAR:-word}` expansion is a gate, because
   CI's shell and production's disagree about it.** bash parses quotes inside
@@ -105,8 +111,8 @@ the absence of a workflow file.
   exercising the exact failing input stays green; `deploy/prod/build-worker.sh`
   is run from `deploy/prod/update.sh` on the Mini and from operator laptops,
   both macOS, where `/bin/sh` **is** bash. `.chug/tasks/check-shell-quoting.sh`
-  (job #501) is a lexical scan over tracked `*.sh` plus `.githooks/pre-commit`,
-  ~0.13s whole-tree (measured 2026-08-08) and unconditional. **It gates the
+  is a lexical scan over tracked `*.sh` plus `.githooks/pre-commit`,
+  ~0.13s whole-tree and unconditional. **It gates the
   class, not one spelling of it**: every operator (`-` `=` `+` `?`, with or
   without the leading colon) and every parameter form (a name, `${1:-…}`,
   `${@:-…}`), in the two contexts where the divergence is silent — inside double
@@ -122,67 +128,60 @@ the absence of a workflow file.
   error.** `.chug/tasks/check-doc-facts.sh` resolves every backticked path claim
   in every tracked `*.md` against `git ls-files`, and every backticked constant
   asserted with a value against the `pub const` in the tree — checks 1 and 2 of
-  design [#415](docs/design/415-knowledge-architecture.md) D6, which lived in
-  `doc-lint.sh` as warnings until S1b moved them here (~0.8s whole-tree).
+  design [#415](docs/design/415-knowledge-architecture.md) D6, ~0.8s whole-tree.
   Whole-tree and every job because the claims are made by every job type: a
-  `code` job orphaned ten tag-file references (#416) that a `docs`-scoped
+  `code` job orphaned ten tag-file references that a `docs`-scoped
   gate never saw. A claim that is correctly unresolvable is marked on its line —
   `<!-- intent -->`, `<!-- runtime -->`, `<!-- absent -->` (docs/reference/style.md's doc-claim
   rule). An unparseable token is skipped silently, and a check that cannot run
   exits **2** as a `LINTER ERROR`, never as a clean tree. `doc-lint.sh` keeps
   markdown well-formedness, relative links and the design-filename shape.
 - **A doc whose subject moved after it did is *suspect*, and suspect is not
-  wrong.** `.chug/tasks/doc-staleness.sh` (#415 D7, job #446) is the git-derived
+  wrong.** `.chug/tasks/doc-staleness.sh` (#415 D7) is the git-derived
   ledger: for each doc, the tree **files** it names, and whether any of them has
   a commit newer than the doc. Nothing is declared and nothing is maintained —
   no `last-verified:` front matter, no dates in prose. It reads check 1's path
   set through `check-doc-facts.sh --emit-paths` rather than answering "what paths
-  does this doc name" a second time, and it is **advisory**: the whole-tree
-  counts print on every job, the reading list itself is `.chug/tasks/doc-staleness.sh`,
-  and the pre-commit hook only reports. The one blocking case is `--gate` on a doc
-  **this diff edits** that is still suspect — which needs the branch to have
-  edited the doc and *then* changed a **non-doc** file it names. It blocks
-  nowhere else on
-  purpose: failing a build for history nobody in the commit caused is how a
-  ledger gets disabled, and at the commit no edit could clear it anyway. Since
-  #471 that block is cleared by an **assertion of attention** rather than an
-  ordering: a `Doc-reread: <path>` line clears exactly the doc it names, read
-  out of `--gate --since <base>`, which `.chug/tasks/ci.sh` passes. Re-touching
-  the doc still satisfies the timestamp, but the gate's printed remedy names the
-  assertion, because committing a doc unchanged satisfies the ordering without
-  satisfying the purpose. It may be written in **two** places and the gate reads
-  both: as a trailer in a commit message on the branch, or — since #482 — as a
-  line the branch's diff **adds** to `.chug/doc-reread`. Only the second
-  survives a rebase, and every merge-conflict rework rebases a job branch, so a
-  squashed or re-authored commit silently destroyed a true assertion and the doc
-  re-blocked; a fresh `git clone --single-branch` is all any container has, so
-  the lost commit cannot be recovered. The file is read from the diff and never
-  from its contents, which is what keeps a merged line from becoming a standing
-  waiver. Only
-  file claims are judged — a directory is newer than every doc the moment
-  anything under it changes, so it is a constant, not a signal. **A `*.md` mover
-  never blocks** (job #454): only a doc makes claims, so only a doc can sit on
-  both sides, and two docs naming each other is a cycle whose only fixed point
-  is a squash — which is exactly what jobs #449 and #453 were forced into. With
-  `.md` off the blocking side the relation is doc → non-doc and acyclic, so
-  re-touching a flagged doc always clears it and can flip nothing else. The
-  cross-reference stays on the advisory reading list, labelled.
+  does this doc name" a second time, and it is **advisory**: the whole-tree counts
+  print on every job, the reading list itself is `.chug/tasks/doc-staleness.sh`, and the
+  pre-commit hook only reports. The one blocking case is `--gate` on a doc **this
+  diff edits** that is still suspect — which needs the branch to have edited the
+  doc and *then* changed a **non-doc** file it names. It blocks nowhere else on
+  purpose: failing a build for history nobody in the commit caused is how a ledger
+  gets disabled, and at the commit no edit could clear it anyway. That block is
+  cleared by an **assertion of attention** rather than an ordering: a `Doc-reread:
+  <path>` line clears exactly the doc it names, read out of `--gate --since
+  <base>`, which `.chug/tasks/ci.sh` passes. Re-touching the doc still satisfies
+  the timestamp, but the gate's printed remedy names the assertion, because
+  committing a doc unchanged satisfies the ordering without satisfying the
+  purpose. It may be written in **two** places and the gate reads both: a trailer
+  in a commit message on the branch, or a line the branch's diff **adds** to
+  `.chug/doc-reread`. Only the second survives a rebase, and every merge-conflict
+  rework rebases a job branch, so a squashed or re-authored commit destroys a
+  trailer assertion silently — a fresh `git clone --single-branch` is all any
+  container has, so the lost commit cannot be recovered. The file is read from the
+  diff and never from its contents, which is what keeps a merged line from
+  becoming a standing waiver. Only file claims are judged — a directory is newer
+  than every doc the moment anything under it changes, so it is a constant, not a
+  signal. **A `*.md` mover never blocks**: only a doc makes claims, so only a doc
+  can sit on both sides, and two docs naming each other is a cycle whose only
+  fixed point is a squash. With `.md` off the blocking side the relation is doc →
+  non-doc and acyclic, so re-touching a flagged doc always clears it and can flip
+  nothing else. The cross-reference stays on the advisory reading list, labelled.
 - **A doc nothing links to is unreachable however true it is**, and the same
-  ledger reports that too (#415 D15, job #468) — advisory, ahead of the
-  staleness half, in the two whole-tree modes only. Per tracked
-  `docs/**/*.md`, the other tracked `*.md` naming it, by a backticked path claim
-  (`check-doc-facts.sh --emit-paths`) or a relative link
-  (`doc-lint.sh --emit-links`, added for this); zero is the finding and anything
-  else is silent. **The catalogue does not count** — check 5 gates
+  ledger reports that too (#415 D15) — advisory, ahead of the staleness half, in
+  the two whole-tree modes only. Per tracked `docs/**/*.md`, the other tracked
+  `*.md` naming it, by a backticked path claim (`check-doc-facts.sh --emit-paths`)
+  or a relative link (`doc-lint.sh --emit-links`); zero is the finding and
+  anything else is silent. **The catalogue does not count** — check 5 gates
   `docs/README.md` to hold a row for every doc, so a row is evidence of nothing
-  and counting it would make the answer constant. Only `docs/` is judged: a
-  prompt or template named by path from a YAML is reached by machinery, not by
-  citation. Measured whole-tree at that job: **0 of 41**, against 7 false
-  positives if links are not counted and 11 if the population is every tracked
-  `*.md` — 7 of that 11 once the correction naming them landed, which is the
-  same argument again.
-- **A slice table cannot claim a job that never merged.** Check 3 (#415 S5a,
-  job #444) resolves `**Landed** (job #N)` in a `docs/design/*.md` table row
+  and counting it would make the answer constant. Only `docs/` is judged: a prompt
+  or template named by path from a YAML is reached by machinery, not by citation.
+  Both narrowings are load-bearing: measured whole-tree the finding is **0**,
+  against 7 false positives if links are not counted and 11 if the population is
+  every tracked `*.md`.
+- **A slice table cannot claim a job that never merged.** Check 3 (#415 S5a)
+  resolves `**Landed** (job #N)` in a `docs/design/*.md` table row
   against a `job/N: {type}` squash-merge commit, and refuses a head saying
   `Status: IMPLEMENTED` over a row still `Proposed`. It reads git, never the
   platform API, so a revoked job and one that never existed are the same
@@ -192,7 +191,7 @@ the absence of a workflow file.
   doc with no slice table, a row it cannot parse, markdown outside
   `docs/design/`, and the whole check when the history holds no `job/N:` commit.
 - **A concept is defined once, and `docs/concepts.md` says where.** Check 4
-  (#415 D3/D4, job #449) fails a job that writes a **registered** term in
+  (#415 D3/D4) fails a job that writes a **registered** term in
   definitional shape — `**Term.**` opening a list item, or `**Term** is|are|
   means|refers to` opening a sentence — anywhere but the doc that registry names
   as its owner. **A mention is free**, as often as an argument needs it; a term
@@ -212,16 +211,18 @@ the absence of a workflow file.
   only when that variable is set — which no task container sets — and otherwise
   compares against the checkout's own epoch, which catches a config declaring an
   epoch newer than the code beside it and nothing about any deployed
-  dispatcher. A green CI skew gate is not evidence a dispatcher was consulted;
-  #421 is the job that fixed reading it that way.
+  dispatcher. **A green CI skew gate is not evidence a dispatcher was
+  consulted.**
 - **The shell suites are the tests of the gates themselves, and CI runs them all.**
   Discovery is `git ls-files '*.test.sh'` — add a suite and it is picked up, with
   no list to update and nothing to register; a glob matching nothing fails rather
   than passing quietly. Bounded at 60s per suite and 120s total
   (`CHUG_CI_SUITE_TIMEOUT_SECS` / `CHUG_CI_SUITES_BUDGET_SECS`), the total checked
-  *between* suites so it stops at the bound and names what it never ran; measured
-  36.8s for the 17 that existed on 2026-08-02, 27.1s of that
-  `deploy/prod/update-refresh.test.sh`, plus ~9s for `android-proof.test.sh`. The
+  *between* suites so it stops at the bound and names what it never ran — the
+  budget is not generous: 58s for the 28 suites of 2026-08-12 against the 120s
+  bound, of which `deploy/prod/update-refresh.test.sh` alone is ~27s (stub
+  polling sleeps) and `.chug/tasks/android-proof.test.sh` ~9s
+  (`docs/reference/testing.md` keeps the series). The
   per-suite cap needs a working `timeout`, probed before the stage announces it —
   a host without one fails the stage rather than running it uncapped and quiet.
   Each suite is handed
@@ -232,12 +233,12 @@ the absence of a workflow file.
 - **Comments are banned; docs are not.** `.chug/tasks/check-comments.sh` rejects
   every non-doc comment in any Rust or TypeScript source and caps doc comments at
   two sentences (module headers exempt) — docs/reference/style.md Tier 1. The tree holds **zero**
-  non-doc comments since job #342, so rule 1 is enforced over every tracked source
+  non-doc comments, so rule 1 is enforced over every tracked source
   rather than only the lines a diff adds; only the two-sentence cap is still a
   ratchet. The knowledge a comment would have carried goes in a doc and the
   rationale in the commit message; `.chug/tasks/docs-update.md` is the work
   task that keeps the docs in step, and `.chug/tasks/review-docs-updated.md` is
-  its evaluator — blocking on every `code` and `web` job since #415 S7, over
+  its evaluator — blocking on every `code` and `web` job, over
   three classes only: cross-doc state claims, behavioural claims about symbols
   the diff touched, and whether a diff implementing a design slice updated that
   design doc's head. Its scanner runs under `LC_ALL=C`, so the
@@ -246,7 +247,7 @@ the absence of a workflow file.
   finish exits **2** as a `LINTER ERROR`, never as a comment violation.
 - **One job type removes *true* sentences, and it has its own gates because no
   other gate can judge it.** A `molt` job (design
-  [#533](docs/design/533-molt.md), machinery landed by #548) sheds the corpus at a
+  [#533](docs/design/533-molt.md)) sheds the corpus at a
   milestone: heads compacted, fully-implemented designs **deleted outright**,
   every referrer repointed or stubbed. The five doc gates above all catch a doc
   saying something *wrong*; shedding produces docs that say something *less*, so
@@ -268,7 +269,9 @@ the absence of a workflow file.
   that reader, close calls first. It is the only type that may delete a
   design doc, and only one whose `Status:` leads with `IMPLEMENTED` and is not
   `IMPLEMENTED IN PART` — which is why the licence is a *deletion* and
-  append-only needs no exception at all. **No molt has run yet.**
+  append-only needs no exception at all. **The first molt shed the reference tier
+  and the 28 design heads (#533 S4) and deleted nothing** — the deletions are S5,
+  so every design doc named above is still in the tree.
   `.chug/tasks/molt-debt.sh` (#533 S3) answers the other half — *is it time* — and
   is wired to **nothing**: no job runs it, because "the corpus has re-grown" is a
   judgement about a milestone, not a defect in any commit. It ranks docs by growth
@@ -284,9 +287,8 @@ the absence of a workflow file.
   formats staged Rust/web files with `rustfmt`/`prettier` and re-stages them,
   then runs the comment lint (`--staged` mode), the registry check, the
   duplication check, the shell-quoting check (staged shell files only), the
-  doc-fact check (`--staged`, +0.16s) and the staleness
-  ledger (`--staged`, advisory) over the staged
-  diff — ~2s, so an agent learns about
+  doc-fact check (`--staged`, +0.16s) and the staleness ledger (`--staged`,
+  advisory) over the staged diff — ~2s, so an agent learns about
   a stray `//` before it exits instead of a rework cycle later. `prettier` runs
   from `web/` so `web/.prettierignore` applies: the Rust-emitted
   `web/src/api/wire-samples.json`, whose exact bytes a cargo test asserts, is
@@ -294,9 +296,8 @@ the absence of a workflow file.
   (so it never blocks a commit CI would accept); `doc-lint` is advisory, and a
   gate that cannot run — missing tooling, an unreachable registry, a `LINTER
   ERROR` — degrades to a loud skip. `git commit --no-verify` bypasses it —
-  legitimate when the alternative
-  is leaving work uncommitted. Work containers get it from
-  `container::bootstrap_cmd`; **a local checkout needs `git config
+  legitimate when the alternative is leaving work uncommitted. Work containers
+  get it from `container::bootstrap_cmd`; **a local checkout needs `git config
   core.hooksPath .githooks` once.** Its test is `.githooks/pre-commit.test.sh`.
 - Per-type **stage-0 agent reviewers** run first (`.chug/tasks/review-*.md`), so the
   slow gate is spent only on changes the reviewer accepts; `docs`/`design`/`molt`
@@ -333,8 +334,8 @@ the absence of a workflow file.
 - **`infra/` holds terraform roots, and they are versioned.** Config travels with the
   project repo, so `infra/gcp-proof/` (chuggernaut's own GCP project and workload-identity
   pool) is tracked; `.gitignore` excludes only the secret and derived half —
-  `terraform.tfvars`, `.tokens/`, `.terraform/`, state, and the fetched `jwks.json`. It
-  used to exclude **`infra/` entirely**, which silently swallowed every `git add` of a real
+  `terraform.tfvars`, `.tokens/`, `.terraform/`, state, and the fetched `jwks.json`. An
+  ignore rule excluding **`infra/` entirely** silently swallows every `git add` of a real
   root; if a `git add infra/...` appears to do nothing, that is the shape of the bug.
   **The operator applies. No job and no gate ever runs `terraform apply`** —
   `infra/README.md` is the runbook, including the trap that an invalid uploaded JWK set

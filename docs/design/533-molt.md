@@ -1,10 +1,15 @@
 # Design #533 — The molt: shedding the doc corpus at a milestone
 
-Status: IMPLEMENTED IN PART — the machinery is built and no molt has run yet.
-S1–S3 are landed; S4–S6 are the first molt itself, and the slice table says where each stands.
+Status: IMPLEMENTED IN PART — S1 to S4 have landed; the deletions and #415's disposition remain.
 
-Written against the tree at `ef11e80` (2026-08-09). Every number here was read out
-of that commit and the command is given so a reader can re-run it rather than
+**The first molt has run.** S4 shed the reference tier and all 28 design heads,
+and **deleted nothing** — its deletion set was empty by decision, so the licensed
+deletion this design exists to authorise has still never been exercised. S5 and
+S6 are what remain, and both are deletions.
+
+Written against the tree at `ef11e80` (2026-08-09), with the figures re-measured
+at S4. Every number here was read out of the tree and the command is given so a
+reader can re-run it rather than
 trust it. One prerequisite is already live and is not a slice of this design: the
 heading-anchor invariant, check 6 of `.chug/tasks/check-doc-facts.sh`, landed in
 jobs #531 and #532 before this document was argued. A molt rewrites headings and
@@ -48,22 +53,47 @@ verification and its own job type rather than being a large `docs` job.
 
 ### What the corpus looks like now
 
-Measured at `ef11e80`:
+Two measurements: the tree that argued this design, and the tree S4 left.
 
-| Figure | Value | Command |
-| --- | --- | --- |
-| Design corpus | 28,327 lines, 24 docs | `git ls-files 'docs/design/*.md' \| xargs wc -l` |
-| Lines below a doc's first `## Correction`/`Finding`/`Amendment` | **17,949 — 63%** | per-doc, first such heading to EOF |
-| Docs whose `Status:` is completely `IMPLEMENTED` | **7 docs, 11,508 lines — 40%** | `grep -m1 '^Status:'` per doc |
-| Job-number references in *reference* docs | ~578 | `grep -oE '(#\|job )[0-9]{3}'` over the reference tier |
-| Anchored links, and dangling ones | 1,307 and **0** | check 6, live since job #532 |
+| Figure | At `ef11e80` | Before S4 | After S4 |
+| --- | --- | --- | --- |
+| Design corpus | 28,327 lines, 24 docs | 33,875 lines, 28 docs | **33,354 lines, 28 docs** |
+| Lines below a doc's first `## Correction`/`Finding`/`Amendment` | 17,949 — 63% | — | — (S4 touched no body) |
+| Reference tier, 12 docs | — | 7,347 lines | **7,856 lines** |
+| Job-number references in those 12 | 454, over 11 docs | 496 | **426** |
+| Docs whose `Status:` is completely `IMPLEMENTED` | 7 | 7 | **7 — S4 deleted none** |
+| Dangling anchored links | 0 of 1,307 | 0 | **0** |
 
-`440-native-worker-daemon.md` is the shape of the problem: 3,451 lines and 22
-dated appendages, 19 of them `## Correction`, of which five (jobs #455–#459) are
-one debugging chain whose durable
-residue is a single sentence. Its head, whose stated purpose in
-`docs/reference/docs.md` is to spare a reader "reconstructing the present from an
-original plus N corrections", opens with three paragraphs doing exactly that.
+The 12 are `CLAUDE.md`, `docs/spec.md`, `docs/implementation-notes.md` and the
+**nine** docs directly under `docs/reference/`; the runbooks are excluded, and a
+count that includes them is not comparable with this row.
+`docs/reference/lifecycle-model.md` did not exist at `ef11e80`, so that column
+is **11** docs and is a baseline rather than a like-for-like term — and it reads
+454, not the `~578` this design's own head carried, which the row's stated
+command does not reproduce on any population the prose admits. Commands, so a reader
+re-runs rather than trusts: `git ls-files 'docs/design/*.md' \| xargs wc -l`;
+`grep -oE '(#\|job )[0-9]{3}'` over those 12; `grep -m1 '^Status:'` per doc;
+check 6 of `.chug/tasks/check-doc-facts.sh` for the anchors. The 63% row is the
+`ef11e80` baseline [D3](#d3-delete-the-doc-do-not-compact-the-body) says a later
+measurement decides body compaction against; S4 touched no body, so it
+has not moved and is carried forward rather than re-measured.
+
+Two things that table says plainly. **The design corpus barely moved, and that is
+the expected shape of S4** — it touched only heads, which are a small fraction of
+a 33,000-line body of append-only argument. And **the reference tier grew while
+losing 14% of its job-number references**, because shedding chronology and
+promoting buried constraints are the same slice: `docs/reference/lifecycle-model.md`
+alone went from 649 lines to 1,042. A molt is not measured in lines removed, which
+is why [D5](#d5-when-a-design-doc-may-be-deleted) gates on eligibility and
+nothing gates on a delta.
+
+`440-native-worker-daemon.md` was the shape of the problem: 3,451 lines at
+`ef11e80` and 22 dated appendages, 19 of them `## Correction`, of which five
+(jobs #455–#459) are one debugging chain whose durable residue is a single
+sentence. Its head, whose stated purpose in `docs/reference/docs.md` is to spare
+a reader "reconstructing the present from an original plus N corrections", opened
+with three paragraphs doing exactly that. S4 cut that head from 221 lines to 176
+and kept the chain's one sentence.
 
 ### The deletable set
 
@@ -77,15 +107,18 @@ any doc in this table. Counted that way the figures below are ±1; a full-path
 `git grep` reaches 18 for `321-job-groups.md` and is counting mentions rather
 than citations.
 
-| Doc | Lines | Surviving referrers | Of which non-doc |
+Line counts are re-measured after S4; the referrer counts are `ef11e80`'s and S5
+must recount them, because S4 rewrote 28 heads and a head is where citations live.
+
+| Doc | Lines (after S4) | Surviving referrers | Of which non-doc |
 | --- | --- | --- | --- |
-| `docs/design/440-native-worker-daemon.md` | 3,451 | 13 | 3 |
-| `docs/design/415-knowledge-architecture.md` | 2,853 | **21** | 3 |
-| `docs/design/490-agent-work-on-a-mac.md` | 1,755 | 11 | 4 |
-| `docs/design/311-job-inputs.md` | 993 | 12 | **6** |
+| `docs/design/440-native-worker-daemon.md` | 3,519 | 13 | 3 |
+| `docs/design/415-knowledge-architecture.md` | 2,769 | **21** | 3 |
+| `docs/design/490-agent-work-on-a-mac.md` | 1,640 | 11 | 4 |
+| `docs/design/311-job-inputs.md` | 990 | 12 | **6** |
 | `docs/design/310-scheduled-jobs.md` | 841 | 5 | 0 |
-| `docs/design/293-worker-capacity.md` | 838 | 7 | 0 |
-| `docs/design/321-job-groups.md` | 777 | 10 | **7** |
+| `docs/design/293-worker-capacity.md` | 822 | 7 | 0 |
+| `docs/design/321-job-groups.md` | 768 | 10 | **7** |
 
 **#415 is excluded from the first molt**, and that exclusion is a decision rather
 than a deferral — see [what 415 costs](#what-415-costs-and-why-it-is-not-in-the-first-molt).
@@ -98,12 +131,18 @@ than a deferral — see [what 415 costs](#what-415-costs-and-why-it-is-not-in-th
 | **S1b** | The **deploy** carrying `TOOLS_SCHEMA_EPOCH` to the running dispatcher, because a config declaring the new epoch cannot merge until a dispatcher carrying it runs (spec §14.3) | **Landed** — the dispatcher runs `fa1c414`, reporting `schema_epoch: 6` |
 | **S2** | The machinery: `.chug/jobs/molt.yaml`, its work prompt and evaluators, and `.chug/tasks/check-molt.sh` with a `.test.sh` sibling. A **human** approves at stage 3 — see [the correction](#correction-2026-08-10--the-molt-ends-in-a-human-not-in-an-adversary-job-562) | **Landed** (job #548) |
 | **S3** | `.chug/tasks/molt-debt.sh` — the git-derived reader that says how much shell has re-grown since the last molt. D7's stated requirement for it was wrong; [the 2026-08-10 correction](#correction-2026-08-10--s3s-rename-detection-requirement-was-misdiagnosed-job-544) is what it was built to | **Landed** (job #573) |
-| **S4** | The first molt's cheap half: the reference tier and `CLAUDE.md`, where narrating a change is *already* out of policy, and the 24 design **heads**, which are already mutable | Proposed |
+| **S4** | The first molt's cheap half: the reference tier and `CLAUDE.md`, where narrating a change is *already* out of policy, and the design **heads**, which are already mutable. Landed with an **empty deletion set** — 28 heads compacted, the reference tier stripped of chronology, and every promotion carried into a reference doc | **Landed** (job #576) |
 | **S5** | The deletions — six of the seven docs above, with every surviving referrer repointed or stubbed | Proposed |
 | **S6** | #415's own disposition, decided on its own evidence rather than by the rule that covers the other six | Proposed |
 
-S1 through S3 are landed, so `Status:` is `IMPLEMENTED IN PART`: **the molt can
-now be run, and has not been.** S4–S6 are the molt itself, and S4 is the first one.
+S1 through S4 are landed, so `Status:` is `IMPLEMENTED IN PART`: **the molt has
+been run once, against heads and the reference tier only.** S5 and S6 remain, and
+both are deletions — which means the four-part eligibility test in
+[D5](#d5-when-a-design-doc-may-be-deleted), the referrer repointing, and the stub
+rule are all still **unexercised by any real molt**. S4 was deliberately sized to
+leave them so: deleting a design and repointing its inbound referrers is the
+largest and most error-prone half of a molt, and stacking it on a slice that
+already touches every doc in the tree would have made the result unreviewable.
 
 S3's **column set was S3's own choice** — D7 fixed the watermark, the advisory
 stance and the absence of a threshold, and nothing else. The reader emits net

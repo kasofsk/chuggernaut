@@ -1,31 +1,18 @@
 # Design #517 — Docker access for jobs, accepted (amending #309 §10 and #313 Decision 0)
 
-Status: IMPLEMENTED IN PART — S1–S5a landed and S5b is declared on nuc and exercised (job #542); D3 amended by [#543](543-placement-granularity.md) D5 and narrowed in the tree (job #551); S6 deferred.
-
-Slice by slice: S1 (job #518), S2 (job #521), S3 (job #522), S4 (job #519), S5a
-(job #523) and the job type S5b names (job #538), then **S5b declared on
-`gumbo-nuc-0` and exercised** (job #542). The mechanism is no longer theoretical:
-one `(project, job type)` holds the socket, and the first run measured that an
-**evaluator** holds it too — a granularity question decided in
-[#543](543-placement-granularity.md) D5 and **now narrowed in the tree**: since
-job #551 the match also requires `CHUG_PHASE=Work`, so an allow-listed pair's
-evaluators receive nothing. The measurement is the 2026-08-10 note at the foot
-of this document and the change is the S3 note after it.
+Status: IMPLEMENTED IN PART — S1–S5a landed, the operator's S5b grant is live on one node, and S6 is deferred.
 
 Written against the tree at `ff3258a`. Every claim about current behavior below
 was read out of the source and out of [`docs/spec.md`](../spec.md), not inferred
-from the sibling designs; where a sibling design and the tree disagree, the tree
-wins and the disagreement is recorded in
-[Corrections](#corrections-verified-against-the-tree). The measurement that
-prompted the decision is job #516's read-only probe on `gumbo-air-0`, quoted
-in full below and not re-run here.
+from the sibling designs.
 
-This document does three things: it **records a decision the operator has
-taken**, in the shape [#313](313-workload-identity-image-builds.md)'s D1–D4 were
-recorded in job #409; it **amends two rules that decision contradicts**, by
-appending to the docs that hold them rather than rewording them; and it
-**decides the one question the measurement left open** — whether container jobs
-get the socket too.
+This document records a decision the operator has taken, **amends the two rules
+that decision contradicts** by appending to the docs that hold them rather than
+rewording them, and decides the one question the measurement left open — whether
+container jobs get the socket too. The measurement is job #516's read-only probe
+on `gumbo-air-0`, quoted in full below; where a sibling design and the tree
+disagree the tree wins, and the disagreement is recorded in
+[Corrections](#corrections-verified-against-the-tree).
 
 ## Current state
 
@@ -33,67 +20,57 @@ get the socket too.
 current truth whenever anything below it changes. Everything after this section
 is append-only.*
 
-**Four slices are built, one node grants, and the grant is work-level only. One
-thing was already live.** As of **2026-08-10**, S1 has landed: `JOB_` is a
-reserved secret/var prefix alongside
-`CHUG_` (`docs/spec.md` §4.1, §5.3), so the `JOB_PROJECT` every node-side
-allow-list matches on can no longer be moved by a job type's `vars:` — which
-also closes [correction 3](#corrections-verified-against-the-tree) against the
-**shipped** KVM grant. S2 has landed under that seal: every launch now carries
-`JOB_TYPE`, so the `(project, job type)` key S3's allow-list needs is observable
-at the node, and [correction 2](#corrections-verified-against-the-tree) is
-historical. S4 has landed beside them, advertising the access. **S3 has landed
-on top of all three**: `container::docker::DockerGrant` binds the node's socket
-into the **work-level** launches a node's own `WORKER_DOCKER_GRANTS` names —
-matched on both stamps and, since job #551, on `CHUG_PHASE=Work` ([the S3
-note](#what-543-s3-narrowed-2026-08-10-job-551)) — failing closed everywhere
-else. One node grants today: `gumbo-nuc-0` declares the socket and
-`kasofsk/chuggernaut:docker-proof`, exercised by job #542 (S5b, [its
+**One node grants, and the grant is work level only.**
+`container::docker::DockerGrant`
+([`crates/container/src/docker.rs`](../../crates/container/src/docker.rs)) binds
+a node's own socket into the launches that node's `WORKER_DOCKER_GRANTS` names,
+matching `JOB_PROJECT`, `JOB_TYPE` and `CHUG_PHASE=Work` and failing closed
+everywhere else — so an allow-listed pair's work and wrap-up commands hold the
+socket and **none of its evaluators do**, including the `ci` one
+[`.chug/jobs/_defaults.yaml`](../../.chug/jobs/_defaults.yaml) appends ([the S3
+note](#what-543-s3-narrowed-2026-08-10-job-551)). `gumbo-nuc-0` declares the
+socket and `kasofsk/chuggernaut:docker-proof` ([the S5b
 note](#note--2026-08-10-s5b-declared-and-the-first-grant-exercised-job-542)).
 Every launch on the live fleet that pair does not name is byte-identical to what
-it was.
+it was, and a node declaring neither knob produces the run spec it always did.
 
-Agent host tasks on `gumbo-air-0` reach a working docker daemon, and every
+**Making a grant is two acts by two owners, and only one of them is a merge.**
+The `placement.node` pin is repo config; the allow-list entry is the node's own
+environment file, which nothing in this repo writes and nothing scheduled
+re-applies — so a grant lives on a node until someone rebuilds it by hand and
+vanishes if the node is recreated without that step.
+[`docs/reference/runbooks/worker-docker-grant.md`](../reference/runbooks/worker-docker-grant.md)
+is the operator procedure. The only consumer is
+[`.chug/jobs/docker-proof.yaml`](../../.chug/jobs/docker-proof.yaml) with
+[`.chug/tasks/docker-proof.sh`](../../.chug/tasks/docker-proof.sh) — a command
+job type pinned to `nuc` whose six-rung ladder builds an image against that
+node's own daemon through the granted socket, runs it, and proves the cleanup.
+Which job types go on a list stays the operator's act.
+
+**Host-mode docker is ambient rather than granted, and stays that way.** Host
+tasks on `gumbo-air-0` reach a working daemon because the task's uid owns
+colima's socket: nothing granted it, it is declared nowhere, and every
 [`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) run since
-[#490](490-agent-work-on-a-mac.md) slice 6 has had that access. It was never
-granted and it is not declared anywhere; it is a consequence of the task user
-owning the colima socket. That is the production posture this document accepts
-rather than closes.
-
-**There is now something to name (job #538), and naming it is still the
-operator's act.** `.chug/jobs/docker-proof.yaml` and `.chug/tasks/docker-proof.sh`
-are the first consumer this document has ever had: a **command** job type pinned
-to `nuc` whose six-rung ladder builds an image against that node's own daemon
-through the granted socket, runs it, and proves the cleanup. It grants nothing
-either — the pin and a node's allow-list entry are two halves, and only the pin
-is in this repo — and until a worker carrying S3 is deployed *and* an operator
-writes the entry, releasing it fails at rung 1 by design. See
-[what job #538 added](#what-job-538-added-a-consumer-to-name-2026-08-10).
-
-**S5a (job #523) makes a grant declarable without hand-editing a node.** The
-deploy composes the node's whole run spec, so until it forwarded these two knobs
-the only way to declare one was an edit the next deploy overwrote. It still
-grants nothing — no `chuggernaut.env` in this repo names a socket or an entry —
-and a node declaring neither produces a byte-identical run spec, asserted in
-`deploy/prod/build-worker.test.sh`. What is left of S5 is the operator's own
-config (S5b).
-
-**[Correction 1](#corrections-verified-against-the-tree) is closed (job #525,
-2026-08-09).** `WORKER_HOST_PROJECTS` exists: fail-closed, enforced at every
-host launch in `container::host::HostTenancy`, and refused at the deploy when a
-node declares `host` with no list. The correction stands as written — it was
-accurate against the tree it measured — and the containment story D1's
-acceptance leans on is now the one the docs assert. It grants nothing here
-either: no node declares a tenancy in this repo, and `gumbo-air-0`'s is the
-operator's to declare
-([`docs/reference/runbooks/worker-host-projects.md`](../reference/runbooks/worker-host-projects.md)).
-
-**S4 (job #519) makes that posture visible.** Every daemon now probes at boot
+[#490](490-agent-work-on-a-mac.md) slice 6 has had it. That is the posture this
+document accepts rather than closes — withholding it needs per-task users (S6,
+deferred). What exists instead is the audit record: every daemon probes at boot
 whether it reaches a docker endpoint and advertises the answer as
-`NodeCapabilities.docker_reachable`, for both modes, defaulting false. Nothing
-is granted, withheld or bound by it — it is an audit record. S3's grant
-mechanism has since landed and no node declares one yet (S5), and withholding
-host-mode access is still S6.
+`NodeCapabilities.docker_reachable`
+([`crates/types/src/worker.rs`](../../crates/types/src/worker.rs)) for both
+modes, defaulting false. Nothing is granted, withheld or bound by that field.
+
+**All three [corrections](#corrections-verified-against-the-tree) below are now
+closed or historical, and each stands as written.** `WORKER_HOST_PROJECTS`
+exists — fail-closed, enforced at every host launch in
+`container::host::HostTenancy`, refused at the deploy when a node declares
+`host` with no list — so the containment story D1's acceptance leans on is the
+one the docs assert (correction 1, closed by job #525). Every launch carries
+`JOB_TYPE` (correction 2), and `JOB_` is a reserved secret/var prefix beside
+`CHUG_` (`docs/spec.md` §4.1, §5.3), so the key any node-side allow-list matches
+on can no longer be moved by a job type's `vars:` — which also closed that
+weakness in the **shipped** KVM grant (correction 3). No node declares a host
+tenancy in this repo either; `gumbo-air-0`'s is the operator's to declare
+([`docs/reference/runbooks/worker-host-projects.md`](../reference/runbooks/worker-host-projects.md)).
 
 | # | Decision | Argued in |
 | --- | --- | --- |

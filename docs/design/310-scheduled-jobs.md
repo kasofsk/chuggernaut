@@ -1,23 +1,23 @@
 # Design #310 — Scheduled jobs (time-triggered job creation)
 
-Status: IMPLEMENTED — the [Minimum useful version](#minimum-useful-version)
-shipped in jobs #359 (items 1, 2 and 6: the config format, the cron parser and
-the `chuggernaut validate` gate) and #360 (items 3, 4 and 5: `Job.schedule`
-provenance, `domain::decide::schedule`, `dispatcher::schedules`, the
-`scan_schedules` tick and the `schedule-fired`/`schedule-skipped` events).
-Everything this doc lists as deferred — `auto_release: false`, the platform
-health surface `schedule-invalid` needs, a UI badge, `timezone:`, `inputs:` —
-is still deferred.
+Status: IMPLEMENTED — schedules fire, skip and coalesce in the dispatcher; four follow-ups stay deferred.
 
-Written against the tree at `55f6595`. Every claim about current behavior below
-was read out of `docs/spec.md` and the source in this repo;
-where the brief and the tree disagree, the tree wins and the disagreement is
-recorded in [Corrections](#corrections-verified-against-the-tree).
+The [Minimum useful version](#minimum-useful-version) is in the tree (jobs #359
+and #360): `.chug/schedules/*.yaml` and its `chuggernaut validate` gate, the
+5-field UTC cron matcher, `Job.schedule` provenance, the decider in
+`crates/domain/src/decide/schedule.rs`, the loader in
+`crates/dispatcher/src/schedules.rs`, the `scan_schedules` tick, and the
+`schedule-fired`/`schedule-skipped` events. Four deferrals stand:
+`auto_release: false`, the platform health surface `schedule-invalid` needs, a
+UI badge and filter on trigger provenance, and `timezone:`. `inputs:` is not
+among them — it landed with design [#311](./311-job-inputs.md) on this doc's
+origination path, leaving Decision 10's seam unchanged.
 
-Doc 2 of 4 extracting implementable specs from
-[design #308](./308-gha-port.md). §E of that doc is the rationale and the
-motivating case (`flutter-integration-tests` runs nightly); it fixes the
-location of the config and two semantics questions and leaves the rest here.
+Written against the tree at `55f6595`; where the brief and the tree disagreed
+the tree won, and the disagreements are in
+[Corrections](#corrections-verified-against-the-tree). Doc 2 of 4 extracting
+implementable specs from [design #308](./308-gha-port.md), whose §E holds the
+rationale and the motivating case (`flutter-integration-tests` runs nightly).
 
 Related: [docs/spec.md](../spec.md) §1.1 (the `Job` record, job types, the config
 root), §2.1 (state machine), §2.2 (release validation's three passes), §3.5

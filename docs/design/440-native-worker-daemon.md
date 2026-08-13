@@ -1,140 +1,95 @@
 # Design — the natively-supervised worker daemon
 
-Status: IMPLEMENTED — all eight slices landed, **corrected on 2026-08-07 for the platform D6 assumed away, on 2026-08-08 for the one artifact that correction over-reached onto, and again for the docker steps both corrections asked of every node rather than of a container-capable one** (job #487), and no node runs a native daemon from this tree: nothing was applied. Host execution itself has moved on without it — `gumbo-air-0`, whose native daemon an operator built by hand, advertises `host` and has run host tasks ([#490](./490-agent-work-on-a-mac.md) slice 6), and #309 P1's legal `runtime.mode: host` (job #478) became routable with P2 (jobs #483, #484).
-
-**The first conversion of a real node, on 2026-08-06, found two things this
-design got wrong for macOS** — [D6](#decisions)'s extracted binary is an ELF file
-a mac cannot exec, and `WORKER_DOCKER_ENDPOINT` was never rendered by anything,
-so the daemon dialled a socket that is not there. Both are
-[#309](./309-host-native-execution.md) P0 finding 6 again, and both are fixed in
-[the correction](#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476):
-a Darwin node **compiles** its own daemon from a declared toolchain, the
-endpoint is derived from the node's own docker context, and every staged binary
-must prove it runs on the node before it is installed. `gumbo-air-0` is running
-a daemon an operator built **by hand** and is not converted by this tree.
-
-**That correction then generalised one artifact too far.** It sent all three
-staged artifacts down the native-build path on Darwin, and
-`chuggernaut-channel` is the *inverse* case: it never runs on the mac, it is
-injected into every agent **container**, so a Mach-O is what breaks it. Jobs #477
-and #478 paid for that in four "produced no output" escalations before the air
-was drained —
-[the 2026-08-08 correction](#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)
-takes the channel binary out of the worker image on both platforms and asks each
-binary the question **its own executor** asks.
-
-**The run spec carries `WORKER_SLOTS_MAX` since job #477** —
-[the correction](#correction-2026-08-07--worker_slots_max-is-forwarded-now-job-477)
-— which supersedes slice 6's parenthetical calling it the one knob no script
-forwards. The swap still copies nothing forward; the ceiling survives because it
-is written down, which is [D7](#decisions) working as intended.
-
-**[D4](#decisions)'s refusal fired in prod on 2026-08-10, and it was wrong.**
-Job #539's deploy was refused by `gumbo-air-0` over its own `deploy` work task —
-an ordinary **container**, reported as host work — because `host_work_check`
-asked a dual-mode node's routed backend for *everything* running and applied no
-mode filter. The guarantee below is unchanged and the implementation is
-corrected in
-[the 2026-08-10 correction](#correction-2026-08-10--d4-asked-the-wrong-backend-on-a-dual-mode-node-job-540):
-the listing is classified by `container::host::names_host_task`, so a host task
-still refuses in the same words and a container task no longer does. It was a
-self-deadlock — a deploy's own work task refusing the refresh it fans out — and
-the fleet sat on `8da61424` until it was fixed.
+Status: IMPLEMENTED — all eight slices landed; no node has been converted by this tree's scripts.
 
 `IMPLEMENTED` is a claim about the slices and nothing more
 ([`docs/reference/docs.md`](../reference/docs.md)), and it is worth saying what it does
 not claim. Every slice is in the tree and the daemon is buildable and
 supervisable natively on both platforms, but **no node has been converted by
-this tree's scripts**: `gumbo-air-0`'s native daemon was built by hand and
-`gumbo-nuc-0` still runs the containerized one, so slices 4–7 have been applied
-to nothing. The host half of the fleet did move, elsewhere and by other jobs:
-`WORKER_MODES` on the air names `host`, `.chug/jobs/mac-proof.yaml` declares
-`runtime.mode: host` (job #502), and #309 P2 (jobs #483, #484) places by it, so
-host work is routable and two `mac-proof` runs have performed it
-([#490](./490-agent-work-on-a-mac.md) slice 6). What none of that exercises is
-**this** design's guarantees: nothing has yet restarted a daemon under a live
-host task, so the drain refusal (slice 3) and the survives-a-restart contract
-(slice 2, spec §3.1) remain proven by tests and not by the fleet. Slice 3's
-refusal is the one exception, and it is not a proof: it fired on the air on
-2026-08-10 over a task that was never host work, which is what the correction
-above is about — the fleet has exercised the check's classification and found it
-broken, never the guarantee it exists to keep. The last
-slice's own half is the sharpest case of the same gap: `nix/chug-node/` declares
-the unit, **nothing in this repo's CI evaluates that module** (#372 §2.3), and
-no node has ever been given it. The slices landed as — 3 as
-[the refusal at both checks](#correction-2026-08-06--slice-3-as-landed-job-460),
-8 as
-[the narrowed guarantee](#slice-8-2026-08-06--the-guarantee-narrowed-in-the-spec-job-470),
-4 as [a unit, an agent and an environment file](#correction-2026-08-06--slice-4-as-landed-job-469)
-that **no node has yet been given**, 5 as
-[a root-owned directory and four refusals](#correction-2026-08-06--slice-5-as-landed-job-472)
-over it, 6 as
-[install-and-restart, with the detached swapper and every carry-forward deleted](#correction-2026-08-06--slice-6-as-landed-job-473),
-and 7 as
-[a shared unit template, an amended charter and an installer no glob reaches](#correction-2026-08-07--slice-7-as-landed-job-475)
-— the nix half of which is **unevaluated by construction**.
-[D3](#decisions) and [D8](#decisions) are **both
-proven on Linux, through the shipped code path**: on `gumbo-nuc-0` (NixOS,
-**systemd 260 (260.2)**, cgroup v2) on 2026-08-06, all thirteen tests in
-`crates/container/tests/host_backend.rs` passed with **no skips** at tree
-`692656e` under `cargo test -p container --test host_backend` — see
+this tree's scripts**: `gumbo-air-0` runs a native daemon an operator built **by
+hand**, `gumbo-nuc-0` still runs the containerized one, and slices 4–7 have
+therefore been applied to nothing. `nix/chug-node/` declares the unit and
+**nothing in this repo's CI evaluates that module** (#372 §2.3), so the last
+slice's own half is unevaluated by construction. Each slice's State cell in
+[the table below](#slices) links to what it landed as.
+
+**What the fleet has never exercised is this design's guarantees.** No daemon
+has been restarted under a live host task on any node, so the drain refusal
+([slice 3](#slices)) and the survives-a-restart contract ([slice 2](#slices),
+[`docs/spec.md`](../spec.md) §3.1) hold on tests rather than on the fleet.
+[D4](#decisions)'s refusal is the one thing the fleet has fired, and it fired
+over a task that was never host work — see
+[the 2026-08-10 correction](#correction-2026-08-10--d4-asked-the-wrong-backend-on-a-dual-mode-node-job-540),
+which classifies the listing through `container::host::names_host_task` so a
+host task still refuses in the same words and a container task no longer does.
+The guarantee itself is unchanged.
+
+Host execution has moved on without this design: `WORKER_MODES` on the air names
+`host`, `.chug/jobs/mac-proof.yaml` declares `runtime.mode: host`, and
+[#309](./309-host-native-execution.md) P2 places by it, so host work is routable
+and two `mac-proof` runs have performed it
+([#490](./490-agent-work-on-a-mac.md) slice 6).
+
+[D3](#decisions) and [D8](#decisions) are both proven **on Linux, through the
+shipped code path**, where #309 §2's `setsid()` escape **is** closed **on
+Linux** by the scope: on `gumbo-nuc-0` (NixOS, systemd 260 (260.2), cgroup v2)
+at tree `692656e`, all thirteen tests in
+`crates/container/tests/host_backend.rs` passed with **no skips** under `cargo
+test -p container --test host_backend`. D3 is proven on **macOS** as well, but
+only one tier down: the proof that passed there on 2026-08-06 — recorded in
+[`docs/reference/runbooks/macos-host-supervision-proof.md`](../reference/runbooks/macos-host-supervision-proof.md)
+as PASSED on macOS 26.5.1 at tree `c8a8354` — exercises the mechanism through a
+shell script rather than the shipped path, so `HostBackend`'s macOS
+`Supervision::ProcessGroup` leg has still never been executed end to end. On
+macOS D8 is untouched and still leaks. See
+[the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux) and
 [D8 in execution](#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466).
-D3 is proven on **macOS** as well, its mechanism exercised firsthand on
-2026-08-06 — see [the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux) —
-and its Linux half had already passed through the same path at trees `186beeb`
-and `af9f74e` — see
-[the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456)
-and [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457).
-So #309 §2's `setsid()` escape **is** closed on Linux by the scope, and it was
-not closed for free: it took `--expand-environment=no` in `scope_args`
-(`crates/container/src/host.rs`), the fix job #462 diagnosed out of systemd's own
-source and this run confirms — see
-[the client rewriting the command](#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462).
-
 **Two qualifiers travel with that result and neither is settled by it.** Every
-Linux run needed `XDG_RUNTIME_DIR=/run/user/1000` set in the invoking
-environment, because every one of them ran unprivileged and an unprivileged
-daemon can only create a `systemd --user` scope. [Slice 7](#slices) answers that
-by construction rather than by measurement: the unit it declares runs as `root`,
-whose scopes are **system** scopes on a bus at a fixed socket path, so the
-daemon borrows nothing from its environment — read off `scope_manager` and
-`borrowed_bus` in `crates/container/src/host.rs`, on a node that does not exist.
-And the defect the flag fixes is
-**systemd-version dependent**: v258 turned `--expand-environment=` on by default
-for `--scope`, so a client below v258 never rewrote a task's argv and the flag
-is a no-op on v254–v257 — and below v254 an unknown option, which makes the node
-refuse `host` outright
+Linux run so far runs unprivileged and needs `XDG_RUNTIME_DIR` set in the
+invoking environment, because an unprivileged daemon can only create a `systemd
+--user` scope; [slice 7](#slices) answers that by construction rather than by
+measurement, its unit running as `root`, whose scopes are **system** scopes on a
+bus at a fixed socket path, so the daemon borrows nothing from its environment —
+read off `scope_manager` and `borrowed_bus` in
+`crates/container/src/host.rs`, on a node that does not exist. And the scope
+needs `--expand-environment=no` in `scope_args`, a flag that exists from systemd
+**v254** and is load-bearing only from **v258**, which turned the expansion on
+by default for `--scope`; below v254 it is an unknown option and the node
+refuses `host` outright
 ([the version table](#the-systemd-version-dependency-plainly)). The proving node
-runs 260.2, past that cutover — which is why the bug was reachable at all, and
-why it read as environment-specific for the five attempts (#455–#459) that
-chased it.
+runs 260.2, past that cutover, which is why the defect was reachable there at
+all and why it read as environment-specific until it was diagnosed.
 
-Slice 2's Linux mechanism was corrected by job #451 to the scope an unprivileged
-daemon can actually create — see
-[the correction](#correction-2026-08-06--the-scope-an-unprivileged-daemon-can-create-job-451) —
-and by job #453 to give that scope's `systemd-run` client the bus variables it
-needs, which is why the Linux assertion had still never run — see
-[the correction](#correction-2026-08-06--the-bus-the-client-needs-job-453). Its
-assertions were then fixed three times: job #455 for a membership check that
-raced the manager's start job — see
-[the first execution](#correction-2026-08-06--the-first-execution-of-d3s-linux-tests-job-455) —
-job #456 for an escapee fixture that reported a failed setup as a silent
-timeout, and whose staging had never executed on any machine, and job #457 for
-the membership check the D8 test itself never had, so that its staging budget is
-no longer shared with the manager's start job — an asymmetry read off the code
-and **not** measured, and the same change makes the next run name the step that
-fails.
+**The two corrections that split [D6](#decisions) by platform bind any
+conversion.** A Darwin node **compiles** its own daemon from a declared
+toolchain and derives `WORKER_DOCKER_ENDPOINT` from its own docker context
+([the 2026-08-07 correction](#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476));
+`chuggernaut-channel` is the *inverse* case and rides out of the worker image on
+**both** platforms, because agent containers exec it and a mac never does
+([the 2026-08-08 correction](#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)).
+Each staged binary must prove it runs on the executor that will exec it before
+it is installed. The docker steps both corrections ask for are the
+**container-capable** node's, not every node's
+([the 2026-08-07 correction](#correction-2026-08-07--the-docker-requirements-are-the-container-capable-nodes-not-the-macs-job-487)).
+The air still holds the `worker-refresh.sh` its hand conversion installed, which
+predates all three; the re-conversion that replaces it is a precondition of the
+next prod deploy and is recorded nowhere as done.
 
-Written against the tree at `1030704`. Every claim about current behavior below
-was read out of the source or out of [`docs/spec.md`](../spec.md) in this tree, not
-carried over from the brief or from a sibling design; where the brief and the
-tree disagree, the tree wins. Two things are relied on **secondhand** and are
-marked where they are load-bearing: the operator's `macos-runner` host
-configuration (not checked out in this workspace, so nothing here re-derives it,
-the way [#361](./361-per-run-placement.md) and [#362](./362-binary-artifacts.md)
-mark theirs), and `launchd`'s documented process-group teardown semantics, which
-no file in this repo states and which [slice 2](#slices) must therefore prove
-rather than assume.
+The run spec carries `WORKER_SLOTS_MAX`
+([the correction](#correction-2026-08-07--worker_slots_max-is-forwarded-now-job-477)),
+which supersedes [slice 6](#slices)'s parenthetical calling it the one knob no
+script forwards. The swap still copies nothing forward; the ceiling survives
+because it is written down, which is [D7](#decisions) working as intended.
+
+Written against the tree at `1030704`; every claim about current behavior below
+was read out of the source or out of [`docs/spec.md`](../spec.md) in this tree,
+and where the brief and the tree disagree, the tree wins. Two things are relied
+on **secondhand** and are marked where they are load-bearing: the operator's
+`macos-runner` host configuration, not checked out in this workspace (the way
+[#361](./361-per-run-placement.md) and [#362](./362-binary-artifacts.md) mark
+theirs), and `launchd`'s documented process-group teardown semantics, which no
+file in this repo states and which [slice 2](#slices) therefore proves rather
+than assumes.
 
 This document decides **one** thing: what a `chuggernaut worker` daemon that is
 not itself a container looks like. It does not touch #309's phase list, does not
@@ -156,12 +111,12 @@ Related: [#309](./309-host-native-execution.md) §2, §6, §8, §10 and its
 | --- | --- | --- |
 | **D1** | **One daemon per node, run natively, serving both modes.** There is never a second daemon process on a node. | A native daemon reaches the host's docker socket directly, so container mode is unchanged and the container-vs-native question becomes a deployment detail; two daemons would split one machine into two fleet rows with no one summing their slots. |
 | **D2** | **Linux: a systemd unit declared by `chug.node`**, amending that module's "owns no lifecycle" charter. **macOS: a `launchd` agent in the login user's GUI domain**, the same shape `deploy/prod/install-launchd.sh` already installs for the dispatcher and api. | #372 §8's four reasons for refusing to declare the container are artifacts of the container swap; three dissolve when the daemon is native — R4 because a unit over a binary has no tag to be missing — and R3, the strongest, is answered by splitting lifecycle (nix) from run spec (the platform's env file). |
-| **D3** | **Host tasks run in their own supervision unit, not the daemon's** — Linux: a transient systemd scope per task; macOS: the process group `spawn_task` already creates — **proven on both, 2026-08-06**: macOS 26.5.1 (Darwin) on `gumbo-air-0` against the mechanism itself, `sh deploy/prod/macos-host-supervision-proof.sh` at tree `c8a8354` ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and Linux through the shipped path on `gumbo-nuc-0` (NixOS, systemd, cgroup v2), `cargo test -p container --test host_backend` at trees `186beeb` and `af9f74e`, with `XDG_RUNTIME_DIR=/run/user/1000` set in the invoking environment ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)). | It is the same mechanism #309 §6, §7 and §2 each independently need, and it is the only way `systemctl restart chug-worker` can stop killing in-flight work. |
+| **D3** | **Host tasks run in their own supervision unit, not the daemon's** — Linux: a transient systemd scope per task; macOS: the process group `spawn_task` already creates — **proven on both**: macOS 26.5.1 (Darwin) on `gumbo-air-0` against the mechanism itself ([the proofs](#proofs-2026-08-06--d3-on-macos-and-on-linux)), and Linux through the shipped path on `gumbo-nuc-0` (NixOS, systemd, cgroup v2) with `XDG_RUNTIME_DIR=/run/user/1000` set in the invoking environment ([the Linux execution](#correction-2026-08-06--d3-is-proven-on-linux-through-the-shipped-path-job-456), [the re-run](#correction-2026-08-06--d3-holds-on-both-platforms-and-the-escapee-staging-is-narrowed-job-457)). | It is the same mechanism #309 §6, §7 and §2 each independently need, and it is the only way `systemctl restart chug-worker` can stop killing in-flight work. |
 | **D4** | **And the daemon declines a `refresh` while any host task is live**, naming the task — evaluated **twice: at accept, and again at the swap boundary** beside `RefreshGate::drained`. | D3 covers a unit restart; it does not cover a reboot or a rebuild that restarts more than the unit, and the self-refresh is the only restart the platform performs *automatically* — a loud refusal there is cheap and unconditional. The accept check is the fast, informative one; the swap-boundary check is the one that is actually load-bearing, because the build phase runs between them. |
 | **D5** | **Credentials move to a root-owned `0700` directory named by the unit, not the login user's home.** `chuggernaut admin worker-creds` is unchanged; the install step in `deploy/prod/README.md` §6 changes. | The login user is in the `docker` group and is who `build-worker.sh` ssh's in as, so a creds file under that user's home is readable by anything that user runs — a strictly worse boundary than the one the mount was pretending to give. |
 | **D6** | **`build-worker.sh` renders and installs a unit + environment file; `worker-refresh.sh`'s swap collapses to "install the binary, ask the supervisor to restart".** The daemon binary is extracted from the worker image the build phase already produces — **on Linux only**: the image is a Linux container, so a **Darwin** node compiles its own from a declared `WORKER_CARGO`, and both platforms must prove the staged binary runs on the node before installing it ([the correction](#correction-2026-08-07--d6-holds-on-linux-only-and-the-endpoint-was-never-rendered-job-476), measured on `gumbo-air-0` 2026-08-06). The split is **per artifact, by who execs it**: `chuggernaut-channel` rides out of the image on *both* platforms, because agent containers exec it and a mac never does ([the 2026-08-08 correction](#correction-2026-08-08--the-correction-above-generalised-over-two-binaries-with-opposite-platforms-job-480)). | Every mount, device and `docker inspect` carry-forward in the swap phase exists only because the daemon is a container that must be re-composed; extracting the binary keeps its build environment byte-identical to today's and needs no host Rust toolchain — an argument whose premise is that the image's platform *is* the node's, which is false on a mac and buys nothing there. |
 | **D7** | **#390's drift guard keeps its meaning and gains reach**: presence-decides-refusal over the same `WORKER_*` key set, comparing the live unit's environment against the composed environment file. | The comparison was never about docker — it is about what a recreate would drop — and a declaration that is a file on the node is legible without `docker inspect`. |
-| **D8** | **Of #309 P0's three known holes, two get worse and one gets better.** Environment inheritance (§10) and `/proc/<pid>/environ` (§8) get worse and stop being P3; the `setsid()` escape (§2) is closed on Linux by D3's scope — **proven in execution on 2026-08-06**, on `gumbo-nuc-0` (NixOS, systemd 260 (260.2), cgroup v2) at tree `692656e` under `cargo test -p container --test host_backend`, where `a_kill_reaches_a_setsid_escapee_through_the_scope` reached and passed its assertion for the first time on any machine, alongside all twelve of its siblings and with no skips ([D8 in execution](#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466)). **Not for free**, twice over: `kill` has to address the cgroup and not only the process group ([the correction](#d8-is-confirmed-on-linux-and-it-needed-one-line-of-code)), and `scope_args` has to pass `--expand-environment=no`, without which a systemd v258-or-later client rewrites the task's own argv before exec'ing it ([the client rewriting the command](#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462)). Its premise is separately asserted, and **passing**, by `a_setsid_escapee_is_staged_outside_the_task_process_group`, which measures the *opposite* half — that a process-group signal cannot reach the escapee — so the two are complementary and both are needed; `a_setsid_escapee_is_staged_under_a_scope_as_well` is that same premise under a scope. On **macOS** the hole is unchanged and still leaks. | Blast radius is what changes: a task inheriting a *native* daemon's environment inherits the node, not a container that happens to hold a socket. |
+| **D8** | **Of #309 P0's three known holes, two get worse and one gets better.** Environment inheritance (§10) and `/proc/<pid>/environ` (§8) get worse and stop being P3; the `setsid()` escape (§2) is closed on Linux by D3's scope — **proven in execution**, on `gumbo-nuc-0` (NixOS, systemd 260 (260.2), cgroup v2), where `a_kill_reaches_a_setsid_escapee_through_the_scope` reached and passed its assertion alongside all twelve of its siblings and with no skips ([D8 in execution](#proof-2026-08-06--d8-in-execution-thirteen-of-thirteen-job-466)). **Not for free**, twice over: `kill` has to address the cgroup and not only the process group ([the correction](#d8-is-confirmed-on-linux-and-it-needed-one-line-of-code)), and `scope_args` has to pass `--expand-environment=no`, without which a systemd v258-or-later client rewrites the task's own argv before exec'ing it ([the client rewriting the command](#correction-2026-08-06--the-scopes-client-was-rewriting-the-tasks-own-command-job-462)). Its premise is separately asserted, and **passing**, by `a_setsid_escapee_is_staged_outside_the_task_process_group`, which measures the *opposite* half — that a process-group signal cannot reach the escapee — so the two are complementary and both are needed; `a_setsid_escapee_is_staged_under_a_scope_as_well` is that same premise under a scope. On **macOS** the hole is unchanged and still leaks. | Blast radius is what changes: a task inheriting a *native* daemon's environment inherits the node, not a container that happens to hold a socket. |
 
 ## Slices
 

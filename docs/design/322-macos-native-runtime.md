@@ -1,47 +1,32 @@
 # Design — a native (macOS) execution runtime for iOS/Xcode jobs
 
-Status: PARTLY IMPLEMENTED — host-node tenancy decided 2026-08-09 (job #526); W2's rebase landed (job #485); the
-`work.type: command` rule it carried has since been **lifted** by
-[#490](490-agent-work-on-a-mac.md) slice 5, which replaced it with a
-capability test at the node. W4's Xcode discovery and `xcode:<version>` resolution
-landed (job #489), and P1's `envs` field with it. W1 and W5 were satisfied
-generically by [#309](309-host-native-execution.md) P0 (job #434) and
-[#440](440-native-worker-daemon.md) slice 3 (job #460), N2's schema by job #401,
-and P1's other half by #309 P2 — the record in job #483 and the
-`choose_placement` predicate in job #484. See [Current state](#current-state).
+Status: PARTLY IMPLEMENTED — the runtime runs on a Mac; its tenancy decision is superseded in design by #537.
 
-Written against the tree at `61b721d` (2026-07-30). Every claim about current
-behavior was read out of the source or out of [docs/spec.md](../spec.md); where
-this document and the job brief disagree, the tree wins and the disagreement is
-recorded under
+Written against the tree at `61b721d` (2026-07-30); where this document and the
+job brief disagree, the tree wins and the disagreement is recorded under
 [Corrections](#corrections-to-the-brief-and-to-309).
 
-**Relationship to the existing docs — read this first.** Host-native execution
-already has a design: [#309](./309-host-native-execution.md), which decided the
-generic shape (backend polymorphism, the `runtime:` selector, capability
-advertisement, placement, leases, drain, limits, secrets, tenancy) and named
-macOS as its weakest platform without resolving the macOS-specific parts.
-[#308 §H](./308-gha-port.md) argues *why* host execution is wanted and §F says
-the mobile category is the one place no container cleverness helps.
-
-This document is **not** a second general design. It decides the macOS
+**Relationship to the existing docs.** Host-native execution has a generic design
+in [#309](./309-host-native-execution.md) — backend polymorphism, the `runtime:`
+selector, capability advertisement, placement, leases, drain, limits, secrets,
+tenancy — which names macOS as its weakest platform without resolving the
+macOS-specific parts; [#308 §H](./308-gha-port.md) argues *why* host execution is
+wanted and §F says the mobile category is the one place no container cleverness
+helps. This document is **not** a second general design. It decides the macOS
 instantiation and the three things #309 left as open risk on that platform:
 
 1. the durable per-task registry that replaces what the Docker daemon
    remembered for us, including recovery across a **launchd** restart and a
-   reboot — the failure mode #309 named but did not design;
-2. the `/workspace` rebase, whose *totality* and whose **credential teardown
-   guarantee** #309 leaves at "part of the boundary, not just hygiene";
-3. `runtime.env` — #309 requires it and defines exactly one scheme,
-   `nix:<flake-ref>#<attr>`. **Xcode is not expressible as a nix flake output.**
-   That is a real gap in #309 for the only category that motivated it, and
-   §[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)
-   closes it.
+   reboot (§[1](#1-the-durable-task-registry));
+2. the `/workspace` rebase, its *totality* and its **credential teardown
+   guarantee** (§[2](#2-workspace-as-a-virtual-wire-path));
+3. `runtime.env`, whose one #309 scheme `nix:<flake-ref>#<attr>` cannot express
+   Xcode — a real gap in #309 for the only category that motivated it, closed in
+   §[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode).
 
-It also does the comparison the brief asks for and #309 does not do at all:
-native execution versus *SSHing into a Mac from an ordinary container*, versus
-doing nothing. #309 assumes host mode is wanted and argues its shape; this
-document argues the decision.
+It also argues the decision #309 assumes rather than only its shape: native
+execution against *SSHing into a Mac from an ordinary container*, against doing
+nothing — [The options](#the-options).
 
 Related: [docs/spec.md](../spec.md) §1.1 (job-type schema and the field-rules
 matrix), §3.1 (backends, placement, worker RPC, self-refresh, node-local
@@ -60,131 +45,99 @@ rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument, never edited.*
 
 **Host tasks run as the node's existing login user, and the operator has ratified
-that (2026-08-09, job #526).** §[5](#5-ios-specifics)'s "one dedicated task user
-with a login session, and the node declared single-tenant" is taken in **half**:
-the single-tenancy half, with the account already logged in at the console
-(`worksalot` on `gumbo-air-0`) rather than one provisioned for the purpose. So
-the cross-task secret boundary is **absent**, deliberately, and of the three
-things §5 offers as bounds one is built and undeclared on the node
-(`WORKER_HOST_PROJECTS`, job #525, the same day), one covers only the task
-directory, and one holds for the two credentials the platform mints and for none
-of the three it forwards. Per-task users are deferred, not
-rejected; [#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s
-user pool is untouched for a Linux host node, of which there are none. The
-record, with each bound read out of the tree and the partial non-Aqua
-measurement that does **not** yet answer the revisit condition, is
+that** (job #526, 2026-08-09): `worksalot` on `gumbo-air-0`, with the node
+declared single-tenant. §[5](#5-ios-specifics)'s "one dedicated task user with a
+login session, and the node declared single-tenant" is taken in **half** — the
+single-tenancy half, with an account already logged in at the console rather than
+one provisioned for the purpose. **The cross-task secret boundary is therefore
+absent, deliberately.** What bounds exposure instead — `WORKER_HOST_PROJECTS`
+tenancy (built, and still undeclared on the node), exit-time deletion of the
+mapped credential tree, and TTLs that bound the two credentials the platform
+*mints* and none of the three it *forwards* — is read out of the tree in
 [the 2026-08-09 correction](#correction--2026-08-09-job-526-host-tasks-run-as-the-login-user-the-secret-boundary-is-absent-and-what-bounds-it-is-thinner-than-5-says).
-That condition has since been answered by
-[#537](537-per-project-users-macos.md) §1, whose session-less uid drove
-simulators and had **no login keychain** — and the operator has since decided
-that the missing keychain **bounds nothing**, because real signing runs through
-fastlane from ordinary secrets rather than through a login keychain. So
-§[5](#5-ios-specifics)'s second collision, and §5's reading of what a device
-build needs, are corrected in
-[the 2026-08-10 correction](#correction--2026-08-10-job-558-the-missing-login-keychain-is-no-longer-a-bound-signing-does-not-use-it);
-what does *not* change is that the node still has zero valid signing identities
-in any session, so nothing here says iOS release builds work.
+[#309 §8](309-host-native-execution.md#8-secrets-on-a-shared-host)'s per-task
+user pool is untouched for a Linux host node, of which there are none.
 
-**That tenancy decision is now superseded in design, and in design only.**
+**That tenancy decision is superseded in design, and in design only.**
 [#537](537-per-project-users-macos.md) replaces the login user with one unix user
-per project, `chug-{project}`, reached by `sudo` from the same GUI-domain daemon;
-its slices 1, 2 and 3 have landed (jobs #563, #565, #566) and all three are
-**inert** — no node declares `WORKER_HOST_USERS` and no node has the users; the
-deploy forwards the declaration and refuses a node whose roster names a project
-it has no unix user for, which changes what is checked before a restart and not
-what any node runs. So what the node does today is still what the 2026-08-09
-correction records.
-Which of that correction's three bounds survives, which is replaced, and what is
-deliberately not yet achieved — the `staff` primary group, and the headless M1 the
-operator deferred — is
+per project, `chug-{project}`, reached by `sudo` from the same GUI-domain daemon.
+Its slices 1, 2 and 3 have landed (jobs #563, #565, #566) and all three are
+**inert**: no node declares `WORKER_HOST_USERS` and no node has the users, so
+what every node does today is still what the 2026-08-09 correction records. Which
+of that correction's three bounds survives and which is replaced is
 [the 2026-08-12 amendment](#amendment--2026-08-12-job-567-per-project-users-supersede-this-decision-in-design-which-of-the-three-bounds-survives-and-what-is-not-yet-achieved).
 
-**The `/workspace` rebase has landed (job #485), and three and a half of the
-other phases were satisfied generically by somebody else.** W2's remaining half
-is what job #485 did: `bootstrap_cmd` clones into `${CHUG_WORKSPACE:-/workspace}`
-(`crates/container/src/lib.rs`), the host backend maps both wire prefixes into
-each task directory over all four surfaces and refuses everything else
-(`crates/container/src/host.rs`), the wrapper deletes the mapped credential tree
-when the command returns — every injected credential in it, sparing the agent
-CLI's own config directory since [#490](490-agent-work-on-a-mac.md) D6's
-amendment, because the harvest reads the transcript out of that leaf after the
-process has exited — an agent-shaped host launch was refused at the node,
-and `WORKER_HOST_ROOT` is forwarded per node by `deploy/prod/build-worker.sh`
-with a boot-time refusal when the node cannot create it. N2's own
-`mode: host` requires `work.type: command` rule landed with it, and **both
-halves are gone since [#490](490-agent-work-on-a-mac.md) slice 5**: the field
-rule is deleted (`crates/types/src/job_type.rs`) and the node's refusal now
-tests what it can serve — the agent CLI it discovered and its own channel
-binary — rather than the launch's shape (`crates/container/src/host.rs`). Phase
-1 serving command work only is **no longer true of the tree**; everywhere below
-that says so is the argument as written, and #490 D5 is what superseded it.
+**What is open there is not achieved by any landed slice.** The per-project
+boundary is designed, not in force, and two holes are named and neither is
+closed. The `staff` primary group is load-bearing in **both** directions — it is
+how a project user traverses the daemon's home and reads `worker.env`, the
+exposure this design exists to remove, and it is also how that user execs the
+agent CLI — so no project user may be taken out of `staff` until the CLI sits at
+the node-wide path on the rendered `PATH` (#537 D12). And the **headless** case
+is untested, a deliberate operator deferral (2026-08-10): every simulator
+measurement so far ran in a session inherited from a console login, so a node
+that reboots with nobody logged in may come back serving host tasks it cannot
+drive CoreSimulator from — an outage invisible above the launch, because every
+layer reports healthy.
 
-**W4 has landed (job #489), so a host job type now has a satisfiable
-`runtime.env` on a Mac.** `crates/worker/src/xcode.rs` scans
-`/Applications/Xcode*.app` once at boot on a node whose `WORKER_MODES` names
-`host`, reads each bundle's `Contents/version.plist`, and
-`crates/worker/src/daemon.rs` forks a declared `runtime.env` on its **scheme**:
-`nix:` keeps [#373](373-project-toolchains.md) P2's realise-and-root path
-untouched, `xcode:<version>` exports `DEVELOPER_DIR` plus the `CHUG_ENV_PATH`
-the §4.1 bootstrap guard reads, and a scheme registered nowhere is refused
-naming both. Three decisions §3 left open were taken here: a version **two
-bundles claim** is advertised nowhere and refused at the launch naming both (they
-can differ in build, so picking one is the silent wrong-toolchain build the
-scheme exists to prevent); **finding no Xcode is a warning, not a refused boot**,
-because refusing would take a dual-mode Mac out of the fleet for every container
-job placed on it; and §3's unpinnable-environment record stays a **rule on the
-task script** (`docs/spec.md` §3.1), because only the task's own shell can
-produce `xcodebuild -version` and `xcrun simctl runtime list` into the captured
-stdout. The discovered set is advertised as `NodeCapabilities.envs`
-(`crates/types/src/worker.rs`), additively — `WORKER_RPC_VERSION` stays at 2 —
-and **placement filters on it** since [#543](543-placement-granularity.md) S1
-(job #550): a launch declaring a node-interpreted `runtime.env` is admitted only
-by a node advertising it. This ran on a Mac for the first time in
-[#490](490-agent-work-on-a-mac.md) slice 6, whose two host tasks launched under
-`xcode:26.5` on `gumbo-air-0` and drove the resolved Xcode's `xcrun simctl`.
+**Signing.** The node holds **zero valid signing identities in any session**,
+nothing has been signed on this fleet, and no job type here declares a signing
+secret — so nothing here says iOS release builds work. The missing login keychain
+on a session-less uid **bounds nothing** (job #558,
+[the 2026-08-10 correction](#correction--2026-08-10-job-558-the-missing-login-keychain-is-no-longer-a-bound-signing-does-not-use-it)):
+real builds sign through fastlane, whose `match` creates and unlocks a keychain
+of its own from ordinary secrets, and an App Store Connect API key is a secret
+rather than an Apple ID with a session. So
+§[Signing: out of scope for phase 1](#signing-out-of-scope-for-phase-1-and-deliberately)
+is right about the scope and wrong about the reason: simulator-only phase 1 is a
+phasing choice, not a statement that the alternative needs session state the
+platform cannot provision.
 
-What is still missing on the macOS side: W3's
-symlink containment (the rebase refuses a `..` component but resolves no
-symlink), the `simctl`-scoped teardown, the retention sweep,
-N3's runbook and N1's remaining spec edits (§3.1's host node kind and
-its trait listing, the Appendix entry). **macOS host tasks have now run** —
-`.chug/jobs/mac-proof.yaml`, the machinery
-[#490](490-agent-work-on-a-mac.md) slice 6 needed, is still the one job type
-declaring `mode: host`, and releasing it is still an operator step; what slice 6
-measured is [that document's job #510
-correction](490-agent-work-on-a-mac.md#correction--2026-08-09-job-510-slice-6-ran-what-two-host-tasks-on-the-air-measured),
-including a `simctl spawn` failure that correction reads as a property of the
-daemon's session and [the job #527
-correction](490-agent-work-on-a-mac.md#correction--2026-08-09-job-527-the-simctl-spawn-finding-was-misattributed-the-argument-not-the-session)
-withdraws — the same errors reproduce over an ordinary SSH session and separate
-by argument, leaving the ordinary constraint that `spawn` runs the named program
-inside the simulator's own filesystem, which is what W3's `simctl` work should
-read. W1 is exactly what
-[#309](309-host-native-execution.md) P0's first slice landed (job #434), N2's
-schema is what job #401 landed for [#373](373-project-toolchains.md), and W5 is
-what [#440](440-native-worker-daemon.md) slice 3 landed (job #460) — so this
-document's three cheapest phases are already paid for. W1 and N2 arrived at
-container scope; W5 is keyed on the node's mode rather than on its OS, so a
-macOS host node inherits the refusal without a line of macOS code. What remains
-is entirely macOS: W3's symlink containment, the `simctl`-scoped teardown, the
-retention sweep and the runbook — plus N1's remaining half,
-§3.1's host node kind and the Appendix entry that still reads as undesigned.
-`runtime.mode: host` **validates** since
-[#309](309-host-native-execution.md) P1 (job #478) landed the host row's field
-rules — the top-level `image` ban and the required `env` this document's N2 also
-asks for; N2's own `mode: host` requires `work.type: command` rule landed in
-job #485, beside the node-side refusal W2 landed in the same job. This
-document's P1 is half paid for too: #309 P2 slice 5 (job #483)
-put `NodeCapabilities` on `PingOk`/`WorkerAnnounce` and ingests it in
-`probe_worker` (`crates/types/src/worker.rs`, `crates/worker/src/backend.rs`),
-so the record P1 asks for exists — without this phase's `envs` field — and
-slice 6 (job #484) added the `choose_placement` predicate that reads its
-`modes`, so a host job type places by mode without a pin.
-§[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)'s
-"what is true today" is superseded on one point: `ContainerLaunchConfig.image`
-and `WorkerLaunchRequest.image` are **`Option<String>`** since #309 P1
-(job #479), and their absence is what selects host mode, so a dual-mode node
-routes each launch rather than serving them all one way.
+**The runtime runs on a Mac.** W1, W2 (including the `/workspace` rebase), W4,
+W5, N2 and P1 have landed; the rows below say what each of them is and where it
+came from. Two host tasks ran on `gumbo-air-0` under `xcode:26.5` in
+[#490](490-agent-work-on-a-mac.md) slice 6, the second green end to end, so the
+rebase, the credential teardown and the transcript harvest are exercised on real
+hardware. [`.chug/jobs/mac-proof.yaml`](../../.chug/jobs/mac-proof.yaml) is still
+the one job type declaring `mode: host`, and releasing it is still an operator
+step. Three node behaviours a job-type author is held to: placement filters on
+the node's advertised `envs` since [#543](543-placement-granularity.md) S1, so a
+launch declaring a node-interpreted `runtime.env` is admitted only by a node
+advertising it; a version **two** installed Xcode bundles claim is advertised
+nowhere and refused at the launch naming both, because they can differ in build
+and picking one is the silent wrong-toolchain build the scheme exists to prevent;
+and finding no Xcode is a **warning, not a refused boot**, so a dual-mode Mac
+keeps every container slot it has (`crates/worker/src/xcode.rs`,
+`crates/worker/src/daemon.rs`).
+
+**Still missing, all of it macOS-specific:** W3's symlink containment (the rebase
+refuses a `..` component lexically but resolves no symlink, in `rebase_path`,
+`crates/container/src/host.rs`), the `simctl`-scoped teardown, the retention
+sweep, N3's runbook, and N1's remaining spec edits — §3.1's host node kind and
+its stale trait listing, and the Appendix entry that still reads as undesigned.
+
+**Three things the append-only body below still says that are no longer true of
+the tree:**
+
+- **Phase 1 serving `work.type: command` only.** The field rule is deleted
+  (`crates/types/src/job_type.rs`) and the node's refusal now tests what it can
+  serve — the agent CLI it discovered and its own channel binary — rather than
+  the launch's shape (`crates/container/src/host.rs`), since
+  [#490](490-agent-work-on-a-mac.md) D5 and slice 5. The credential teardown
+  spares the agent CLI's own config directory, because the harvest reads the
+  transcript out of that leaf after the process has exited (#490 D6's amendment).
+- **§[3](#3-image-resources-and-what-runtimeenv-means-when-the-toolchain-is-xcode)'s
+  "what is true today".** `ContainerLaunchConfig.image` and
+  `WorkerLaunchRequest.image` are **`Option<String>`** since #309 P1, and their
+  absence is what selects host mode, so a dual-mode node routes each launch
+  rather than serving them all one way.
+- **The `simctl spawn` failure slice 6 read as a property of the daemon's
+  session.** It was misattributed: the same errors reproduce over an ordinary SSH
+  session and separate by **argument**
+  ([#490's job #527 correction](490-agent-work-on-a-mac.md#correction--2026-08-09-job-527-the-simctl-spawn-finding-was-misattributed-the-argument-not-the-session)).
+  What is left is the ordinary constraint that `spawn` runs the named program
+  inside the **simulator's** own filesystem, which is what W3's `simctl` work
+  must read.
 
 The rows below are the states of [Phased implementation
 sketch](#phased-implementation-sketch)'s table, which keeps each phase's full

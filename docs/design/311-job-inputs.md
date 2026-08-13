@@ -1,53 +1,49 @@
 # Design #311 — Job inputs (parameterizing a run without rewriting it)
 
-Status: IMPLEMENTED — slices A, B and C shipped in jobs #314–#319, #369
-and #376.
+Status: IMPLEMENTED — slices A, B and C are shipped and deployed.
 
-[Slice A](#minimum-useful-version) — the recommended first ship — landed end to
-end and is deployed: `CONFIG_SCHEMA_EPOCH` was 2 when it landed
-(`crates/types/src/version.rs` is the authority today; slice C's
-`SCHEDULE_INPUTS_SCHEMA_EPOCH` took it to 3, #401's `RUNTIME_SCHEMA_EPOCH` to 4,
-then #313 S3's `WORKLOAD_IDENTITY_SCHEMA_EPOCH` to 5 and #533 S1's
-`TOOLS_SCHEMA_EPOCH` to 6; `INPUTS_SCHEMA_EPOCH` stays frozen at 2) in
-`crates/types/src/version.rs`, `crates/types/src/inputs.rs` holds the shared
-rules and `crates/domain/src/inputs.rs` the pure decider, `CHUG_INPUT_*` is
-injected into work, eval and wrap-up containers, and `.chug/jobs/rollback.yaml`
-plus `.chug/tasks/rollback.sh` are the first consumer (#314–#317, with the
-deploy #318 carrying the epoch bump to prod). Slice B's web half — declared
-inputs rendered on the create form, the Draft editor and the job header —
-shipped in #319, and its dispatcher half in #369: the `### Inputs` block is
-rendered by `chuggernaut_domain::inputs::brief_inputs_block` into
-`job_brief_block` (`crates/dispatcher/src/exec.rs`) for the work agent and every
-agent evaluator, and `summary_inputs_line` opens the squash body above the
-agent's closing summary (`crates/dispatcher/src/eval.rs`). The
-`<untrusted_input>` delimiter in the Option B sketch below was new to this repo
-when it landed, exactly as [correction 3](#corrections-verified-against-the-tree)
-predicted — the brief block did not already use one for the description, and
-still does not. Slice C shipped in #376: `inputs:` on a schedule file
-(`crates/types/src/schedule.rs`), threaded into `schedule_create_spec`
-(`crates/dispatcher/src/scan.rs`) as the created job's supplied set, judged
-against the target's declaration at config load, and gated on a
-`SCHEDULE_INPUTS_SCHEMA_EPOCH` of 3 — a schedule's `inputs:` is invisible to a
-dispatcher that understands a job type's, so only an epoch that dispatcher does
-not advertise turns the drop into a refusal.
+Landed in jobs #314–#319 (slice A, and slice B's web half), #369 (slice B's
+dispatcher half) and #376 (slice C).
 
-Written against the tree at `acdb2c6`. Every claim about current behavior below
-was read out of `docs/spec.md` and the source in this repo; where the brief and the
-tree disagree, the tree wins and the disagreement is recorded in
-[Corrections](#corrections-verified-against-the-tree).
+The two decisions that still bind: an input is a value delivered to a running
+container and is **never** substituted into job-type configuration
+([Decision 1](#decision-1-an-input-is-a-value-not-a-substitution)), and matrix /
+fan-out is excluded by decision rather than deferred
+([Decision 7](#decision-7-matrix--fan-out-is-excluded)).
+
+In the tree: `crates/types/src/inputs.rs` holds the shape rules every consumer
+shares and `crates/domain/src/inputs.rs` the pure decider; `container_env`
+(`crates/dispatcher/src/exec.rs`) injects `CHUG_INPUT_*` into work, eval and
+wrap-up containers; `brief_inputs_block` renders the `### Inputs` subsection
+into `job_brief_block` for the work agent and every agent evaluator, and
+`summary_inputs_line` opens the squash body above the agent's closing summary
+(`crates/dispatcher/src/eval.rs`); the web half renders declared inputs on the
+create form, the Draft editor and the job header; the `<untrusted_input>`
+delimiter that block wraps values in is used nowhere else — the brief still
+does not delimit the description. `.chug/jobs/rollback.yaml` plus
+`.chug/tasks/rollback.sh` are the first consumer. A schedule file carries
+`inputs:` (`crates/types/src/schedule.rs`), threaded into `schedule_create_spec`
+(`crates/dispatcher/src/scan.rs`) as the created job's supplied set and judged
+against the target's declaration at config load.
+
+Epochs, with `crates/types/src/version.rs` as the authority:
+`INPUTS_SCHEMA_EPOCH = 2`, frozen there. The schedule surface needs its **own**
+`SCHEDULE_INPUTS_SCHEMA_EPOCH = 3` — a schedule's `inputs:` is invisible to a
+dispatcher that already understands a job type's, so only an epoch that
+dispatcher does not advertise turns the silent drop into a refusal. That is the
+one addition [Minimum useful version](#minimum-useful-version) did not
+anticipate.
 
 Doc 3 of 4 extracting implementable specs from
-[design #308](./308-gha-port.md). Gap 1 of that doc is the motivation
-("Twelve deploy workflows differ by two strings"); category C is the blocked
-case (`rollback` needs an `image_tag`). #308 fixes the frame — an input
-"parameterizes a run without rewriting it" — and defers everything else here.
-
-Sibling doc 1 — [host-native execution](./309-host-native-execution.md) — is
-**still PROPOSED and not implemented**; sibling doc 2 —
-[scheduled jobs](./310-scheduled-jobs.md) — has since shipped its minimum
-useful version. Nothing below assumes any field, epoch or mechanism either of
-them proposes exists; where sequencing matters it is called out explicitly
-(see [Skew](#skew-what-a-new-field-costs)).
+[design #308](./308-gha-port.md), which owns the motivation ([Problem](#problem))
+and fixes the frame this title uses. Written against the tree at `acdb2c6`;
+where the originating brief and the tree disagreed, the tree won, and the
+disagreements are recorded in
+[Corrections](#corrections-verified-against-the-tree). Nothing below assumes any
+field, epoch or mechanism proposed by the siblings
+[host-native execution](./309-host-native-execution.md) or
+[scheduled jobs](./310-scheduled-jobs.md) exists; where sequencing matters it is
+called out in [Skew](#skew-what-a-new-field-costs).
 
 Related: [docs/spec.md](../spec.md) §1.1 (the `Job` record, job types, the
 field-rule matrices, the config root), §2.1 (state machine, batches), §2.2

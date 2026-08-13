@@ -1,56 +1,40 @@
 # Design #367 — Android emulator execution: a container with `/dev/kvm`, not a host runtime
 
-Status: IMPLEMENTED IN PART, amended 2026-08-02 — recommendation unchanged, phase A1's mechanism rewritten; A1 and A2 have since landed (jobs #374, #395), A3 and A4 are open.
+Status: IMPLEMENTED IN PART — A1 and A2 landed (jobs #374, #395); A3 and A4 are now design #543 slice S4.
 
-Written against the tree at `1e567e3`, amended against `fef87f9`. Every claim
-about this repository was read out of the source or out of
-[`docs/spec.md`](../spec.md), not inferred from a sibling design; where the brief
-and the tree disagree, the tree wins and the disagreement is recorded in
-[Corrections](#corrections-verified-against-the-tree). The four external claims
-the brief supplies were fetched and are quoted where used. One class of claim —
-anything about the **beacon** repository — is **not verifiable from this tree**:
-`~/beacon` is not present in this container, and every such claim below is
-marked *(secondhand)*.
+Written against the tree at `1e567e3`, amended against `fef87f9`. Claims about
+the **beacon** repository, and every measurement taken on the operator's node,
+are not verifiable from this tree and are marked *(secondhand)* where they are
+used; where the brief and the tree disagree the tree wins, and the disagreement
+is recorded in [Corrections](#corrections-verified-against-the-tree).
 
-**The 2026-08-02 amendment.** An operator ran the experiment this document's
-phase A0 asked for, on `gumbo-nuc-0` against the real `chuggernaut/agent:prod`
-image. It **confirms the recommendation and refutes phase A1's mechanism**, so
-the recommendation below is untouched and §[3](#3-part-two-the-toolchain-bulk)
-and §[7](#7-sequencing-what-ships-first-and-what-it-unblocks) are rewritten
-around what was measured. That measurement is *(secondhand)* on the same terms
-as everything else about that node: `gumbo-nuc-0` is not reachable from this
-container (`ssh` fails at host-key verification), and this container has no
-`/dev/kvm`, no `/nix`, and no docker socket, so nothing about it could be
-reproduced here. Corrections [8](#the-2026-08-02-measurement-corrections-812)
-onward carry it; correction 12 is the one finding of the amendment that *is*
-tree-verified, and it is a second thing A1 got wrong.
+**Why *(secondhand)* is a standing tag here and not a hedge**, and this is the
+amendment note the corrections point back at: `gumbo-nuc-0` is not reachable
+from a work container (`ssh` fails at host-key verification), and a work
+container has no `/dev/kvm`, no `/nix` and no docker socket — so nothing about
+that node could be reproduced from inside one, then or now. Corrections 8–11 are
+the operator's run and carry the tag; correction 12 is read out of this tree and
+does not.
 
-**What this document is for.** [#308](./308-gha-port.md) category F treats
-"mobile" as one thing that needs host-native execution, and
-[#309](./309-host-native-execution.md) §H and
-[#322](./322-macos-native-runtime.md) build that route. #322 is explicitly
-macOS-only. **No document in this tree designs the Android leg at all**, and
-`/dev/kvm` appears in the whole corpus exactly three times — twice in #308
-(lines 690 and 801) as a passing machine-fact, once in #309 (line 540) as an
-example of a physical fact. This document fills that hole and argues that the
-two legs of category F are not symmetric and should stop being sequenced as if
-they were.
+**Scope.** The Android leg of [#308](./308-gha-port.md) category F, which this
+document argues is not symmetric with the iOS leg and should stop being
+sequenced behind it. It does **not** redesign iOS —
+[#322](./322-macos-native-runtime.md) owns the macOS instantiation — and it does
+not re-litigate whether host-native execution should exist, which
+[#309](./309-host-native-execution.md) and #322 decided.
 
-**Scope.** This does **not** redesign iOS — [#322](./322-macos-native-runtime.md)
-owns the macOS instantiation, and where a primitive is shared this document says
-so and defers to it. It does **not** re-litigate whether host-native execution
-should exist; #309 and #322 decided that, and the recommendation below leaves
-both intact. It changes nothing about `runtime:`, `CONFIG_SCHEMA_EPOCH`, or the
-host backend.
-
-Related: [`docs/spec.md`](../spec.md) §3.1 (backends, placement, worker RPC,
-node-local build caching, "no host bind-mounts"), §3.5 (launch capacity queue),
-§14.1 (config/version skew); [#308](./308-gha-port.md) §F, §G, H.2, H.4, H.5,
-H.6 and the gap table; [#309](./309-host-native-execution.md) §4, §5a, §5b, §9,
-§10, Phasing; [#322](./322-macos-native-runtime.md);
+Related: [`docs/spec.md`](../spec.md) §3.1 (backends, placement, worker RPC, and
+the node properties: device passthrough, the toolchain mounts, the nix GC
+roots), §3.5 (launch capacity queue), §14.1 (config/version skew);
+[#308](./308-gha-port.md) §F, §G, H.2, H.4, H.5, H.6 and the gap table;
+[#309](./309-host-native-execution.md) §4, §5a, §5b, §9, §10, Phasing;
+[#322](./322-macos-native-runtime.md);
 [#313](./313-workload-identity-image-builds.md) B-IV;
 [#355](./355-project-task-images.md); [#361](./361-per-run-placement.md);
-[#362](./362-binary-artifacts.md); [`docs/reference/style.md`](../reference/style.md);
+[#362](./362-binary-artifacts.md); [#373](./373-project-toolchains.md);
+[#543](./543-placement-granularity.md);
+[`docs/reference/runbooks/worker-kvm.md`](../reference/runbooks/worker-kvm.md);
+[`docs/reference/style.md`](../reference/style.md);
 [`docs/reference/crates.md`](../reference/crates.md); [`docs/reference/testing.md`](../reference/testing.md).
 
 ## Current state
@@ -60,21 +44,38 @@ rewritten to current truth whenever anything below it changes. Everything after
 this section is append-only — the original argument and its 2026-08-02
 amendment, never edited into the prose above them.*
 
-**The recommendation shipped, and the Android leg did precede #322 W2 as
-predicted.** A1 and A2 are in the tree: `WORKER_KVM` / `WORKER_KVM_PROJECTS`
-gate a per-project `/dev/kvm` device and a read-only `/nix/store` mount, the
-Android environment is injected beside the cache env, and
-[`.chug/jobs/android-proof.yaml`](../../.chug/jobs/android-proof.yaml) plus
+**The recommendation shipped, and the mechanism is normative rather than
+proposed.** [`docs/spec.md`](../spec.md) §3.1's node-local device passthrough
+owns the contract and
+[`docs/reference/runbooks/worker-kvm.md`](../reference/runbooks/worker-kvm.md)
+is the operator procedure. `WORKER_KVM` and `WORKER_KVM_PROJECTS` grant an
+allow-listed project's launch the device and the read-only toolchain mounts
+together or not at all; the toolchain arrived as one leaf per tool
+(`WORKER_ANDROID_SDK_DIR`, `WORKER_FLUTTER_DIR`, `WORKER_JDK_DIR`) beside the
+node's `/nix/store`, each an activation-maintained stable path and never a store
+hash. [`.chug/jobs/android-proof.yaml`](../../.chug/jobs/android-proof.yaml) and
 [`.chug/tasks/android-proof.sh`](../../.chug/tasks/android-proof.sh) climb the
-ladder on a pinned node. What is still true from the original argument: the work
-is **pinned** with `placement.node`, because placement can select a node's
-execution *mode* but not the KVM feature this document needs.
-`NodeCapabilities` itself now exists — [#309](309-host-native-execution.md) §4
-landed it on both worker transports in job #483, which correction 2 below
-predates — but with `modes`, `platform`, `resources_enforced` and `leases` only,
-and #309 P2 slice 6 (job #484) filters placement by `modes` alone. A3 is still
-unbuilt: it is the `features` field and the widening of that predicate to read
-it, and it is only needed when a second KVM node exists.
+ladder on a node **pinned** with `placement.node`, because placement can select
+a node's execution *mode* but not the KVM feature this document needs.
+
+**What has moved under the argument.** `NodeCapabilities`
+(`crates/types/src/worker.rs`) rides both worker transports and carries `modes`,
+`platform`, `resources_enforced`, `leases`, `envs`, `agent_cli` and
+`docker_reachable` — so correction 2's "does not exist anywhere in the code" is
+superseded — and `choose_placement` filters on mode, on `envs` and on whether
+the node enforces resource limits. **Nothing in the fleet advertises a device**:
+every daemon sends `leases` empty and there is no `features` field, so A3's
+advertisement half must land before any matcher has something to read
+([#543](./543-placement-granularity.md) correction 7). The contradiction
+§[5](#5-the-platform-contradiction-and-how-a-node-advertises-kvm) opens is
+settled as §5.1 asks: `platform` is diagnostic only and never a placement filter
+on its own, in the shipped doc comment and in the predicate.
+
+**A3 and A4 are carried by [#543](./543-placement-granularity.md) S4**, which
+makes `placement.features` the general form of the `runtime.env` matcher #543 S1
+landed. Android still takes no lease
+(§[4](#4-exclusivity-and-why-android-does-not-need-a-lease)); #309 §5b/P4 stays,
+motivated by iOS, and nothing reads `leases` yet.
 
 The rows below are the states of [7. Sequencing: what ships first, and what it
 unblocks](#7-sequencing-what-ships-first-and-what-it-unblocks)'s table, which

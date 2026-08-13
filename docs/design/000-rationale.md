@@ -1,14 +1,15 @@
 # Chuggernaut v2 — Design Document
 
-Status: FOUNDATIONAL — the original v2 rationale, written 2026-07 before the
-first job ran, and still the standing argument for the platform's shape. It is
-**not normative**: [`docs/spec.md`](../spec.md) is, and where the two disagree the
-spec wins. The philosophy and the key decisions below still hold —
+Status: FOUNDATIONAL — the original v2 rationale, still the standing argument for the platform's shape.
+
+Written 2026-07, before the first job ran. It is **not normative**:
+[`docs/spec.md`](../spec.md) is, and where the two disagree the spec wins. The
+philosophy and the key decisions below still hold —
 [`docs/reference/style.md`](../reference/style.md) Tier 3 and
-[`CLAUDE.md`](../../CLAUDE.md) restate the single-writer rule from here — but
+[`CLAUDE.md`](../../CLAUDE.md) restate the single-writer rule from here — while
 individual entries have been overtaken by designs of their own, notably
 [Deferred](#deferred)'s binary artifact store
-([#362](362-binary-artifacts.md) S1/S2 landed) and its macOS bare metal line
+([#362](362-binary-artifacts.md)) and its macOS bare metal line
 ([#322](322-macos-native-runtime.md), [#309](309-host-native-execution.md)).
 This page is not amended to track them; it records why v2 was built the way it
 was. There is no slice table because this document plans no work.
