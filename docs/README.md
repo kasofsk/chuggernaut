@@ -76,6 +76,7 @@ from being the one everyone forgets (design
 | [`docs/design/533-molt.md`](design/533-molt.md) | The molt: shedding the doc corpus at a milestone, what survives a deletion, and why there is nowhere for sheddings to go |
 | [`docs/design/537-per-project-users-macos.md`](design/537-per-project-users-macos.md) | Per-project unix users on a macOS host node: what a session-less uid driving CoreSimulator restores, and what it costs the host backend |
 | [`docs/design/543-placement-granularity.md`](design/543-placement-granularity.md) | Placement granularity: what a task needs of its node, why a pin names a machine instead, and the capabilities advertised with no reader |
+| [`docs/design/577-fleet-on-nomad.md`](design/577-fleet-on-nomad.md) | Greenfield: the four fleet machines as one Nomad cluster running chuggy, why not Kubernetes, and what replaces this platform |
 
 ## The target factoring
 
